@@ -267,6 +267,14 @@ test('换账号后积分/签到缓存必须作废（回归：面板把 A 账号�
       health: { auth: { userId: currentAccount, expiresAt: new Date(Date.now() + 864e5).toISOString() } },
     });
 
+    // 桩：quota/checkin 也打桩 —— **不能依赖真实桥**（CI 上没有桥在跑，
+    // 之前本地能过只是因为 8790 上恰好有一个）。返回值随账号变化，
+    // 顺带验证"换号后必须重新调上游，不能吃旧缓存"。
+    let quotaCalls = 0;
+    let checkinCalls = 0;
+    result.client.quota = async () => { quotaCalls += 1; return { ok: true, total: currentAccount === 'A' ? 111 : 222, packages: [] }; };
+    result.client.checkin = async () => { checkinCalls += 1; return { ok: true, status: { todayCheckedIn: false, streakDays: 1 }, auto: { auto: false } }; };
+
     // ── 第一幕：账号 A，正常取一次积分与签到
     // 预置一份模型目录：第三幕要断言"换号后目录被作废"
     result.adapter.catalogCache = { at: Date.now(), models: [{ id: 'm-from-A' }] };
@@ -283,7 +291,7 @@ test('换账号后积分/签到缓存必须作废（回归：面板把 A 账号�
     // TTL 内再取快照：换号后**不许**继续用 A 的缓存值
     const snapB = await snapshot({});
     await state.checkinInflight;
-    assert.notEqual(snapB.quota, quotaA, '换账号后快照里的积分必须换新（不能是 A 的那份）');
+    assert.equal(snapB.quota?.total, 222, `换账号后积分必须换新（B=222），实际 ${snapB.quota?.total}`);
     assert.equal(state.quotaCache.account, 'B', '新缓存必须标记为账号 B');
     assert.equal(state.checkinCache.account, 'B', '签到缓存也必须换到账号 B 名下');
 
