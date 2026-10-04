@@ -61,8 +61,8 @@ npm run pack:plugin        # = vendor + npm pack
 node <解压出来的插件目录>/scripts/preflight.mjs    # 或解压后自检
 dsh plugin --profile desktop add D:\path\to\dsh-plugin-workbuddy-1.0.0.tgz
 ```
-> `package.json` 里是 `"private": true`，所以 `npm pack` 可以、`npm publish` 会被挡。
-> 要发到 npm 就把它改成 `false` 并确认包名可用（见路线 C）。
+> `package.json` 里是 `"private": true`，这是有意的：防止误发到公共 npm。
+> 本项目按非公开分发的定位维护，直接用 tgz 或文件夹拷贝即可。
 
 ---
 
