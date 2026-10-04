@@ -176,7 +176,7 @@ dsh-plugin/
 `POST /workbuddy/bridge|console|migrate`、`DELETE /workbuddy/usage|log`、
 `*  /workbuddy/console-api/<白名单>`。
 
-**status 快照字段**（消费方参考）：`bridge{state,health,error}`、`console{state,url,error,managed,autoStart}`、`config{provider,bridgeUrl,consoleUrl,projectRoot,…}`、`route{registered,provider,error,fallback}`、`directory[]`、`legacy{found,files,cleaned}`、`quota`、`checkin`、`dsh`、`client{available,composed,ids}`、`sampleModel`、`runtime`。
+**status 快照字段**（消费方参考）：`bridge{state,health,error}`（state ∈ running/degraded/unauthorized/foreign/stopped）、`console{state,url,error,managed,autoStart}`、`config{provider,bridgeUrl,consoleUrl,projectRoot,…}`、`route{registered,provider,error,fallback}`、`directory[]`、`legacy{found,files,cleaned}`、`quota`、`quotaError`、`quotaAt`、**`quotaAccount`**（这份积分属于哪个账号，= 读取时的 health.auth.userId）、**`bridgeAccount`**（桥当前登录的账号；与 quotaAccount 不一致 = 换号后缓存尚未换新，面板据此显示警告）、`checkin`、`checkinError`、**`checkinAccount`**、`dsh`、`client{available,composed,ids}`、`sampleModel`、`runtime`。
 
 ---
 
