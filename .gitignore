@@ -44,3 +44,6 @@ Thumbs.db
 docs/promo/_*
 docs/promo/_dbg*
 docs/promo/_measure*
+
+# 发布相关内部笔记（不入库）
+.PUBLISH.local.md
