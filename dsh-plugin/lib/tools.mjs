@@ -168,7 +168,20 @@ export function createTools(deps) {
     },
     async execute(args, exec) {
       const claim = args?.claim === true;
-      const result = await client.checkin({ claim, signal: exec?.signal });
+      // 桥凭据异常（degraded）时 checkin 接口会回 502 —— 把它转成可读的
+      // 修法提示，而不是向 agent 抛裸异常（那只会显示一个无上下文的错误码）。
+      let result;
+      try {
+        result = await client.checkin({ claim, signal: exec?.signal });
+      } catch (error) {
+        if (error?.status === 502 || /login|sign in|accessToken|凭据|登录/i.test(String(error?.message))) {
+          return `签到不可用：读不出 WorkBuddy 登录凭据（${error.message || 'HTTP ' + error.status}）。\n修法：打开 WorkBuddy 桌面端重新登录一次，然后重试。`;
+        }
+        if (error?.status === 401) {
+          return '签到不可用：本地令牌与桥不一致（检查 .env 的 WORKBUDDY_LOCAL_TOKEN，或重启桥）。';
+        }
+        throw error;
+      }
       const status = result?.status || {};
       const lines = [];
       if (claim) {
@@ -177,6 +190,10 @@ export function createTools(deps) {
       lines.push(`今日：${status.todayCheckedIn ? '已签到' : '未签到'}${typeof status.todayCredit === 'number' ? `（今日获得 ${status.todayCredit}）` : ''}`);
       if (typeof status.streakDays === 'number') lines.push(`连续签到：${status.streakDays} 天`);
       if (result?.auto) lines.push(`自动签到：${result.auto.auto ? '开启' : '关闭'}${result.auto.lastError ? `，上次失败：${result.auto.lastError}` : ''}`);
+      // 归属标注：签到状态与积分一样是账号视角的数据 —— 与桥当前账号不一致时说明
+      if (result?.account && state.bridgeAccount && result.account !== state.bridgeAccount) {
+        lines.push(`⚠ 以上签到状态属于上一个账号（缓存 ${String(result.account).slice(0, 8)}…，桥当前 ${String(state.bridgeAccount).slice(0, 8)}…），正在自动重读`);
+      }
       return lines.join('\n');
     },
   });
