@@ -61,7 +61,7 @@ function sendJson(res, status, payload) {
  * @param {{ url: string, probe: (o?: object) => Promise<{state: string, error?: string}> }} deps.consoleSupervisor
  * @param {(line: string, detail?: unknown) => void} [deps.log]
  */
-export function createConsoleApiHandler({ consoleSupervisor, log = () => {} }) {
+export function createConsoleApiHandler({ consoleSupervisor, log = () => {}, onUpstreamMutation = () => {} }) {
   /** 每个请求一个，避免并发请求互相干扰（SSE 长连接尤其需要）。 */
   return async function handleConsoleApi(req, res) {
     const url = new URL(req.url, 'http://127.0.0.1');
@@ -78,6 +78,12 @@ export function createConsoleApiHandler({ consoleSupervisor, log = () => {} }) {
     if (method !== 'GET' && req.headers['x-workbuddy-panel'] !== '1') {
       return sendJson(res, 403, { ok: false, error: 'missing x-workbuddy-panel header' });
     }
+
+    // 会改变"上游余额/签到状态"的透传：成功后要作废插件自己的积分缓存，
+    // 否则面板最长 120 秒还显示旧余额（换号 bug 的同源缺口，这是第三个消费方）
+    const mutatesQuota =
+      (sub === '/checkin' && method === 'POST')
+      || (sub === '/account/switch' && method === 'POST');
 
     const probe = await consoleSupervisor.probe({ cached: true });
     if (probe.state !== 'running') {
@@ -125,6 +131,10 @@ export function createConsoleApiHandler({ consoleSupervisor, log = () => {} }) {
         }
       }
       res.end();
+      // 透传完成后（成功状态码才作废）：下一次 snapshot 会重新打上游取新余额
+      if (mutatesQuota && upstream.ok) {
+        try { onUpstreamMutation(); } catch { /* 回调异常不影响响应 */ }
+      }
     } catch (error) {
       if (ac.signal.aborted) { try { res.end(); } catch { /* 客户端已断开 */ } return; }
       log(`透传 ${method} ${sub} 失败`, error);

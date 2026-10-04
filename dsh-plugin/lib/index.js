@@ -688,10 +688,20 @@ export function apply(ctx, rawConfig = {}) {
     });
   }
 
+  /**
+   * 上游会发生"余额/状态改变"的操作（领取签到等）成功后调用：
+   * 立即作废插件侧的积分/签到缓存，让下一次快照重新打上游。
+   * 没有它，面板在领取后最长 120 秒还显示旧余额（与换号 bug 同源的缓存一致性缺口）。
+   */
+  function invalidateUpstreamCaches() {
+    state.quotaCache = { ...state.quotaCache, at: 0, value: null };
+    state.checkinCache = { ...state.checkinCache, at: 0, value: null };
+  }
+
   // ── 6. HTTP 数据面（入口页用） ─────────────────────────────────────────
   if (config.routes) {
     useService('webServer', (webServer) => {
-      const routes = createRouteTable({ snapshot, supervisor, consoleSupervisor, client, adapter, paths: dshPaths, provider: config.provider, log });
+      const routes = createRouteTable({ snapshot, supervisor, consoleSupervisor, client, adapter, paths: dshPaths, provider: config.provider, log, onUpstreamMutation: invalidateUpstreamCaches });
       const disposeRoutes = mountRoutes(webServer, routes, log);
       ctx.effect(() => disposeRoutes, 'workbuddy.panel-routes');
     });

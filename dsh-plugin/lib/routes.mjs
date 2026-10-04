@@ -48,7 +48,7 @@ async function readJsonBody(req, limit = 64 * 1024) {
  * @param {(line: string, detail?: unknown) => void} deps.log
  */
 export function createRouteTable(deps) {
-  const { snapshot, supervisor, consoleSupervisor, client, adapter, paths, provider, log } = deps;
+  const { snapshot, supervisor, consoleSupervisor, client, adapter, paths, provider, log, onUpstreamMutation = () => {} } = deps;
 
   /** 写操作的准入检查。 */
   const guard = (req) => req.headers['x-workbuddy-panel'] === '1';
@@ -187,7 +187,11 @@ export function createRouteTable(deps) {
           const url = new URL(req.url, 'http://127.0.0.1');
           const claim = req.method === 'POST' && url.searchParams.get('claim') === '1';
           if (claim && !guard(req)) return sendJson(res, 403, { ok: false, error: 'missing x-workbuddy-panel header' });
-          sendJson(res, 200, { ok: true, ...(await client.checkin({ claim })) });
+          const result = await client.checkin({ claim });
+          // 领取成功 = 上游余额变了：作废插件侧积分/签到缓存（下一次快照重取新值），
+          // 否则面板最长 120 秒还显示领取前的余额
+          if (claim && result?.ok !== false) onUpstreamMutation();
+          sendJson(res, 200, { ok: true, ...result });
         } catch (error) {
           sendJson(res, 200, { ok: false, error: String(error?.message || error) });
         }
@@ -276,7 +280,7 @@ export function createRouteTable(deps) {
     {
       kind: 'prefix',
       path: CONSOLE_API_PREFIX,
-      handler: createConsoleApiHandler({ consoleSupervisor, log }),
+      handler: createConsoleApiHandler({ consoleSupervisor, log, onUpstreamMutation }),
     },
   ];
 }

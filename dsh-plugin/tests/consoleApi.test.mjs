@@ -126,3 +126,53 @@ test('console-api：控制台进程消失时给 502 而不是挂住', async () =
   assert.ok([502, 503].includes(res.status), `实际 ${res.status}`);
   assert.match(String(res.json.hint || res.json.error), /控制台/);
 });
+
+test('console-api：改余额的透传成功后必须触发 onUpstreamMutation（缓存一致性）', async () => {
+  const fake = await startFakeConsole();
+  let mutations = 0;
+  const handler = createConsoleApiHandler({
+    consoleSupervisor: { url: `http://127.0.0.1:${fake.port}`, probe: async () => ({ state: 'running' }) },
+    log: () => {},
+    onUpstreamMutation: () => { mutations += 1; },
+  });
+
+  try {
+    // 领签到（POST /checkin）成功 → 必须作废插件侧积分缓存
+    await call(handler, {
+      method: 'POST', path: `${CONSOLE_API_PREFIX}/checkin`,
+      headers: { 'x-workbuddy-panel': '1' }, body: '{}',
+    });
+    assert.equal(mutations, 1, '领取签到成功后必须触发缓存作废');
+
+    // 换号（POST /account/switch）成功 → 同样触发
+    await call(handler, {
+      method: 'POST', path: `${CONSOLE_API_PREFIX}/account/switch`,
+      headers: { 'x-workbuddy-panel': '1' }, body: JSON.stringify({ file: 'b.info' }),
+    });
+    assert.equal(mutations, 2, '换号成功后必须触发缓存作废');
+
+    // 读操作不触发
+    await call(handler, { path: `${CONSOLE_API_PREFIX}/overview` });
+    assert.equal(mutations, 2, 'GET overview 不应触发');
+
+    // 写失败（上游 500）也不触发 —— 只有确认成功才作废
+    const failing = createConsoleApiHandler({
+      consoleSupervisor: {
+        url: await (async () => {
+          const server = createServer((req, res) => { res.writeHead(500, { 'content-type': 'application/json' }); res.end('{"ok":false}'); });
+          await new Promise((r) => server.listen(0, '127.0.0.1', r));
+          setImmediate(() => server.close());
+          return `http://127.0.0.1:${server.address().port}`;
+        })(),
+        probe: async () => ({ state: 'running' }),
+      },
+      log: () => {},
+      onUpstreamMutation: () => { mutations += 1; },
+    });
+    await call(failing, {
+      method: 'POST', path: `${CONSOLE_API_PREFIX}/checkin`,
+      headers: { 'x-workbuddy-panel': '1' }, body: '{}',
+    });
+    assert.equal(mutations, 2, '上游失败时不应作废缓存（余额没变）');
+  } finally { await fake.close(); }
+});
