@@ -510,19 +510,38 @@ async function aggregateStream(res) {
  */
 const MAX_USAGE_LINES = 2000;
 let usageLines = null;
-/** 上次与账本文件同步后的字节数，用来发现「文件被外部清空 / 删除」。 */
+/**
+ * 上次与账本文件同步后的**指纹**（字节数 + mtimeMs），用来发现「文件被外部改动」。
+ *
+ * 为什么不能只用字节数比大小：镜像可能是空的（`usageBytes === 0`，例如外部刚把
+ * 文件删掉、或进程还没记过任何账），这时 `size < usageBytes` 恒为 false ——
+ * 于是外部随后写进来的**任何**文件都不会触发重载，镜像会永久性地读成空。
+ * 实测这条在「删除文件 → 外部写入新账本」的序列里会真实发生（D4-E7）。
+ * 带上 mtime 后，"外部换了个文件" 与 "我们自己刚追加过" 就能区分开。
+ */
 let usageBytes = 0;
-
+let usageMtimeMs = -1;
 /** 账本位置：与脚本同目录（即 bridge/），可用环境变量覆盖。 */
 function usageFile() {
   return process.env.WORKBUDDY_USAGE_FILE
     || join(dirname(fileURLToPath(import.meta.url)), 'usage.jsonl');
 }
 
+/** 读文件指纹；文件不存在时返回 { size: 0, mtimeMs: -1 }。 */
+function usageStat(file) {
+  try {
+    const st = existsSync(file) ? statSync(file) : null;
+    return st ? { size: st.size, mtimeMs: st.mtimeMs } : { size: 0, mtimeMs: -1 };
+  } catch {
+    return { size: 0, mtimeMs: -1 };
+  }
+}
+
 function loadUsageLines(file) {
   const text = existsSync(file) ? readFileSync(file, 'utf8') : '';
   usageLines = text.split('\n').filter(Boolean);
   usageBytes = Buffer.byteLength(text);
+  usageMtimeMs = usageStat(file).mtimeMs;
 }
 
 /**
@@ -536,18 +555,44 @@ function shortError(text, limit = 160) {
   return s.length > limit ? `${s.slice(0, limit)}…` : s;
 }
 
+/**
+ * 确保内存镜像与文件一致，必要时重新加载。
+ *
+ * 抽成独立函数是因为它现在有**两个**调用方：`recordRequest`（写之前要确认
+ * 镜像没被外部清空）和 `readUsageRows`（读之前同样要确认）。这段判断是语义
+ * 核心，复制成两份迟早会分叉。
+ *
+ * **判据：文件指纹与上次同步时不一致就重载。** 指纹 = 字节数 + mtimeMs。
+ *
+ * 演进过程（两次都栽在"只比大小"上，记下来免得再犯）：
+ *   - 最初只判 `size < usageBytes`。这能覆盖「清空账本」（0 字节）与「截断」，
+ *     但**镜像为空时失效**：`usageBytes === 0` 意味着 `size < 0` 恒为 false，
+ *     外部此后写的任何文件都不会被看到。实测 D4-E7 就是这样读成空账本的
+ *     （外部删除文件 → 换入一个非空文件 → 桥永远读 0 条），而 HEAD 的全量
+ *     重读没有这个问题。
+ *   - 补 `mtimeMs < usageMtimeMs` 也没救：外部**新写**的文件 mtime 只会变大。
+ *
+ * 所以改成「指纹不等就重载」。这样「删除→重建」「换成另一个文件」「清空」
+ * 全都能覆盖，代价只是我们自己每次 append 后要刷新一次指纹
+ * （见 recordRequest 末尾），否则会把自己的写入误判成外部改动、白重载一次。
+ *
+ * `usageLines === null`（进程刚起，一次请求都还没记过）也走这里初始化：
+ * 这正是 D4 之前缺失的路径 —— 冷启动后第一个 `/v1/usage` 请求读不到内存副本，
+ * 只能回磁盘，改成镜像优先之后必须有地方把它建起来。
+ */
+function syncUsageMirror(file) {
+  if (usageLines === null) {
+    loadUsageLines(file);
+    return;
+  }
+  const { size, mtimeMs } = usageStat(file);
+  if (size !== usageBytes || mtimeMs !== usageMtimeMs) loadUsageLines(file);
+}
+
 function recordRequest(entry) {
   try {
     const file = usageFile();
-    if (usageLines === null) {
-      loadUsageLines(file);
-    } else {
-      // 文件被手工删除 / 清空（或走「清空账本」）时，内存副本必须作废：
-      // 否则累计到上限做整块重写时，已清掉的历史会被原样写回去。
-      let size = 0;
-      try { size = existsSync(file) ? statSync(file).size : 0; } catch { size = 0; }
-      if (size < usageBytes) loadUsageLines(file);
-    }
+    syncUsageMirror(file);
 
     const line = JSON.stringify({ t: Date.now(), ...entry });
     usageLines.push(line);
@@ -560,6 +605,9 @@ function recordRequest(entry) {
       appendFileSync(file, `${line}\n`);
       usageBytes += Buffer.byteLength(`${line}\n`);
     }
+    // 我们自己刚写过，指纹要跟上：否则下一次 syncUsageMirror 会把自己的写入
+    // 当成「外部改动」而白重载一次（虽然结果正确，纯属浪费一次全文件解析）。
+    usageMtimeMs = usageStat(file).mtimeMs;
   } catch (e) {
     log('usage record failed', e.message); // 记账失败绝不影响请求
   }
@@ -571,14 +619,27 @@ function resetUsageLedger() {
   writeFileSync(file, '');
   usageLines = [];
   usageBytes = 0;
+  usageMtimeMs = usageStat(file).mtimeMs;
 }
 
-/** 读账本原始行（解析失败的行直接跳过）。 */
+/**
+ * 读账本原始行（解析失败的行直接跳过）。
+ *
+ * 优先用内存镜像（`usageLines`），不再每次 `readFileSync` 全文件 + 逐行
+ * `JSON.parse`：这个函数被 `/v1/usage` 与 `/v1/requests` 调用，而控制台每 20 秒
+ * 轮询一次、插件面板也按 interval 拉 —— 每次重读磁盘并解析 2000 行 JSON，
+ * 纯属把事件循环堵上一段，而进程里本来就有一份同步的副本。
+ *
+ * 镜像里的行是**写入时的原样字符串**（`recordRequest` 只 push 不重排），所以
+ * 解析结果与直接读文件**逐字节等价**；输出结构因此完全不变。
+ *
+ * 保留的唯一磁盘访问是 `syncUsageMirror` 里的 `statSync` —— 它撑住「外部清空
+ * 账本」的语义，删掉就会让已清掉的历史被下一次整块重写带回来。
+ */
 function readUsageRows() {
-  const file = usageFile();
   try {
-    if (!existsSync(file)) return [];
-    return readFileSync(file, 'utf8').split('\n').filter(Boolean)
+    syncUsageMirror(usageFile());
+    return usageLines
       .map((line) => { try { return JSON.parse(line); } catch { return null; } })
       .filter((r) => r && typeof r.t === 'number');
   } catch {
@@ -766,7 +827,9 @@ function catalogPathsFor() {
 }
 
 const CATALOG_TTL_MS = 5 * 60 * 1000;
-let catalogCache = { at: 0, models: [], shape: null };
+// `upstreamModelCount` 初值必须是 0：冷启动时一个模型都没看过，此时任何请求都
+// 该放行。它同时也是「模型预校验能不能启用」的唯一开关（见 preflightModelError）。
+let catalogCache = { at: 0, models: [], shape: null, upstreamModelCount: 0 };
 let catalogRefreshing = null;
 
 /**
@@ -801,10 +864,76 @@ async function upstreamCatalog() {
   return catalogCache.models;
 }
 
+/**
+ * 是否对请求里的 model 做目录预校验。`WORKBUDDY_SKIP_MODEL_PREFLIGHT=1` 关闭。
+ *
+ * 为什么必须留这个开关：上游目录**已知是不完整的** —— 上面 fetchCatalog 里
+ * 「FEATURED 补全」那段注释记着同一件事（国际版能调 deepseek-v4.1-flash，
+ * 目录端点里却没有它）。目录滞后于实际上线模型时，预校验会**误杀一个本来
+ * 能用的模型**，这比「省一次上游往返」严重得多。所以：默认开（它能挡住的
+ * 是绝大多数拼错 id 的调用），但必须给用户一个立刻能关掉它的出口。
+ */
+const MODEL_PREFLIGHT_ENABLED = process.env.WORKBUDDY_SKIP_MODEL_PREFLIGHT !== '1';
+
+/**
+ * chat 前的本地模型预校验。返回错误文本表示「该拒」，返回 null 表示「放行」。
+ *
+ * **启用条件只有一个：`catalogCache.upstreamModelCount > 0`** —— 即这一轮缓存里
+ * 确实有模型是从上游目录端点拿到并留下的。
+ *
+ * 这里踩过一个真实的坑，记下来免得再犯：最初的判据是 `catalogCache.models.length
+ * > 0`，看起来等价，其实完全不等价 —— `fetchCatalog` 末尾会用 FEATURED **无条件**
+ * 补全，所以只要两个目录端点都**不返回 5xx**（404 / 字段改名 / 返回空数组 /
+ * 模型全被 isNonChatModel 过滤掉…），缓存里也至少躺着 3 个精选模型。
+ * 于是「桥对真实目录一无所知」被误判成「目录已知」，任何不在 FEATURED 里的
+ * 真实可用模型都会被本地 400 拦下、一次上游都不打 —— 正是这条预校验本该
+ * 避免的伤害。FEATURED 是**给客户端兜底的展示数据**，不是目录已知的证据。
+ * 实测这条误杀在 404 / 空数组 / 字段改名 / 全被 supportsToolCall:false 挡掉
+ * 四种常见故障下**全部可达**（只有 500 硬失败那条路径是对的）。
+ *
+ * 计数为 0（目录未知）时一律放行：我们不知道有哪些模型，就不该猜。
+ *
+ * 判定用 `catalogCache` 而不是 `upstreamCatalog()`：后者是 async 且可能触发一次
+ * 抓取，放在请求路径上会把「校验」变成「多等几秒」。预校验的卖点就是省一次
+ * 上游往返，不能自己先花掉一次。
+ *
+ * **FEATURED 仍然要在放行名单里**：`/v1/models` 在缓存为空时会退回 FEATURED
+ * 定义（见那个端点的 `if (!catalog.length)` 分支），也就是桥刚刚才把这些 id
+ * 告诉过客户端。若预校验只认缓存，就会出现「桥让你选 deepseek-v4.1-flash，
+ * 转头又说这个模型不在目录里」的自相矛盾。所以放行判断是「在目录里 **或**
+ * 在精选定义里」—— 桥对外承诺过的 id 一律不能自己否掉。
+ * 注意这两件事是分开的：FEATURED 参与**放行**，但不参与**激活**预校验。
+ */
+function preflightModelError(model) {
+  if (!MODEL_PREFLIGHT_ENABLED) return null;
+  // 只在「真的从上游拿到过模型」时才敢拒。404 / 空数组 / 字段改名 / 全被过滤
+  // 以及 5xx 硬失败，全都落在这个 0 上。
+  if (!catalogCache.upstreamModelCount) return null;
+  const catalog = catalogCache.models;
+  if (!catalog.length) return null; // 理论上计数 > 0 时不会为空，兜一手
+  if (typeof model !== 'string' || !model) return null; // 交给后面的默认值逻辑
+  if (catalog.some((m) => m.id === model)) return null;
+  if (FEATURED.some((f) => f.id === model)) return null;
+
+  // 提示要**可操作**：光说「模型不存在」，用户下一步只能去猜。这里给出三个
+  // 真实出口 —— 看完整目录（默认只回精选，具体模型在 ?all=1 里）、刷新目录
+  // （缓存可能过期）、关掉预校验（目录可能漏了这个模型）。
+  return `workbuddy-bridge: model "${model}" is not in the current catalog`
+    + ` (${catalog.length} models). Check GET /v1/models?all=1 for the full list`
+    + ' or GET /v1/models?refresh=1 if the catalog may be stale;'
+    + ' set WORKBUDDY_SKIP_MODEL_PREFLIGHT=1 to forward unknown model ids anyway.';
+}
+
 async function fetchCatalog() {
   // 是否**真的**从上游取到了目录。下面 FEATURED 补全会让 merged 永远非空，
   // 所以不能靠「目录非空」判断这次抓取成没成功。
   let upstreamOk = false;
+  // 上游目录里**真正进了缓存的**模型条数（即通过了下面那套过滤、且不是
+  // FEATURED 补出来的）。这才是「桥认识哪些模型」的唯一硬证据：
+  // upstreamOk 只说明「端点回了 models 数组」，一个空数组也算 true，
+  // 而全被过滤掉的情况（非对话模型 / supportsToolCall:false）同样算 true。
+  // 模型预校验只有在这个计数 > 0 时才敢启用（见 preflightModelError）。
+  let upstreamModelCount = 0;
   // 是否遇到**硬失败**（上游 5xx / 网络异常 / 解析异常）。硬失败时绝不用半份
   // 目录顶掉完整缓存——否则用户的模型列表会凭空少几个，还看不出原因。
   let hardError = false;
@@ -910,6 +1039,12 @@ async function fetchCatalog() {
       }
     }
 
+    // 在这里定格「上游给了几个模型」：**必须**在下面 FEATURED 补全之前取，
+    // 因为补全之后 merged 至少会有 3 条，那个数字就不再代表上游了。
+    // 用 merged.size 而不是各端点 list 长度之和：merged 是去重后的 Map，
+    // 重复 id 不会把计数灌水，正好等于「桥实际认识多少个上游模型」。
+    upstreamModelCount = merged.size;
+
     // 目录接口**并不完整**：国际版能成功调用 deepseek-v4.1-flash，
     // 但它不出现在任何一个目录端点里。因此把已知可用、目录却漏掉的模型补进来
     // ——能不能用最终由上游决定，列出来才有机会被选到。
@@ -934,31 +1069,51 @@ async function fetchCatalog() {
     if (models.length && !hardError) {
       // 目录里排掉的东西登记下来，便于在 /health 的 upstreamShape 里追溯
       shape.droppedNonChat = models.filter((m) => isNonChatModel(m)).map((m) => m.id);
+      // 与写进缓存的 models 用**同一套过滤**，保证这个计数就是"桥认识几个模型"，
+      // 不会因为过滤规则前后不一致而虚高。
+      const kept = models.filter((m) => m.supportsToolCall !== false
+        && !/^(codewise|hunyuan-image)/.test(m.id)
+        && !isNonChatModel(m));
+      // 过滤后还剩几个是**真的来自上游**的（FEATURED 补全项带 _supplemented 标记，
+      // 要排除掉——否则补全又会把计数顶上去，等于没修）。
+      const upstreamKept = kept.filter((m) => !m._supplemented).length;
       catalogCache = {
         at: Date.now(),
-        models: models
-          .filter((m) => m.supportsToolCall !== false
-            && !/^(codewise|hunyuan-image)/.test(m.id)
-            && !isNonChatModel(m))
-          .map((m) => ({
-            id: m.id,
-            name: m.name || m.id,
-            context: m.maxInputTokens,
-            maxOutput: m.maxOutputTokens,
-            images: !!m.supportsImages,
-            credits: m.credits,
-            // 保留上游的说明与标签：国际版把具体型号写在 description 里，
-            // 光看 id（default-model 这类档位名）无法判断它其实是哪个模型
-            vendor: m.vendor,
-            tags: m.tags,
-            descriptionZh: m.descriptionZh,
-            descriptionEn: m.descriptionEn,
-            isDefault: m.isDefault,
-            badge: promotions.get(m.id)?.label,
-            free: promotions.get(m.id)?.free === true,
-          })),
+        models: kept.map((m) => ({
+          id: m.id,
+          name: m.name || m.id,
+          context: m.maxInputTokens,
+          maxOutput: m.maxOutputTokens,
+          images: !!m.supportsImages,
+          credits: m.credits,
+          // 保留上游的说明与标签：国际版把具体型号写在 description 里，
+          // 光看 id（default-model 这类档位名）无法判断它其实是哪个模型
+          vendor: m.vendor,
+          tags: m.tags,
+          descriptionZh: m.descriptionZh,
+          descriptionEn: m.descriptionEn,
+          isDefault: m.isDefault,
+          badge: promotions.get(m.id)?.label,
+          free: promotions.get(m.id)?.free === true,
+        })),
         // 诊断用：各端点的命中数量与模型字段名
         shape,
+        /**
+         * 缓存里**真正来自上游目录**、且能对话的模型条数。模型预校验的启用
+         * 依据（见 preflightModelError），0 表示放行一切。
+         *
+         * 为什么不能用 `models.length > 0`：上面的 FEATURED 补全会**无条件**
+         * 把 3 个精选模型塞进来，所以哪怕两个目录端点一个模型都没给出
+         * （404 / 字段改名 / 空数组 / 全被 isNonChatModel 过滤），`models`
+         * 照样非空。**非空 ≠ 已知**，差的就是这个 `_supplemented` 的排除。
+         *
+         * 也不要拿 upstreamOk 顶替：那个变量的语义是「端点回了一个 models
+         * 数组」，空数组同样算 true，它服务于 /v1/models?refresh=1 的
+         * "这次刷新算不算成功"提示，与本处的「桥认识几个模型」不是一回事。
+         */
+        upstreamModelCount: upstreamOk && !hardError ? upstreamKept : 0,
+        // 原始计数留在诊断口径里，/health 的 upstreamShape 能直接看到
+        upstreamModelsSeen: upstreamModelCount,
       };
     } else if (hardError) {
       log('catalog refresh failed; keeping cached catalog');
@@ -1190,11 +1345,66 @@ async function fetchQuota(auth) {
 }
 
 // ── HTTP server ──────────────────────────────────────────────────────────
-const readBody = (req) => new Promise((resolve, reject) => {
+/**
+ * chat 请求体上限。
+ *
+ * 32MB 这个数是**从最大合法请求倒推**的，不是随手取的：dsh / 控制台的「图片
+ * 转 base64 内联」会把整张图塞进 messages，1MB 的 PNG 编码后约 1.37MB，一条
+ * 多轮带图对话叠到十几 MB 是正常现象。控制台自己那条 readBody 只给 512KB ——
+ * 那是**控制台内部**的管理类小请求，桥这边不能照抄，否则一张稍大的图就被拒。
+ * 反过来，无上限就等于「一个坏客户端能把这个零依赖的本地进程内存吃干」。
+ * 32MB 足够覆盖真实的多模态对话，又能在单个请求层面兜住内存。
+ *
+ * 可用 `WORKBUDDY_MAX_BODY_BYTES` 覆盖：上限是随用法变的（比如有人专门灌长
+ * 上下文做压测），写死会让那种场景没有任何出口。
+ */
+const MAX_BODY_BYTES = Number(process.env.WORKBUDDY_MAX_BODY_BYTES || 32 * 1024 * 1024);
+
+/**
+ * 读取请求体，超过 MAX_BODY_BYTES 立刻失败。
+ *
+ * **超限时既不在这里 destroy，调用方也不 destroy** —— 这是两次实测才定下来的：
+ *
+ *   1. 控制台那份 readBody 是「fail() + req.destroy()」，桥这边不能照抄：destroy
+ *      会把 socket 直接拆掉，413 还没写出去，客户端只收到 ECONNRESET。
+ *   2. 于是改成「这里 pause()、调用方写完 413 再 destroy」—— **仍然不行**。
+ *      实测（1MB~16MB）：pause() 之后客户端**还在继续发**，此时 destroy 让内核
+ *      回 RST，客户端在读到 413 之前就被复位，丢失率最高到 10/10（8MB）。
+ *      对照实验：把 destroy 换成 resume()、其余一字不改 → 0/50 丢失。
+ *
+ * 所以最终做法是：超限时 `req.pause()` 停止为它累计内存，调用方回完 413 后
+ * 用 `req.resume()` 把剩余字节**读掉并丢弃**，让这条连接自然收尾。
+ *
+ * 代价是确实还会从网络上读走那部分字节 —— 但这不违背 D2 的目标：D2 要挡的是
+ * 「无上限地往内存里 Buffer.concat」，而 resume() 之后没有任何东西被累计，
+ * 每条请求仍有 MAX_BODY_BYTES 的硬上限兜底。
+ *
+ * 抛出的错误带上 `code = 'BODY_TOO_LARGE'`：调用方要据此回**明确的 413**，
+ * 而不是和「JSON 解析失败」共用同一个 400。
+ */
+const readBody = (req, limit = MAX_BODY_BYTES) => new Promise((resolve, reject) => {
+  let size = 0;
+  let done = false;
   const chunks = [];
-  req.on('data', (c) => chunks.push(c));
-  req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
-  req.on('error', reject);
+  req.on('data', (c) => {
+    if (done) return; // 已经判定超限：后续在途 chunk 一律丢弃，不再累计
+    size += c.length;
+    if (size > limit) {
+      done = true;
+      const err = new Error(`request body exceeds ${limit} bytes`);
+      err.code = 'BODY_TOO_LARGE';
+      // 先停住继续灌数据，再 reject —— 顺序反过来的话，pause 之前可能又塞进来
+      // 几个 chunk（Node 的 data 事件是同步派发的），白占内存。
+      // 注意这里**只是暂停**：真正丢弃剩余字节要等 413 写完之后（见调用方）。
+      req.pause();
+      reject(err);
+      return;
+    }
+    chunks.push(c);
+  });
+  req.on('end', () => { if (!done) { done = true; resolve(Buffer.concat(chunks).toString('utf8')); } });
+  // 连接被对端提前掐断等情况：已经 settle 过就别再 reject 一次
+  req.on('error', (e) => { if (!done) { done = true; reject(e); } });
 });
 
 const json = (res, status, obj) => {
@@ -1340,11 +1550,62 @@ const server = createServer(async (req, res) => {
     }
 
     if (url.pathname === '/v1/chat/completions' && req.method === 'POST') {
-      const raw = await readBody(req);
+      let raw;
+      try {
+        raw = await readBody(req);
+      } catch (e) {
+        if (e.code === 'BODY_TOO_LARGE') {
+          // 明确的 413 + JSON：客户端要能一眼分清「请求太大」和「JSON 写错了」，
+          // 这两种 400 类失败的处置方式完全不同。这里**不记账**是对的 ——
+          // 连 body 都没读全，没有 model / 耗时可言，记一条全是 0 的账只会污染
+          // 控制台的失败列表。
+          log('rejected oversized body', e.message);
+          const body = JSON.stringify({
+            error: {
+              message: `workbuddy-bridge: request body too large (limit ${MAX_BODY_BYTES} bytes);`
+                + ' raise WORKBUDDY_MAX_BODY_BYTES if this is a legitimate multi-modal request',
+              type: 'payload_too_large',
+            },
+          });
+          res.writeHead(413, { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) });
+          // 413 写完后 `resume()` 把剩余字节读掉丢弃。
+          //
+          // **不要改成 destroy()**：实测这样会让客户端在读到 413 之前就吃 RST
+          // （8MB 下丢失率可达 10/10，详见 readBody 的注释）。resume() 之后
+          // 没有任何东西被累计进内存，D2 的内存上限目标依然成立，而契约
+          // （"明确的 413 JSON"）才真的兑现了。
+          res.end(body);
+          req.resume();
+          return;
+        }
+        throw e;
+      }
       let payload;
       try { payload = JSON.parse(raw); } catch { return json(res, 400, { error: { message: 'invalid JSON body' } }); }
       const wantStream = payload.stream === true;
       const model = payload.model || 'deepseek-v4.1-flash';
+
+      // 模型预校验：桥手里就有目录，拼错的 id 不该花一次上游往返（详见
+      // preflightModelError 的注释）。放在 maybeAutoCheckin 之前是刻意的 ——
+      // 一次注定失败的调用不该顺带触发签到。
+      const modelError = preflightModelError(model);
+      if (modelError) {
+        log('rejected unknown model', model);
+        // **必须落账**：否则这次拒绝在控制台「最近请求」里完全不可见，用户
+        // 看到的是一个客户端报错、而账本上什么都没有，只能去翻原始日志 ——
+        // 这正是 D3 想解决的场景，不记等于白改。
+        recordRequest({
+          model,
+          stream: wantStream,
+          ms: 0,
+          ok: false,
+          status: 400,
+          code: null,
+          error: modelError,
+        });
+        return json(res, 400, { error: { message: modelError, type: 'model_not_found' } });
+      }
+
       // 每日自动签到：**先转发、后台补签**。放在这里是因为「有人调模型」
       // 就是「在用」的最强信号；不 await，绝不拖慢这次请求。
       maybeAutoCheckin();

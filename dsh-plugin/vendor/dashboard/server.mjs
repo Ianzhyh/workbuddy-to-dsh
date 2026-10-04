@@ -8,6 +8,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { createServer } from 'node:http';
 import { closeSync, existsSync, openSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
 import { join, resolve, sep } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import config, { bridgeEnv } from '../config.mjs';
 import {
   bridgeHealth,
@@ -82,26 +83,109 @@ const SYNC_OPTS = {
   maxBuffer: 4 * 1024 * 1024,
 };
 
+/** 异步 spawn 的公共选项：语义同上，但只收集 stdout（探测命令的 stderr 没有用）。 */
+const ASYNC_OPTS = {
+  stdio: ['ignore', 'pipe', 'ignore'],
+  windowsHide: true,
+};
+
 /**
- * 按端口找监听进程，跨平台。
+ * Windows 的 netstat 参数。
+ *
+ * `-p TCP` 是**必须**的：不带它时输出里混着 UDP（本机 DNS/DHCP/发现协议几百行），
+ * 而我们只关心 TCP 监听端口。缩小输出面既省了解析，也让每次调用的内存与时间
+ * 都可预期 —— 这个命令会被"停桥等待"的轮询反复调用。
+ *
+ * `-n` 关掉反向域名解析：否则每个外部地址都要去查一次 DNS，在断网或 DNS 慢的
+ * 机器上单次 netstat 能卡到秒级（我们只需要端口号，主机名毫无用处）。
+ */
+const NETSTAT_ARGS = ['-ano', '-p', 'TCP', '-n'];
+
+/**
+ * 把一份 `netstat -ano` 风格的输出解析成该端口的监听 PID。
+ *
+ * 只认 LISTENING 行：否则会把「连到该端口的客户端」当成监听者，进而去 kill
+ * 一个无辜的进程。端口匹配用 `:PORT` 结尾而不是 includes —— 否则找 790 会命中
+ * `:8790`（前缀相同但完全是另一个端口）。
+ */
+function parsePortPid(stdout, port) {
+  if (!stdout) return null;
+  const suffix = `:${port}`;
+  for (const rawLine of stdout.split('\n')) {
+    const line = rawLine.trim();
+    // 快路径：绝大多数行不含目标端口，先做一次廉价子串判断
+    if (!line.includes(suffix) || !/LISTENING/i.test(line)) continue;
+    const cols = line.split(/\s+/);
+    if (!cols[1].endsWith(suffix)) continue;
+    const pid = Number(cols[cols.length - 1]);
+    if (Number.isInteger(pid) && pid > 0) return pid;
+  }
+  return null;
+}
+
+/**
+ * 异步版的「按端口找监听进程」。
+ *
+ * 为什么要单独有一份异步实现：`stopBridgeAndWait` 要轮询"端口释放了没"
+ * （最多 20 次，POSIX 升级 SIGKILL 后还有 12 次）。用同步版意味着每次轮询都
+ * spawnSync 一个 netstat **把事件循环整个卡住** —— 停桥期间控制台连一个
+ * `/api/overview` 都答不上来，页面表现为"点了停止，整个控制台卡死几秒"。
+ * 异步版把等待时间还给事件循环，代价只是多一个 Promise。
+ *
+ * 只用于"等待端口释放"这条快路径；真正要 kill 的 PID 仍由同步版
+ * {@link findPortPid} 给出（那条路径有 taskkill / process.kill 兜底，见 stopBridge）。
+ *
+ * 任何异常（命令不存在、超时、输出为空）都返回 null：对调用方来说
+ * "探测不出来" 与 "没找到" 在轮询里是同一件事 —— 都表示还没释放/还不能关。
+ */
+function probePortPid(port) {
+  return new Promise((ok) => {
+    let child;
+    try {
+      child = process.platform === 'win32'
+        ? spawn(systemExe('netstat'), NETSTAT_ARGS, ASYNC_OPTS)
+        : spawn('lsof', ['-nP', `-iTCP:${port}`, '-sTCP:LISTEN', '-t'], ASYNC_OPTS);
+    } catch {
+      ok(null);
+      return;
+    }
+    let out = '';
+    let done = false;
+    const finish = (value) => {
+      if (done) return;
+      done = true;
+      clearTimeout(killer);
+      ok(value);
+    };
+    // 探测命令本身卡住时必须能放弃：否则"停桥"会挂在一个永远不返回的 netstat 上
+    const killer = setTimeout(() => { try { child.kill(); } catch { /* 已经退了 */ } finish(null); }, 5000);
+    child.stdout.on('data', (c) => {
+      out += c;
+      // 输出量兜底：真出问题时别把整个 stdout 攒进内存
+      if (out.length > 4 * 1024 * 1024) { try { child.kill(); } catch { /* 同上 */ } finish(null); }
+    });
+    child.on('error', () => finish(null));
+    child.on('close', () => {
+      if (process.platform === 'win32') { finish(parsePortPid(out, port)); return; }
+      const pid = Number(out.split('\n').map((s) => s.trim()).filter(Boolean)[0]);
+      finish(Number.isInteger(pid) && pid > 0 ? pid : null);
+    });
+  });
+}
+
+/**
+ * 按端口找监听进程，跨平台（同步版）。
  *
  * 不要用 execSync：它经 cmd.exe 执行且默认给 stdin 开管道，在 Windows 上必定
  * 抛 EBUSY。spawnSync + stdio:['ignore',...] 直连 exe 才是可靠路径。
  *
- * Windows 用 `netstat -ano`，macOS / Linux 用 `lsof`（缺 lsof 时退回 `ss`）。
- * 只认 LISTENING/LISTEN 的行，避免把「连到该端口的客户端」当成监听者。
+ * Windows 用 `netstat`，macOS / Linux 用 `lsof`（缺 lsof 时退回 `ss`）。
  */
 function findPortPid(port) {
   if (process.platform === 'win32') {
-    const r = spawnSync(systemExe('netstat'), ['-ano'], SYNC_OPTS);
+    const r = spawnSync(systemExe('netstat'), NETSTAT_ARGS, SYNC_OPTS);
     if (r.error || !r.stdout) return null;
-    for (const line of r.stdout.split('\n')) {
-      if (line.includes(`:${port}`) && /LISTENING/i.test(line)) {
-        const pid = Number(line.trim().split(/\s+/).pop());
-        if (Number.isInteger(pid) && pid > 0) return pid;
-      }
-    }
-    return null;
+    return parsePortPid(r.stdout, port);
   }
 
   const lsof = spawnSync('lsof', ['-nP', `-iTCP:${port}`, '-sTCP:LISTEN', '-t'], SYNC_OPTS);
@@ -185,10 +269,20 @@ function startBridge(opts = {}) {
   return info;
 }
 
-function stopBridge() {
-  const pid = findPortPid(config.bridge.port);
-  if (!pid) return { stopped: false, error: `端口 ${config.bridge.port} 上没有监听进程` };
+function stopBridge(port = config.bridge.port) {
+  const pid = findPortPid(port);
+  if (!pid) return { stopped: false, error: `端口 ${port} 上没有监听进程` };
+  // 明确带上 stopped:true —— 下面 stopBridgeAndWait 要靠它短路（"本来就没在跑"
+  // 时不该再白等 5 秒端口轮询）
+  return killPid(pid);
+}
 
+/**
+ * 真正结束一个进程，跨平台。
+ * Windows 必须 taskkill /F（process.kill 对非本进程树的老进程不一定可靠），
+ * POSIX 走 SIGTERM（SIGKILL 的升级逻辑在 stopBridgeAndWait 里）。
+ */
+function killPid(pid) {
   if (process.platform === 'win32') {
     const r = spawnSync(systemExe('taskkill'), ['/F', '/PID', String(pid)], SYNC_OPTS);
     if (r.status !== 0) {
@@ -478,23 +572,45 @@ async function startBridgeAndWait(opts = {}) {
   };
 }
 
-/** 停桥并等端口真正释放，避免重启时撞上 TIME_WAIT。 */
-async function stopBridgeAndWait() {
-  const result = stopBridge();
+/**
+ * 停桥并等端口真正释放，避免重启时撞上 TIME_WAIT。
+ *
+ * 等待循环走**异步探测**（{@link probePortPid}）：早期版本在这里调同步的
+ * findPortPid，于是一次"重启桥"最坏会 spawnSync 几十次 netstat，每次都把事件
+ * 循环卡住 —— 控制台在停桥期间整段无响应。异步探测不影响正确性，只是把等待
+ * 时间还给了事件循环。
+ *
+ * 返回值结构保持不变（`{stopped, ...}`，失败时补 `warning`）：前端与测试都在用。
+ *
+ * 导出（而不是只在本文件里用）是为了让自测能真的把桥停一遍：`/api/bridge/*`
+ * 是破坏性接口，能直接调到的测试比"起个控制台进程再打 HTTP"稳得多。
+ *
+ * @param {string} [target] 只停**这一个** `host:port` 上的监听者。
+ *   路由都走默认的 `config.bridge.port`；显式传值只给自测用 —— 否则测试要拿
+ *   真实端口做断言就只能去改 `.env`（会连带把控制台自己也换到别的端口）。
+ */
+export async function stopBridgeAndWait(target) {
+  const port = target || config.bridge.port;
+  const result = stopBridge(port);
+  // stopBridge 已经确认过"端口上没有监听进程"（`stopped:false`）：此时再去
+  // 轮询端口纯属浪费 —— 直接原样返回。这条短路同时保证了"桥本来就没跑"时
+  // 停止按钮是**立刻**返回的，不会先白等 5 秒。
+  if (!result.stopped) return result;
+
   let freed = false;
   for (let i = 0; i < 20; i += 1) {
     await sleep(250);
-    if (!findPortPid(config.bridge.port)) { freed = true; break; }
+    if (!(await probePortPid(port))) { freed = true; break; }
   }
   // POSIX 下 SIGTERM 被忽略时升级为 SIGKILL，否则重启会一直撞在旧进程上
-  if (!freed && result.stopped && process.platform !== 'win32') {
+  if (!freed && process.platform !== 'win32') {
     try { process.kill(result.pid, 'SIGKILL'); } catch { /* 已经退出了 */ }
     for (let i = 0; i < 12; i += 1) {
       await sleep(250);
-      if (!findPortPid(config.bridge.port)) { freed = true; break; }
+      if (!(await probePortPid(port))) { freed = true; break; }
     }
   }
-  return freed || !result.stopped ? result : { ...result, warning: '进程未在超时内退出，端口可能仍被占用' };
+  return freed ? result : { ...result, warning: `进程未在超时内退出，端口 ${port} 可能仍被占用` };
 }
 
 // ── 对话代理（流式原样透传） ────────────────────────────────────────────
@@ -665,7 +781,19 @@ const server = createServer(async (req, res) => {
     }
 
     if (route === '/api/bridge/stop' && req.method === 'POST') {
-      sendJson(res, 200, await stopBridgeAndWait());
+      // 端点是 POST：浏览器把「页面/请求断开」和「用户点了停止」都报在这里。
+      // 客户端已经断开时没人收响应，但**停桥必须照做**（用户取消/关页不该让桥
+      // 留着）；而且要对齐 proxyChat 的做法——断了就取消后续的等待，别为一个
+      // 没人要的响应白等 5 秒端口轮询。
+      const ac = new AbortController();
+      const onClientClose = () => { if (!res.writableEnded) ac.abort(); };
+      res.on('close', onClientClose);
+      try {
+        const result = await stopBridgeAndWait();
+        if (!ac.signal.aborted) sendJson(res, 200, result);
+      } finally {
+        res.off('close', onClientClose);
+      }
       return;
     }
 
@@ -897,41 +1025,68 @@ function openBrowser(url) {
   }
 }
 
-server.listen(config.dashboard.port, config.dashboard.host, async () => {
-  console.log(`WorkBuddy 控制台  ->  ${config.dashboard.url}`);
-  console.log(`登录文件          ->  ${config.workbuddy.authFile}`);
-
-  // 地址以实际监听结果为准（.env 里的 DASHBOARD_PORT 已生效），不再由脚本猜端口
-  if (config.dashboard.openBrowser) openBrowser(config.dashboard.url);
-
-  // 每日自动签到：启动时检查一次，之后每小时一次（R11.3）。
-  // 覆盖「开着控制台但没人调模型」的情况；有人调模型时桥侧也会补签。
-  if (AUTO_CHECKIN_ENABLED && readCheckinState().auto) {
-    setTimeout(() => { autoCheckinTick('startup').catch(() => { /* 静默：失败已落盘 */ }); }, 3000);
+/**
+ * 这个文件**被当作程序运行时**才起服务（`node dashboard/server.mjs`）。
+ *
+ * 为什么要这道门：`stopBridgeAndWait` 是导出给自测用的，而"import 就跑
+ * `server.listen`"会让测试进程多出一个永不关闭的监听 socket —— `node --test`
+ * 的子进程因此**永远不会退出**，runner 只能把它判成失败（现场看不到任何断言
+ * 报错，只有一个笼统的 "test failed"，极难排查）。副作用不该在 import 时发生。
+ *
+ * 用 `import.meta.url` 与 `process.argv[1]` 比对是零依赖的判据；`.cmd`/快捷方式
+ * 直接 `node dashboard/server.mjs` 时 argv[1] 就是它自己的路径。
+ * 路径在 Windows 上大小写与分隔符都可能不一致，因此先 resolve 再比对。
+ */
+function isMainModule() {
+  const entry = process.argv[1];
+  if (!entry) return false;
+  try {
+    return resolve(entry) === fileURLToPath(import.meta.url);
+  } catch {
+    return false;
   }
-  setInterval(() => { autoCheckinTick('hourly').catch(() => { /* 同上 */ }); }, CHECKIN_COOLDOWN_MS);
+}
 
-  if (!config.dashboard.autoStartBridge) {
-    console.log(`桥地址            ->  ${config.bridge.url}/v1（未自动启动）`);
-    console.log('仅监听回环地址，Ctrl+C 退出。');
-    return;
-  }
+/** 启动控制台服务（进程入口调用；测试 import 时不执行）。 */
+function startConsoleServer() {
+  server.listen(config.dashboard.port, config.dashboard.host, async () => {
+    console.log(`WorkBuddy 控制台  ->  ${config.dashboard.url}`);
+    console.log(`登录文件          ->  ${config.workbuddy.authFile}`);
 
-  // 桥若已在跑就直接复用，避免重复绑定端口
-  const existing = await bridgeHealth();
-  if (existing.running) {
-    console.log(`桥地址            ->  ${config.bridge.url}/v1（已在运行，复用）`);
-    console.log('仅监听回环地址，Ctrl+C 退出。');
-    return;
-  }
+    // 地址以实际监听结果为准（.env 里的 DASHBOARD_PORT 已生效），不再由脚本猜端口
+    if (config.dashboard.openBrowser) openBrowser(config.dashboard.url);
 
-  console.log('正在启动桥服务…');
-  const result = await startBridgeAndWait();
-  if (result.started) {
-    console.log(`桥地址            ->  ${config.bridge.url}/v1（已就绪，PID ${result.pid}）`);
-  } else {
-    console.log(`桥启动失败        ->  ${result.error || result.warning || '未知原因'}`);
-    console.log('可在页面上点「启动桥服务」重试。');
-  }
-  console.log('仅监听回环地址，Ctrl+C 退出控制台（桥会继续在后台运行）。');
-});
+    // 每日自动签到：启动时检查一次，之后每小时一次（R11.3）。
+    // 覆盖「开着控制台但没人调模型」的情况；有人调模型时桥侧也会补签。
+    if (AUTO_CHECKIN_ENABLED && readCheckinState().auto) {
+      setTimeout(() => { autoCheckinTick('startup').catch(() => { /* 静默：失败已落盘 */ }); }, 3000);
+    }
+    setInterval(() => { autoCheckinTick('hourly').catch(() => { /* 同上 */ }); }, CHECKIN_COOLDOWN_MS);
+
+    if (!config.dashboard.autoStartBridge) {
+      console.log(`桥地址            ->  ${config.bridge.url}/v1（未自动启动）`);
+      console.log('仅监听回环地址，Ctrl+C 退出。');
+      return;
+    }
+
+    // 桥若已在跑就直接复用，避免重复绑定端口
+    const existing = await bridgeHealth();
+    if (existing.running) {
+      console.log(`桥地址            ->  ${config.bridge.url}/v1（已在运行，复用）`);
+      console.log('仅监听回环地址，Ctrl+C 退出。');
+      return;
+    }
+
+    console.log('正在启动桥服务…');
+    const result = await startBridgeAndWait();
+    if (result.started) {
+      console.log(`桥地址            ->  ${config.bridge.url}/v1（已就绪，PID ${result.pid}）`);
+    } else {
+      console.log(`桥启动失败        ->  ${result.error || result.warning || '未知原因'}`);
+      console.log('可在页面上点「启动桥服务」重试。');
+    }
+    console.log('仅监听回环地址，Ctrl+C 退出控制台（桥会继续在后台运行）。');
+  });
+}
+
+if (isMainModule()) startConsoleServer();
