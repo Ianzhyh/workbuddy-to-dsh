@@ -49,6 +49,11 @@ const SKIP = [
   /\.log$/i,
   /\.jsonl$/i,          // 用量账本
   /\.bak($|-)/i,        // 备份（index.html.bak 之类）
+  // **测试文件不进分发包**：bridge.test.mjs 是仓库里的合约测试（要起真桥、
+  // 用随机端口），复制进 vendor 既没用又会让 vendor:check 在 CI 上永远不同步
+  //（CI 从 git checkout 拿不到它 —— 它不在 ENTRIES 的清单里，是整目录复制时
+  // 跟着进来的）。同时排除一切测试/构建产物命名模式。
+  /\.(test|spec)\.(mjs|js|cjs|ts)$/i,
   /^\.state\.json$/i,
   /^\.env$/i,           // 使用者自己的配置（发 .env.example 就够）
   /^node_modules$/,
