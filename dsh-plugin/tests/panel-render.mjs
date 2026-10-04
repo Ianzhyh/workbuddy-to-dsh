@@ -639,6 +639,7 @@ try {
   }
   const quotaMsg = await page.cdp.evaluate(`(() => { const c=document.querySelector('.wb-quota'); return c ? c.innerText : ''; })()`);
   if (!/已刷新|刷新失败/.test(quotaMsg)) problems.push('刷新积分后没有给出结果提示');
+  console.log(`积分刷新：POST /workbuddy/quota → ${/已刷新/.test(quotaMsg) ? '成功提示' : /旧构建/.test(quotaMsg) ? '旧构建降级提示' : /刷新失败/.test(quotaMsg) ? '失败提示' : '（无提示）'}`);
 
   // 破坏性操作必须二次确认，且确认后才真的发请求：
   //   清空账本（用量）/ 清空日志（日志）/ 清除体检结论（模型）
@@ -1000,6 +1001,17 @@ async function verifyStaleHost() {
       await sleep(400);
     }
     if (probeDisabled !== true) problems.push('宿主旧构建时「全部体检」应禁用');
+
+    // 概览页「刷新积分」在旧宿主上的降级：不许报错，必须给出"按缓存刷新+重启提示"
+    await page2.cdp.evaluate(`(() => { const b=[...document.querySelectorAll('.wb-tab')].find(x=>x.textContent==='概览'); b && b.click(); })()`);
+    await sleep(600);
+    await page2.cdp.evaluate(`(() => { const b=[...document.querySelectorAll('.wb-btn')].find(x=>x.textContent.includes('刷新积分')); b && b.click(); })()`);
+    await sleep(900);
+    const quotaText = await page2.cdp.evaluate(`(() => { const c=document.querySelector('.wb-quota'); return c ? c.innerText : ''; })()`);
+    if (/刷新失败/.test(quotaText)) problems.push('旧宿主上「刷新积分」报错（应当降级为"按缓存刷新+重启提示"）');
+    if (!/旧构建|按缓存刷新/.test(quotaText)) problems.push('旧宿主上「刷新积分」没有给出降级说明');
+    if (/已刷新/.test(quotaText)) problems.push('旧宿主上不该显示"已刷新"（并没有真的重读上游）');
+    console.log('旧宿主刷新积分：降级提示正常（按缓存刷新 + 重启提示）');
   } catch (error) {
     problems.push(`场景 2 失败：${error.message}`);
   } finally {

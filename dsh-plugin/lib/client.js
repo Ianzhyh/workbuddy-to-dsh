@@ -557,9 +557,9 @@ window.__ModuleLoader__.load({
         setMessage('');
         const res = await postJson('/workbuddy/quota', {});
         setRefreshing(false);
-        if (res.status === 404) {
-          // 宿主端还是旧构建（没有 /workbuddy/quota）：退回刷新状态。
-          // 积分这时走 120 秒缓存，重启 dsh 后才能"立即重读上游"。
+        // 旧宿主的两种表现：路由不存在（404）或被只读守卫拒掉（405）——
+        // 都说明"宿主端进程还是旧构建"。退回刷新状态并讲清楚为什么不能立即重读。
+        if (res.status === 404 || res.status === 405) {
           setMessage('宿主端还是旧构建：已按缓存刷新（重启一次 dsh 后，「刷新积分」可直接重读上游）。');
           await reload();
           return;
@@ -604,7 +604,7 @@ window.__ModuleLoader__.load({
     }
 
     // ─────────────────────────── 账号 ───────────────────────────
-    function AccountsPanel({ onStartConsole, busy }) {
+    function AccountsPanel({ onStartConsole, busy, reloadStatus }) {
       const api = useConsoleApi(CONSOLE_API + '/accounts', { interval: 30000 });
       const { data, error, status, reload } = api;
       const [working, setWorking] = useState('');
@@ -618,8 +618,17 @@ window.__ModuleLoader__.load({
         setMessage('');
         const res = await postJson(CONSOLE_API + '/account/switch', { file: name });
         setWorking('');
-        setMessage(res.data?.switched ? '已切换到 ' + name + '（桥已重启，两边同步）' : '切换失败：' + (res.data?.error || res.status));
+        if (res.data?.switched) {
+          // 切换成功：立刻刷本面板 + 强制重读状态（status 会带着新账号的积分回来；
+          // 宿主端 reconciliation 也会因账号变化作废旧缓存）—— 不等 8 秒轮询
+          const fresh = await getJson('/workbuddy/status?quota=1').catch(() => null);
+          setMessage('已切换到 ' + (res.data?.account?.name || name)
+            + (fresh && fresh.status === 200 ? '，积分已更新' : '') + '。桥已重启，两边同步。');
+        } else {
+          setMessage('切换失败：' + (res.data?.error || res.status));
+        }
         reload();
+        reloadStatus();
       };
       return h(Card, { title: '账号' },
         error ? h(Alert, { bad: true }, error) : null,
@@ -1312,7 +1321,7 @@ window.__ModuleLoader__.load({
         }, t.label))),
         !status ? h(Card, null, '正在读取状态…') : null,
         status && tab === 'overview' ? h(OverviewPanel, panelProps) : null,
-        tab === 'accounts' ? h(AccountsPanel, { onStartConsole: startConsole, busy }) : null,
+        tab === 'accounts' ? h(AccountsPanel, { onStartConsole: startConsole, busy, reloadStatus }) : null,
         tab === 'usage' ? h(UsagePanel, null) : null,
         tab === 'requests' ? h(RequestsPanel, null) : null,
         tab === 'checkin' ? h(CheckinPanel, { onStartConsole: startConsole, busy }) : null,

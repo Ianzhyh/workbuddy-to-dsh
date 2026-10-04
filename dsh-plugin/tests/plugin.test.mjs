@@ -251,6 +251,55 @@ function fakeCtx() {
   return { ctx, calls };
 }
 
+test('换账号后积分/签到缓存必须作废（回归：面板把 A 账号积分挂在 B 账号头上）', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'wb-account-'));
+  try {
+    const { ctx } = fakeCtx();
+    const result = apply(ctx, { projectRoot: dir, autoStart: false, consoleAutoStart: false, migrateLegacy: false });
+    const { state, snapshot } = result;
+
+    // 桩：probe 返回的 userId 由外部变量控制 —— **模拟真实换号**：
+    // 桥重启后 health 报新 userId，插件靠自己对比发现"账号变了"。
+    // （不许手动改 state.bridgeAccount —— 那等于替插件作弊，把变化掩盖了。）
+    let currentAccount = 'A';
+    result.supervisor.probe = async () => ({
+      state: 'running',
+      health: { auth: { userId: currentAccount, expiresAt: new Date(Date.now() + 864e5).toISOString() } },
+    });
+
+    // ── 第一幕：账号 A，正常取一次积分与签到
+    // 预置一份模型目录：第三幕要断言"换号后目录被作废"
+    result.adapter.catalogCache = { at: Date.now(), models: [{ id: 'm-from-A' }] };
+    const snapA = await snapshot({});
+    assert.ok(snapA.quota, '账号 A 应当有积分缓存');
+    assert.equal(state.quotaCache.account, 'A', '积分缓存必须打上账号 A 的标记');
+    // 签到刷新是后台异步的：等它落盘再断言
+    await state.checkinInflight;
+    assert.equal(state.checkinCache.account, 'A', '签到缓存必须打上账号 A 的标记');
+    const quotaA = snapA.quota;
+
+    // ── 第二幕：切到账号 B（只改桥报告的身份，让插件自己发现变化）
+    currentAccount = 'B';
+    // TTL 内再取快照：换号后**不许**继续用 A 的缓存值
+    const snapB = await snapshot({});
+    await state.checkinInflight;
+    assert.notEqual(snapB.quota, quotaA, '换账号后快照里的积分必须换新（不能是 A 的那份）');
+    assert.equal(state.quotaCache.account, 'B', '新缓存必须标记为账号 B');
+    assert.equal(state.checkinCache.account, 'B', '签到缓存也必须换到账号 B 名下');
+
+    // ── 第三幕：模型目录同样属于账号视角 —— reconcile 必须把目录作废
+    // （adapter.invalidate 会把 catalogCache 清空，下一次目录读取自然从桥重取）
+    assert.equal(result.adapter.catalogCache.models.length, 0, '换号后模型目录必须已作废（等下一次从桥重取）');
+
+    // ── 第四幕：bridgeAccount 为 null（旧桥/探测不完整）时**不许**误清有效缓存
+    result.supervisor.probe = async () => ({ state: 'running', health: { auth: {} } });
+    const beforeNull = { quota: state.quotaCache.value, checkin: state.checkinCache.value };
+    await snapshot({});
+    assert.equal(state.quotaCache.value, beforeNull.quota, '拿不到账号身份时不能清掉积分缓存');
+    assert.equal(state.checkinCache.value, beforeNull.checkin, '拿不到账号身份时不能清掉签到缓存');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 test('apply() 装配：注册 llm 路由、5 个工具、命令、HTTP 路由', () => {
   const dir = mkdtempSync(join(tmpdir(), 'wb-apply-'));
   try {

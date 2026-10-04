@@ -302,9 +302,10 @@ export function apply(ctx, rawConfig = {}) {
     readyPromise: null,
     lastEnsure: null,
     lastConsoleEnsure: null,
-    quotaCache: { at: 0, value: null, error: '' },
-    checkinCache: { at: 0, value: null, error: '' },
+    quotaCache: { at: 0, value: null, error: '', account: null },
+    checkinCache: { at: 0, value: null, error: '', account: null },
     checkinInflight: null,
+    bridgeAccount: null,
   };
 
   /**
@@ -438,6 +439,48 @@ export function apply(ctx, rawConfig = {}) {
 
   // ── 3. 运行态快照（入口页 / 工具共用） ─────────────────────────────────
   const CHECKIN_TTL_MS = 30 * 60 * 1000;
+  const QUOTA_TTL_MS = 120 * 1000;
+
+  /**
+   * 桥当前服务的是**哪个账号**。
+   *
+   * 来源（按可靠度）：/health 的 userId > 令牌剩余与 health.auth 一致性。
+   * 拿不到时返回 null（探测未就绪 / 旧桥），调用方此时**不要**误判成"账号变了"。
+   */
+  function bridgeAccountOf(probe) {
+    const userId = probe?.health?.auth?.userId;
+    return typeof userId === 'string' && userId ? userId : null;
+  }
+
+  /**
+   * 账号身份变化时的缓存失效。
+   *
+   * 这是「换账号后积分还是上一个的」那个 bug 的根治点：控制台切账号只清**它自己**
+   * 进程里的缓存（`invalidateQuotaCache()`），插件进程里的 quotaCache（120s）/
+   * checkinCache（30min）没人清 —— 面板就会把 A 账号的积分挂在 B 账号头上。
+   * 现在所有跨账号的缓存值都打上账号标记，快照时发现身份不一致立即作废并强制重取。
+   */
+  function reconcileAccount(probe) {
+    const account = bridgeAccountOf(probe);
+    // 桥还没就绪 / 旧桥没有 userId：保留现状（不能用 null 去作废有效缓存）
+    if (account === null) return { changed: false, account: state.bridgeAccount };
+    if (state.bridgeAccount === null) {
+      // 首次观察到身份：只记录，不清缓存（缓存可能本来就是空的）
+      state.bridgeAccount = account;
+      return { changed: false, account };
+    }
+    if (state.bridgeAccount !== account) {
+      log(`桥的登录账号已变化（${state.bridgeAccount} → ${account}）：作废积分/签到缓存`);
+      state.quotaCache = { at: 0, value: null, error: '', account: null };
+      state.checkinCache = { at: 0, value: null, error: '', account: null };
+      // 模型目录也属于"账号视角"的数据（不同账号可见模型可能不同）
+      adapter.invalidate();
+      state.bridgeAccount = account;
+      return { changed: true, account };
+    }
+    return { changed: false, account };
+  }
+
   /**
    * 发起一次签到状态刷新（不 await）。在途去重：并发调用只会打一次上游。
    * 快照里始终返回缓存值，最坏情况是"少一次数据"，绝不会把状态查询拖慢。
@@ -445,13 +488,22 @@ export function apply(ctx, rawConfig = {}) {
   function maybeRefreshCheckin(bridgeState) {
     if (bridgeState !== 'running') return;
     if (state.checkinInflight) return;
-    if (state.checkinCache.value && Date.now() - state.checkinCache.at < CHECKIN_TTL_MS) return;
+    // 缓存里记录的账号与当前账号不一致时必须刷新（换账号后的第一次快照就要新值）
+    const stale = state.checkinCache.value && state.checkinCache.account !== state.bridgeAccount;
+    if (state.checkinCache.value && !stale && Date.now() - state.checkinCache.at < CHECKIN_TTL_MS) return;
+    if (!state.checkinCache.value && Date.now() - state.checkinCache.at < 5_000) return; // 刚失败过，别打爆
+    const account = state.bridgeAccount;
     state.checkinInflight = (async () => {
       try {
         const value = await client.checkin({});
-        state.checkinCache = { at: Date.now(), value, error: '' };
+        // 只有身份没再变时才入缓存（极端：刷新期间又切了账号）
+        if (state.bridgeAccount === account) {
+          state.checkinCache = { at: Date.now(), value, error: '', account };
+        }
       } catch (error) {
-        state.checkinCache = { ...state.checkinCache, at: Date.now(), error: String(error?.message || error) };
+        if (state.bridgeAccount === account) {
+          state.checkinCache = { ...state.checkinCache, at: Date.now(), error: String(error?.message || error), account };
+        }
       } finally {
         state.checkinInflight = null;
       }
@@ -463,17 +515,28 @@ export function apply(ctx, rawConfig = {}) {
   async function snapshot({ signal, quota = false } = {}) {
     const probe = await supervisor.probe(signal);
     const consoleProbe = await consoleSupervisor.probe({ signal, cached: true });
+    // 先对账号：身份变了就作废全部跨账号缓存（含模型目录）
+    const reconciliation = reconcileAccount(probe);
     let quotaValue = state.quotaCache.value;
     let quotaError = state.quotaCache.error;
-    const wantQuota = quota || Date.now() - state.quotaCache.at > 120_000;
+    const staleQuota = state.quotaCache.value && state.quotaCache.account !== state.bridgeAccount;
+    const wantQuota = quota
+      || !state.quotaCache.value
+      || staleQuota
+      || Date.now() - state.quotaCache.at > QUOTA_TTL_MS;
     if (probe.state === 'running' && wantQuota) {
       try {
         quotaValue = await client.quota(signal);
-        state.quotaCache = { at: Date.now(), value: quotaValue, error: '' };
+        // 身份没再变才入缓存（避免"取的是新账号、标记却是旧账号"的错位）
+        if (state.bridgeAccount === reconciliation.account) {
+          state.quotaCache = { at: Date.now(), value: quotaValue, error: '', account: reconciliation.account };
+        }
         quotaError = '';
       } catch (error) {
         quotaError = String(error?.message || error);
-        state.quotaCache = { ...state.quotaCache, at: Date.now(), error: quotaError };
+        if (state.bridgeAccount === reconciliation.account) {
+          state.quotaCache = { ...state.quotaCache, at: Date.now(), error: quotaError, account: reconciliation.account };
+        }
       }
     }
     // 签到状态：TTL 30 分钟，而且**绝不阻塞** status。

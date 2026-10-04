@@ -27,5 +27,8 @@ jobs:
       - name: 单元测试（协议 / 装配 / 路由矩阵 / 分发形态）
         run: node --test "dsh-plugin/tests/*.test.mjs"
 
+      - name: 桥的合约测试（起真桥进程打真实 HTTP）
+        run: node --test bridge/bridge.test.mjs
+
       - name: 独立分发包演练（没有仓库时也能跑起来）
         run: node dsh-plugin/scripts/verify-standalone.mjs
