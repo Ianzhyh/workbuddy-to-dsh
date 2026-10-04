@@ -51,7 +51,10 @@ docs/promo/_measure*
 # 宣传文案与投放笔记（本地留存，不入库）
 .promo/
 
-# 优化过程的内部工作区：只保留 SUMMARY.md（它面向读者），
-# 其余是侦察结论与对抗性验证的原始记录，属过程性材料，不入库。
-.optimize/findings.md
-.optimize/verification.md
+# 优化过程的内部工作区：只保留 SUMMARY.md（它面向读者）。
+# 这里刻意用「忽略整个目录 + 只放行一个文件」的白名单写法，
+# 而不是逐个列举要忽略的文件 —— 过程性材料会不断新增（PR 材料、探针脚本、
+# 对照用的中间产物），逐个列举迟早会漏，而漏掉就意味着误提交内部笔记。
+# 与上面 .promo/ / .PUBLISH.local.md 是同一个意图。
+.optimize/*
+!.optimize/SUMMARY.md
