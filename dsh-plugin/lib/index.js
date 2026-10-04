@@ -545,6 +545,19 @@ export function apply(ctx, rawConfig = {}) {
     // 一旦上游慢，await 它会把状态页一起拖住。所以这里只"发起"刷新（带在途
     // 去重），快照永远返回当前缓存值 —— 下一次快照自然拿到新值。
     maybeRefreshCheckin(probe.state);
+    /**
+     * 最近失败请求：概览页的待办提醒只需要"有几条失败"，不必把 20 条明细
+     * 搬给客户端（那会每 15 秒重复搬一遍，且与 status 的 8 秒轮询重叠）。
+     * 从本地账本现算，成本极低；桥没跑时给空数组（不阻塞、不报错）。
+     */
+    let recentFailed = [];
+    if (probe.state === 'running') {
+      try {
+        const recent = await client.requests({ limit: 20, signal });
+        recentFailed = (recent?.requests || []).filter((r) => !r.ok)
+          .map((r) => ({ t: r.t, model: r.model, status: r.status, code: r.code, error: r.error }));
+      } catch { /* 账本读不到就当"没有失败"，不要因此让整页报错 */ }
+    }
     const catalog = adapter.catalogCache.models;
     return {
       bridge: { state: probe.state, health: probe.health || null, error: probe.error || '' },
@@ -589,6 +602,8 @@ export function apply(ctx, rawConfig = {}) {
       checkin: state.checkinCache.value,
       checkinError: state.checkinCache.error || '',
       checkinAccount: state.checkinCache.account,
+      /** 最近 20 条里的失败（概览页待办提醒用；避免客户端为"数几条"再拉一次明细） */
+      recentFailed,
       dsh: { home: dshPaths.home, profileDir: dshPaths.profileDir, settingsPath: dshPaths.settingsPath, patchPath: dshPaths.patchPath },
       client: clientGraphSummary(ctx.get('clientModules')),
       runtime: { node: process.version, pid: process.pid, pluginDir: PLUGIN_DIR },

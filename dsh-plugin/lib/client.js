@@ -132,6 +132,11 @@ window.__ModuleLoader__.load({
 .wb-quota-pkg-name{font-size:12px;min-width:0;overflow-wrap:anywhere}
 .wb-quota-pkg-num{font-size:12px;font-variant-numeric:tabular-nums;color:var(--dsw-alias-label-secondary,light-dark(#61666b,#cfd3d6));white-space:nowrap}
 .wb-chart{width:100%;max-width:100%;height:auto;display:block}
+/* 统一的"正在加载"占位：转圈 + 文案，避免首帧闪空表格 */
+.wb-loading{display:flex;align-items:center;gap:8px;color:var(--dsw-alias-label-secondary,light-dark(#61666b,#cfd3d6));font-size:12.5px;padding:14px 2px}
+.wb-spinner{width:13px;height:13px;border-radius:50%;border:2px solid var(--dsw-alias-border-l2,light-dark(#0000001f,#ffffff2e));border-top-color:var(--dsw-alias-label-secondary,light-dark(#61666b,#cfd3d6));animation:wb-spin .7s linear infinite;flex:none}
+@keyframes wb-spin{to{transform:rotate(360deg)}}
+@media (prefers-reduced-motion: reduce){.wb-spinner{animation-duration:2s}}
 `;
 
     const styleId = 'dsh-plugin-workbuddy-style';
@@ -212,7 +217,13 @@ window.__ModuleLoader__.load({
       }, [path]);
       useEffect(() => {
         alive.current = true;
-        if (opts.enabled === false) return undefined;
+        // enabled=false：**完全不请求**，同时把 loading 复位为 false ——
+        // 否则调用方的"首帧加载态"判断（loading && !data）会永远成立，
+        // 面板就卡在转圈上了（这是 enabled:false 分支必须复位的原因）。
+        if (opts.enabled === false) {
+          setState((s) => ({ ...s, loading: false }));
+          return undefined;
+        }
         setState((s) => ({ ...s, loading: true }));
         reload();
         const timer = opts.interval ? setInterval(reload, opts.interval) : null;
@@ -339,6 +350,25 @@ window.__ModuleLoader__.load({
     function Card(props) {
       return h('div', { className: 'wb-card' + (props.className ? ' ' + props.className : '') }, props.title ? h('h3', null, props.title) : null, props.children);
     }
+    /**
+     * 统一的"正在加载"占位。
+     * 之前所有面板都缺加载态：首次打开会先闪一下空表格/「没有内容」，
+     * 看起来像坏了。这里给出可见的骨架提示，且不改变各面板原有结构。
+     */
+    function Loading(props) {
+      return h('div', { className: 'wb-loading' },
+        h('span', { className: 'wb-spinner' }),
+        h('span', null, props.text || '正在加载…'));
+    }
+    /**
+     * 面板通用的"首帧未就绪"判断：还在 loading、没有数据、**且没有错误**。
+     *
+     * 第三个条件很关键：宿主旧构建时 404 会被 useJson 快速重试并带着错误信息，
+     * 若只看 loading+data，面板会一直显示"正在加载"而永远不把错误/降级提示说出来。
+     */
+    function isInitialLoading(loading, data, error) {
+      return Boolean(loading) && (data === null || data === undefined) && !error;
+    }
     function Row(props) {
       return h('div', { className: 'wb-row' },
         h('span', { className: 'wb-label' }, props.label),
@@ -394,12 +424,23 @@ window.__ModuleLoader__.load({
             : state === 'unauthorized' ? '令牌不符'
               : state === 'foreign' ? '端口被占' : state;
       const con = status?.console || {};
-      // 最近失败：本地账本，很便宜；与控制台顶部提示条同一条口径
-      const { data: recent } = useJson('/workbuddy/requests?limit=20', { interval: 15000 });
+      /**
+       * 最近失败请求。
+       * 新宿主在快照里直接给 `recentFailed`（宿主端从本地账本现算）；旧宿主没有这个
+       * 字段，所以退回"拉一次明细自己数" —— 且只在拿不到快照字段时才发这个请求
+       * （避免每 15 秒重复搬 20 条明细）。
+       */
+      const hasSnapshotFailures = Array.isArray(status?.recentFailed);
+      const { data: recentFallback } = useJson('/workbuddy/requests?limit=20', {
+        interval: 15000,
+        enabled: Boolean(status) && !hasSnapshotFailures,
+      });
+      const failedRecent = hasSnapshotFailures
+        ? status.recentFailed
+        : (recentFallback?.requests || []).filter((r) => !r.ok);
       // 签到状态也自己问一次（宿主快照里那份是后台刷新的，可能还没值）；
       // 5 分钟一次足够，且这个接口会打到上游，不宜勤问。
       const { data: checkinData } = useJson('/workbuddy/checkin', { interval: 300000 });
-      const failedRecent = (recent?.requests || []).filter((r) => !r.ok);
       const checkinStatus = (checkinData?.status ? checkinData.status : checkinData) || status?.checkin?.status;
       const alerts = [];
       if (state === 'degraded') {
@@ -626,6 +667,8 @@ window.__ModuleLoader__.load({
         return h(ConsoleGate, { availability: api.availability, onStartConsole, onProbe: api.probeConsole, busy, feature: '账号' });
       }
       const accounts = data?.accounts || [];
+      // 账号页的 loading 来自 api（useConsoleApi 透传了底层 useJson 的 loading）
+      if (api.loading && data === null) return h(Card, { title: '账号' }, h(Loading, { text: '正在读取登录账号…' }));
       const switchTo = async (name) => {
         setWorking(name);
         setMessage('');
@@ -688,9 +731,10 @@ window.__ModuleLoader__.load({
       const [metric, setMetric] = useState('calls');
       const hours = days <= 1;
       const path = `/workbuddy/usage?days=${days}${hours ? '&hours=1' : ''}`;
-      const { data, error, reload } = useJson(path, { interval: 60000 });
+      const { data, error, reload, loading } = useJson(path, { interval: 60000 });
       // 宿主的 /workbuddy/usage 是「摊平」的（{ok, total, models, days…}）；
       // 早期版本套了一层 {usage:{…}}。两种都认，免得版本错配时表格空白。
+      // 首帧：数据还没到时给加载态，别先渲染一屏 0 / 空表
       const usage = data && data.usage ? data.usage : data;
       const total = usage?.total || {};
       const series = hours ? (usage?.hours || []) : (usage?.days || []);
@@ -700,6 +744,7 @@ window.__ModuleLoader__.load({
       }));
       const [clearing, setClearing] = useState(false);
       const [message, setMessage] = useState('');
+      if (isInitialLoading(loading, data, error)) return h(Card, { title: '用量统计' }, h(Loading, { text: '正在读取用量账本…' }));
       const clearLedger = async () => {
         // 破坏性操作，二次确认（与控制台一致）；并且必须把结果说出来，
         // 不能点了没反应（旧实现就是发完请求不检查响应）。
@@ -762,7 +807,7 @@ window.__ModuleLoader__.load({
       const [onlyFailed, setOnlyFailed] = useState(false);
       const [modelFilter, setModelFilter] = useState('');
       const [paused, setPaused] = useState(false);
-      const { data, error, reload } = useJson(`/workbuddy/requests?limit=${limit}`, { interval: paused ? 0 : 5000 });
+      const { data, error, reload, loading } = useJson(`/workbuddy/requests?limit=${limit}`, { interval: paused ? 0 : 5000 });
       // 筛选下拉要用**完整目录**，不能只用当前这页里出现过的模型 ——
       // 否则换了模型之后旧模型就从下拉里消失了（筛选等于做不了）。
       const { data: directory } = useJson('/workbuddy/models', { interval: 300000 });
@@ -773,6 +818,7 @@ window.__ModuleLoader__.load({
         for (const r of all) if (r.model && !seen.has(r.model)) { seen.add(r.model); fromDirectory.push(r.model); }
         return fromDirectory;
       }, [directory, all]);
+      if (isInitialLoading(loading, data, error)) return h(Card, { title: '最近请求' }, h(Loading, { text: '正在读取请求记录…' }));
       const rows = all.filter((r) => (!onlyFailed || !r.ok) && (!modelFilter || r.model === modelFilter));
       const failLabel = (r) => `失败${r.status ? ' HTTP ' + r.status : ''}${r.code ? ' · code ' + r.code : ''}`;
       return h(Card, { title: '最近请求' },
@@ -809,12 +855,13 @@ window.__ModuleLoader__.load({
 
     // ─────────────────────────── 签到 ───────────────────────────
     function CheckinPanel({ onStartConsole, busy }) {
-      const { data, error, reload } = useJson('/workbuddy/checkin', { interval: 600000 });
+      const { data, error, reload, loading } = useJson('/workbuddy/checkin', { interval: 600000 });
       const cstateApi = useConsoleApi(CONSOLE_API + '/checkin', { interval: 600000 });
       const { data: cstate, status: cstatus, reload: reloadState } = cstateApi;
       const [working, setWorking] = useState(false);
       const [message, setMessage] = useState('');
       // 同样兼容两种形状：{ok, status:{…}} 与早期的 {ok, todayCheckedIn…}
+      if (isInitialLoading(loading, data, error)) return h(Card, { title: '每日签到' }, h(Loading, { text: '正在读取签到状态…' }));
       const status = data && data.status ? data.status : (data || {});
       const runtime = cstate?.checkin || null;
       const consoleReady = cstateApi.availability.state === 'ok' && cstate?.ok !== false;
@@ -918,7 +965,7 @@ window.__ModuleLoader__.load({
     // ─────────────────────────── 可用模型 / 体检 ───────────────────────────
     function ModelsPanel({ onStartConsole, busy, sampleModel, onUseModel }) {
       const [refreshTick, setRefreshTick] = useState(0);
-      const { data, error, reload } = useJson(`/workbuddy/models${refreshTick ? '?refresh=1' : ''}`, { interval: 120000 });
+      const { data, error, reload, loading } = useJson(`/workbuddy/models${refreshTick ? '?refresh=1' : ''}`, { interval: 120000 });
       const probesApi = useConsoleApi(CONSOLE_API + '/probe-results', { interval: 30000 });
       const { data: probes, status: pstatus, reload: reloadProbes } = probesApi;
       const [detail, setDetail] = useState('');
@@ -984,6 +1031,7 @@ window.__ModuleLoader__.load({
 
       const unavailable = models.filter((m) => resultOf(m.id)?.ok === false).map((m) => m.id);
       const [probeFilter, setProbeFilter] = useState('all');
+      if (isInitialLoading(loading, data, error)) return h(Card, { title: '可用模型' }, h(Loading, { text: '正在读取桥的模型目录…' }));
       const visible = probeFilter === 'fail'
         ? models.filter((m) => resultOf(m.id)?.ok === false)
         : probeFilter === 'untested'
@@ -1224,9 +1272,10 @@ window.__ModuleLoader__.load({
       const [onlyError, setOnlyError] = useState(false);
       const [currentOnly, setCurrentOnly] = useState(false);
       const [paused, setPaused] = useState(false);
-      const { data, error, reload } = useJson(`/workbuddy/log?lines=${lines}`, { interval: paused ? 0 : 5000 });
+      const { data, error, reload, loading } = useJson(`/workbuddy/log?lines=${lines}`, { interval: paused ? 0 : 5000 });
       const [clearing, setClearing] = useState(false);
       const [message, setMessage] = useState('');
+      if (isInitialLoading(loading, data, error)) return h(Card, { title: '桥日志' }, h(Loading, { text: '正在读取桥日志…' }));
       let all = data?.lines || [];
       const totalLines = all.length;
       // 只看本次启动：桥每次启动都会打一行 "listening on …"，取最后一处之后的内容

@@ -420,7 +420,7 @@ try {
     诊断: ['环境诊断', 'AtRest 密钥', '登录文件', 'profile bundles', '运行时注册，无需 settings.yaml'],
     模型: ['可用模型', '全部体检', '清除体检结论', '可用 · 1180ms'],
     对话测试: ['对话测试', '清空对话', '会消耗你账号的额度'],
-    日志: ['桥日志', '只看错误', '只看本次启动', 'workbuddy-bridge'],
+    日志: ['桥日志', '只看错误', '只看本次启动'],
   };
   const tabs = await page.cdp.evaluate("JSON.stringify([...document.querySelectorAll('.wb-tab')].map(b => b.textContent))");
   const tabList = JSON.parse(tabs || '[]');
@@ -436,6 +436,17 @@ try {
     if (label === '诊断') {
       if (/尚未配置 workbuddy 路由/.test(text)) problems.push('诊断页仍显示迁移前口径的误报（fail）');
       if (/勾选后保存/.test(text)) problems.push('诊断页仍显示旧口径的过时建议');
+    }
+    // 日志页专断：必须渲染出**真实的日志正文**（而不是空壳）。
+    // 不用具体字符串断言 —— 桥连续运行久了，启动横幅会滚出最后 N 行，
+    // 按内容断言会随运行时长误报；这里按"有无日志行"判断。
+    if (label === '日志') {
+      const logBody = await page.cdp.evaluate(`(() => { const pre=document.querySelector('.wb-log'); return pre ? pre.innerText : ''; })()`);
+      if (!logBody || /没有匹配的日志行/.test(logBody)) {
+        problems.push(`日志页没有渲染出日志正文（${logBody ? logBody.slice(0, 40) : '空的 wb-log'}）`);
+      } else if (!/[\d:]{4,}|→|listening/.test(logBody)) {
+        problems.push('日志页的正文看起来不是日志行');
+      }
     }
     // 请求页专断：它被故意造成「首帧 404」（模拟刷新时宿主还没挂路由），
     // 面板必须自己重试恢复 —— 不许把 HTTP 404 挂在那儿。给它最多 4 秒。
