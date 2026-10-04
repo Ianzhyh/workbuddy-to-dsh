@@ -749,6 +749,23 @@ const server = createServer(async (req, res) => {
           catalogAt: health.body?.catalogAt || null,
           // 目录治理的诊断形状（含 droppedNonChat）：诊断报告要回答「某个模型为什么不在列表里」
           upstreamShape: health.body?.upstreamShape || null,
+          /**
+           * 桥侧的**自动签到**内存态：`{ at, result, credit? }`，桥重启后清空。
+           *
+           * 为什么必须透出来：自动签到有两条后台路径（有人调模型时桥补签、控制台
+           * 启动时与每小时各一次），它们发生时**没有任何东西通知页面**。页面若不
+           * 刷新，就会一直显示「今日尚未签到」—— 而积分其实早已到账。实测证据：
+           * 桥日志记录 `auto checkin ok 100`，同一时刻页面仍显示「今日尚未签到」。
+           * 这属于"结论在说谎"，比不显示更糟。
+           *
+           * 为什么放在 /api/overview 而不是新增一次 /api/checkin 轮询：overview
+           * 本来就在每 20 秒轮询，这里只是顺带带上，**零额外上游请求**；而
+           * /api/checkin 每次都打上游计费端点，拿它去轮询纯属浪费。页面据 `at`
+           * 的变化判断"有新一次自动签到发生了"，再按需刷新签到面板。
+           */
+          autoCheckin: health.body?.autoCheckin || null,
+          /** 桥侧是否启用自动签到（启动时由 env 注入，改开关需重启桥才生效）。 */
+          autoCheckinEnabled: health.body?.autoCheckinEnabled === true,
         },
         // 控制台自身版本：诊断报告头部要用，避免用户报障时说不清是哪个版本
         console: { version: consoleVersion(), node: process.version },

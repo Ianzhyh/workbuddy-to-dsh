@@ -441,6 +441,39 @@ let lastBridge = null;
 let lastCheckinStatus = null;
 /** 最近一次 /api/checkin 带回的本地签到状态（开关 + 上次自动尝试）。 */
 let lastCheckinLocal = null;
+/** 已见过的桥侧自动签到时刻（`/health` 的 autoCheckin.at）；用来判断"刚又签了一次"。 */
+let seenAutoCheckinAt = null;
+
+/**
+ * 自动签到刚发生时，刷新签到面板。
+ *
+ * 为什么需要它：自动签到有两条**后台**路径 —— 有人调模型时由桥补签、控制台启动时
+ * 与每小时各一次。它们发生时没有任何东西通知页面，而签到面板原先只在**首次加载**
+ * 与**手动操作**时刷新，于是页面会一直显示「今日尚未签到」，而积分其实早已到账。
+ *
+ * 实测证据（这次就是靠它定位的）：
+ *   桥日志   `[2026-10-04T16:12:01.683Z] auto checkin ok 100`
+ *   同一时刻页面仍显示「今日尚未签到」—— 用户因此以为自动签到没生效。
+ * 这属于"结论在说谎"，比不显示更糟。
+ *
+ * 为什么不用轮询 /api/checkin：那个接口每次都打上游计费端点，为了"一天变一次"的
+ * 状态去高频轮询纯属浪费。而桥已经在 /health 里带回了 autoCheckin 状态，控制台的
+ * /api/overview 又是每 20 秒本来就要拉的 —— 这里只是**顺带比对**，零额外请求。
+ *
+ * 判据用 `at`（时刻）而不是 `result`：同一天可能先 error 后 ok，`at` 每次尝试都会
+ * 变，能捕捉到任意一次新尝试（包括失败——失败也要让"自动签到失败"那行红字及时出现）。
+ *
+ * @param {object} bridge /api/overview 的 bridge 段
+ */
+function syncCheckinFromOverview(bridge) {
+  const at = bridge && bridge.autoCheckin && bridge.autoCheckin.at;
+  if (!at) return;                       // 桥没跑 / 旧桥没这个字段：不动，别误判成"变了"
+  const isFirst = seenAutoCheckinAt === null; // 首次见到：只记基线，不额外请求
+  if (at === seenAutoCheckinAt) return;  // 没有新的自动签到
+  seenAutoCheckinAt = at;
+  if (isFirst) return;
+  loadCheckin();
+}
 /** 最近一次诊断逐项（复制诊断报告要用）。 */
 let lastDiag = null;
 /** 最近一次取回的桥日志原始行（过滤在本地做，改筛选不再请求）。 */
@@ -2213,6 +2246,9 @@ async function loadOverview() {
   // 已注册列表可能刚变化：重算「失效注册」提示
   if (lastModels) renderModelSection();
 
+  // 自动签到刚发生：刷新签到面板（见 syncCheckinFromOverview 的说明）
+  syncCheckinFromOverview(b);
+
   // 日志只在面板展开时读：收起时每 20 秒读一次文件是白费的
   refreshLogIfOpen();
 }
@@ -3349,6 +3385,9 @@ const pollers = [
   // 账号读取要启动客户端取密钥（约 0.3s），因此放慢到 60s 一次
   { every: 60000, run: loadAccounts },
 ];
+// 注：签到面板**不在这里轮询**。自动签到是后台发生的，但它的"已发生"信号
+// 随 /api/overview（已每 20 秒轮询）一起来，页面据此按需刷新（见 syncCheckinFromOverview）。
+// 用轮询去模拟事件既慢又费上游 —— /api/checkin 每次都要打上游计费端点。
 
 /**
  * 轮询调度器。依赖全部注入，便于单测。
