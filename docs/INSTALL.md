@@ -64,29 +64,6 @@ dsh plugin --profile desktop add D:\path\to\dsh-plugin-workbuddy-1.0.0.tgz
 > `package.json` 里是 `"private": true`，所以 `npm pack` 可以、`npm publish` 会被挡。
 > 要发到 npm 就把它改成 `false` 并确认包名可用（见路线 C）。
 
-### 路线 C：发布到 npm（对方一条命令装）
-
-> **前置说明**：DeepSeek Harness **没有"提交到官方插件"的入口** —— 官方插件是随 dsh
-> 内置分发的；社区插件的渠道就是 npm 包名。详见 [PUBLISH.md](./PUBLISH.md)
-> （含合规提醒：本插件依赖解密 WorkBuddy 桌面端凭据，公开分发前请自行评估）。
-> 团队内部用建议走**私有 registry**，别公开。
-
-```sh
-cd E:\workbuddy-to-dsh
-npm run release:check                      # 发版前检查（vendor + 单测 + 独立分发演练）
-
-# 1) 去掉 dsh-plugin/package.json 里的 "private": true（有意的安全闸）
-# 2) 登录并发布（publishConfig 已把目标固定为官方 npm，本机 .npmrc 指向的镜像是只读的）
-cd dsh-plugin
-npm login --registry https://registry.npmjs.org/
-npm publish
-```
-对方：
-```sh
-dsh plugin --profile desktop add dsh-plugin-workbuddy
-```
-发版前建议跑：`npm run release:check`。
-
 ---
 
 ## 三、对方装完后的验收清单

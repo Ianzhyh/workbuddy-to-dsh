@@ -20,13 +20,6 @@ dsh plugin --profile desktop add <本仓库路径>/dsh-plugin
 > 可以直接把 `dsh-plugin/` 文件夹拷给别人，对方不需要本仓库。
 > 安装路线、验收清单与九条故障排查见 [docs/INSTALL.md](docs/INSTALL.md)。
 
-### 想被搜到：给仓库加上 `dsh-plugin` topic
-
-官方 `deepseek-ai/deepseek-harness` 的 README 明确写了分发方式：
-**把插件仓库公开在 GitHub 上，并添加 [`dsh-plugin`](https://github.com/topics/dsh-plugin) topic**
-（该 topic 下已有 17,000+ 仓库，官方仓库自己也带着它）。社区市场（如 dsh-plugin.org）
-按这个 topic 爬取收录。完整步骤、上架文案与合规提醒见 [docs/PUBLISH.md](docs/PUBLISH.md)。
-
 ---
 
 ## 它解决什么问题

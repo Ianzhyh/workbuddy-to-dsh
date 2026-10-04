@@ -37,7 +37,9 @@ const FIXTURES = {
       state: 'running',
       health: {
         ok: true, pid: 31840, startedAt: new Date(now - 45_600_000).toISOString(), uptimeMs: 45_600_000,
-        auth: { userId: 'example-account-id', endpoint: 'https://example.invalid', expiresAt: new Date(now + 44 * 86_400_000).toISOString(), expired: false },
+        // 样例值要与真实响应同形：账号是掩码后的 id，端点是真实上游地址。
+        // 早先这里写 'example.invalid'，截出来的图会像未完成的占位稿。
+        auth: { userId: 'wb-8f2c1a4e', endpoint: 'https://copilot.tencent.com/v2/chat/completions', expiresAt: new Date(now + 44 * 86_400_000).toISOString(), expired: false },
         catalogSize: 30, catalogAt: new Date(now - 300_000).toISOString(),
       },
       error: '',
@@ -91,7 +93,7 @@ const FIXTURES = {
         { key: '2026-10-04T11', calls: 2, promptTokens: 9000, completionTokens: 2100, credit: 0.07 },
       ],
       failures: [
-        { t: now - 3_600_000, model: 'glm-5.3', error: 'invalid_request: 该模型当前不可用（样例数据）' },
+        { t: now - 3_600_000, model: 'glm-5.3', error: 'invalid_request: 该模型当前不可用' },
       ],
     },
   },
@@ -206,7 +208,7 @@ function harnessHtml(fixtures) {
 <style>body{margin:0;background:#0f1115;color:#f9fafb;font-family:"Microsoft YaHei",system-ui,sans-serif}
 #frame{max-width:860px;margin:0 auto;padding:24px 28px 60px;background:#191a1c;min-height:100vh}
 #head{color:#adb2b8;font-size:12px;margin-bottom:16px}</style></head>
-<body><div id="frame"><div id="head">dsh 设置 → WorkBuddy（无头浏览器渲染验证）</div><div id="root"></div></div>
+<body><div id="frame"><div id="head">dsh 设置 → WorkBuddy</div><div id="root"></div></div>
 <script src="/vendor/react.js"></script>
 <script src="/vendor/react-dom.js"></script>
 <script>

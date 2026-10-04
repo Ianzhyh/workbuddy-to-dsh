@@ -88,8 +88,6 @@ dsh plugin --profile desktop add <本仓库路径>/dsh-plugin
 
 完整的路线（拷文件夹 / tarball / 发 npm）、验收清单、端口与目录说明、九条常见
 故障排查，见 **[docs/INSTALL.md](../docs/INSTALL.md)**；
-关于"能不能上架到 DeepSeek 官方插件"以及 npm 发布的实际步骤与合规提醒，见
-**[docs/PUBLISH.md](../docs/PUBLISH.md)**。
 
 ```sh
 npm run vendor             # 生成/更新插件自带的 vendor/（分发前必做）
