@@ -80,13 +80,21 @@ if (!authDir) {
     `${authDir}（${infos.length} 个：${infos.join('、') || '空'}）`,
     infos.length ? null : '在 WorkBuddy 桌面端登录一次账号');
   const active = process.env.WORKBUDDY_AUTH_FILE || (existsSync(join(authDir, 'workbuddy-desktop.info')) ? join(authDir, 'workbuddy-desktop.info') : '');
-  if (active) {
+  if (!active) {
+    record('warn', '当前使用的登录文件', '没找到默认的 workbuddy-desktop.info',
+      '在 .env 里用 WORKBUDDY_AUTH_FILE 指定具体文件（多账号时用得上）');
+  } else if (!existsSync(active)) {
+    // 用户显式指定的路径可能写错、文件可能被删 —— 这时**不能**直接 readFileSync：
+    // 自检脚本的最大价值就是"装上还没跑通时告诉你为什么"，在这里抛 Node 堆栈
+    // 恰好把最需要它的人挡在门外（实测：未捕获异常 + 退出码 1）。
+    // 所以这里降级成一条可读的检查项，与上面"找不到登录目录"同一种处理方式。
+    record('bad', '当前使用的登录文件', `指定的文件不存在：${active}`,
+      '检查 .env / 环境变量里的 WORKBUDDY_AUTH_FILE 是否写对；'
+      + '文件被删或换了账号时，在 WorkBuddy 桌面端重新登录一次即可重新生成');
+  } else {
     const raw = readFileSync(active, 'utf8').trim();
     const encrypted = raw.startsWith('{') || raw.startsWith('v10') || !raw.includes('"');
     record('ok', '当前使用的登录文件', `${active}（${encrypted ? 'AtRest 信封/加密' : '明文 JSON'}）`, null);
-  } else {
-    record('warn', '当前使用的登录文件', '没找到默认的 workbuddy-desktop.info',
-      '在 .env 里用 WORKBUDDY_AUTH_FILE 指定具体文件（多账号时用得上）');
   }
 }
 
