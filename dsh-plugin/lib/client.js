@@ -632,11 +632,16 @@ window.__ModuleLoader__.load({
         const res = await postJson(CONSOLE_API + '/account/switch', { file: name });
         setWorking('');
         if (res.data?.switched) {
-          // 切换成功：立刻刷本面板 + 强制重读状态（status 会带着新账号的积分回来；
-          // 宿主端 reconciliation 也会因账号变化作废旧缓存）—— 不等 8 秒轮询
+          // 切换成功：立刻刷本面板 + 强制重读状态（status?quota=1 会带着新账号的
+          // 积分回来；宿主端 reconciliation 也会因账号变化作废旧缓存）—— 不等 8 秒轮询。
+          // 诚实性：只有**新构建**的宿主才认识 quota=1（旧构建会静默忽略），
+          // 所以"积分已更新"这句话只在确认拿到新账号的积分时才说。
           const fresh = await getJson('/workbuddy/status?quota=1').catch(() => null);
-          setMessage('已切换到 ' + (res.data?.account?.name || name)
-            + (fresh && fresh.status === 200 ? '，积分已更新' : '') + '。桥已重启，两边同步。');
+          const quotaFresh = fresh && fresh.status === 200
+            && fresh.data?.quotaAccount && fresh.data?.bridgeAccount
+            && fresh.data.quotaAccount === fresh.data.bridgeAccount;
+          setMessage('已切换到 ' + (res.data?.account?.name || name) + '。桥已重启，两边同步。'
+            + (quotaFresh ? '积分已更新。' : '（积分正在后台刷新，稍后自动显示新账号的值。）'));
         } else {
           setMessage('切换失败：' + (res.data?.error || res.status));
         }
