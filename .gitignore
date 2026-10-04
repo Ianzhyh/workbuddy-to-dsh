@@ -50,3 +50,8 @@ docs/promo/_measure*
 
 # 宣传文案与投放笔记（本地留存，不入库）
 .promo/
+
+# 优化过程的内部工作区：只保留 SUMMARY.md（它面向读者），
+# 其余是侦察结论与对抗性验证的原始记录，属过程性材料，不入库。
+.optimize/findings.md
+.optimize/verification.md
