@@ -1038,6 +1038,11 @@ async function verifyDegradedBridge() {
     ...routes,
     '/workbuddy/status': {
       ...data.status,
+      // 同时模拟「积分缓存的归属账号 ≠ 桥的账号」：积分卡必须显示黄色警告
+      // （这是换号 bug 的可见化 —— 缓存还没换新时用户一眼能看出来）
+      quotaAccount: 'account-AAAAAAAA',
+      bridgeAccount: 'account-BBBBBBBB',
+      quota: { ok: true, total: 999, packages: [{ name: 'CodeBuddy个人体验版', remain: 426, size: 500 }] },
       bridge: {
         state: 'degraded',
         health: { ok: false, error: 'login file has no accessToken; sign in to the WorkBuddy desktop app first', authFile: 'C:\\auth\\workbuddy-desktop.info' },
@@ -1067,6 +1072,10 @@ async function verifyDegradedBridge() {
     if (!/重新登录/.test(text)) problems.push('没有给出「重新登录 WorkBuddy」这条修法');
     if (!/sign in to the WorkBuddy|accessToken/.test(text)) problems.push('没有把桥给的原因原样带出来');
     if (/foreign|不是 workbuddy-bridge/.test(text)) problems.push('仍然误判成"端口上是别人的服务"');
+    // 积分归属警告：夹具故意造成 quotaAccount(A) ≠ bridgeAccount(B)，
+    // 积分卡必须警告"积分还是上一个账号的"，而不是若无其事地显示数字
+    if (!/积分还是上一个账号的/.test(text)) problems.push('积分归属不一致时没有显示警告（换号 bug 的可见化缺失）');
+    if (!/正在自动重读/.test(text)) problems.push('归属警告没有说明系统正在自动恢复');
     const shot = await page4.cdp.send('Page.captureScreenshot', { format: 'png', captureBeyondViewport: true });
     writeFileSync(join(ROOT, 'docs', 'plugin-panel-degraded.png'), Buffer.from(shot.result.data, 'base64'));
   } catch (error) {
