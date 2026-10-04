@@ -1,0 +1,3319 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WorkBuddy 中转控制台</title>
+<link rel="stylesheet" href="/style.css">
+<style>
+  /* 旋转加载动画 */
+  .spin-icon { animation: spin 1s linear infinite; }
+  @keyframes spin { 100% { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <div class="brand-group">
+      <div class="brand-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/>
+        </svg>
+      </div>
+      <div class="brand-text">
+        <h1>WorkBuddy 中转控制台 <span class="brand-badge">Local Bridge</span></h1>
+        <p class="sub">把 WorkBuddy 桌面端已登录的模型，经本地桥暴露为 OpenAI 兼容接口，供 DeepSeek Harness 调用。</p>
+      </div>
+    </div>
+    <div class="head-right">
+      <span class="stamp" id="overviewStamp"></span>
+      <span class="badge" id="badge"><span class="dot"></span><span id="badgeText">检测中</span></span>
+      <button type="button" id="themeToggle" class="icon-btn" title="切换深色/浅色主题">
+        <svg id="themeIconSun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="display:none;width:15px;height:15px"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
+        <svg id="themeIconMoon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:15px;height:15px"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+      </button>
+      <button id="refreshBtn">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:14px;height:14px"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+        刷新
+      </button>
+    </div>
+  </header>
+
+  <!-- 视图导航切换 -->
+  <nav class="nav-tabs" id="navTabs">
+    <button type="button" class="nav-tab active" data-tab="all">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/></svg>
+      全部面板
+    </button>
+    <button type="button" class="nav-tab" data-tab="overview">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+      概览与用量
+    </button>
+    <button type="button" class="nav-tab" data-tab="models">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m12 3-1.912 5.813a2 2 0 0 1-1.275 1.275L3 12l5.813 1.912a2 2 0 0 1 1.275 1.275L12 21l1.912-5.813a2 2 0 0 1 1.275-1.275L21 12l-5.813-1.912a2 2 0 0 1-1.275-1.275L12 3Z"/></svg>
+      可用模型
+    </button>
+    <button type="button" class="nav-tab" data-tab="playground">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+      对话测试与诊断
+    </button>
+  </nav>
+
+  <div id="alertBar" hidden></div>
+
+  <div class="actions">
+    <div class="action-group">
+      <button class="primary" id="startBtn">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+        启动桥服务
+      </button>
+      <button id="restartBtn">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+        重启桥
+      </button>
+      <button class="danger" id="stopBtn">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="4" width="16" height="16" rx="2"/></svg>
+        停止
+      </button>
+    </div>
+    <span class="sep"></span>
+    <div class="action-group">
+      <button id="diagBtn">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
+        重新诊断
+      </button>
+      <button id="copyUrlBtn">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
+        复制地址
+      </button>
+      <button id="copyDiagBtn">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>
+        复制诊断报告
+      </button>
+    </div>
+    <span class="msg" id="actionMsg"></span>
+  </div>
+
+  <div class="cards" id="cards" data-section="overview"></div>
+
+  <section class="panel" data-section="overview">
+    <h2>账号 <span class="spacer"></span><span class="stamp" id="accountsStamp"></span></h2>
+    <p class="hint">登录目录下有多个账号快照时，可切换桥使用哪一个。切换会自动重启桥，并清空上一个账号的体检结论。</p>
+    <div id="accountList"><div class="empty">正在读取…</div></div>
+  </section>
+
+  <section class="panel" data-section="overview">
+    <h2>用量统计 <span class="hint" style="display:inline">最近 <select id="usageDays" style="padding:2px 6px;font-size:12px"><option>1</option><option selected>7</option><option>30</option></select> 天 · 只记元数据，不含对话内容</span>
+      <span class="spacer"></span>
+      <select id="trendMetric" title="趋势图指标"><option value="calls" selected>调用次数</option><option value="tokens">tokens</option><option value="credit">积分</option></select>
+      <select id="trendGran" title="趋势图粒度"><option value="day" selected>按天</option><option value="hour">最近 24 小时</option></select>
+      <span class="stamp" id="usageStamp"></span><button class="mini" id="usageCsvBtn">导出 CSV</button><button class="mini danger" id="usageClearBtn">清空账本</button></h2>
+    <div id="usageBox"><div class="empty">加载中…</div></div>
+  </section>
+
+  <section class="panel" data-section="overview">
+    <h2>每日签到 <span class="spacer"></span><span class="stamp" id="checkinStamp"></span></h2>
+    <p class="hint">领取当天的签到积分。签到的判定与奖励由上游决定，重复签到会被识别为"今天已签"而不是失败。</p>
+    <div id="checkinBox"><div class="empty">正在读取…</div></div>
+  </section>
+
+  <section class="panel" data-section="overview">
+    <h2>最近请求 <span class="hint" style="display:inline">只含元数据（模型、耗时、token、结果），不含对话内容</span>
+      <span class="spacer"></span>
+      <select id="reqModelFilter" title="只看某个模型的请求"><option value="">全部模型</option></select>
+      <label class="check"><input type="checkbox" id="reqFailOnly"> 仅看失败</label>
+      <select id="reqLimit" title="显示条数"><option value="40" selected>40 条</option><option value="100">100 条</option><option value="200">200 条</option></select>
+      <label class="check" title="暂停后 20 秒轮询不再刷新本面板；手动「刷新」仍然可用"><input type="checkbox" id="reqPause"> 暂停自动刷新</label>
+      <span class="stamp" id="reqPauseNote"></span>
+      <span class="stamp" id="reqStamp"></span>
+      <button class="mini" id="exportReqBtn" title="导出当前筛选与条数下的明细">导出 CSV</button>
+      <button class="mini" id="reqRefreshBtn">刷新</button></h2>
+    <div id="reqFilterChip"></div>
+    <div id="reqBox"><div class="empty">加载中…</div></div>
+  </section>
+
+  <section class="panel" data-section="playground">
+    <h2>环境诊断 <span class="spacer"></span><span class="stamp" id="diagStamp"></span></h2>
+    <p class="hint">按优先级排序：红色项不解决，模型在选择器里就不会出现。</p>
+    <div class="diag" id="diagList"><div class="empty">正在检测…</div></div>
+  </section>
+
+  <section class="panel" data-section="models">
+    <h2>可用模型 <span class="spacer"></span><span class="stamp" id="modelStamp"></span></h2>
+    <p class="hint">以下模型由桥从 WorkBuddy 上游实时取回。体检范围可只测「勾选的 / 已注册的」；
+      「全选 / 加选免费」只跳过<b>已知不可用</b>的模型，<b>未测的不会被跳过</b>——跳过只依据已知结论。</p>
+    <div class="notice hidden" id="modelNotice"></div>
+    <div class="probe-progress" id="probeProgress" hidden>
+      <div class="ptrack"><div class="pfill" id="probeFill"></div></div>
+      <span id="probeText"></span>
+    </div>
+    <div id="modelWrap"><div class="empty">桥未运行，暂无数据。</div></div>
+  </section>
+
+  <section class="panel" data-section="playground">
+    <h2>对话测试</h2>
+    <p class="hint">多轮对话（带上下文），直接走完整链路。会消耗少量额度；历史过长只提示清空，不会自动裁剪。</p>
+    <div class="quick-prompts">
+      <span class="quick-pill" data-prompt="用一句话介绍你自己">介绍你自己</span>
+      <span class="quick-pill" data-prompt="写一个 Python 快速排序算法并附带简短注释">快速排序</span>
+      <span class="quick-pill" data-prompt="请简述大语言模型中 Context Window 与输出 Token 的关系">Context Window 概念</span>
+      <span class="quick-pill" data-prompt="讲一个关于程序员调 bug 的冷笑话">程序员冷笑话</span>
+    </div>
+    <div class="chat-controls">
+      <input type="text" id="modelSearch" placeholder="搜索模型…" style="max-width:150px">
+      <select id="modelSel"></select>
+      <input type="text" id="promptInput" placeholder="例如：用一句话介绍你自己" value="用一句话介绍你自己">
+      <button class="primary" id="sendBtn">发送</button>
+      <button id="chatStopBtn" hidden>停止</button>
+      <button id="chatClearBtn" title="清空对话历史与输出（不影响模型选择与搜索词）">清空对话</button>
+    </div>
+    <div id="chatOut"><span class="meta">等待发送…</span></div>
+    <details id="logDrawer">
+      <summary>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" style="width:14px;height:14px"><polyline points="9 18 15 12 9 6"/></svg>
+        查看桥日志（最近 80 行）
+      </summary>
+      <div class="logctl">
+        <label class="check"><input type="checkbox" id="logCurrentOnly"> 只看本次启动</label>
+        <input type="text" id="logFilter" placeholder="按关键字过滤（大小写不敏感）…" style="max-width:230px">
+        <label class="check"><input type="checkbox" id="logErrorsOnly"> 只看错误</label>
+        <span class="stamp" id="logInfo"></span>
+        <button class="mini danger" id="logClearBtn">清空日志</button>
+      </div>
+      <pre class="log" id="logOut"></pre>
+    </details>
+  </section>
+
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+
+async function api(path, options) {
+  const res = await fetch(path, options);
+  const text = await res.text();
+  try { return JSON.parse(text); } catch { return { error: text }; }
+}
+
+function fmtDuration(ms) {
+  if (!Number.isFinite(ms)) return '—';
+  if (ms <= 0) return '已过期';
+  const d = Math.floor(ms / 86400000);
+  const h = Math.floor((ms % 86400000) / 3600000);
+  const m = Math.floor((ms % 3600000) / 60000);
+  if (d > 0) return d + ' 天 ' + h + ' 小时';
+  if (h > 0) return h + ' 小时 ' + m + ' 分';
+  return m + ' 分';
+}
+
+function fmtNum(n) { return Number(n).toLocaleString('en-US'); }
+
+/**
+ * 紧凑数字：`1,000,000 → 1M`、`960,000 → 960K`、`131,072 → 131K`。
+ * ≥1M 且不是整数倍时保留一位小数（`1,500,000 → 1.5M`）。
+ * **只用于表格里好读**；精确值一律放 tooltip 与详情弹层（R6.2）。
+ */
+function fmtCompact(n) {
+  const v = Number(n) || 0;
+  if (v >= 1000000) {
+    const m = v / 1000000;
+    return (Number.isInteger(m) ? String(m) : m.toFixed(1)) + 'M';
+  }
+  if (v >= 1000) return Math.round(v / 1000) + 'K';
+  return String(v);
+}
+
+/**
+ * 积分数值。
+ *
+ * `reported` 为 false 表示上游**没有回报**这次调用的扣分 → 显示「—」。
+ * 回报了 0 就显示 0 —— 两者含义完全不同：前者是没数据，后者是真的没扣到。
+ * 上游按**两位小数**回报，几十 token 的小请求真实扣分就是 0.00，所以单次
+ * 经常是 0，合计才有意义。
+ */
+function fmtCredit(value, reported) {
+  if (!reported) return '—';
+  const v = Number(value) || 0;
+  return v ? String(Math.round(v * 10000) / 10000) : '0';
+}
+
+/** 运行时长：不足一分钟按秒显示，否则复用 fmtDuration。 */
+function fmtUptime(ms) {
+  if (!Number.isFinite(ms) || ms < 0) return '—';
+  if (ms < 60000) return Math.floor(ms / 1000) + ' 秒';
+  return fmtDuration(ms);
+}
+
+/** 本地时间 HH:MM:SS。 */
+function fmtTime(t) {
+  const d = new Date(t);
+  const p = (n) => String(n).padStart(2, '0');
+  return p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
+}
+
+/** 「N 分钟前」这类相对时间。 */
+function fmtAgo(t) {
+  if (!t) return '';
+  const s = Math.max(0, Math.floor((Date.now() - t) / 1000));
+  if (s < 60) return s + ' 秒前';
+  if (s < 3600) return Math.floor(s / 60) + ' 分钟前';
+  if (s < 86400) return Math.floor(s / 3600) + ' 小时前';
+  return Math.floor(s / 86400) + ' 天前';
+}
+
+/** 触发一次浏览器下载。CSV 前置 BOM，否则 Excel 打开中文列名是乱码。 */
+function downloadCsv(filename, rows) {
+  const csv = rows.map((r) => r.map((cell) => {
+    const s = cell === null || cell === undefined ? '' : String(cell);
+    return /[",\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+  }).join(',')).join('\r\n');
+
+  const blob = new Blob(['\ufeff' + csv], { type: 'text/csv;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+const today = () => new Date().toISOString().slice(0, 10);
+
+function setBadge(state, text) {
+  $('badge').className = 'badge ' + state;
+  $('badgeText').textContent = text;
+}
+
+function setMsg(text, cls, title) {
+  const el = $('actionMsg');
+  el.textContent = text || '';
+  el.className = 'msg' + (cls ? ' ' + cls : '');
+  el.title = title || '';
+}
+
+/**
+ * 危险动作的二次确认（R7.1）。
+ *
+ * 「最近 60 秒内有 N 条请求」必须**当场取**（`GET /api/requests?limit=10`），
+ * 不能依赖最长 20 秒前的轮询缓存——那会漏掉刚刚开始的调用，而正是那种调用
+ * 最怕被打断。取不到就如实说「无法确认」，**不猜**。
+ */
+async function confirmDangerous(title, extraLines = []) {
+  let recentLine;
+  try {
+    const d = await api('/api/requests?limit=10');
+    const list = (d && d.requests) || [];
+    const since = Date.now() - 60000;
+    const n = list.filter((r) => Number(r.t) >= since).length;
+    recentLine = n
+      ? '最近 60 秒内有 ' + n + ' 条请求，会打断正在进行的调用。'
+      : '最近 60 秒没有请求。';
+  } catch {
+    recentLine = '无法确认最近 60 秒是否有请求（读取明细失败）。';
+  }
+  return confirm([title, '', recentLine, ...extraLines].join('\n'));
+}
+
+/** 体检进行中时，危险动作要额外提醒一句。 */
+function probeRunningNote() {
+  return probeCtrl ? ['体检进行中，停止桥会中断本轮体检。'] : [];
+}
+
+/**
+ * 启停接口的统一提示。三种事实必须区分开：
+ *   已启动（本次 spawn 的进程在服务） / 已复用（端口上的旧进程在服务） / 失败。
+ * 绝不允许再出现「桥已启动 (PID 死进程)」这种与「桥进程」卡片矛盾的结论。
+ */
+function setBridgeMsg(d, verb) {
+  if (d.started && d.reused) {
+    const pid = d.pid === null || d.pid === undefined ? '未知' : d.pid;
+    setMsg(
+      d.spawnError ? '新进程启动失败，仍在复用旧进程（PID ' + pid + '）' : '桥已在运行（PID ' + pid + '）',
+      d.spawnError ? 'err' : '',
+      d.spawnError || '',
+    );
+  } else if (d.started) {
+    setMsg(verb + ' (PID ' + d.pid + ')', 'good');
+  } else {
+    setMsg(verb + '失败：' + (d.error || '未知原因'), 'err', d.spawnError || '');
+  }
+}
+
+const CARD_ICONS = {
+  '账号': '<svg class="k-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>',
+  '令牌剩余': '<svg class="k-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>',
+  '凭据加密': '<svg class="k-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>',
+  '上游端点': '<svg class="k-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"/></svg>',
+  '桥进程': '<svg class="k-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><line x1="9" y1="1" x2="9" y2="4"/><line x1="15" y1="1" x2="15" y2="4"/><line x1="9" y1="20" x2="9" y2="23"/><line x1="15" y1="20" x2="15" y2="23"/><line x1="20" y1="9" x2="23" y2="9"/><line x1="20" y1="14" x2="23" y2="14"/><line x1="1" y1="9" x2="4" y2="9"/><line x1="1" y1="14" x2="4" y2="14"/></svg>',
+  '可用模型': '<svg class="k-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m12 3-1.912 5.813a2 2 0 0 1-1.275 1.275L3 12l5.813 1.912a2 2 0 0 1 1.275 1.275L12 21l1.912-5.813a2 2 0 0 1 1.275-1.275L21 12l-5.813-1.912a2 2 0 0 1-1.275-1.275L12 3Z"/></svg>',
+  '积分余额': '<svg class="k-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="8"/><path d="M14.8 9A2 2 0 0 0 13 8h-2a2 2 0 0 0 0 4h2a2 2 0 0 1 0 4h-2a2 2 0 0 1-1.8-1"/><path d="M12 6v2m0 8v2"/></svg>',
+  'DSH 配置': '<svg class="k-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>',
+  '调用次数': '<svg class="k-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>',
+  '输入 tokens': '<svg class="k-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/></svg>',
+  '输出 tokens': '<svg class="k-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><polyline points="10 13 14 17 18 13"/></svg>',
+  '平均耗时': '<svg class="k-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 14 14"/></svg>',
+  '消耗积分': '<svg class="k-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>',
+  '失败': '<svg class="k-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="color:var(--fail)"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>'
+};
+
+function card(key, value, note, small) {
+  const icon = CARD_ICONS[key] || '';
+  return '<div class="card"><div class="k"><span>' + escapeAttr(key) + '</span>' + icon + '</div>' +
+    '<div class="v' + (small ? ' small' : '') + '">' + escapeAttr(value) + '</div>' +
+    (note ? '<div class="note">' + escapeAttr(note) + '</div>' : '') + '</div>';
+}
+
+/** 面板级数据新鲜度：更新于 HH:MM:SS。 */
+function setStamp(id) {
+  const el = $(id);
+  if (el) el.textContent = '更新于 ' + fmtTime(Date.now());
+}
+
+/**
+ * 单飞：同一面板的请求在飞时不重复发起。
+ *
+ * 手动刷新与 20 秒轮询共用同一把锁，因此慢响应既不会叠出并发请求（O10），
+ * 刷新期间轮询也不会插队再打一遍。
+ */
+function singleFlight(fn) {
+  let inflight = null;
+  return (...args) => {
+    if (inflight) return inflight;
+    inflight = Promise.resolve()
+      .then(() => fn(...args))
+      .finally(() => { inflight = null; });
+    return inflight;
+  };
+}
+
+/** 一次刷新覆盖全部数据面板；日志仍只在面板展开时读。 */
+async function refreshAll() {
+  const btn = $('refreshBtn');
+  if (btn.disabled) return;
+  btn.disabled = true;
+  const label = btn.innerHTML;
+  btn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="spin-icon" style="width:14px;height:14px"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg> 刷新中…';
+  setMsg('正在刷新全部面板…');
+  try {
+    await Promise.all([
+      loadOverview(), loadModels(), loadDiag(), loadUsage(),
+      loadAccounts(), loadCheckin(), loadRequests(),
+    ]);
+    if (logPanel && logPanel.open) await loadLog();
+    setMsg('已刷新全部面板（' + fmtTime(Date.now()) + '）', 'good');
+  } catch (err) {
+    setMsg('刷新失败：' + ((err && err.message) || err), 'err');
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = label;
+  }
+}
+
+let currentModels = [];
+let probeResults = {};
+let lastModelSig = '';
+let sortedByCredits = false;
+/** 最近一次 /api/overview 的完整响应（卡片要等模型目录一起渲染）。 */
+let lastOverview = null;
+/** 模型目录（/api/models）；null = 还没取到（与桥状态解耦，允许后到）。 */
+let lastModels = null;
+/** 上一次模型目录读取失败的原因；为空表示没有失败。 */
+let lastModelsError = '';
+/** 最近一次「刷新目录」失败时桥带回的 staleMs（缓存有多旧）；成功时为 null。 */
+let lastModelsStaleMs = null;
+/** 最近一次「最近请求」的明细，供前端筛选/统计复用。 */
+let lastRequests = [];
+/**
+ * 「最近请求」的模型筛选 —— **唯一真源**。用量表的模型行点击与
+ * `#reqModelFilter` 下拉都写它，任一处改另一处立刻同步。空串 = 不筛。
+ */
+let reqModelFilter = '';
+/** 已注册但不在上游目录里的模型 id，供「清理并保存」使用。 */
+let lastStaleIds = [];
+/** 可用性列的排序模式：'' | 'ok' | 'ms' | 'msdesc'。 */
+let probeSortMode = '';
+/** 最近一次 /api/overview 里的 bridge 段，供「复制地址」使用。 */
+let lastBridge = null;
+/** 最近一次 /api/checkin 的 status（未签到提醒要用）。 */
+let lastCheckinStatus = null;
+/** 最近一次 /api/checkin 带回的本地签到状态（开关 + 上次自动尝试）。 */
+let lastCheckinLocal = null;
+/** 最近一次诊断逐项（复制诊断报告要用）。 */
+let lastDiag = null;
+/** 最近一次取回的桥日志原始行（过滤在本地做，改筛选不再请求）。 */
+let logLines = [];
+
+// ── 提醒状态（R3）───────────────────────────────────────────────────────
+// localStorage 只允许存**时间戳 / 日期 / 枚举**三类，键名统一 wb. 前缀；
+// 绝不存凭据、对话内容、模型清单。
+/** 失败水位线（毫秒时间戳）：比它新的失败才算「新失败」。 */
+let failSeenTs = 0;
+/** 令牌临期提醒的静默标记（本次会话有效）。 */
+let tokenMuted = false;
+/** 未签到提醒的静默日期（本地日期串，跨天自动恢复提醒）。 */
+let checkinMutedDate = '';
+
+function lsGet(key, dflt) {
+  try { const v = localStorage.getItem(key); return v === null ? dflt : v; } catch { return dflt; }
+}
+function lsSet(key, value) {
+  try { localStorage.setItem(key, value); } catch { /* 无痕模式 / 配额满：静默降级，不影响本次会话 */ }
+}
+
+/** 本地日期串 `YYYY-MM-DD`（与桥的 localDay 同规则，用于「当天」判定）。 */
+function localDateStr(d = new Date()) {
+  const p = (n) => String(n).padStart(2, '0');
+  return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate());
+}
+
+/** 启动时把三类本地标记读回来。 */
+function initAlerts() {
+  const ts = Number(lsGet('wb.failSeenTs', '0'));
+  failSeenTs = Number.isFinite(ts) && ts > 0 ? ts : 0;
+  tokenMuted = lsGet('wb.muted.token', '') === '1';
+  checkinMutedDate = lsGet('wb.muted.checkin', '');
+}
+
+/**
+ * 比水位线更新的失败条数 —— **唯一算法**。
+ * 提示条与标签页标题都用它，两处数字必须永远相等（R3.3）。
+ */
+function countNewFailures() {
+  return lastRequests.filter((r) => !r.ok && Number(r.t) > failSeenTs).length;
+}
+
+/**
+ * 推进失败水位线到「当前最新一条失败的时间」。
+ * 点「知道了」或打开「仅看失败」时调用：同一批失败不重复提醒。
+ */
+function advanceFailWatermark() {
+  const newest = lastRequests.filter((r) => !r.ok)
+    .reduce((mx, r) => Math.max(mx, Number(r.t) || 0), 0);
+  if (newest > failSeenTs) {
+    failSeenTs = newest;
+    lsSet('wb.failSeenTs', String(newest));
+  }
+}
+
+const TITLE_SUFFIX = ' · WorkBuddy 中转控制台';
+
+/**
+ * 标签页标题随状态变化（R3.1）。
+ * 刻意**不放** PID / 运行时长这类频繁变化的数字——标题闪起来很烦。
+ */
+function refreshTitle() {
+  const b = lastBridge;
+  let head;
+  if (!b) head = '⚠ 控制台异常';
+  else if (!b.running) head = '⚠ 桥未运行';
+  else if (!b.ok) head = '⚠ 桥有响应但异常';
+  else {
+    const m = Array.isArray(lastModels) ? lastModels.length : (Number(b.catalogSize) || 0);
+    head = '桥运行中 · ' + m + ' 模型';
+  }
+  const n = countNewFailures();
+  document.title = head + (n ? ' · 新失败 ' + n : '') + TITLE_SUFFIX;
+}
+
+/**
+ * 顶部提示条（R3.2）。
+ *
+ * 多条并存时按严重度排序：桥不可用 > 令牌临期 > 新失败 > 未签到。
+ * 桥不可用**不可关闭**（恢复后自然消失）——关掉它只会让人以为一切正常。
+ */
+function renderAlerts() {
+  const bar = $('alertBar');
+  if (!bar) return;
+  const items = [];
+
+  // 1. 桥不可用
+  const b = lastBridge;
+  if (!b || !b.running || !b.ok) {
+    items.push({
+      sev: 0,
+      cls: 'fail',
+      text: !b ? '控制台还没取到桥的状态。'
+        : (b.running ? '桥有响应但状态异常：' + (b.error || '上游不可用') + '。' : '桥未运行，模型调用会失败。'),
+      action: { label: '启动桥服务', run: () => $('startBtn').click() },
+    });
+  }
+
+  // 2. 令牌临期（≤3 天）
+  const a = lastOverview && lastOverview.credentials && lastOverview.credentials.active;
+  const remainMs = a && Number(a.remainingMs);
+  if (a && Number.isFinite(remainMs) && remainMs <= 3 * 86400000 && !tokenMuted) {
+    const days = Math.max(0, Math.ceil(remainMs / 86400000));
+    items.push({
+      sev: 1,
+      cls: 'warn',
+      text: '令牌将于 ' + days + ' 天后到期；桌面端在线时会自行续期，若届时返回 401 请在桌面端重新登录。',
+      dismiss: { label: '知道了', run: () => { tokenMuted = true; lsSet('wb.muted.token', '1'); renderAlerts(); } },
+      action: { label: '重新诊断', run: () => $('diagBtn').click() },
+    });
+  }
+
+  // 3. 新失败
+  const n = countNewFailures();
+  if (n > 0) {
+    items.push({
+      sev: 2,
+      cls: 'warn',
+      text: '最近请求里有 ' + n + ' 条新的失败。',
+      dismiss: { label: '知道了', run: () => { advanceFailWatermark(); renderAlerts(); refreshTitle(); } },
+      action: {
+        label: '仅看失败',
+        run: () => {
+          const c = $('reqFailOnly');
+          if (c) { c.checked = true; c.dispatchEvent(new Event('change')); }
+          advanceFailWatermark();
+          renderAlerts();
+          refreshTitle();
+        },
+      },
+    });
+  }
+
+  // 4. 未签到（国内账号；关闭按**本地日期**记，跨天自动恢复）
+  const st = lastCheckinStatus;
+  if (st && st.active && !st.todayCheckedIn && checkinMutedDate !== localDateStr()) {
+    // 自动签到失败 / 开关关闭时，提醒里带上失败原因（R11.4：不静默）
+    const c = lastCheckinLocal;
+    const failNote = c && c.lastResult === 'error' && c.lastError
+      ? '（上次自动签到失败：' + c.lastError + '）' : '';
+    items.push({
+      sev: 3,
+      cls: 'warn',
+      text: '今天还没签到，签到积分过期不补。' + failNote,
+      dismiss: {
+        label: '知道了',
+        run: () => { checkinMutedDate = localDateStr(); lsSet('wb.muted.checkin', checkinMutedDate); renderAlerts(); },
+      },
+      action: { label: '立即签到', run: () => doCheckin() },
+    });
+  }
+
+  items.sort((x, y) => x.sev - y.sev);
+  if (!items.length) { bar.hidden = true; bar.innerHTML = ''; return; }
+
+  bar.hidden = false;
+  // 文案全部过 escapeAttr：错误原文、账号等都可能含 HTML
+  bar.innerHTML = items.map((it, i) =>
+    '<div class="alert ' + it.cls + '">' +
+      '<span class="alert-text">' + escapeAttr(it.text) + '</span>' +
+      (it.action ? '<button class="mini" data-alert-act="' + i + '">' + escapeAttr(it.action.label) + '</button>' : '') +
+      (it.dismiss ? '<button class="mini alert-x" data-alert-dismiss="' + i + '" title="知道了">' + escapeAttr(it.dismiss.label) + '</button>' : '') +
+    '</div>').join('');
+
+  bar.querySelectorAll('[data-alert-act]').forEach((btn) => {
+    const it = items[Number(btn.dataset.alertAct)];
+    if (it) btn.onclick = () => it.action.run();
+  });
+  bar.querySelectorAll('[data-alert-dismiss]').forEach((btn) => {
+    const it = items[Number(btn.dataset.alertDismiss)];
+    if (it) btn.onclick = () => it.dismiss.run();
+  });
+}
+/** 最近一次取回的用量数据，供导出 CSV 使用。 */
+let lastUsage = null;
+/**
+ * 用量面板**当前展示**的那份数据（按天或按小时）。
+ * 与 lastUsage 分开：lastUsage 始终是**按天窗口**的，成本列与导出 CSV 认它；
+ * 切到小时视图不该把成本口径也换掉。
+ */
+let usageView = null;
+/** 按天 / 按小时两份响应的缓存——切回按天时直接用缓存，不发多余请求。 */
+let usageDayCache = null;
+let usageHourCache = null;
+/** 趋势图粒度：'day' | 'hour'。 */
+let trendGran = 'day';
+/** 趋势图指标：'calls' | 'tokens' | 'credit'。 */
+let trendMetric = 'calls';
+/** 体检结果落盘时间（毫秒）；null 表示还没有存过。 */
+let probeUpdatedAt = null;
+let probeSaveTimer = null;
+let probeCtrl = null;
+let probeAborted = false;
+/** 正在飞行中的体检模型（独立于 probeResults，取消时历史结果不受影响）。 */
+const probePending = new Set();
+/** 本轮实际测出的模型 id：只把这些写回服务端，未重测的历史由服务端合并保留。 */
+const probeDirty = new Set();
+/** 体检范围：'checked' | 'registered' | 'all'。默认「有勾选就测勾选的」。 */
+let probeScope = 'checked';
+/** 服务端记录的本轮体检范围（probe.lastRun）：{ scope, count } | null。 */
+let probeLastRun = null;
+/** 本次运行要随结果一起提交的范围（供防抖落盘与收尾落盘共用）。 */
+let probeRunInfo = null;
+
+/** 当前勾选的模型 id —— 从 DOM 现算，与 updateRegCount() 同源，不另立一份状态。 */
+function checkedModelIds() {
+  return [...document.querySelectorAll('#modelTable input[data-id]:checked')]
+    .map((c) => c.dataset.id)
+    .filter(Boolean);
+}
+
+/** 已注册 ∩ 当前目录 的模型 id（注册表里有、但已不在上游目录的不算）。 */
+function registeredInCatalogIds() {
+  const set = new Set((lastOverview && lastOverview.dsh && lastOverview.dsh.registeredModels) || []);
+  return currentModels.map((m) => m.id).filter((id) => set.has(id));
+}
+
+/** 按范围取要体检的模型 id。三种范围的语义见 spec R9.1。 */
+function probeScopeIds(scope) {
+  if (scope === 'checked') return { scope: 'checked', ids: checkedModelIds() };
+  if (scope === 'registered') return { scope: 'registered', ids: registeredInCatalogIds() };
+  return { scope: 'all', ids: currentModels.map((m) => m.id) };
+}
+
+/** 处于勾选状态、且体检结论为「不可用」的模型 id。 */
+function badCheckedIds() {
+  const ids = [];
+  document.querySelectorAll('#modelTable tbody tr').forEach((tr) => {
+    if (tr.dataset.probeOk !== '0') return;
+    const cb = tr.querySelector('input[data-id]');
+    if (cb && cb.checked) ids.push(cb.dataset.id);
+  });
+  return ids;
+}
+
+/**
+ * 模型表格的数据指纹。
+ *
+ * 轮询每 20 秒跑一次，若无条件重建整块表格，会把用户正在用的
+ * 搜索词、筛选、勾选和体检结果全部冲掉（表格连工具栏一起重建）。
+ * 指纹没变就不动 DOM。
+ */
+function modelSignature(models, registered) {
+  return JSON.stringify([
+    models.map((m) => [m.id, m.credits, m.badge, m.free ? 1 : 0]),
+    [...registered].sort(),
+  ]);
+}
+
+/** 重建表格前记下用户当前的 UI 状态，重建后原样恢复。 */
+function captureTableState() {
+  // 表格还没建起来时**没有**「用户状态」可保：此时必须返回 null。
+  // 否则 restore 会拿一个空的勾选集当权威，把首次渲染时按注册状态预勾选的
+  // 勾选全部清掉——「有勾选 → 默认测勾选的」这条规则就永远不成立。
+  if (!$('modelTable')) return null;
+  // 记录**完整**的勾选状态：既要保住用户新勾的，也要保住用户取消掉的
+  const checked = new Set();
+  document.querySelectorAll('#modelTable input[data-id]').forEach((c) => {
+    if (c.checked) checked.add(c.dataset.id);
+  });
+  const wrap = $('modelTableWrap');
+  return {
+    filter: ($('modelFilter') && $('modelFilter').value) || '',
+    kind: ($('modelKind') && $('modelKind').value) || '',
+    checked,
+    sorted: sortedByCredits,
+    // 表格被整体替换后滚动位置会回到顶部，长列表里很恼人
+    scroll: wrap ? wrap.scrollTop : 0,
+    checkAll: !!($('checkAll') && $('checkAll').checked),
+  };
+}
+
+function restoreTableState(s) {
+  if (!s) return;
+  // 按捕获的状态**完全**还原（包括用户取消掉的勾选），而不是只补勾
+  document.querySelectorAll('#modelTable input[data-id]').forEach((c) => {
+    c.checked = s.checked.has(c.dataset.id);
+  });
+  if ($('modelFilter')) $('modelFilter').value = s.filter;
+  if ($('modelKind')) $('modelKind').value = s.kind;
+  if ($('checkAll')) $('checkAll').checked = s.checkAll;
+  if (s.sorted) sortModelsByCredits(true);
+  updateRegCount();
+  applyModelFilter();
+  // 放在最后：过滤会隐藏行、改变 scrollHeight，先设会被夹回 0
+  const wrap = $('modelTableWrap');
+  if (wrap) wrap.scrollTop = s.scroll || 0;
+}
+
+/**
+ * 全页唯一的 HTML 转义助手：**所有**拼进 innerHTML 的接口动态字段都必须过它。
+ * 只做转义，不做关键字黑名单——任何「识别危险字符再过滤」的做法都会漏。
+ */
+function escapeAttr(text) {
+  return String(text)
+    .replace(/&/g, '&amp;').replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
+    .replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+function renderProbe(id) {
+  if (probePending.has(id)) return '<span class="tag">测试中…</span>';
+  const r = probeResults[id];
+  if (!r) return '<span class="tag">未测</span>';
+  const when = r.at ? '　（' + fmtAgo(r.at) + '）' : '';
+  if (r.ok) {
+    const credit = typeof r.credit === 'number' ? ' · 扣 ' + r.credit : '';
+    return '<span class="tag ok" title="' + escapeAttr('测得时间' + when) + '">'
+      + '可用 ' + r.ms + 'ms' + credit + '</span>';
+  }
+  return '<span class="tag fail" title="' + escapeAttr((r.error || '') + when) + '">不可用</span>';
+}
+
+function refreshProbeCells() {
+  document.querySelectorAll('#modelTable td[data-probe]').forEach(td => {
+    td.innerHTML = renderProbe(td.dataset.probe);
+    syncProbeRowState(td.closest('tr'));
+  });
+}
+
+/**
+ * 把体检结论同步到行的 dataset（供排序与筛选直接读取，不用解析 DOM）。
+ * 「测试中」不算结论，按未测处理。
+ */
+function syncProbeRowState(tr) {
+  if (!tr) return;
+  const id = tr.dataset.modelId || '';
+  const r = probePending.has(id) ? null : probeResults[id];
+  tr.dataset.probeOk = r ? (r.ok ? '1' : '0') : '';
+  tr.dataset.probeMs = r && Number.isFinite(Number(r.ms)) ? String(Number(r.ms)) : '';
+}
+
+async function probeOne(id, signal) {
+  probePending.add(id);
+  refreshProbeCells();
+
+  let r;
+  try {
+    const res = await fetch('/api/probe', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: id }),
+      signal,
+    });
+    r = await res.json();
+  } catch (err) {
+    // 用户取消：这一格不算结论，历史结果原样保留且**不落盘**
+    if (err && err.name === 'AbortError') return null;
+    r = { ok: false, error: String((err && err.message) || err) };
+  } finally {
+    probePending.delete(id);
+  }
+
+  probeResults[id] = (r && typeof r.ok === 'boolean')
+    ? { ...r, at: Date.now() }
+    : { ok: false, error: (r && r.error) || '未知错误', at: Date.now() };
+  probeDirty.add(id);
+  refreshProbeCells();
+  scheduleProbeSave();
+  return probeResults[id];
+}
+
+/** 体检并发度：2–4 之间；3 在「快」与「不给上游压力」之间取平衡。 */
+const PROBE_CONCURRENCY = 3;
+
+/** 体检进度区：进度条 + 完成数 + 当前模型 + 已用/预计剩余。 */
+function updateProbeProgress(state) {
+  const box = $('probeProgress');
+  if (!box) return;
+  if (!state) {
+    box.hidden = true;
+    $('probeFill').style.width = '0%';
+    $('probeText').textContent = '';
+    return;
+  }
+  const { done, total, ok, elapsedMs } = state;
+  const current = [...probePending];
+  box.hidden = false;
+  $('probeFill').style.width = (total ? Math.round((done / total) * 100) : 0) + '%';
+  const avgPerModel = done ? elapsedMs / done : 0;
+  const remainingMs = done && done < total ? (avgPerModel * (total - done)) / PROBE_CONCURRENCY : 0;
+  $('probeText').textContent = '完成 ' + done + ' / ' + total + ' · 可用 ' + ok
+    + (current.length ? ' · 当前 ' + current.join('、') : '')
+    + ' · 已用 ' + Math.round(elapsedMs / 1000) + 's'
+    + (remainingMs > 0 ? ' · 预计剩余 ' + Math.max(1, Math.round(remainingMs / 1000)) + 's' : '');
+}
+
+async function probeAll() {
+  if (!currentModels.length) return;
+  const btn = $('probeAllBtn');
+  const cancelBtn = $('probeCancelBtn');
+  const msg = $('regMsg');
+  const scopeSel = $('probeScope');
+  const scope = scopeSel ? scopeSel.value : 'all';
+  const { ids } = probeScopeIds(scope);
+  if (!ids.length) {
+    setRegMsg(scope === 'checked' ? '先勾选要测的模型' : '当前范围里没有可测的模型');
+    return;
+  }
+  // 本轮范围随结果一起提交，由服务端清洗后写进 .state.json 的 probe.lastRun，
+  // 表头的「本轮 K 个」就是从那里来的
+  probeRunInfo = { scope, count: ids.length };
+  if (scopeSel) scopeSel.disabled = true;
+
+  // **不再**整体清空历史结果：本轮只覆盖真正测到的模型，
+  // 未重测的沿用已加载的旧结论（含各自的时间戳），取消也不会抹掉它们。
+  const ctrl = new AbortController();
+  probeCtrl = ctrl;
+  probeAborted = false;
+  btn.disabled = true;
+  if (cancelBtn) cancelBtn.hidden = false;
+  if (msg) { msg.className = 'msg'; msg.textContent = '开始测试 ' + ids.length + ' 个模型…（会消耗少量额度）'; }
+
+  const startedAt = Date.now();
+  let ok = 0;
+  let done = 0;
+  const queue = ids.slice();
+  const snapshot = () => updateProbeProgress({
+    done, total: ids.length, ok, elapsedMs: Date.now() - startedAt,
+  });
+
+  const worker = async () => {
+    for (;;) {
+      if (probeAborted) return;
+      const id = queue.shift();
+      if (!id) return;
+      const r = await probeOne(id, ctrl.signal);
+      if (r) {
+        done += 1;
+        if (r.ok) ok += 1;
+      }
+      if (msg) msg.textContent = '进度 ' + done + '/' + ids.length + ' · 可用 ' + ok;
+      snapshot();
+    }
+  };
+
+  snapshot();
+  await Promise.all(Array.from({ length: Math.min(PROBE_CONCURRENCY, ids.length) }, worker));
+
+  probeCtrl = null;
+  btn.disabled = false;
+  if (cancelBtn) cancelBtn.hidden = true;
+  if (scopeSel) scopeSel.disabled = false;
+  updateProbeProgress(null);
+  refreshProbeCells();
+  applyModelFilter(); // 新结论可能改变「仅可用 / 仅不可用」这类筛选的可见行
+
+  // 取消时只落盘已测完的部分；未测模型的历史由服务端合并保留
+  await saveProbeResults();
+  updateProbeScopeUI(); // 收尾后按最新状态恢复按钮文案/禁用态
+
+  if (msg) {
+    if (probeAborted) {
+      msg.className = 'msg';
+      msg.textContent = '已取消：完成 ' + done + '/' + ids.length + ' · 可用 ' + ok
+        + '（已完成的结果已保存，未测模型保留上次结论）';
+    } else {
+      msg.className = 'msg' + (ok === ids.length ? ' good' : '');
+      msg.textContent = '测试完成：' + ok + '/' + ids.length + ' 个模型可正常调用';
+    }
+  }
+}
+
+// ── 体检结果持久化 ──────────────────────────────────────────────────────
+//
+// 一次全量体检要串行打几十个请求，刷新页面就全丢太浪费。结果存到控制台的
+// .state.json，页面重开还在，并显示体检时间。
+
+async function loadProbeResults() {
+  const d = await api('/api/probe-results');
+  if (d && d.results && typeof d.results === 'object') {
+    probeResults = d.results;
+    probeUpdatedAt = Number(d.updatedAt) || null;
+  }
+  // 本轮范围（表头「本轮 K 个」的来源）；服务端缺省时为 null → 该段不显示
+  probeLastRun = (d && d.lastRun) || null;
+  refreshProbeStamp();
+}
+
+/** 防抖落盘：一次全量体检有几十个模型，别写几十次。 */
+function scheduleProbeSave() {
+  if (probeSaveTimer) clearTimeout(probeSaveTimer);
+  probeSaveTimer = setTimeout(() => { saveProbeResults(); }, 1500);
+}
+
+/**
+ * 落盘体检结果。只发送**本轮实际测到**的模型（probeDirty）；
+ * 未重测的历史条目由服务端合并保留，因此这里不能整块覆盖。
+ */
+async function saveProbeResults() {
+  probeSaveTimer = null;
+  const payload = {};
+  for (const id of probeDirty) {
+    const r = probeResults[id];
+    if (!r) continue;
+    payload[id] = {
+      ok: !!r.ok,
+      ms: Number(r.ms) || 0,
+      at: Number(r.at) || Date.now(),
+      ...(typeof r.credit === 'number' ? { credit: r.credit } : {}),
+      ...(r.error ? { error: String(r.error).slice(0, 200) } : {}),
+    };
+  }
+  if (!Object.keys(payload).length) return; // 没有新结论，不必写盘
+  const d = await api('/api/probe-results', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    // lastRun 描述「本轮测了哪些范围、共几个」；服务端会清洗，非法值不落盘
+    body: JSON.stringify({ results: payload, ...(probeRunInfo ? { lastRun: probeRunInfo } : {}) }),
+  });
+  if (d && d.saved) {
+    probeUpdatedAt = d.updatedAt;
+    probeDirty.clear();
+    probeLastRun = d.lastRun || null;
+  }
+  refreshProbeStamp();
+  updateProbeClearBtn();
+}
+
+async function clearProbeResults() {
+  await api('/api/probe-results', { method: 'DELETE' });
+  resetProbeState();
+  setMsg('已清除体检结果');
+}
+
+/** 本地体检状态全部清空（服务端存档由调用方负责）。 */
+function resetProbeState() {
+  probeResults = {};
+  probePending.clear();
+  probeDirty.clear();
+  probeUpdatedAt = null;
+  refreshProbeStamp();
+  updateProbeClearBtn();
+  refreshProbeCells();
+  applyModelFilter();
+}
+
+/**
+ * 表头时间线：`上次体检 X 前 · 本轮 K 个 · 可用 M / N`。
+ *
+ * 三个数字各自回答一个问题，别混成一个：**测了哪些范围（K）、归档里累计
+ * 多少（N）、其中可用多少（M）**。K 来自服务端 probe.lastRun，缺省就整段省略。
+ */
+function refreshProbeStamp() {
+  const el = $('probeStamp');
+  if (!el) return;
+  const vals = Object.values(probeResults);
+  const passed = vals.filter((r) => r && r.ok).length;
+  if (!probeUpdatedAt) { el.textContent = ''; return; }
+  const parts = ['上次体检 ' + fmtAgo(probeUpdatedAt)];
+  if (probeLastRun && Number.isInteger(probeLastRun.count)) parts.push('本轮 ' + probeLastRun.count + ' 个');
+  parts.push('可用 ' + passed + ' / ' + vals.length);
+  el.textContent = parts.join(' · ');
+  // 体检结论变了：「同步可用模型到 dsh」的可用集合也跟着变
+  updateSyncUsableBtn();
+}
+
+/** 「清除体检」只在真的存过结果时才出现，平时不占地方。 */
+function updateProbeClearBtn() {
+  const btn = $('probeClearBtn');
+  if (btn) btn.hidden = !probeUpdatedAt;
+}
+
+async function loadCheckin() {  const box = $('checkinBox');
+  const d = await api('/api/checkin');
+  setStamp('checkinStamp');
+  const s = d && d.status;
+  lastCheckinStatus = s || null;
+  lastCheckinLocal = (d && d.checkin) || null;
+  renderAlerts(); // 未签到提醒跟着签到状态走
+
+  const autoRow = renderCheckinAutoRow();
+
+  if (!s) {
+    box.innerHTML = '<div class="empty">读取失败：' + escapeAttr((d && d.error) || '桥未运行') + '</div>' + autoRow;
+    wireCheckinAuto();
+    return;
+  }
+  if (!s.active) {
+    // 国际版没有积分系统：如实说，**不算失败**（R11.4 第三分支）
+    box.innerHTML = '<div class="empty">当前账号没有签到活动（国际版网关不含积分系统）。</div>' + autoRow;
+    wireCheckinAuto();
+    return;
+  }
+
+  const done = s.todayCheckedIn;
+  const c = lastCheckinLocal;
+  const streak = s.streakDays > 0 ? '连续 ' + s.streakDays + ' 天' : '尚未开始';
+  const reward = s.dailyCredit ? '每日 +' + s.dailyCredit : '';
+  const streakLine = s.streakBonusDays > 0
+    ? '　连续 ' + s.streakBonusDays + ' 天可得 ' + s.streakBonusCredit + ' 积分'
+    : '';
+
+  // 已签到时标注是**自动**还是**手动**签的（R11.4 第一分支）
+  const byAuto = done && c && (c.lastResult === 'ok' || c.lastResult === 'already')
+    ? ' · ' + (c.lastSource === 'manual' ? '手动' : '自动')
+      + '（' + new Date(c.lastAt).toLocaleTimeString('zh-CN', { hour12: false, hour: '2-digit', minute: '2-digit' }) + '）'
+    : '';
+  // 自动签到失败要**红字说出来**，不静默（R11.4 第二分支）
+  const failLine = !done && c && c.lastResult === 'error'
+    ? '<div class="acct-sub errline">自动签到失败：' + escapeAttr(c.lastError || '未知原因')
+      + '（' + new Date(c.lastAt).toLocaleTimeString('zh-CN', { hour12: false, hour: '2-digit', minute: '2-digit' })
+      + '）· 可手动重试</div>'
+    : '';
+
+  box.innerHTML =
+    '<div class="acct">' +
+      '<div>' +
+        '<div class="acct-name">' + (done ? '今日已签到' : '今日尚未签到') + byAuto +
+          ' <span class="tag' + (done ? ' ok' : '') + '">' + streak + '</span></div>' +
+        '<div class="acct-sub">' + [reward, streakLine.trim()].filter(Boolean).join('　') + '</div>' +
+        failLine +
+      '</div>' +
+      '<div class="acct-act">' +
+        (done
+          ? '<span class="tag ok">已领取</span>'
+          : '<button class="primary" id="checkinBtn">立即签到</button>') +
+      '</div>' +
+    '</div>' + autoRow;
+
+  wireCheckinAuto();
+  const btn = $('checkinBtn');
+  if (btn) btn.onclick = doCheckin;
+}
+
+/**
+ * 自动签到开关那一行（R11.1）。说明必须写清**两条触发路径**与
+ * 「桥侧需重启桥生效」——不写的话用户会以为开关立刻对桥生效。
+ */
+function renderCheckinAutoRow() {
+  const autoOn = lastCheckinLocal ? lastCheckinLocal.auto !== false : true;
+  const c = lastCheckinLocal;
+  let attempt = '还没有自动尝试记录。';
+  if (c && c.lastAt) {
+    const src = c.lastSource === 'manual' ? '手动'
+      : (c.lastSource === 'hourly' ? '自动（每小时检查）' : '自动（启动时）');
+    const result = {
+      ok: '成功', already: '上游已签到（按成功处理）', 'no-activity': '当前账号没有签到活动', error: '失败',
+    }[c.lastResult] || (c.lastResult || '未知');
+    attempt = '上次尝试：' + new Date(c.lastAt).toLocaleString('zh-CN', { hour12: false })
+      + ' · ' + src + ' · ' + result + (c.lastError ? '（' + c.lastError + '）' : '');
+  }
+  return '<div class="acct">' +
+      '<div>' +
+        '<div class="acct-name"><label class="check"><input type="checkbox" id="checkinAuto"'
+          + (autoOn ? ' checked' : '') + '> 每日自动签到</label></div>' +
+        '<div class="acct-sub">桥在跑：每天首次模型请求时自动签；控制台开着：启动时与每小时检查一次。'
+          + '<b>桥侧需重启桥生效</b>（这里不自动重启）。</div>' +
+        '<div class="acct-sub' + (c && c.lastResult === 'error' ? ' errline' : '') + '">' + escapeAttr(attempt) + '</div>' +
+      '</div>' +
+      '<div class="acct-act">' + (autoOn ? '<span class="tag ok">已开启</span>' : '<span class="tag">已关闭</span>') + '</div>' +
+    '</div>';
+}
+
+/** 绑定自动签到开关；保存失败要回滚勾选，别让界面说谎。 */
+function wireCheckinAuto() {
+  const cb = $('checkinAuto');
+  if (!cb) return;
+  cb.onchange = async () => {
+    const auto = cb.checked;
+    const r = await api('/api/checkin/settings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ auto }),
+    });
+    if (r && r.saved) {
+      setMsg(auto ? '已开启每日自动签到（桥侧需重启桥生效）' : '已关闭每日自动签到（桥侧需重启桥生效）', 'good');
+    } else {
+      cb.checked = !auto;
+      setMsg('保存自动签到开关失败：' + ((r && r.error) || '未知错误'), 'err');
+    }
+    await loadCheckin();
+  };
+}
+
+async function doCheckin() {
+  const btn = $('checkinBtn');
+  if (btn) { btn.disabled = true; btn.textContent = '签到中…'; }
+  const d = await api('/api/checkin', { method: 'POST' });
+  if (d && d.ok) {
+    setMsg(d.already
+      ? '今天已经签过了（' + (d.message || '') + '）'
+      : '签到成功，获得 ' + (d.credit || 0) + ' 积分', d.already ? '' : 'good');
+  } else {
+    setMsg('签到失败：' + ((d && d.error) || '未知错误'), 'err');
+  }
+  await loadCheckin();
+  await loadOverview();
+}
+
+async function loadUsage() {
+  const days = $('usageDays') ? $('usageDays').value : 7;
+  const gran = $('trendGran') ? $('trendGran').value : 'day';
+  trendGran = gran;
+
+  if (gran === 'hour') {
+    // 小时视图单独请求一次（days=1&hours=1）；它只服务趋势图与卡片，
+    // **不覆盖** lastUsage —— 成本列与导出 CSV 认的是按天窗口
+    const d = await api('/api/usage?days=1&hours=1');
+    setStamp('usageStamp');
+    usageHourCache = (d && d.usage) || null;
+    usageView = usageHourCache;
+    renderUsage();
+    return;
+  }
+
+  const d = await api('/api/usage?days=' + days);
+  setStamp('usageStamp');
+  usageDayCache = (d && d.usage) || null;
+  lastUsage = usageDayCache;
+  usageView = usageDayCache;
+  renderUsage();
+  refreshCostCells();
+}
+
+/** 切粒度：小时视图要请求一次；切回按天**直接用缓存**，不发多余请求。 */
+function onTrendGranChange(e) {
+  const gran = e.target.value;
+  trendGran = gran;
+  if (gran === 'hour') { loadUsage(); return; }
+  if (usageDayCache) { usageView = usageDayCache; renderUsage(); return; }
+  loadUsage();
+}
+
+/**
+ * 零依赖绘图组件（R10.3）：**只产出 SVG 字符串**，不引任何图表库。
+ *
+ * 刻意不用 `preserveAspectRatio="none"` —— 那会把文字一起拉变形。
+ * 颜色只取现有 CSS 变量；**不靠颜色单独承载信息**：每个点 / 柱都带原生
+ * `<title>` 数值，色盲用户也能读。异常态由调用方负责清掉上一次的图。
+ *
+ * @param {object} spec
+ *   kind     'bar' | 'stackBar' | 'line'
+ *   series   [{ name, values, dashed?, color? }]
+ *   xLabels  string[]
+ *   opts     { height, ariaLabel, valueFmt }
+ */
+function renderChart(spec) {
+  const kind = spec.kind;
+  const series = spec.series || [];
+  const xLabels = spec.xLabels || [];
+  const opts = spec.opts || {};
+  const W = 720;
+  const H = Number(opts.height) || 180;
+  const padL = 52;
+  const padR = 14;
+  const padT = 12;
+  const padB = 26;
+  const plotW = W - padL - padR;
+  const plotH = H - padT - padB;
+  const n = xLabels.length;
+  if (!n) return '';
+
+  const fmt = opts.valueFmt || ((v) => fmtCompact(v));
+  const all = series.flatMap((s) => s.values.map((v) => Number(v) || 0));
+  const maxV = Math.max(...all, 0);
+  const top = maxV > 0 ? maxV : 1; // 全 0 时不该走到这里（调用方先判空态）
+  const yOf = (v) => padT + plotH - (v / top) * plotH;
+  const bandW = plotW / n;
+  const colorOf = (s, i) => s.color || (i % 2 ? 'var(--ok)' : 'var(--accent)');
+
+  let svg = '<svg width="100%" viewBox="0 0 ' + W + ' ' + H + '" role="img" aria-label="'
+    + escapeAttr(opts.ariaLabel || '用量图表') + '" class="chart">';
+
+  // y 轴 4 条网格线 + 紧凑刻度
+  for (let i = 0; i <= 4; i += 1) {
+    const v = (top / 4) * i;
+    const yy = yOf(v);
+    svg += '<line x1="' + padL + '" y1="' + yy.toFixed(1) + '" x2="' + (W - padR) + '" y2="' + yy.toFixed(1)
+      + '" stroke="var(--border)" stroke-width="1"/>';
+    svg += '<text x="' + (padL - 7) + '" y="' + (yy + 3.5).toFixed(1)
+      + '" text-anchor="end" font-size="10" fill="var(--faint)">' + escapeAttr(fmt(v)) + '</text>';
+  }
+
+  // x 轴标签：点太多时抽稀（30 天视图每 5 个一个），否则会糊成一片
+  const step = n > 20 ? 5 : (n > 12 ? 2 : 1);
+  for (let i = 0; i < n; i += 1) {
+    if (i % step !== 0 && i !== n - 1) continue;
+    const cx = padL + bandW * (i + 0.5);
+    svg += '<text x="' + cx.toFixed(1) + '" y="' + (H - 8)
+      + '" text-anchor="middle" font-size="10" fill="var(--faint)">' + escapeAttr(xLabels[i]) + '</text>';
+  }
+
+  if (kind === 'bar' || kind === 'stackBar') {
+    const barW = Math.max(2, Math.min(34, bandW * 0.62));
+    for (let i = 0; i < n; i += 1) {
+      const cx = padL + bandW * (i + 0.5);
+      let acc = 0;
+      const bars = [];
+      for (let si = 0; si < series.length; si += 1) {
+        const v = Number(series[si].values[i]) || 0;
+        if (v <= 0) continue;
+        const h = (v / top) * plotH;
+        bars.push('<rect x="' + (cx - barW / 2).toFixed(1) + '" y="' + (padT + plotH - acc - h).toFixed(1)
+          + '" width="' + barW.toFixed(1) + '" height="' + h.toFixed(1)
+          + '" fill="' + colorOf(series[si], si) + '" rx="2"/>');
+        acc += h;
+      }
+      const tip = xLabels[i] + '：' + series.map((s) => s.name + ' ' + fmt(Number(s.values[i]) || 0)).join(' · ');
+      // 透明命中区：柱很矮时也能悬停到
+      svg += '<g><title>' + escapeAttr(tip) + '</title>' + bars.join('')
+        + '<rect x="' + (padL + bandW * i).toFixed(1) + '" y="' + padT + '" width="' + bandW.toFixed(1)
+        + '" height="' + plotH + '" fill="transparent"/></g>';
+    }
+  } else {
+    for (let si = 0; si < series.length; si += 1) {
+      const s = series[si];
+      const pts = s.values.map((v, i) => (padL + bandW * (i + 0.5)).toFixed(1) + ',' + yOf(Number(v) || 0).toFixed(1)).join(' ');
+      svg += '<polyline points="' + pts + '" fill="none" stroke="' + colorOf(s, si) + '" stroke-width="2"'
+        + (s.dashed ? ' stroke-dasharray="5 4"' : '') + '/>';
+      for (let i = 0; i < s.values.length; i += 1) {
+        svg += '<circle cx="' + (padL + bandW * (i + 0.5)).toFixed(1) + '" cy="' + yOf(Number(s.values[i]) || 0).toFixed(1)
+          + '" r="3" fill="' + colorOf(s, si) + '"><title>'
+          + escapeAttr(xLabels[i] + '：' + s.name + ' ' + fmt(Number(s.values[i]) || 0)) + '</title></circle>';
+      }
+    }
+  }
+
+  svg += '</svg>';
+  return svg;
+}
+
+/** 图例（多序列时给一行，避免「哪根是输入哪根是输出」靠猜）。 */
+function chartLegend(series) {
+  if (series.length < 2) return '';
+  return '<div class="chart-legend">' + series.map((s, i) =>
+    '<span class="lg"><i style="background:' + (s.color || (i % 2 ? 'var(--ok)' : 'var(--accent)'))
+    + (s.dashed ? ';opacity:.55' : '') + '"></i>' + escapeAttr(s.name) + '</span>').join('') + '</div>';
+}
+
+/**
+ * 趋势图（R10.1）：指标由 `#trendMetric` 决定，粒度由 `#trendGran` 决定。
+ * 形态是**固定**的（不做无意义的自由组合）：次数=柱、tokens=堆叠柱、积分=折线+累计虚线。
+ */
+function buildTrendChart(buckets) {
+  if (buckets.length <= 1) return ''; // 只有一根柱子没有比较意义
+  const isHour = trendGran === 'hour';
+  const xLabels = buckets.map((b) => {
+    const raw = isHour ? String(b.key || '') : String(b.day || '');
+    return isHour ? (raw.slice(11, 13) + ' 时') : raw.slice(5);
+  });
+  const calls = buckets.map((b) => Number(b.calls) || 0);
+  const pin = buckets.map((b) => Number(b.promptTokens) || 0);
+  const pout = buckets.map((b) => Number(b.completionTokens) || 0);
+  const credit = buckets.map((b) => Number(b.credit) || 0);
+  const creditCalls = buckets.reduce((n, b) => n + (Number(b.creditCalls) || 0), 0);
+  const totalCalls = calls.reduce((a, b) => a + b, 0);
+
+  const cum = [];
+  credit.reduce((acc, v) => { const next = acc + v; cum.push(next); return next; }, 0);
+
+  const byMetric = {
+    calls: [{ name: '调用次数', values: calls }],
+    tokens: [{ name: '输入', values: pin }, { name: '输出', values: pout }],
+    credit: [{ name: '积分', values: credit }, { name: '累计', values: cum, dashed: true }],
+  };
+  const series = byMetric[trendMetric] || byMetric.calls;
+
+  // 空态：窗口内全 0 → 说清楚，**不画空轴**（空轴只会让人以为图坏了）
+  if (series.every((s) => s.values.every((v) => !v))) {
+    return '<div class="empty">这段时间没有调用。</div>';
+  }
+
+  const granText = isHour ? '最近 24 小时' : ('最近 ' + buckets.length + ' 天');
+  const metricName = { calls: '调用次数', tokens: 'tokens', credit: '积分' }[trendMetric] || '调用次数';
+  let aria = granText + metricName + '图';
+  if (trendMetric === 'credit') {
+    const sum = Math.round(credit.reduce((a, b) => a + b, 0) * 10000) / 10000;
+    aria += '，合计 ' + fmtCredit(sum, true);
+    const unreported = totalCalls - creditCalls;
+    if (unreported > 0) aria += '，其中 ' + unreported + ' 次调用未回报扣分';
+  } else if (trendMetric === 'tokens') {
+    aria += '，输入 ' + fmtCompact(pin.reduce((a, b) => a + b, 0))
+      + ' / 输出 ' + fmtCompact(pout.reduce((a, b) => a + b, 0));
+  } else {
+    aria += '，合计 ' + totalCalls + ' 次';
+  }
+
+  const kind = trendMetric === 'calls' ? 'bar' : (trendMetric === 'tokens' ? 'stackBar' : 'line');
+  const valueFmt = trendMetric === 'credit' ? ((v) => fmtCredit(v, true)) : ((v) => fmtCompact(v));
+  return chartLegend(series)
+    + renderChart({ kind, series, xLabels, opts: { ariaLabel: aria, valueFmt, height: 190 } });
+}
+
+/**
+ * 模型积分排行（R10.2）：水平条形 top 8 + 「其它」。
+ *
+ * `creditCalls = 0` 的模型**单列**在「未回报」区——它们不是「0 消耗」，
+ * 混进占比会把「没数据」画成「没有消耗」，那是两回事。
+ * 口径与「实测成本」严格同源（同一份 `lastUsage.models`）。
+ */
+function renderCreditRanking(models) {
+  const list = Array.isArray(models) ? models : [];
+  const withCredit = list.filter((m) => (Number(m.creditCalls) || 0) > 0);
+  const noCredit = list.filter((m) => !(Number(m.creditCalls) || 0) && (Number(m.calls) || 0) > 0);
+  if (!withCredit.length && !noCredit.length) return '';
+
+  let html = '<h3 class="sub-h">积分排行（按模型）</h3>';
+  if (withCredit.length) {
+    const sorted = [...withCredit].sort((a, b) => (Number(b.credit) || 0) - (Number(a.credit) || 0));
+    const top = sorted.slice(0, 8);
+    const rest = sorted.slice(8);
+    const rows = top.map((m) => ({
+      model: m.model, credit: Number(m.credit) || 0, calls: Number(m.creditCalls) || 0,
+    }));
+    if (rest.length) {
+      rows.push({
+        model: '其它（' + rest.length + ' 个）',
+        credit: rest.reduce((s, m) => s + (Number(m.credit) || 0), 0),
+        calls: rest.reduce((s, m) => s + (Number(m.creditCalls) || 0), 0),
+        other: true,
+      });
+    }
+    const max = Math.max(...rows.map((r) => r.credit), 0.0001);
+    html += '<div class="rank">' + rows.map((r) => {
+      const pct = Math.max(2, Math.round((r.credit / max) * 100));
+      const clickable = !r.other;
+      return '<div class="rank-row' + (clickable ? ' pick' : '') + '"' + (clickable ? ' data-rank-model="' + escapeAttr(r.model) + '"' : '')
+        + (clickable ? ' title="点击筛选「最近请求」"' : '') + '>'
+        + '<span class="rank-name mono">' + escapeAttr(r.model) + '</span>'
+        + '<span class="rank-track"><span class="rank-fill" style="width:' + pct + '%"></span></span>'
+        + '<span class="rank-val mono">' + fmtCredit(r.credit, true) + '（' + r.calls + ' 次）</span>'
+        + '</div>';
+    }).join('') + '</div>';
+  }
+
+  if (noCredit.length) {
+    html += '<div class="rank-nocredit">未回报扣分的模型（' + noCredit.length + ' 个）：'
+      + '<span class="mono">' + noCredit.map((m) => escapeAttr(m.model)).join('、') + '</span>'
+      + '　—— 有成功调用但上游一次都没回报扣分，<b>不计入</b>上面的占比。</div>';
+  }
+  return html;
+}
+
+/** 渲染用量面板（数据来自 usageView；粒度切换只重绘，不重新请求）。 */
+function renderUsage() {
+  const box = $('usageBox');
+  const u = usageView;
+
+  // 账本被清空后总量会是「全 0」，那种一屏 0 没有信息量；
+  // 只有失败记录时仍要显示卡片（失败不计入 calls）
+  const emptyTotal = u && u.total
+    && Number(u.total.calls) === 0 && Number(u.total.failed) === 0;
+  if (!u || !u.total || emptyTotal) {
+    box.innerHTML = '<div class="empty">暂无数据（桥未运行或还没有请求过）。</div>';
+    return;
+  }
+
+  const t = u.total;
+  const avg = t.calls ? Math.round(t.ms / t.calls) : 0;
+  const credit = Number(t.credit) || 0;
+  const creditCalls = Number(t.creditCalls) || 0;
+
+  // 明确告诉用户「扣分为什么是 0 / 为什么是 —」：上游按两位小数回报，
+  // 小请求扣分本来就是 0.00；没有回报的调用才显示「—」。
+  const creditNote = creditCalls
+    ? '已回报 ' + creditCalls + '/' + t.calls + ' 次'
+      + (creditCalls > 1 ? '　平均 ' + fmtCredit(credit / creditCalls, true) : '')
+      + '　上游按两位小数回报'
+    : '上游未回报（' + t.calls + ' 次调用）';
+
+  let html =
+    '<div class="cards" style="margin-bottom:14px">' +
+      card('调用次数', String(t.calls), '最近 ' + u.windowDays + ' 天') +
+      card('输入 tokens', fmtNum(t.promptTokens), '') +
+      card('输出 tokens', fmtNum(t.completionTokens), '') +
+      card('平均耗时', avg + ' ms', '', true) +
+      card('消耗积分', fmtCredit(credit, creditCalls), creditNote, true) +
+      (Number(t.failed) > 0
+        ? card('失败', String(t.failed), '不计入 token / 积分', true)
+        : '') +
+    '</div>';
+
+  // 趋势图（R10.1）：指标由 #trendMetric、粒度由 #trendGran 决定。
+  // 空态 / 单桶由 buildTrendChart 自己处理（不画空轴）。
+  const buckets = trendGran === 'hour'
+    ? (Array.isArray(u.hours) ? u.hours : [])
+    : (Array.isArray(u.days) ? u.days : []);
+  html += buildTrendChart(buckets);
+
+  // 积分排行：与趋势图同一份数据，回答「这段时间积分花在哪了」
+  html += renderCreditRanking(u.models);
+
+  if (u.models.length) {
+    // 明细表在窄屏下会宽于容器：必须放进可横向滚动的壳里，否则整页横向溢出
+    html += '<div class="tablewrap" style="max-height:340px">'
+      + '<table><thead><tr><th>模型</th><th>次数</th><th>输入</th><th>输出</th><th>积分</th><th>积分/次</th><th>总耗时</th></tr></thead><tbody>';
+    for (const m of u.models) {
+      const mc = Number(m.creditCalls) || 0;
+      const per = mc ? fmtCredit((Number(m.credit) || 0) / mc, true) : '—';
+      const active = !!reqModelFilter && reqModelFilter === m.model;
+      html += '<tr class="pickrow' + (active ? ' rowactive' : '') + '" data-model="' + escapeAttr(m.model)
+        + '" title="点击筛选「最近请求」">'
+        + '<td class="mono">' + escapeAttr(m.model) + '</td><td>' + m.calls +
+        '</td><td class="mono">' + fmtNum(m.promptTokens) +
+        '</td><td class="mono">' + fmtNum(m.completionTokens) +
+        '</td><td class="mono"' + (mc ? '' : ' title="上游未回报该模型的扣分"') + '>'
+        + fmtCredit(m.credit, mc) +
+        '</td><td class="mono">' + per +
+        '</td><td class="mono">' + fmtNum(m.ms) + ' ms</td></tr>';
+    }
+    html += '</tbody></table></div>';
+  } else {
+    html += '<div class="empty">这段时间没有调用。</div>';
+  }
+  box.innerHTML = html;
+  // 点模型行 → 筛选「最近请求」；再点同一行 = 取消（与下拉共用同一份状态）
+  box.querySelectorAll('tr.pickrow').forEach((tr) => {
+    tr.onclick = () => setReqModelFilter(reqModelFilter === tr.dataset.model ? '' : tr.dataset.model);
+  });
+  // 积分排行的条形同样联动（复用 R1.1 的同一状态，不另立一套筛选）
+  box.querySelectorAll('.rank-row.pick[data-rank-model]').forEach((el) => {
+    el.onclick = () => setReqModelFilter(reqModelFilter === el.dataset.rankModel ? '' : el.dataset.rankModel);
+  });
+}
+
+/**
+ * 最近请求明细。
+ *
+ * 成功和失败都在这里——只看用量统计是看不到失败的（失败没有 token 也没有扣分），
+ * 而「为什么这个模型调不通」恰恰只能从失败记录里看出来。
+ */
+async function loadRequests() {
+  const limit = Number($('reqLimit') && $('reqLimit').value) || 40;
+  const d = await api('/api/requests?limit=' + limit);
+  setStamp('reqStamp');
+  const list = d && d.requests;
+  if (!list) {
+    lastRequests = [];
+    $('reqBox').innerHTML = '<div class="empty">桥未运行，暂无数据。</div>';
+    return;
+  }
+  lastRequests = list;
+  // 明细变了：刷新下拉选项并保住当前选中值（选中值消失时回落「全部模型」）
+  syncReqModelFilterUI();
+  renderRequests();
+  // 新失败数只从这份明细算（与提示条同源同算）
+  refreshTitle();
+  renderAlerts();
+}
+
+/** 明细里出现过的模型（去重、字典序）——下拉选项与「有没有这个模型」都以它为准。 */
+function requestModels() {
+  const seen = new Set();
+  for (const r of lastRequests) if (r.model) seen.add(r.model);
+  return [...seen].sort((a, b) => a.localeCompare(b));
+}
+
+/**
+ * 同步「模型筛选」下拉的选项与选中值。
+ *
+ * 选中值不在新明细里时回落「全部模型」并提示一次——否则用户会盯着一个
+ * 筛不出任何东西的下拉，以为页面坏了。
+ */
+function syncReqModelFilterUI() {
+  const sel = $('reqModelFilter');
+  if (!sel) return;
+  const models = requestModels();
+  const prev = reqModelFilter;
+  sel.innerHTML = '<option value="">全部模型</option>'
+    + models.map((id) => '<option value="' + escapeAttr(id) + '">' + escapeAttr(id) + '</option>').join('');
+
+  let fellBackFrom = '';
+  if (prev && !models.includes(prev)) {
+    reqModelFilter = '';
+    fellBackFrom = prev;
+  }
+  sel.value = reqModelFilter;
+  renderReqFilterChip(fellBackFrom);
+}
+
+/** 「已筛选：X ×」标记（× 可点清除）；fellBackFrom 非空时改提示「已不在明细里」。 */
+function renderReqFilterChip(fellBackFrom) {
+  const el = $('reqFilterChip');
+  if (!el) return;
+  if (fellBackFrom) {
+    el.innerHTML = '<span class="filterchip">「' + escapeAttr(fellBackFrom)
+      + '」已不在最近明细里，已恢复「全部模型」</span>';
+    return;
+  }
+  if (!reqModelFilter) { el.innerHTML = ''; return; }
+  el.innerHTML = '<span class="filterchip">已筛选：<b>' + escapeAttr(reqModelFilter)
+    + '</b> <button class="chipx" id="reqFilterClear" title="清除筛选">×</button></span>';
+  const btn = $('reqFilterClear');
+  if (btn) btn.onclick = () => setReqModelFilter('');
+}
+
+/**
+ * 设置模型筛选 —— 用量表行点击与下拉共用的**唯一入口**。
+ * 只重绘，不重新请求（数据已在 lastRequests 里）。
+ */
+function setReqModelFilter(id, opts = {}) {
+  reqModelFilter = String(id || '');
+  const sel = $('reqModelFilter');
+  if (sel) {
+    // 点排行条形 / 用量表行时，筛的模型可能**不在当前明细里**（没有对应 option）。
+    // 直接赋值会被浏览器夹成空串，于是「标记说已筛选、下拉说全部」自相矛盾。
+    // 先把这个选项补上，保证状态能被如实表示；表格会给出「最近 N 条里没有 X」的说明。
+    if (reqModelFilter && ![...sel.options].some((o) => o.value === reqModelFilter)) {
+      const o = document.createElement('option');
+      o.value = reqModelFilter;
+      o.textContent = reqModelFilter;
+      sel.appendChild(o);
+    }
+    sel.value = reqModelFilter;
+  }
+  // 用量表里对应行的选中态（不整表重建，只改类名）
+  document.querySelectorAll('#usageBox tr.pickrow').forEach((tr) => {
+    tr.classList.toggle('rowactive', !!reqModelFilter && tr.dataset.model === reqModelFilter);
+  });
+  renderReqFilterChip('');
+  renderRequests();
+  if (reqModelFilter && !opts.noScroll) {
+    const box = $('reqBox');
+    if (box && box.scrollIntoView) box.scrollIntoView({ block: 'start', behavior: 'smooth' });
+  }
+}
+
+/**
+ * 当前筛选（模型 + 仅看失败）下的明细 —— 渲染与导出 CSV **共用同一个算法**，
+ * 保证「导出的就是屏幕上看到的那些」。
+ */
+function visibleRequests() {
+  const failOnly = !!($('reqFailOnly') && $('reqFailOnly').checked);
+  return lastRequests.filter((r) => (!failOnly || !r.ok) && (!reqModelFilter || r.model === reqModelFilter));
+}
+
+/** 当前筛选范围的文字描述（导出提示里要写清，别偷偷导全量）。 */
+function requestScopeText() {
+  return (reqModelFilter ? '模型 ' + reqModelFilter : '全部模型')
+    + (($('reqFailOnly') && $('reqFailOnly').checked) ? ' · 仅失败' : '');
+}
+
+/** 渲染请求明细（「仅看失败」只影响显示，不重新请求——数据已在内存）。 */
+function renderRequests() {
+  const box = $('reqBox');
+  const list = lastRequests;
+  // 重绘前记住滚动位置：排障时要盯住某一屏，每 20 秒被弹回顶部没法看
+  const prevWrap = $('reqTableWrap');
+  const prevScroll = prevWrap ? prevWrap.scrollTop : 0;
+
+  if (!list.length) {
+    box.innerHTML = '<div class="empty">还没有请求记录。</div>';
+    return;
+  }
+
+  const shown = visibleRequests();
+  const failed = list.filter((r) => !r.ok).length;
+
+  // 失败率 + 出现最多的「错误码 · 模型」组合：取自已返回的明细，不新增接口
+  let notice = '';
+  if (failed) {
+    const rate = (failed / list.length * 100).toFixed(1);
+    const tally = new Map();
+    for (const r of list) {
+      if (r.ok) continue;
+      const codeText = (r.code === null || r.code === undefined)
+        ? (r.status ? 'HTTP ' + r.status : '无状态码')
+        : String(r.code);
+      const key = codeText + ' · ' + (r.model || '未知模型');
+      tally.set(key, (tally.get(key) || 0) + 1);
+    }
+    const top = [...tally.entries()].sort((a, b) => b[1] - a[1]).slice(0, 3)
+      .map(([k, n]) => escapeAttr(k) + '（' + n + ' 次）').join('、');
+    notice = '<div class="notice">最近 ' + list.length + ' 条里有 <b>' + failed + '</b> 条失败（'
+      + rate + '%）；最多：' + top + '。鼠标悬停结果标签可看上游返回的错误原文。</div>';
+  }
+
+  if (!shown.length) {
+    // 明细里压根没有这个模型（不是被「仅看失败」挡住的）→ 告诉用户怎么把它找出来，
+    // 不能只是空白一片，让人以为联动坏了
+    if (reqModelFilter && !list.some((r) => r.model === reqModelFilter)) {
+      box.innerHTML = notice + '<div class="empty">最近 ' + list.length + ' 条里没有 '
+        + escapeAttr(reqModelFilter) + ' 的记录，可把条数调大到 200。</div>';
+      return;
+    }
+    box.innerHTML = notice + '<div class="empty">当前筛选下没有记录。</div>';
+    return;
+  }
+
+  const rows = shown.map((r) => {
+    const result = r.ok
+      ? '<span class="tag ok">成功</span>'
+      // 失败标签可点：一键把「状态码 · 错误码 · 模型 + 错误原文」抄进剪贴板。
+      // 成功行**不给**复制入口——没有错误原文可抄，给了只会让人以为漏了什么。
+      : '<button type="button" class="tag fail copyfail" title="点击复制错误详情（悬停已看原文）"'
+        + ' data-copyfail="' + escapeAttr(copyFailText(r)) + '">'
+        + (r.status ? 'HTTP ' + r.status : '失败')
+        + (r.code === null || r.code === undefined ? '' : ' · ' + escapeAttr(r.code)) + '</button>';
+    const hasTokens = typeof r.promptTokens === 'number' || typeof r.completionTokens === 'number';
+    const tokens = hasTokens
+      ? fmtNum(r.promptTokens || 0) + ' / ' + fmtNum(r.completionTokens || 0)
+      : '—';
+    return '<tr' + (r.ok ? '' : ' class="rowfail"') + '>' +
+      '<td class="mono">' + fmtTime(r.t) + '</td>' +
+      '<td class="mono">' + escapeAttr(r.model) + '</td>' +
+      '<td>' + (r.stream ? '流式' : '非流式') + '</td>' +
+      '<td class="mono">' + fmtNum(r.ms) + ' ms</td>' +
+      '<td class="mono">' + tokens + '</td>' +
+      '<td class="mono">' + fmtCredit(r.credit, typeof r.credit === 'number') + '</td>' +
+      '<td>' + result + '</td>' +
+      '</tr>';
+  }).join('');
+
+  box.innerHTML = notice +
+    '<div class="tablewrap" id="reqTableWrap" style="max-height:320px"><table><thead><tr>' +
+    '<th>时间</th><th>模型</th><th>方式</th><th>耗时</th><th>输入/输出</th><th>积分</th><th>结果</th>' +
+    '</tr></thead><tbody>' + rows + '</tbody></table></div>';
+  // 恢复滚动位置（放最后：innerHTML 一换 scrollTop 就归零了）
+  const nextWrap = $('reqTableWrap');
+  if (nextWrap) nextWrap.scrollTop = prevScroll;
+  // 失败标签点击 = 复制错误详情（反馈沿用 copyText 的统一提示）
+  box.querySelectorAll('button.copyfail').forEach((b) => {
+    b.onclick = () => copyText(b.dataset.copyfail || '');
+  });
+}
+
+/**
+ * 失败行一键复制的内容：`HTTP <status> · <code> · <model>` + 换行 + 错误原文。
+ *
+ * 缺字段的段自动省略。这里的模型名与错误原文**不转义**——剪贴板是纯文本，
+ * 转义只用于拼 DOM（否则用户粘出来会是一堆 &amp;）。
+ */
+function copyFailText(r) {
+  const head = [];
+  if (r.status) head.push('HTTP ' + r.status);
+  if (r.code !== null && r.code !== undefined) head.push(String(r.code));
+  if (r.model) head.push(String(r.model));
+  const err = r.error ? String(r.error) : '';
+  return head.join(' · ') + (err ? '\n' + err : '');
+}
+
+async function loadAccounts() {
+  const el = $('accountList');
+  const d = await api('/api/accounts');
+  setStamp('accountsStamp');
+  if (!d.accounts || !d.accounts.length) {
+    el.innerHTML = '<div class="empty">' + escapeAttr(d.error || '未找到账号快照。') + '</div>';
+    return;
+  }
+
+  el.innerHTML = d.accounts.map(a => {
+    const status = a.usable
+      ? '<span class="tag ok">可用</span>'
+      : '<span class="tag fail" title="' + escapeAttr(a.error || '') + '">不可用</span>';
+    const expire = a.remainingMs > 0 ? fmtDuration(a.remainingMs) : '已过期';
+    const switchBtn = a.active
+      ? ''
+      : '<button data-switch="' + escapeAttr(a.name) + '"' + (a.usable ? '' : ' disabled') + '>切换</button>';
+    return '<div class="acct">' +
+      '<div>' +
+        '<div class="acct-name">' + escapeAttr(a.account || a.name) +
+          (a.active ? ' <span class="tag ok">使用中</span>' : '') + '</div>' +
+        '<div class="acct-sub mono">' + escapeAttr(a.name) + ' · ' + escapeAttr(a.domain || '—')
+          + ' · 剩余 ' + expire + '</div>' +
+      '</div>' +
+      '<div class="acct-act">' + status + switchBtn + '</div>' +
+    '</div>';
+  }).join('');
+
+  el.querySelectorAll('[data-switch]').forEach(btn => {
+    btn.onclick = () => switchAccount(btn.dataset.switch);
+  });
+}
+
+async function switchAccount(file) {
+  // 取消 → 直接返回，不重启桥、不清体检结论
+  const ok = await confirmDangerous('确定切换到账号 ' + file + '？', [
+    '切换会自动重启桥，并**清空上一个账号的体检结论**（结论只对被测时的账号成立）。',
+    ...probeRunningNote(),
+  ]);
+  if (!ok) return;
+  $('accountList').querySelectorAll('button').forEach(b => { b.disabled = true; });
+  setMsg('正在切换账号，桥会重启，请稍候…');
+  const r = await api('/api/account/switch', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ file }),
+  });
+  setMsg(
+    r.switched ? ('已切换到 ' + ((r.account && r.account.account) || file)) : ('切换失败：' + (r.error || '')),
+    r.switched ? 'good' : 'err',
+  );
+  // 账号变了，签到活动与模型目录都要跟着重读（国际版没有签到活动）
+  await loadAccounts();
+  await loadOverview();
+  await loadDiag();
+  await loadCheckin();
+  // 体检结论只对被测时的账号成立：服务端在切换时已清空存档，这里同步本地显示
+  if (r.switched) resetProbeState();
+}
+
+/**
+ * 复制文本到剪贴板，并在操作条给一句反馈。
+ *
+ * 剪贴板 API 可能因浏览器未授权而失败（非安全上下文、无用户手势等），
+ * 因此退化到 execCommand 兜底；两条路都走不通时，把文本直接显示出来，
+ * 至少让用户能手动选中复制——只报一句「复制失败」等于什么也没给。
+ */
+async function copyText(text, opts = {}) {
+  if (!text) return false;
+
+  let ok = false;
+  try {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(text);
+      ok = true;
+    }
+  } catch {
+    /* 继续尝试兜底方案 */
+  }
+
+  if (!ok) {
+    try {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.style.position = 'fixed';
+      ta.style.top = '-1000px';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.select();
+      ok = document.execCommand('copy');
+      ta.remove();
+    } catch {
+      ok = false;
+    }
+  }
+
+  // quiet：内容很长时（如整份诊断报告）不要把全文塞进提示条，由调用方自己给文案
+  if (!opts.quiet) {
+    if (ok) setMsg('已复制：' + text, 'good');
+    else setMsg('复制失败，请手动复制：' + text, 'err');
+  }
+  return ok;
+}
+
+/** 按搜索词、类别与体检结论过滤模型行（纯前端，不改数据）。 */
+function applyModelFilter() {
+  const q = ($('modelFilter') && $('modelFilter').value || '').trim().toLowerCase();
+  const kind = ($('modelKind') && $('modelKind').value) || '';
+  // 从 DOM 现算勾选状态：用户可能刚改过，缓存集合会过期
+  const checked = new Set(
+    [...document.querySelectorAll('#modelTable input[data-id]')]
+      .filter((c) => c.checked).map((c) => c.dataset.id),
+  );
+
+  let shown = 0;
+  document.querySelectorAll('#modelTable tbody tr').forEach((tr) => {
+    const id = tr.dataset.modelId || '';
+    const name = tr.dataset.modelName || '';
+    const free = tr.dataset.free === '1';
+    const isReg = checked.has(id);
+    const probeOk = tr.dataset.probeOk || ''; // '' 未测 / '1' 可用 / '0' 不可用
+
+    const matchQ = !q || id.toLowerCase().includes(q) || name.toLowerCase().includes(q);
+    const matchKind = !kind
+      || (kind === 'free' && free)
+      || (kind === 'registered' && isReg)
+      || (kind === 'unregistered' && !isReg)
+      || (kind === 'probe-ok' && probeOk === '1')
+      || (kind === 'probe-fail' && probeOk === '0')
+      || (kind === 'probe-none' && probeOk === '');
+
+    const show = matchQ && matchKind;
+    tr.style.display = show ? '' : 'none';
+    if (show) shown += 1;
+  });
+
+  // 用独立元素显示过滤结果：#regMsg 要留给「保存 / 探测」的进度与结论，
+  // 两者共用会让「改一下搜索词就把探测进度冲掉」
+  const info = $('filterInfo');
+  if (info) info.textContent = (q || kind) ? '显示 ' + shown + ' / ' + currentModels.length : '';
+}
+
+/** 取出行的体检耗时（没有则视为无穷大，排在最后）。 */
+function rowProbeMs(tr) {
+  const v = Number(tr.dataset.probeMs);
+  return Number.isFinite(v) && v > 0 ? v : Number.POSITIVE_INFINITY;
+}
+
+/** 按当前 probeSortMode 重排行序（静默时不刷提示）。 */
+function applyProbeSort(silent) {
+  const tbody = document.querySelector('#modelTable tbody');
+  if (!tbody) return;
+  const rows = [...tbody.querySelectorAll('tr')];
+  const rank = (tr) => (tr.dataset.probeOk === '1' ? 0 : tr.dataset.probeOk === '0' ? 1 : 2);
+  const byId = (a, b) => (a.dataset.modelId || '').localeCompare(b.dataset.modelId || '');
+
+  if (probeSortMode === 'ok') {
+    rows.sort((a, b) => rank(a) - rank(b) || rowProbeMs(a) - rowProbeMs(b) || byId(a, b));
+  } else if (probeSortMode === 'ms') {
+    rows.sort((a, b) => rowProbeMs(a) - rowProbeMs(b) || byId(a, b));
+  } else if (probeSortMode === 'msdesc') {
+    rows.sort((a, b) => {
+      const av = rowProbeMs(a);
+      const bv = rowProbeMs(b);
+      const aHas = Number.isFinite(av);
+      const bHas = Number.isFinite(bv);
+      if (aHas !== bHas) return aHas ? -1 : 1;
+      return (bv - av) || byId(a, b);
+    });
+  } else {
+    rows.sort(byId); // 默认顺序：按模型 id
+  }
+  for (const tr of rows) tbody.appendChild(tr);
+
+  const mark = $('probeSortMark');
+  if (mark) {
+    mark.textContent = probeSortMode === 'ok' ? '可用优先'
+      : probeSortMode === 'ms' ? '耗时↑'
+        : probeSortMode === 'msdesc' ? '耗时↓' : '';
+  }
+  if (silent) return;
+  const msg = $('regMsg');
+  if (msg) {
+    msg.className = 'msg';
+    msg.textContent = probeSortMode
+      ? '已按可用性排序：' + mark.textContent + '（点表头继续切换）'
+      : '已恢复默认顺序（按模型 id）';
+  }
+}
+
+/** 点「可用性」表头：在 可用优先 / 耗时升序 / 耗时降序 / 默认 之间循环。 */
+function sortModelsByProbe() {
+  const order = ['ok', 'ms', 'msdesc', ''];
+  probeSortMode = order[(order.indexOf(probeSortMode) + 1) % order.length];
+  applyProbeSort(false);
+}
+
+/**
+ * 按倍率升序重排表格（未知的排最后）。
+ * @param {boolean} [silent] 由状态恢复触发时不显示提示
+ */
+function sortModelsByCredits(silent) {
+  const tbody = document.querySelector('#modelTable tbody');
+  if (!tbody) return;
+  const rows = [...tbody.querySelectorAll('tr')];
+  const creditOf = (tr) => {
+    const v = tr.dataset.credits;
+    return v === '' ? Number.POSITIVE_INFINITY : Number(v);
+  };
+  rows.sort((a, b) => creditOf(a) - creditOf(b));
+  for (const tr of rows) tbody.appendChild(tr);
+
+  sortedByCredits = true;
+  probeSortMode = ''; // 两种排序互斥，避免表头标记与实际行序不符
+  const mark = $('probeSortMark');
+  if (mark) mark.textContent = '';
+  if (silent) return;
+  const msg = $('regMsg');
+  if (msg) { msg.className = 'msg'; msg.textContent = '已按倍率升序排列'; }
+}
+
+function updateRegCount() {
+  const n = checkedModelIds().length;
+  const btn = $('saveRegBtn');
+  if (btn) {
+    btn.textContent = n ? '保存到 dsh 设置（' + n + ' 个）' : '保存到 dsh 设置';
+    btn.disabled = n === 0;
+  }
+  // 勾选变化会同时影响「体检范围」的数量文案与「取消勾选不可用的」的可见性
+  updateProbeScopeUI();
+  updateUncheckBadBtn();
+}
+
+/** 模型工具栏的提示（与顶部操作条的 setMsg 分开，别串到别的面板上去）。 */
+function setRegMsg(text, cls) {
+  const el = $('regMsg');
+  if (!el) return;
+  el.className = 'msg' + (cls ? ' ' + cls : '');
+  el.textContent = text || '';
+}
+
+/**
+ * 刷新体检范围控件：选项文案带数量、按钮文案带数量、空范围禁用。
+ *
+ * 默认规则（R9.1）：有勾选 → 「勾选的」；一个都没勾 → 「全部」——首次使用
+ * 不会莫名只测 0 个。用户手动改过（dataset.touched）之后就不再套默认，
+ * 免得把用户的选择覆盖回去。
+ */
+function updateProbeScopeUI() {
+  const sel = $('probeScope');
+  if (!sel) return;
+  const k = checkedModelIds().length;
+  const r = registeredInCatalogIds().length;
+  const m = currentModels.length;
+
+  if (!sel.dataset.touched) {
+    probeScope = k > 0 ? 'checked' : 'all';
+    sel.value = probeScope;
+  }
+
+  const setLabel = (v, label) => {
+    const o = sel.querySelector('option[value="' + v + '"]');
+    if (o) o.textContent = label;
+  };
+  setLabel('checked', '勾选的（' + k + '）');
+  setLabel('registered', '已注册的（' + r + '）');
+  setLabel('all', '全部（' + m + '）');
+
+  const btn = $('probeAllBtn');
+  if (!btn || probeCtrl) return; // 体检进行中：按钮由 probeAll() 掌管，别抢
+  const { ids } = probeScopeIds(sel.value);
+  btn.textContent = ids.length ? '测试可用性（' + ids.length + ' 个）' : '测试可用性';
+  btn.disabled = ids.length === 0;
+  btn.title = ids.length === 0
+    ? (sel.value === 'checked' ? '先勾选要测的模型' : '当前范围里没有可测的模型')
+    : '只测「' + (sel.options[sel.selectedIndex]?.textContent || '') + '」；会消耗少量额度';
+}
+
+/** 「取消勾选不可用的」只在「确实有不可用结论，且它还在勾选里」时出现。 */
+function updateUncheckBadBtn() {
+  const btn = $('uncheckBadBtn');
+  if (!btn) return;
+  const n = badCheckedIds().length;
+  btn.hidden = n === 0;
+  btn.textContent = n ? '取消勾选不可用的（' + n + ' 个）' : '取消勾选不可用的';
+}
+
+/**
+ * 把已测出「不可用」的模型从勾选里去掉。**不写盘** —— 只是本地勾选变化，
+ * 用户还得点「保存到 dsh 设置」才会生效（提示里必须说清这一点）。
+ */
+function uncheckBadModels() {
+  const n = badCheckedIds().length;
+  if (!n) { setRegMsg('没有处于勾选状态的不可用模型'); return; }
+  document.querySelectorAll('#modelTable tbody tr').forEach((tr) => {
+    if (tr.dataset.probeOk !== '0') return;
+    const cb = tr.querySelector('input[data-id]');
+    if (cb) cb.checked = false;
+  });
+  if ($('checkAll')) $('checkAll').checked = false;
+  updateRegCount();
+  applyModelFilter();
+  setRegMsg('已取消勾选 ' + n + ' 个不可用模型（未保存前不影响 dsh）');
+}
+
+/**
+ * 把目录里标了「免费 / 促销」的模型**追加**到当前勾选（不覆盖已选的）。
+ * 已知不可用（体检结论 ok=false）的不勾：它们必然调用失败。
+ */
+function selectFreeModels() {
+  let added = 0;
+  let skipped = 0;
+  document.querySelectorAll('#modelTable tbody tr').forEach((tr) => {
+    if (tr.dataset.free !== '1') return;
+    const cb = tr.querySelector('input[data-id]');
+    if (!cb || cb.checked) return;
+    if (tr.dataset.probeOk === '0') { skipped += 1; return; }
+    cb.checked = true;
+    added += 1;
+  });
+  updateRegCount();
+  applyModelFilter();
+  const msg = $('regMsg');
+  if (msg) {
+    msg.className = 'msg';
+    const skipNote = skipped ? '，跳过 ' + skipped + ' 个已知不可用的模型' : '';
+    msg.textContent = added
+      ? '加选了 ' + added + ' 个免费模型' + skipNote + '，点「保存到 dsh 设置」生效'
+      : (skipped ? '可选的免费模型已经都选上了（跳过 ' + skipped + ' 个已知不可用的）' : '免费模型已经都选上了');
+  }
+}
+
+function clearModelSelection() {
+  document.querySelectorAll('#modelTable input[data-id]').forEach((c) => { c.checked = false; });
+  if ($('checkAll')) $('checkAll').checked = false;
+  updateRegCount();
+  applyModelFilter();
+  const msg = $('regMsg');
+  if (msg) { msg.className = 'msg'; msg.textContent = '已清空勾选（未保存前不影响 dsh 配置）'; }
+}
+
+async function saveRegistration() {
+  const ids = [...document.querySelectorAll('#modelTable input[data-id]:checked')]
+    .map(c => c.dataset.id);
+  const models = ids.map(id => {
+    const m = currentModels.find(x => x.id === id) || { id };
+    return { id, name: m.name || id, contextWindow: m.context_window, maxTokens: m.max_output_tokens };
+  });
+
+  const msg = $('regMsg');
+  msg.textContent = '正在写入…';
+  msg.className = 'msg';
+
+  const r = await api('/api/register', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ models }),
+  });
+
+  if (r.saved) {
+    // 先刷新再写提示：已注册列表变化会重建整块表格（连 regMsg 一起换掉），
+    // 先写的话消息会被新元素吞掉，用户只看到一闪。
+    await loadOverview();
+    const fresh = $('regMsg');
+    if (fresh) {
+      fresh.textContent = '已写入 ' + r.count + ' 个模型' + (r.backup ? '，原文件已备份' : '')
+        + (r.patchError ? '；cordis.patch.yml 写入失败：' + r.patchError : '')
+        + dshEffectNote();
+      fresh.className = 'msg good';
+    }
+  } else {
+    msg.textContent = '写入失败：' + (r.error || '未知错误');
+    msg.className = 'msg err';
+  }
+}
+
+/**
+ * 保存成功后的「生效时机」说明（R8.1）。
+ *
+ * DSH Desktop 0.2.0 是**下次启动**才把 settings.yaml 导入 patch 层；但若路由
+ * 已经由 cordis.patch.yml 提供，那就是**立即生效**。两者必须说清——否则用户
+ * 会盯着「保存成功」纳闷「怎么还没反应」。
+ */
+function dshEffectNote() {
+  const d = lastOverview && lastOverview.dsh;
+  if (d && d.routeSource === 'cordis.patch.yml') return '；已写入 cordis.patch.yml，立即生效。';
+  return '；DSH Desktop 0.2.0 会在下次启动时把 settings.yaml 导入 patch 层；已生效路径同时写入 cordis.patch.yml。';
+}
+
+// ── 同步可用模型到 dsh（R8.3）───────────────────────────────────────────
+// 「勾选 → 测 → 取消坏的 → 保存」是四步，忙起来容易漏。这里把
+// 「体检可用 ∩ 当前目录」一次写入 dsh，勾选与保存都不用再手工对齐。
+
+/** 体检结论为「可用」且仍在当前目录里的模型 id（集合 S）。 */
+function usableIds() {
+  const inCatalog = new Set(currentModels.map((m) => m.id));
+  return Object.keys(probeResults)
+    .filter((id) => probeResults[id] && probeResults[id].ok === true && inCatalog.has(id));
+}
+
+function updateSyncUsableBtn() {
+  const btn = $('syncUsableBtn');
+  if (!btn) return;
+  const n = usableIds().length;
+  btn.disabled = n === 0;
+  btn.textContent = n ? '同步可用模型到 dsh（' + n + ' 个）' : '同步可用模型到 dsh';
+  btn.title = n === 0
+    ? '先做一次体检：当前没有「可用」结论可同步'
+    : '把体检可用的模型一次写入 dsh（会替换当前勾选，原文件自动备份）';
+}
+
+async function syncUsableModels() {
+  const ids = usableIds();
+  if (!ids.length) { setRegMsg('先做一次体检：当前没有「可用」的模型可同步', 'err'); return; }
+  const ok = confirm('将把 ' + ids.length + ' 个「体检可用」的模型写入 dsh，会替换当前勾选；'
+    + '原文件会自动备份。\n\n确定继续？');
+  if (!ok) return; // 取消 → 什么都不写
+  const set = new Set(ids);
+  document.querySelectorAll('#modelTable input[data-id]').forEach((c) => { c.checked = set.has(c.dataset.id); });
+  if ($('checkAll')) $('checkAll').checked = false;
+  updateRegCount();
+  applyModelFilter();
+  await saveRegistration(); // 含双写与生效时机提示
+}
+
+/** 导出当前目录下的全部模型（含倍率与注册状态），便于离线比对。 */
+/**
+ * 导出「最近请求」CSV —— 导出的是**当前筛选与条数**下的明细（不偷偷导全量）。
+ * 列与页面表格对齐，另补状态码 / 错误码 / 错误原文（页面靠悬停看，CSV 里要落下来）。
+ */
+function exportRequestsCsv() {
+  const shown = visibleRequests();
+  if (!shown.length) { setRegMsg('当前筛选下没有可导出的明细', 'err'); return; }
+  const rows = [['时间', '模型', '方式', '耗时(ms)', '输入 tokens', '输出 tokens', '积分', '结果', '状态码', '错误码', '错误原文']];
+  for (const r of shown) {
+    rows.push([
+      new Date(r.t).toLocaleString('zh-CN', { hour12: false }),
+      r.model || '',
+      r.stream ? '流式' : '非流式',
+      Number(r.ms) || 0,
+      typeof r.promptTokens === 'number' ? r.promptTokens : '',
+      typeof r.completionTokens === 'number' ? r.completionTokens : '',
+      typeof r.credit === 'number' ? r.credit : '',
+      r.ok ? '成功' : '失败',
+      r.status || '',
+      r.code === null || r.code === undefined ? '' : r.code,
+      r.error ? String(r.error).replace(/\s+/g, ' ').slice(0, 300) : '',
+    ]);
+  }
+  downloadCsv('workbuddy-requests-' + today() + '.csv', rows);
+  setRegMsg('已导出请求明细（' + requestScopeText() + ' · ' + shown.length + ' 条）', 'good');
+}
+
+function exportModelsCsv() {
+  if (!currentModels.length) { setMsg('没有可导出的模型', 'err'); return; }
+  const registered = new Set(
+    [...document.querySelectorAll('#modelTable input[data-id]')]
+      .filter((c) => c.checked).map((c) => c.dataset.id),
+  );
+  const rows = [['模型 id', '显示名', '上下文', '最大输出', '倍率', '免费', '已注册 dsh',
+    '体检结论', '体检耗时(ms)', '支持图片(空=未声明)', '实测成本(每千 token)', '成本样本(次)']];
+  for (const m of currentModels) {
+    const p = probeResults[m.id];
+    const cost = costRaw(m.id);
+    rows.push([
+      m.id,
+      m.name || '',
+      m.context_window || 0,
+      m.max_output_tokens || 0,
+      typeof m.credits === 'number' ? m.credits : '',
+      m.free ? '是' : '',
+      registered.has(m.id) ? '是' : '',
+      // 体检结论 / 耗时：与页面同一个 probeResults，口径一致
+      p ? (p.ok ? '可用' : '不可用') : '未测',
+      p && Number.isFinite(Number(p.ms)) ? Number(p.ms) : '',
+      m.supports_images ? '是' : '',
+      // 实测成本与页面同源（同一个 costRaw）；数据不足留空，不写 0 冒充
+      cost ? Math.round(cost.per * 10000) / 10000 : '',
+      cost ? cost.calls : '',
+    ]);
+  }
+  downloadCsv('workbuddy-models-' + today() + '.csv', rows);
+  setMsg('已导出模型清单 CSV（含体检结论与实测成本）', 'good');
+}
+
+/** 导出用量账本（按模型聚合 + 合计）。 */
+function exportUsageCsv() {
+  const u = lastUsage;
+  if (!u || !u.total) { setMsg('暂无可导出的用量数据', 'err'); return; }
+
+  // 留空的单元格表示「上游没有回报该次扣分」，与回报了 0 是两回事
+  const r4 = (n) => Math.round((Number(n) || 0) * 10000) / 10000;
+  const creditCell = (credit, creditCalls) => (creditCalls ? r4(credit) : '');
+  const perCell = (credit, creditCalls) => (creditCalls ? r4((Number(credit) || 0) / creditCalls) : '');
+
+  const rows = [['模型', '调用次数', '输入 tokens', '输出 tokens', '消耗积分', '积分回报次数', '积分/次', '总耗时(ms)']];
+  for (const m of u.models) {
+    const mc = Number(m.creditCalls) || 0;
+    rows.push([
+      m.model, m.calls, m.promptTokens, m.completionTokens,
+      creditCell(m.credit, mc), mc, perCell(m.credit, mc), m.ms,
+    ]);
+  }
+  const t = u.total;
+  const tc = Number(t.creditCalls) || 0;
+  rows.push([
+    '合计', t.calls, t.promptTokens, t.completionTokens,
+    creditCell(t.credit, tc), tc, perCell(t.credit, tc), t.ms,
+  ]);
+  downloadCsv('workbuddy-usage-' + today() + '.csv', rows);
+  setMsg('已导出用量 CSV（最近 ' + u.windowDays + ' 天）', 'good');
+}
+
+async function loadOverview() {
+  const d = await api('/api/overview');
+  setStamp('overviewStamp');
+  if (d.error) { setBadge('fail', '控制台异常'); return; }
+
+  lastOverview = d;
+  const b = d.bridge;
+  lastBridge = b;
+  // catalogAt 到了：模型面板的「目录 HH:MM」要跟着更新
+  refreshModelStamp();
+  // 桥状态变了：标题与提示条都要重算
+  refreshTitle();
+  renderAlerts();
+
+  if (b.ok) setBadge('ok', '桥运行中');
+  else if (b.running) setBadge('warn', '桥有响应但异常');
+  else setBadge('fail', '桥未运行');
+
+  $('startBtn').disabled = b.ok;
+  $('stopBtn').disabled = !b.running;
+
+  renderCards();
+  // 已注册列表可能刚变化：重算「失效注册」提示
+  if (lastModels) renderModelSection();
+
+  // 日志只在面板展开时读：收起时每 20 秒读一次文件是白费的
+  refreshLogIfOpen();
+}
+
+/**
+ * 渲染状态卡。模型目录与桥状态是**两个来源**：目录后到时用占位，
+ * 到了再补（避免桥冷启动时整页陪着等上游）。
+ */
+function renderCards() {
+  const d = lastOverview;
+  if (!d) return;
+  const a = d.credentials.active;
+  const b = d.bridge;
+  const cards = [];
+
+  cards.push(card('账号',
+    a ? (a.account || '—') : '—',
+    a ? 'uid ' + (a.userId || '').slice(0, 8) + '…' : (d.credentials.error || '未取到')));
+
+  cards.push(card('令牌剩余',
+    a ? fmtDuration(a.remainingMs) : '—',
+    a ? '至 ' + new Date(a.expiresAt).toLocaleString('zh-CN', { hour12: false }) : '',
+    true));
+
+  cards.push(card('凭据加密',
+    a ? (a.encrypted ? 'AtRest 信封' : '明文') : '—',
+    a && a.keyIdMatches ? 'keyId ' + a.keyId : (a ? 'keyId 不匹配' : '')));
+
+  cards.push(card('上游端点',
+    b.upstream ? b.upstream.replace('https://', '') : '—',
+    '本地 ' + b.endpoint, true));
+
+  cards.push(card('桥进程',
+    b.uptimeMs != null ? ('运行 ' + fmtUptime(b.uptimeMs)) : (b.running ? '—' : '未运行'),
+    b.pid
+      ? ('PID ' + b.pid + (b.catalogSize != null ? '　目录 ' + b.catalogSize + ' 个模型' : ''))
+      : (b.running ? '该桥未汇报进程信息（版本较旧）' : ''),
+    true));
+
+  const models = lastModels;
+  cards.push(card('可用模型',
+    models ? String(models.length) : '—',
+    models === null
+      ? (lastModelsError ? '模型目录读取失败：' + lastModelsError : '正在读取模型目录…')
+      : (models.length
+        ? models.slice(0, 2).map(m => m.id).join(' · ') + (models.length > 2 ? ' 等 ' + models.length + ' 个' : '')
+        : '桥未运行或目录为空')));
+
+  if (d.quota) {
+    const pkgs = d.quota.packages || [];
+    const detail = pkgs.slice(0, 2).map(p => p.name + ' ' + p.remain + '/' + p.size).join(' · ')
+      + (pkgs.length > 2 ? ' 等 ' + pkgs.length + ' 个套餐' : '');
+    cards.push(card('积分余额', String(d.quota.total), detail || '无套餐'));
+  } else {
+    cards.push(card('积分余额', '—', '桥未运行或查询失败', true));
+  }
+
+  const cfgOk = d.dsh.routeLive && d.dsh.hasBridgeKey;
+  cards.push(card('DSH 配置',
+    cfgOk ? (d.dsh.bundlesOk ? '已就绪' : '待修复') : '未就绪',
+    (d.dsh.routeLive ? '路由 ✓' : '路由 ✗') + '　' +
+    (d.dsh.hasBridgeKey ? '凭据 ✓' : '凭据 ✗') + '　' +
+    (d.dsh.bundlesOk ? 'bundle ✓' : 'bundle ✗'),
+    true));
+
+  $('cards').innerHTML = cards.join('');
+}
+
+/** 模型目录：独立于 /api/overview，慢也不拖累徽章与卡片。 */
+async function loadModels(opts = {}) {
+  const refresh = !!opts.refresh;
+  if (!$('modelTable')) $('modelWrap').innerHTML = '<div class="empty">正在读取模型目录…</div>';
+  const d = await api('/api/models' + (refresh ? '?refresh=1' : ''));
+  // 刷新失败时桥会带回 staleMs：记下来，供「目录 HH:MM」与失败提示如实说明缓存有多旧
+  lastModelsStaleMs = (d && d.staleMs !== undefined && d.staleMs !== null) ? Number(d.staleMs) : null;
+  refreshModelStamp();
+  if (!d || !Array.isArray(d.models)) {
+    // 读不到目录时**不能**说成「桥未运行」——这是接口本身的问题，如实说清
+    lastModels = null;
+    lastModelsError = (d && d.error) ? String(d.error) : '响应格式不符';
+    $('modelWrap').innerHTML = '<div class="empty">模型目录读取失败：'
+      + escapeAttr(lastModelsError) + '</div>';
+    renderCards();
+    return;
+  }
+  lastModels = d.models;
+  lastModelsError = '';
+  renderCards();
+  renderModelSection();
+  refreshTitle(); // 标题里的「M 模型」来自目录
+}
+
+/** 模型面板时间戳：`更新于 HH:MM:SS` + 有缓存时补 `目录 HH:MM`（本地时间）。 */
+function refreshModelStamp() {
+  const el = $('modelStamp');
+  if (!el) return;
+  const clock = catalogCacheClock();
+  el.textContent = '更新于 ' + fmtTime(Date.now()) + (clock ? ' · 目录 ' + clock : '');
+}
+
+/**
+ * 目录缓存的抓取时刻 `HH:MM`（本地时间）。
+ * 优先用「刷新失败时桥带回的 staleMs」反推；没有就用 /api/overview 的 catalogAt。
+ * 两者都没有（桥未运行 / 从没抓过）→ 空串，页面上就不显示这一段。
+ */
+function catalogCacheClock() {
+  let at = null;
+  if (Number.isFinite(lastModelsStaleMs)) at = new Date(Date.now() - lastModelsStaleMs);
+  else if (lastBridge && lastBridge.catalogAt) at = new Date(lastBridge.catalogAt);
+  if (!at || Number.isNaN(at.getTime())) return '';
+  return String(at.getHours()).padStart(2, '0') + ':' + String(at.getMinutes()).padStart(2, '0');
+}
+
+/**
+ * 手动强制重取上游目录（R2.3）。
+ *
+ * 失败时**保留旧表格**：宁可给一份标了年纪的目录，也别让页面突然空白。
+ * 期间按钮禁用——连点不并发（桥侧另有 catalogRefreshing 去重兜底）。
+ */
+async function refreshCatalogNow() {
+  const btn = $('refreshCatalogBtn');
+  if (btn) { btn.disabled = true; btn.textContent = '正在刷新目录…'; }
+  try {
+    const d = await api('/api/models?refresh=1');
+    if (!d || !Array.isArray(d.models)) {
+      setRegMsg('刷新失败：' + ((d && d.error) || '响应格式不符') + '；表格保留原有内容', 'err');
+      return;
+    }
+    const stale = (d.staleMs === undefined || d.staleMs === null) ? null : Number(d.staleMs);
+    lastModels = d.models;
+    lastModelsStaleMs = stale;
+    lastModelsError = '';
+    renderCards();
+    renderModelSection();
+    refreshModelStamp();
+    if (stale === null) {
+      setRegMsg('目录已更新（' + d.models.length + ' 个模型）', 'good');
+    } else {
+      const clock = catalogCacheClock();
+      setRegMsg('刷新失败：上游未返回新目录；仍显示 ' + (clock ? clock + ' 的缓存' : '上一次的缓存')
+        + '（' + d.models.length + ' 个模型）', 'err');
+    }
+  } catch (err) {
+    setRegMsg('刷新失败：' + ((err && err.message) || err) + '；表格保留原有内容', 'err');
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = '刷新目录'; }
+  }
+}
+
+/** 渲染模型面板：失效注册提示 + 模型表（只在数据指纹变化时重建 DOM）。 */
+function renderModelSection() {
+  const models = lastModels || [];
+  const registered = new Set(
+    (lastOverview && lastOverview.dsh && lastOverview.dsh.registeredModels) || [],
+  );
+
+  // 已注册但上游目录里已经没有的模型：dsh 里会留着一条永远调不通的条目
+  const notice = $('modelNotice');
+  lastStaleIds = models.length ? [...registered].filter((id) => !models.some((m) => m.id === id)) : [];
+  if (notice) {
+    if (lastStaleIds.length) {
+      notice.className = 'notice';
+      notice.innerHTML = '有 ' + lastStaleIds.length + ' 个已注册模型已不在上游目录中：'
+        + '<span class="mono">' + lastStaleIds.map(escapeAttr).join('、') + '</span>'
+        + '　—— 它们仍会出现在 dsh 的模型列表里，但调用必然失败。'
+        + '<button class="mini" id="cleanStaleBtn" style="margin-left:8px">清理并保存</button>';
+      $('cleanStaleBtn').onclick = cleanStaleRegistrations;
+    } else {
+      notice.className = 'notice hidden';
+      notice.innerHTML = '';
+    }
+  }
+
+  if (!models.length) {
+    lastModelSig = '';
+    $('modelWrap').innerHTML = '<div class="empty">桥未运行，暂无数据。</div>';
+    return;
+  }
+
+  // 探测结果只对当前目录里的模型有意义，换了账号/目录后要丢掉失效的
+  const ids = new Set(models.map((m) => m.id));
+  for (const key of Object.keys(probeResults)) if (!ids.has(key)) delete probeResults[key];
+
+  const sig = modelSignature(models, registered);
+  if (sig !== lastModelSig || !$('modelTable')) {
+    const state = captureTableState();
+    lastModelSig = sig;
+    currentModels = models;
+    renderModelTable(models, registered);
+    // 首次渲染时 state 为 null（没有用户状态可还原），此时预勾选保持不动
+    restoreTableState(state);
+    if (!state) applyModelFilter();
+  } else {
+    currentModels = models;
+  }
+}
+
+/** 一键清掉「已注册但已不在目录里」的模型（写入前仍会自动备份）。 */
+async function cleanStaleRegistrations() {
+  const models = lastModels || [];
+  const registered = (lastOverview && lastOverview.dsh && lastOverview.dsh.registeredModels) || [];
+  const stale = new Set(lastStaleIds);
+  const keepIds = registered.filter((id) => !stale.has(id));
+  if (!keepIds.length) {
+    setMsg('清理会把注册列表清空，已取消；请先勾选要保留的模型再保存', 'err');
+    return;
+  }
+  const payload = keepIds.map((id) => {
+    const m = models.find((x) => x.id === id) || {};
+    return { id, name: m.name || id, contextWindow: m.context_window, maxTokens: m.max_output_tokens };
+  });
+  setMsg('正在清理失效注册…');
+  const r = await api('/api/register', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ models: payload }),
+  });
+  if (r.saved) {
+    setMsg('已清理 ' + stale.size + ' 个失效注册（保留 ' + r.count + ' 个）'
+      + (r.backup ? '，原文件已备份' : ''), 'good');
+    await loadOverview();
+    await loadModels();
+  } else {
+    setMsg('清理失败：' + (r.error || '未知错误'), 'err');
+  }
+}
+
+/** 模型 id 列的复制图标（只有这一列可点击复制）。 */
+const COPY_ICON = '<svg class="copyicon" viewBox="0 0 16 16" fill="none" stroke="currentColor"'
+  + ' stroke-width="1.2" aria-hidden="true"><rect x="5.5" y="5.5" width="8" height="8" rx="1.5"/>'
+  + '<path d="M10.5 5.5V3.5a1 1 0 0 0-1-1h-6a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h2"/></svg>';
+
+/** 渲染模型表格（含工具栏）。只在数据变化时调用，避免冲掉用户操作。 */
+function renderModelTable(models, registered) {
+  {
+    // 整表即将重建：旧的详情行会一起消失，状态也要跟着清掉
+    openDetailId = null;
+    const rows = models.map(m => {
+      const on = registered.has(m.id);
+      const r = probePending.has(m.id) ? null : probeResults[m.id];
+      const probeOk = r ? (r.ok ? '1' : '0') : '';
+      const probeMs = r && Number.isFinite(Number(r.ms)) ? String(Number(r.ms)) : '';
+      // 免费状态与促销标签合并成一个标签：hy3 这类行不该同时出现「免费 限时免费」
+      const promoLabel = m.badge || (m.free ? '免费' : '');
+      const rateCell = m.free
+        ? '<span class="tag promo">' + escapeAttr(promoLabel) + '</span>'
+        : (typeof m.credits === 'number' ? m.credits : '—')
+          + (m.badge ? ' <span class="tag promo">' + escapeAttr(m.badge) + '</span>' : '');
+      return '<tr data-model-id="' + escapeAttr(m.id) + '" data-model-name="' + escapeAttr(m.name || '')
+        + '" data-free="' + (m.free ? '1' : '') + '" data-credits="'
+        + (typeof m.credits === 'number' ? m.credits : '') + '" data-probe-ok="' + probeOk
+        + '" data-probe-ms="' + probeMs + '">' +
+        '<td><input type="checkbox" data-id="' + escapeAttr(m.id) + '"' + (on ? ' checked' : '') + '></td>' +
+        '<td class="mono copyable" data-copy="' + escapeAttr(m.id) + '" title="点击复制">'
+          + escapeAttr(m.id) + COPY_ICON +
+          '<button type="button" class="infobtn" data-info="' + escapeAttr(m.id)
+          + '" aria-expanded="false" title="查看模型详情">ⓘ</button></td>' +
+        '<td class="name">' + escapeAttr(m.name || '—') + '</td>' +
+        '<td class="mono" title="' + escapeAttr(fmtNum(m.context_window || 0)) + '">' + escapeAttr(fmtCompact(m.context_window)) + '</td>' +
+        '<td class="mono" title="' + escapeAttr(fmtNum(m.max_output_tokens || 0)) + '">' + escapeAttr(fmtCompact(m.max_output_tokens)) + '</td>' +
+        '<td class="mono">' + rateCell + '</td>' +
+        '<td class="mono" data-cost="' + escapeAttr(m.id) + '" title="正在计算…">—</td>' +
+        '<td>' + (on ? '<span class="tag ok">已注册</span>' : '<span class="tag">未注册</span>') + '</td>' +
+        '<td data-probe="' + escapeAttr(m.id) + '">' + renderProbe(m.id) + '</td>' +
+      '</tr>';
+    }).join('');
+
+    $('modelWrap').innerHTML =
+      '<div class="regbar">' +
+        '<input type="text" id="modelFilter" placeholder="搜索模型…" style="max-width:190px">' +
+        '<select id="modelKind">' +
+          '<option value="">全部</option>' +
+          '<option value="free">仅免费</option>' +
+          '<option value="registered">仅已注册</option>' +
+          '<option value="unregistered">仅未注册</option>' +
+          '<option value="probe-ok">仅可用</option>' +
+          '<option value="probe-fail">仅不可用</option>' +
+          '<option value="probe-none">未测</option>' +
+        '</select>' +
+        '<span class="filterinfo" id="filterInfo"></span>' +
+        '<button id="sortByCredits">按倍率排序</button>' +
+        '<span class="sep"></span>' +
+        '<label class="check"><input type="checkbox" id="checkAll"> 全选</label>' +
+        '<button id="selectFreeBtn">加选免费</button>' +
+        '<button id="clearSelBtn">清空勾选</button>' +
+        '<button id="uncheckBadBtn" hidden>取消勾选不可用的</button>' +
+        '<span class="sep"></span>' +
+        '<button id="saveRegBtn" class="primary">保存到 dsh 设置</button>' +
+        '<button id="syncUsableBtn" title="把体检可用的模型一次写入 dsh">同步可用模型到 dsh</button>' +
+        '<label class="check" title="体检范围：只测勾选的 / 已注册的 / 目录里全部">范围' +
+          '<select id="probeScope">' +
+            '<option value="checked">勾选的</option>' +
+            '<option value="registered">已注册的</option>' +
+            '<option value="all">全部</option>' +
+          '</select></label>' +
+        '<button id="probeAllBtn">测试可用性</button>' +
+        '<button id="probeCancelBtn" hidden>取消测试</button>' +
+        '<button id="probeClearBtn" hidden>清除体检</button>' +
+        '<button id="exportModelsBtn">导出 CSV</button>' +
+        '<button id="refreshCatalogBtn" title="立即强制重取上游模型目录">刷新目录</button>' +
+        '<span class="msg" id="regMsg"></span>' +
+      '</div>' +
+      '<div class="tablewrap" id="modelTableWrap"><table id="modelTable"><thead><tr>' +
+      '<th style="width:38px"></th><th>模型 id</th><th>显示名</th><th>上下文</th><th>最大输出</th><th>倍率</th>'
+      + '<th title="账本最近 N 天：扣分合计 ÷ token 合计 × 1000，只含成功且回报了扣分的调用">实测成本</th><th>dsh</th>' +
+      '<th class="th-probe" id="probeSortTh" title="点击切换排序：可用优先 / 耗时升序 / 耗时降序">可用性'
+        + '<span class="sortmark" id="probeSortMark"></span> <span class="stamp" id="probeStamp"></span></th>' +
+      '</tr></thead><tbody>' + rows + '</tbody></table></div>';
+
+    probeSortMode = ''; // 表格重建后回到默认顺序
+
+    // 全选只作用于**当前可见**的行：过滤后点全选，不会把隐藏的也勾上；
+    // 已知不可用的模型不勾（O2：不让「全选」把必然失败的条目写进 dsh）
+    $('checkAll').onchange = (e) => {
+      let skipped = 0;
+      document.querySelectorAll('#modelTable tbody tr').forEach((tr) => {
+        if (tr.style.display === 'none') return;
+        const cb = tr.querySelector('input[data-id]');
+        if (!cb) return;
+        if (e.target.checked && tr.dataset.probeOk === '0') { cb.checked = false; skipped += 1; return; }
+        cb.checked = e.target.checked;
+      });
+      updateRegCount();
+      applyModelFilter();
+      const msg = $('regMsg');
+      if (msg) {
+        msg.className = 'msg';
+        msg.textContent = e.target.checked
+          ? (skipped ? '已全选当前可见模型，跳过 ' + skipped + ' 个已知不可用的模型' : '已全选当前可见的模型')
+          : '已取消全选';
+      }
+    };
+    document.querySelectorAll('#modelTable input[data-id]').forEach((c) => {
+      c.onchange = () => { updateRegCount(); applyModelFilter(); };
+    });
+    // 点击模型 id 即复制；其它列（上下文 / 最大输出这类数字）不再触发复制
+    document.querySelectorAll('#modelTable td.copyable').forEach((td) => {
+      td.onclick = () => copyText(td.dataset.copy || '');
+    });
+    // ⓘ 按钮：展开详情（同屏只开一个）。stopPropagation 免得顺带触发「点击复制」
+    document.querySelectorAll('#modelTable button.infobtn').forEach((b) => {
+      b.onclick = (e) => { e.stopPropagation(); toggleModelDetail(b.dataset.info, b); };
+    });
+    $('saveRegBtn').onclick = saveRegistration;
+    $('syncUsableBtn').onclick = syncUsableModels;
+    $('probeScope').onchange = (e) => {
+      e.target.dataset.touched = '1'; // 用户手动选过：之后不再套「有勾选就测勾选的」默认
+      probeScope = e.target.value;
+      updateProbeScopeUI();
+    };
+    $('probeAllBtn').onclick = probeAll;
+    $('probeCancelBtn').onclick = () => { probeAborted = true; if (probeCtrl) probeCtrl.abort(); };
+    $('probeClearBtn').onclick = clearProbeResults;
+    $('selectFreeBtn').onclick = selectFreeModels;
+    $('clearSelBtn').onclick = clearModelSelection;
+    $('uncheckBadBtn').onclick = uncheckBadModels;
+    $('exportModelsBtn').onclick = exportModelsCsv;
+    $('refreshCatalogBtn').onclick = refreshCatalogNow;
+    $('modelFilter').oninput = applyModelFilter;
+    $('modelKind').onchange = applyModelFilter;
+    $('probeSortTh').onclick = sortModelsByProbe;
+    // 包一层：直接挂 sortModelsByCredits 会把 MouseEvent 当成 silent 参数，
+    // 于是点「按倍率排序」永远不显示提示
+    $('sortByCredits').onclick = () => sortModelsByCredits();
+    updateRegCount();
+    updateProbeClearBtn();
+    refreshProbeStamp();
+    // 表格刚重建：把「实测成本」补上（用量数据可能比目录先到，见 refreshCostCells）
+    refreshCostCells();
+
+    applyModelSearch();
+  }
+}
+
+/**
+ * 实测成本的**原始值**（不含显示格式），供 CSV 导出使用。
+ * 数据不足时返回 null —— 调用方自己决定显示「—」还是留空。
+ */
+function costRaw(id) {
+  const u = lastUsage;
+  if (!u || !Array.isArray(u.models)) return null;
+  const m = u.models.find((x) => x.model === id);
+  if (!m) return null;
+  const cc = Number(m.creditCalls) || 0;
+  const tokens = (Number(m.promptTokens) || 0) + (Number(m.completionTokens) || 0);
+  if (!cc || !tokens) return null;
+  return { per: ((Number(m.credit) || 0) / tokens) * 1000, calls: cc, tokens };
+}
+
+/**
+ * 实测成本（每千 token 扣分）。
+ *
+ * 口径**严格等于**「用量统计」面板：账本最近 N 天里，该模型的扣分合计 ÷
+ * token 合计 × 1000，**只含成功且回报了扣分的调用**。数据不足一律「—」并
+ * 说明原因——绝不用目录倍率（那是官方标价）或别的模型的值顶替。
+ */
+function costFor(id) {
+  const u = lastUsage;
+  if (!u || !Array.isArray(u.models)) return { text: '—', title: '还没有用量数据（桥未运行或没有调用）' };
+  const m = u.models.find((x) => x.model === id);
+  if (!m) return { text: '—', title: '最近 ' + u.windowDays + ' 天没有该模型的成功调用' };
+  const calls = Number(m.calls) || 0;
+  const cc = Number(m.creditCalls) || 0;
+  const tokens = (Number(m.promptTokens) || 0) + (Number(m.completionTokens) || 0);
+  if (!cc) {
+    return { text: '—', title: '最近 ' + u.windowDays + ' 天该模型 ' + calls + ' 次成功调用，但上游一次都没回报扣分' };
+  }
+  if (!tokens) {
+    return { text: '—', title: '最近 ' + u.windowDays + ' 天该模型没有可计入的 token，无法折算' };
+  }
+  const raw = costRaw(id);
+  const per = raw ? raw.per : 0;
+  return {
+    text: fmtCredit(per, true) + ' / 千 token（' + cc + ' 次）',
+    title: '最近 ' + u.windowDays + ' 天：扣分 ' + fmtCredit(m.credit, true)
+      + ' ÷ ' + fmtNum(tokens) + ' tokens × 1000（' + cc + '/' + calls + ' 次回报了扣分）',
+  };
+}
+
+/**
+ * 定向刷新「实测成本」列 —— **不整表重建**，因此不会冲掉搜索词 / 筛选 / 勾选 / 滚动。
+ * 表格还没渲染时什么都不做：renderModelTable 收尾会自己调一次。
+ */
+function refreshCostCells() {
+  document.querySelectorAll('#modelTable td[data-cost]').forEach((td) => {
+    const { text, title } = costFor(td.dataset.cost);
+    td.textContent = text;
+    td.title = title;
+    const tr = td.closest('tr');
+    if (tr) tr.dataset.cost = text;
+  });
+}
+
+// ── 模型详情弹层（R6.1）─────────────────────────────────────────────────
+// 目录本来就带回了中文描述 / 厂商 / 标签 / 是否支持图片，之前一个都没展示，
+// 用户看不出 hy3 与 hy4 的区别。这里在行下方插一行展开，**不重建整表**，
+// 因此搜索词 / 筛选 / 勾选 / 滚动位置都不会被冲掉。
+
+/** 当前展开的模型 id（同屏只开一个）。 */
+let openDetailId = null;
+
+function closeModelDetail() {
+  const tr = document.querySelector('#modelTable tr.detail-row');
+  if (tr) tr.remove();
+  document.querySelectorAll('#modelTable button.infobtn[aria-expanded="true"]')
+    .forEach((b) => b.setAttribute('aria-expanded', 'false'));
+  openDetailId = null;
+}
+
+/** 详情内容：缺数据的字段**整行不显示**（不写「无」，那只会更让人困惑）。 */
+function modelDetailHtml(m) {
+  const p = probeResults[m.id];
+  const registered = new Set((lastOverview && lastOverview.dsh && lastOverview.dsh.registeredModels) || []);
+  const rows = [];
+  const add = (label, value, opts = {}) => {
+    if (value === null || value === undefined || value === '') return;
+    rows.push('<div class="drow"><span class="dlabel">' + escapeAttr(label)
+      + '</span><span class="dvalue' + (opts.mono ? ' mono' : '') + '">' + escapeAttr(String(value)) + '</span></div>');
+  };
+
+  add('中文描述', m.description_zh);
+  add('英文描述', m.description_en);
+  add('厂商', m.vendor);
+  if (Array.isArray(m.tags) && m.tags.length) add('标签', m.tags.join('、'));
+  if (m.supports_images) add('支持图片', '是');
+  // 精确值：表格列显示的是 1M / 131K 这类紧凑形式，这里给原始数字
+  if (Number(m.context_window)) add('上下文（精确）', fmtNum(m.context_window), { mono: true });
+  if (Number(m.max_output_tokens)) add('最大输出（精确）', fmtNum(m.max_output_tokens), { mono: true });
+  if (typeof m.credits === 'number') add('倍率', m.credits === 0 ? '免费' : '×' + m.credits, { mono: true });
+  if (m.badge) add('促销', m.badge);
+  const cost = costFor(m.id);
+  if (cost.text !== '—') add('实测成本', cost.text, { mono: true });
+  if (p) {
+    add('体检结论', (p.ok ? '可用' : '不可用') + '（'
+      + new Date(Number(p.at) || Date.now()).toLocaleString('zh-CN', { hour12: false }) + '）');
+  }
+  add('dsh 注册', registered.has(m.id) ? '已注册' : '未注册');
+
+  if (!rows.length) return '<div class="detail-empty">这个模型没有更多可展示的信息。</div>';
+  return '<div class="detail-body">' + rows.join('') + '</div>';
+}
+
+/** 展开 / 收起某个模型的详情行（定向插入 / 移除，不重建整表）。 */
+function toggleModelDetail(id, btn) {
+  const wasOpen = openDetailId === id;
+  closeModelDetail(); // 同屏只开一个
+  if (wasOpen) return;
+
+  const row = btn.closest('tr');
+  const m = currentModels.find((x) => x.id === id);
+  if (!row || !m) return;
+
+  const tr = document.createElement('tr');
+  tr.className = 'detail-row';
+  const td = document.createElement('td');
+  td.colSpan = row.children.length; // 跟着实际列数走，加列不会错位
+  td.innerHTML = modelDetailHtml(m);
+  tr.appendChild(td);
+  row.after(tr);
+  btn.setAttribute('aria-expanded', 'true');
+  openDetailId = id;
+}
+
+// Esc 关闭；点空白也关闭（点详情行内部或 ⓘ 按钮本身不关）
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && openDetailId) closeModelDetail();
+});
+document.addEventListener('click', (e) => {
+  if (!openDetailId) return;
+  if (e.target.closest('tr.detail-row') || e.target.closest('button.infobtn')) return;
+  closeModelDetail();
+});
+
+/**
+ * 对话测试的模型下拉：按搜索框关键字过滤选项（31 个模型时手翻太慢）。
+ * 直接重建 options，不依赖 option.hidden（各浏览器支持不一致）。
+ */
+function applyModelSearch() {
+  const sel = $('modelSel');
+  if (!sel) return;
+  const q = (($('modelSearch') && $('modelSearch').value) || '').trim().toLowerCase();
+  const prev = sel.value;
+  const list = currentModels.filter((m) => !q || m.id.toLowerCase().includes(q));
+  sel.innerHTML = list.length
+    ? list.map((m) => '<option value="' + escapeAttr(m.id) + '">' + escapeAttr(m.id) + '</option>').join('')
+    : '<option value="">（无匹配模型）</option>';
+  sel.value = (prev && list.some((m) => m.id === prev)) ? prev : ((list[0] && list[0].id) || '');
+}
+
+async function loadDiag() {
+  $('diagList').innerHTML = '<div class="empty">正在检测（需读取客户端密钥）…</div>';
+  const d = await api('/api/diagnose');
+  setStamp('diagStamp');
+  if (d.error || !d.items) {
+    lastDiag = null;
+    $('diagList').innerHTML = '<div class="empty">诊断失败：' + escapeAttr(d.error || '未知错误') + '</div>';
+    return;
+  }
+  lastDiag = d.items;
+  $('diagList').innerHTML = d.items.map(it =>
+    '<div class="diag-row">' +
+      '<div class="s-dot s-' + it.status + '"></div>' +
+      '<div class="label">' + escapeAttr(it.label) + '</div>' +
+      '<div class="detail">' + escapeAttr(it.detail) +
+        (it.hint ? '<span class="hint">建议：' + escapeAttr(it.hint) + '</span>' : '') +
+      '</div>' +
+    '</div>').join('');
+}
+
+// ── 诊断报告（R5.1）──────────────────────────────────────────────────────
+// 出问题时要截图 / 手抄太费劲。这里把已有接口的结论拼成一段 Markdown，
+// 直接贴给同事或留档。**绝不含任何令牌值** —— 只有账号、域名、剩余时间与
+// keyId 匹配结论（keyId 是哈希，页面本来就展示）。
+
+const DIAG_MARK = { ok: '✓', warn: '!', fail: '✗' };
+
+function buildDiagReport() {
+  const o = lastOverview;
+  const b = (o && o.bridge) || {};
+  const c = (o && o.console) || {};
+  const cred = (o && o.credentials) || {};
+  const a = cred.active || {};
+  const dsh = (o && o.dsh) || {};
+  const L = [];
+
+  L.push('# WorkBuddy 中转控制台 · 诊断报告');
+  L.push('');
+  L.push('- 时间：' + new Date().toLocaleString('zh-CN', { hour12: false }));
+  L.push('- 控制台 v' + (c.version || '?') + ' · Node ' + (c.node || '?'));
+  L.push('- 桥：' + (b.endpoint || '—')
+    + '（PID ' + (b.pid === null || b.pid === undefined ? '—' : b.pid)
+    + ' / 运行 ' + (Number.isFinite(Number(b.uptimeMs)) ? fmtUptime(Number(b.uptimeMs)) : '—')
+    + ' / 目录 ' + (b.catalogSize === null || b.catalogSize === undefined ? '—' : b.catalogSize) + ' 个'
+    + (b.catalogAt ? ' @ ' + new Date(b.catalogAt).toLocaleTimeString('zh-CN', { hour12: false, hour: '2-digit', minute: '2-digit' }) : '')
+    + '）');
+  L.push('- 桥状态：' + (!b.running ? '未运行' : (b.ok ? '正常' : '有响应但异常'))
+    + (b.error ? '（' + String(b.error).replace(/\s+/g, ' ') + '）' : ''));
+
+  L.push('');
+  L.push('## 账号与凭据');
+  if (a.account) {
+    L.push('- 账号：' + a.account + '（uid ' + String(a.userId || '').slice(0, 8) + '…）');
+    L.push('- 域名：' + (a.domain || cred.domain || '—'));
+    L.push('- 令牌剩余：' + (Number.isFinite(Number(a.remainingMs)) ? fmtDuration(Number(a.remainingMs)) : '—'));
+  } else {
+    L.push('- 未取到有效凭据' + (cred.error ? '：' + String(cred.error).replace(/\s+/g, ' ') : ''));
+  }
+  // AtRest 结论从诊断项里取（那里已经有 keyId 与是否与信封一致）
+  const atrest = (lastDiag || []).find((it) => it.id === 'atrest');
+  if (atrest) L.push('- AtRest：' + atrest.detail);
+
+  L.push('');
+  L.push('## 诊断逐项');
+  if (lastDiag && lastDiag.length) {
+    for (const it of lastDiag) {
+      L.push('- [' + (DIAG_MARK[it.status] || '?') + '] ' + it.label + '：' + it.detail
+        + (it.hint ? '（建议：' + it.hint + '）' : ''));
+    }
+  } else {
+    L.push('- （未取到诊断结果）');
+  }
+
+  L.push('');
+  L.push('## 目录摘要');
+  const shape = b.upstreamShape || {};
+  const dropped = Array.isArray(shape.droppedNonChat) ? shape.droppedNonChat : [];
+  L.push('- 目录模型数：' + (Array.isArray(lastModels) ? lastModels.length : '—'));
+  L.push('- 被排除的非对话模型：' + (dropped.length ? dropped.join('、') : '无'));
+  const reg = dsh.registeredModels || [];
+  const regSet = new Set(reg);
+  const stale = (Array.isArray(lastModels) ? lastModels : []).length
+    ? reg.filter((id) => !lastModels.some((m) => m.id === id))
+    : [];
+  L.push('- 已注册：' + reg.length + ' 个' + (stale.length ? '（其中 ' + stale.length + ' 个已不在目录：' + stale.join('、') + '）' : ''));
+
+  L.push('');
+  L.push('## 最近 5 条失败');
+  const fails = lastRequests.filter((r) => !r.ok).slice(0, 5);
+  if (fails.length) {
+    for (const r of fails) {
+      const parts = [new Date(r.t).toLocaleString('zh-CN', { hour12: false }), r.model || '—'];
+      if (r.status) parts.push('HTTP ' + r.status);
+      if (r.code !== null && r.code !== undefined) parts.push(String(r.code));
+      const err = r.error ? String(r.error).replace(/\s+/g, ' ').slice(0, 200) : '';
+      L.push('- ' + parts.join(' · ') + (err ? ' · ' + err : ''));
+    }
+  } else {
+    L.push('- （最近明细里没有失败）');
+  }
+
+  return L.join('\n');
+}
+
+async function copyDiagReport() {
+  const text = buildDiagReport();
+  // 报告很长：quiet 模式避免把全文塞进提示条，成功/失败各给一句人话
+  const ok = await copyText(text, { quiet: true });
+  if (ok) setMsg('诊断报告已复制到剪贴板（不含任何令牌值）', 'good');
+  else setMsg('复制失败，请手动复制', 'err');
+}
+
+async function loadLog() {
+  const currentOnly = !!($('logCurrentOnly') && $('logCurrentOnly').checked);
+  const d = await api('/api/bridge/log?lines=80' + (currentOnly ? '&current=1' : ''));
+  // 原始行留在内存里：改过滤条件只重绘，不再打接口
+  logLines = (d.lines && d.lines.length) ? d.lines : [];
+  renderLog();
+}
+
+/**
+ * 纯前端按行过滤日志（R5.4）：大小写不敏感；「只看错误」是一组预设关键字。
+ * 与「只看本次启动」叠加生效——后者是**请求参数**，前者是**本地过滤**。
+ */
+function renderLog() {
+  const el = $('logOut');
+  const kw = (($('logFilter') && $('logFilter').value) || '').trim().toLowerCase();
+  const errOnly = !!($('logErrorsOnly') && $('logErrorsOnly').checked);
+  const ERR_RE = /error|interrupted|failed/i;
+
+  let shown = logLines;
+  if (errOnly) shown = shown.filter((l) => ERR_RE.test(l));
+  if (kw) shown = shown.filter((l) => l.toLowerCase().includes(kw));
+
+  const total = logLines.length;
+  el.textContent = shown.length
+    ? shown.join('\n')
+    : (total ? '（当前过滤条件下没有匹配的行）' : '（暂无日志）');
+  el.scrollTop = el.scrollHeight; // 展开日志时自动滚到底：最新的行永远在末尾
+
+  const info = $('logInfo');
+  if (info) info.textContent = '显示 ' + shown.length + ' / 总 ' + total + ' 行';
+}
+
+/** 日志面板展开时才刷新——收起时每 20 秒读一次文件纯属浪费。 */
+function refreshLogIfOpen() {
+  if (logPanel && logPanel.open) loadLog();
+}
+
+$('refreshBtn').onclick = refreshAll;
+
+$('diagBtn').onclick = () => { loadDiag(); };
+
+$('reqRefreshBtn').onclick = loadRequests;
+$('exportReqBtn').onclick = exportRequestsCsv;
+
+// 「仅看失败」只重绘表格（数据已在内存）；条数变化才重新请求
+$('reqFailOnly').onchange = renderRequests;
+$('reqModelFilter').onchange = (e) => setReqModelFilter(e.target.value, { noScroll: true });
+$('reqLimit').onchange = loadRequests;
+// 「暂停自动刷新」：只影响 20 秒轮询，手动刷新照常
+$('reqPause').onchange = () => {
+  const note = $('reqPauseNote');
+  if (note) note.textContent = $('reqPause').checked ? '已暂停自动刷新' : '';
+};
+
+// 「清空账本」：交给桥执行（它在内存里也持有一份副本），带二次确认
+$('usageClearBtn').onclick = async () => {
+  if (!confirm('确定清空用量账本？历史记录将被删除，且不会被恢复。')) return;
+  const r = await api('/api/usage', { method: 'DELETE' });
+  if (r.cleared) {
+    setMsg('已清空用量账本', 'good');
+    await loadUsage();
+    await loadRequests();
+  } else {
+    setMsg('清空账本失败：' + (r.error || '未知错误'), 'err');
+  }
+};
+
+$('logCurrentOnly').onchange = loadLog;
+// 过滤是纯前端的：改条件只重绘，不再打接口
+$('logFilter').oninput = renderLog;
+$('logErrorsOnly').onchange = renderLog;
+
+$('logClearBtn').onclick = async () => {
+  if (!confirm('确定清空 bridge.log？当前桥进程会继续往新文件里写。')) return;
+  const r = await api('/api/bridge/log', { method: 'DELETE' });
+  if (r.cleared) {
+    setMsg('已清空桥日志', 'good');
+    await loadLog();
+  } else {
+    setMsg('清空日志失败：' + (r.error || '未知错误'), 'err');
+  }
+};
+
+$('modelSearch').oninput = applyModelSearch;
+
+$('startBtn').onclick = async () => {
+  setMsg('正在启动桥服务…');
+  $('startBtn').disabled = true;
+  const d = await api('/api/bridge/start', { method: 'POST' });
+  setBridgeMsg(d, '桥已启动');
+  await loadOverview();
+  await loadDiag();
+};
+
+$('stopBtn').onclick = async () => {
+  // 取消 → 直接返回，**不产生任何请求**
+  const ok = await confirmDangerous('确定停止桥服务？', [
+    '停止后 dsh / 其它客户端将无法调用模型，需要重新点「启动桥服务」才能恢复。',
+    ...probeRunningNote(),
+  ]);
+  if (!ok) return;
+  setMsg('正在停止…');
+  const d = await api('/api/bridge/stop', { method: 'POST' });
+  setMsg(d.stopped ? ('已停止 (PID ' + d.pid + ')') : ('停止失败：' + (d.error || '')), d.stopped ? '' : 'err');
+  await loadOverview();
+  await loadDiag();
+};
+
+$('restartBtn').onclick = async () => {
+  const ok = await confirmDangerous('确定重启桥服务？', [
+    '重启会中断正在进行的调用（约几秒不可用）；桥内存里的状态（如自动签到记录）会重新开始。',
+    ...probeRunningNote(),
+  ]);
+  if (!ok) return;
+  const btn = $('restartBtn');
+  btn.disabled = true;
+  setMsg('正在重启桥服务…');
+  const d = await api('/api/bridge/restart', { method: 'POST' });
+  if (d.started && d.reused) {
+    // 重启没成功（旧进程还在服务），如实说明，不谎报「已重启」
+    const pid = d.pid === null || d.pid === undefined ? '未知' : d.pid;
+    setMsg('桥仍在运行（PID ' + pid + '），本次未能完成重启', 'err', d.spawnError || d.error || '');
+  } else {
+    setBridgeMsg(d, '桥已重启');
+  }
+  btn.disabled = false;
+  await loadOverview();
+  await loadDiag();
+};
+
+// 桥地址是给其它客户端（Cherry Studio / Open WebUI 等）填 Base URL 用的
+$('copyUrlBtn').onclick = () => {
+  if (!lastBridge || !lastBridge.running) { setMsg('桥未运行，暂无可复制的地址', 'err'); return; }
+  copyText(lastBridge.endpoint + '/v1');
+};
+
+// 诊断报告：出问题时一键把结论抄走，不用截图手抄
+$('copyDiagBtn').onclick = copyDiagReport;
+
+// ── 对话测试（R4）────────────────────────────────────────────────────────
+// 多轮：固定 system + user/assistant 交替，发送时整体带上。
+// 阈值只提示「建议清空」，**不裁剪** —— 裁剪会让模型看到的和用户看到的不是一回事。
+
+const CHAT_SYSTEM = 'You are a concise assistant.';
+const CHAT_WARN_MSGS = 20;
+const CHAT_WARN_CHARS = 12000;
+
+let chatCtrl = null;
+/** 发送给上游的消息数组（含固定 system 首条）。 */
+let chatHistory = [{ role: 'system', content: CHAT_SYSTEM }];
+/** 输出区的轮次（含被回滚的失败轮，所以与 chatHistory 不是同一份）。 */
+let chatRounds = [];
+/** 上一次发送的规模，用于末行「本轮发送 N 条消息 · 约 X 字符」。 */
+let chatLastSend = null;
+
+function chatChars(history = chatHistory) {
+  return history.reduce((n, m) => n + String(m.content || '').length, 0);
+}
+
+/** 渲染输出区：按轮次分段，助手轮带「复制」（只复制纯文本回答）。 */
+function renderChat() {
+  const out = $('chatOut');
+  if (!chatRounds.length && !chatLastSend) {
+    out.innerHTML = '<span class="meta">等待发送…</span>';
+    return;
+  }
+  const turns = chatRounds.map((t, i) =>
+    '<div class="turn ' + t.role + '">' +
+      '<div class="turn-role">' + (t.role === 'user' ? '你' : '助手') +
+        (t.role === 'assistant'
+          ? ' <button class="mini" data-copy-turn="' + i + '">复制</button>'
+            + (t.meta ? ' <span>' + escapeAttr(t.meta) + '</span>' : '')
+          : '') +
+      '</div>' +
+      '<div class="turn-body">' + escapeAttr(t.text || (t.streaming ? '…' : '')) + '</div>' +
+    '</div>').join('');
+  const info = chatLastSend
+    ? '<div class="chat-sendinfo">本轮发送 ' + chatLastSend.n + ' 条消息 · 约 '
+      + chatLastSend.chars + ' 字符' + (chatLastSend.warn ? '（建议清空对话）' : '') + '</div>'
+    : '';
+  out.innerHTML = turns + info;
+  out.querySelectorAll('[data-copy-turn]').forEach((b) => {
+    b.onclick = () => copyText(chatRounds[Number(b.dataset.copyTurn)].text || '');
+  });
+  out.scrollTop = out.scrollHeight;
+}
+
+/**
+ * 本次调用的用量摘要：`输入 x / 输出 y tokens · 扣分 z · Ns`。
+ * 上游没回报扣分 → `—（上游未回报）`，**不猜**成 0。
+ */
+function chatUsageText(ms, usage) {
+  const sec = (ms / 1000).toFixed(1) + 's';
+  if (!usage) return '用时 ' + sec;
+  const pin = Number(usage.prompt_tokens);
+  const pout = Number(usage.completion_tokens);
+  const credit = typeof usage.credit === 'number' ? String(usage.credit) : null;
+  return '输入 ' + (Number.isFinite(pin) ? pin : '—')
+    + ' / 输出 ' + (Number.isFinite(pout) ? pout : '—')
+    + ' tokens · 扣分 ' + (credit === null ? '—（上游未回报）' : credit)
+    + ' · ' + sec;
+}
+
+async function sendChat() {
+  const model = $('modelSel').value;
+  const prompt = $('promptInput').value.trim();
+  if (!model) {
+    $('chatOut').innerHTML = '<span class="meta">没有选中的模型：等「可用模型」加载完成，或清空搜索词再选。</span>';
+    return;
+  }
+  if (!prompt) return;
+
+  // 阈值提示（不裁剪）：把「这一轮发出去会很大」如实说清，让用户自己决定清不清
+  const willSend = chatHistory.length + 1;
+  const willChars = chatChars() + prompt.length;
+  chatLastSend = {
+    n: willSend,
+    chars: willChars,
+    warn: willSend >= CHAT_WARN_MSGS || willChars >= CHAT_WARN_CHARS,
+  };
+
+  chatHistory.push({ role: 'user', content: prompt });
+  chatRounds.push({ role: 'user', text: prompt });
+  const aIdx = chatRounds.push({ role: 'assistant', text: '', streaming: true }) - 1;
+  renderChat();
+
+  $('sendBtn').disabled = true;
+  $('chatStopBtn').hidden = false;
+  const ctrl = new AbortController();
+  chatCtrl = ctrl;
+  const t0 = performance.now();
+  let acc = '';
+  let reasoning = '';
+  let usage = null;
+  let failed = '';
+  let aborted = false;
+
+  try {
+    const res = await fetch('/api/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      // 整段历史一起带上（含固定 system 首条）
+      body: JSON.stringify({ model, messages: chatHistory, stream: true }),
+      signal: ctrl.signal,
+    });
+
+    if (!res.ok) {
+      failed = 'HTTP ' + res.status + ' · ' + (await res.text()).slice(0, 600);
+    } else {
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = '';
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        const lines = buf.split('\n');
+        buf = lines.pop();
+        for (const line of lines) {
+          if (!line.startsWith('data:')) continue;
+          const payload = line.slice(5).trim();
+          if (payload === '[DONE]' || !payload) continue;
+          let chunk;
+          try { chunk = JSON.parse(payload); } catch { continue; }
+          // 桥逐帧透传上游；usage 通常只在最后一帧 —— 取最后一次出现的
+          if (chunk.usage && typeof chunk.usage === 'object') usage = chunk.usage;
+          const delta = chunk.choices && chunk.choices[0] && chunk.choices[0].delta;
+          if (!delta) continue;
+          if (delta.reasoning_content) reasoning += delta.reasoning_content;
+          if (delta.content) {
+            acc += delta.content;
+            chatRounds[aIdx].text = acc;
+            renderChat();
+          }
+        }
+      }
+    }
+  } catch (err) {
+    if (err && err.name === 'AbortError') aborted = true; // 手动停止：保留已输出内容，不报错
+    else failed = '请求异常：' + ((err && err.message) || err);
+  } finally {
+    chatCtrl = null;
+    $('sendBtn').disabled = false;
+    $('chatStopBtn').hidden = true;
+  }
+
+  const ms = Math.round(performance.now() - t0);
+  const sec = (ms / 1000).toFixed(1) + 's';
+  chatRounds[aIdx].streaming = false;
+
+  if (failed) {
+    // 失败：**回滚这一轮**，别让历史里留下「没有回应的 user」破坏 user/assistant 交替
+    chatHistory.pop();
+    chatRounds[aIdx].text = '';
+    chatRounds[aIdx].meta = '失败：' + failed;
+    renderChat();
+    return;
+  }
+
+  if (aborted) {
+    // 停止：只显示已用时间，**不猜** token / 扣分
+    if (acc) {
+      chatHistory.push({ role: 'assistant', content: acc });
+      chatRounds[aIdx].text = acc;
+    } else {
+      chatHistory.pop();
+      chatRounds[aIdx].text = '';
+    }
+    chatRounds[aIdx].meta = '已手动停止 · 用时 ' + sec;
+    renderChat();
+    return;
+  }
+
+  if (acc) {
+    // 成功：助手回复入历史
+    chatHistory.push({ role: 'assistant', content: acc });
+    chatRounds[aIdx].text = acc;
+    chatRounds[aIdx].meta = chatUsageText(ms, usage) + (reasoning ? ' · 思考 ' + reasoning.length + ' 字' : '');
+  } else {
+    // 上游正常结束但没给内容：同样回滚，保持交替
+    chatHistory.pop();
+    chatRounds[aIdx].text = '';
+    chatRounds[aIdx].meta = '（无内容返回）用时 ' + sec;
+  }
+  renderChat();
+}
+
+/** 清空对话历史与输出 —— 不影响模型选择与搜索词（R4.1）。 */
+function clearChat() {
+  chatHistory = [{ role: 'system', content: CHAT_SYSTEM }];
+  chatRounds = [];
+  chatLastSend = null;
+  renderChat();
+}
+
+$('sendBtn').onclick = sendChat;
+$('chatStopBtn').onclick = () => { if (chatCtrl) chatCtrl.abort(); };
+$('chatClearBtn').onclick = clearChat;
+
+$('promptInput').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') $('sendBtn').click();
+});
+
+// 日志面板元素与轮询句柄（refreshAll / refreshLogIfOpen 都会用到，先声明）
+let logTimer = null;
+const logPanel = document.querySelector('details');
+if (logPanel) {
+  logPanel.addEventListener('toggle', () => {
+    if (logPanel.open) {
+      loadLog();
+      logTimer = setInterval(loadLog, 3000);
+    } else if (logTimer) {
+      clearInterval(logTimer);
+      logTimer = null;
+    }
+  });
+}
+
+// ── 单飞包装 ────────────────────────────────────────────────────────────
+// 所有面板加载器都走单飞：20 秒轮询与手动刷新共用同一把锁，
+// 慢响应既不叠并发（O10），刷新期间也不会被轮询插队。
+loadOverview = singleFlight(loadOverview);
+loadModels = singleFlight(loadModels);
+loadDiag = singleFlight(loadDiag);
+loadUsage = singleFlight(loadUsage);
+loadAccounts = singleFlight(loadAccounts);
+loadCheckin = singleFlight(loadCheckin);
+loadRequests = singleFlight(loadRequests);
+loadLog = singleFlight(loadLog);
+
+$('usageDays').onchange = loadUsage;
+$('trendGran').onchange = onTrendGranChange;
+// 指标切换只重绘（数据已在 usageView 里），不重新请求
+$('trendMetric').onchange = (e) => { trendMetric = e.target.value; renderUsage(); };
+$('usageCsvBtn').onclick = exportUsageCsv;
+
+// ── 主题与交互规范 ──────────────────────────────────────────────────
+function initTheme() {
+  const saved = localStorage.getItem('wb.theme');
+  const prefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+  const theme = saved || (prefersDark ? 'dark' : 'light');
+  applyTheme(theme);
+}
+function applyTheme(theme) {
+  document.documentElement.setAttribute('data-theme', theme);
+  localStorage.setItem('wb.theme', theme);
+  const isDark = theme === 'dark';
+  const sun = $('themeIconSun');
+  const moon = $('themeIconMoon');
+  if (sun && moon) {
+    sun.style.display = isDark ? 'inline-block' : 'none';
+    moon.style.display = isDark ? 'none' : 'inline-block';
+  }
+}
+const themeBtn = $('themeToggle');
+if (themeBtn) {
+  themeBtn.onclick = () => {
+    const current = document.documentElement.getAttribute('data-theme') || 'light';
+    applyTheme(current === 'dark' ? 'light' : 'dark');
+  };
+}
+
+function initNavTabs() {
+  const tabs = document.querySelectorAll('.nav-tab');
+  tabs.forEach(tab => {
+    tab.onclick = () => {
+      tabs.forEach(t => t.classList.remove('active'));
+      tab.classList.add('active');
+      const target = tab.dataset.tab;
+      document.querySelectorAll('[data-section]').forEach(sec => {
+        if (target === 'all' || sec.dataset.section === target) {
+          sec.style.display = '';
+        } else {
+          sec.style.display = 'none';
+        }
+      });
+    };
+  });
+}
+
+function initQuickPrompts() {
+  document.querySelectorAll('.quick-pill').forEach(pill => {
+    pill.onclick = () => {
+      const input = $('promptInput');
+      if (input) {
+        input.value = pill.dataset.prompt || pill.textContent;
+        input.focus();
+      }
+    };
+  });
+}
+
+// 先把历史体检结果取回来，再渲染模型表——否则第一次渲染全是「未测」，
+// 过一会儿又被落盘的结果刷掉，看起来像闪了一下
+initAlerts(); // 读回失败水位线 / 提醒静默标记（只含时间戳与日期）
+initTheme();
+initNavTabs();
+initQuickPrompts();
+(async () => {
+  await loadProbeResults();
+  await loadOverview();
+  loadModels();
+  loadDiag();
+  loadAccounts();
+  loadCheckin();
+  loadUsage();
+  loadRequests();
+})();
+
+setInterval(() => {
+  loadOverview();
+  loadModels();
+  loadUsage();
+  // 「暂停自动刷新」时不碰请求明细——排障时要盯住某一屏（手动「刷新」仍然可用）
+  if (!$('reqPause') || !$('reqPause').checked) loadRequests();
+}, 20000);
+// 「上次体检 N 分钟前」要跟着时间走，但不必重拉数据
+setInterval(refreshProbeStamp, 30000);
+// 账号读取要启动客户端取密钥（约 0.3s），因此放慢到 60s 一次
+setInterval(loadAccounts, 60000);
+</script>
+</body>
+</html>

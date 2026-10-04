@@ -1,0 +1,41 @@
+# 依赖与运行时
+node_modules/
+*.log
+
+# 本地用量账本（只记元数据，但属运行时产物）
+usage.jsonl
+
+# 本地配置（可能含机器相关路径）
+.env
+
+# 程序写入的运行时状态（如当前选中的账号）
+.state.json
+
+# 凭据：任何情况下都不得提交
+*.info
+*.info.bak-*
+*.bak-*
+*.bak
+.bridge-tmp
+
+# 本地工作目录（与插件无关的临时/备份/工具产物）
+.backup/
+.trae/
+.workbuddy-ai/
+
+# 生成的设置文件备份
+settings.yaml.bak-*
+.credentials.yaml.bak-*
+
+# 系统与编辑器
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/
+
+# 临时探查产物（asar 抽取、面板渲染用的 React UMD 等）
+.tmp-*
+
+# ����ʵ�˺���Ϣ�ľɽ�ͼ�������ر�����
+.enhance-preview.local.png

@@ -1,0 +1,33 @@
+{
+  "name": "workbuddy-to-dsh",
+  "version": "1.0.0",
+  "private": true,
+  "description": "把 WorkBuddy 桌面端已登录的模型，经本地桥暴露为 OpenAI 兼容接口，供 DeepSeek Harness 或任意 OpenAI 客户端调用。",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node dashboard/server.mjs",
+    "bridge": "node bridge/workbuddy-bridge.mjs",
+    "doctor": "node tools/doctor.mjs",
+    "verify": "node tools/verify-atrest.mjs",
+    "test:plugin": "node --test \"dsh-plugin/tests/*.test.mjs\"",
+    "panel:shot": "node dsh-plugin/tests/panel-render.mjs",
+    "preflight": "node dsh-plugin/scripts/preflight.mjs",
+    "vendor": "node dsh-plugin/scripts/vendor.mjs",
+    "vendor:check": "node dsh-plugin/scripts/vendor.mjs --check",
+    "verify:standalone": "node dsh-plugin/scripts/verify-standalone.mjs",
+    "pack:plugin": "node dsh-plugin/scripts/vendor.mjs && cd dsh-plugin && npm pack",
+    "release:check": "npm run vendor:check && npm run test:plugin && npm run verify:standalone"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Ianzhyh/workbuddy-to-dsh.git"
+  },
+  "homepage": "https://github.com/Ianzhyh/workbuddy-to-dsh#readme",
+  "bugs": {
+    "url": "https://github.com/Ianzhyh/workbuddy-to-dsh/issues"
+  }
+}

@@ -1,0 +1,18 @@
+# ============================================================================
+# dsh-plugin-workbuddy —— bundle patch
+#
+# 只做一件事：把本插件自己的 Loader 条目插进配置树。
+#
+#   - id 是「条目 id」，用户可用同一个 id 在自己的
+#     $DSH_HOME/profiles/<profile>/cordis.patch.yml 里覆盖 config
+#     （例如 projectRoot 指向 workbuddy-to-dsh 的检出目录）。
+#   - name 是包名，由 profile 的 node_modules 解析。
+#
+# 这里**不动**任何官方条目：模型路由由插件的宿主端在运行时
+# 用 ctx.llm.registerAdapter() 注册，不写 settings.yaml，也不需要
+# 给 llm-pi-ai 那一行打补丁。
+# ============================================================================
+
+- insert:
+    - id: workbuddy
+      name: dsh-plugin-workbuddy

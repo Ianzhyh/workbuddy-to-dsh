@@ -1,0 +1,31 @@
+# 发版前检查：vendor 与仓库同步 + 单测 + 独立分发包演练
+#
+# 为什么放在 CI：这个插件的"发布物"是自带桥与控制台的 vendor/ 快照，
+# 只要忘了重跑 vendor，别人装到的就是旧代码 —— 这类问题本地很容易漏。
+name: release-check
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  check:
+    # 桥要用 Windows DPAPI 解 WorkBuddy 的 AtRest 凭据；测试本身跨平台，
+    # 但独立演练会真的起桥，所以固定 Windows 更贴近真实使用环境。
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: vendor 与仓库是否同步
+        run: node dsh-plugin/scripts/vendor.mjs --check
+
+      - name: 单元测试（协议 / 装配 / 路由矩阵 / 分发形态）
+        run: node --test "dsh-plugin/tests/*.test.mjs"
+
+      - name: 独立分发包演练（没有仓库时也能跑起来）
+        run: node dsh-plugin/scripts/verify-standalone.mjs
