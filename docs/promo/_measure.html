@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 1280px; height: 640px; overflow: hidden; }
+  body {
+    font-family: "Segoe UI", "Microsoft YaHei", "PingFang SC", system-ui, sans-serif;
+    background: #f8fafc;
+    color: #0f172a;
+    -webkit-font-smoothing: antialiased;
+  }
+  .stage {
+    position: relative;
+    width: 1280px; height: 640px;
+    background:
+      radial-gradient(900px 480px at 88% -10%, #dbeafe 0%, rgba(219,234,254,0) 62%),
+      radial-gradient(620px 420px at 4% 108%, #e0e7ff 0%, rgba(224,231,255,0) 60%),
+      #f8fafc;
+    display: flex;
+    flex-direction: column;
+    padding: 46px 56px 28px;
+  }
+  .grid {
+    position: absolute; inset: 0;
+    background-image:
+      linear-gradient(to right, rgba(37,99,235,.055) 1px, transparent 1px),
+      linear-gradient(to bottom, rgba(37,99,235,.055) 1px, transparent 1px);
+    background-size: 40px 40px;
+    mask-image: linear-gradient(to bottom, #000 0%, rgba(0,0,0,.35) 70%, transparent 100%);
+    pointer-events: none;
+  }
+  .main { position: relative; flex: 1; display: flex; gap: 42px; min-height: 0; }
+  .left { width: 656px; flex: none; }
+  .right { flex: 1; padding-top: 4px; }
+
+  /* ---------- 品牌行 ---------- */
+  .brandrow { display: flex; align-items: center; gap: 10px; margin-bottom: 22px; }
+  .logo {
+    width: 40px; height: 40px; border-radius: 11px;
+    background: linear-gradient(160deg, #3b82f6, #2563eb);
+    color: #fff; font-weight: 800; font-size: 16px; letter-spacing: .5px;
+    display: flex; align-items: center; justify-content: center;
+    box-shadow: 0 6px 16px rgba(37,99,235,.30);
+  }
+  .pill {
+    font-size: 13px; font-weight: 600; line-height: 1;
+    padding: 7px 12px; border-radius: 999px;
+    background: #eff6ff; color: #1d4ed8; border: 1px solid #bfdbfe;
+  }
+  .pill.mono { font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; font-size: 12px; }
+  .pill.ghost { background: #fff; color: #475569; border-color: #e2e8f0; }
+
+  /* ---------- 标题 ---------- */
+  h1 {
+    font-size: 50px; line-height: 1.1; font-weight: 800;
+    letter-spacing: -1.2px; color: #0b1220;
+  }
+  h1 .to { color: #2563eb; }
+  .sub {
+    margin-top: 16px; font-size: 18px; line-height: 1.62; color: #475569;
+    font-weight: 500;
+  }
+  .sub b { color: #1e293b; font-weight: 700; }
+
+  /* ---------- 特性列表 ---------- */
+  .feats { list-style: none; margin-top: 22px; display: flex; flex-direction: column; gap: 12px; }
+  .feats li { display: flex; align-items: center; gap: 11px; font-size: 16px; color: #334155; font-weight: 500; }
+  .tick {
+    width: 21px; height: 21px; flex: none; border-radius: 999px;
+    background: #ecfdf5; border: 1px solid #a7f3d0;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .tick svg { width: 12px; height: 12px; }
+  .feats b { color: #0f172a; font-weight: 700; }
+
+  /* ---------- 安装命令 ---------- */
+  .cmd {
+    margin-top: 24px; display: inline-flex; align-items: center; gap: 12px;
+    background: #0f172a; color: #e2e8f0; border-radius: 12px;
+    padding: 15px 20px; font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+    font-size: 14.5px; box-shadow: 0 10px 26px rgba(15,23,42,.22);
+  }
+  .cmd .dollar { color: #60a5fa; font-weight: 700; }
+  .cmd .flag { color: #93c5fd; }
+
+  /* ---------- 右侧流程图 ---------- */
+  .flow {
+    background: #ffffff; border: 1px solid #e2e8f0; border-radius: 16px;
+    padding: 20px 20px 18px; box-shadow: 0 14px 40px rgba(15,23,42,.09);
+  }
+  .flow h2 {
+    font-size: 12px; font-weight: 700; letter-spacing: 1.4px; text-transform: uppercase;
+    color: #94a3b8; margin-bottom: 14px;
+  }
+  .node {
+    border: 1px solid #e2e8f0; border-radius: 12px; padding: 12px 14px;
+    background: #f8fafc; display: flex; align-items: center; gap: 12px;
+  }
+  .node .ic {
+    width: 34px; height: 34px; flex: none; border-radius: 9px;
+    display: flex; align-items: center; justify-content: center; font-size: 16px;
+  }
+  .node .tt { font-size: 14.5px; font-weight: 700; color: #0f172a; line-height: 1.35; }
+  .node .dd { font-size: 11.5px; color: #64748b; margin-top: 2px; font-weight: 500; }
+  .node.blue { background: #eff6ff; border-color: #bfdbfe; }
+  .node.blue .ic { background: #2563eb; color: #fff; }
+  .node.dark { background: #0f172a; border-color: #0f172a; }
+  .node.dark .tt { color: #f1f5f9; }
+  .node.dark .dd { color: #94a3b8; }
+  .node.dark .ic { background: #1e293b; color: #93c5fd; }
+  .link { display: flex; justify-content: center; padding: 6px 0; }
+  .link .bar { width: 2px; height: 16px; background: #cbd5e1; border-radius: 2px; position: relative; }
+  .link .bar::after {
+    content: ""; position: absolute; left: 50%; bottom: -1px;
+    transform: translateX(-50%);
+    border-left: 4px solid transparent; border-right: 4px solid transparent;
+    border-top: 6px solid #cbd5e1;
+  }
+  .tagline { margin-top: 15px; display: flex; gap: 8px; flex-wrap: wrap; }
+  .tagline span {
+    font-size: 11.5px; font-weight: 600; padding: 6px 10px; border-radius: 7px;
+    background: #f1f5f9; color: #475569; border: 1px solid #e2e8f0;
+  }
+  .tagline span.hi { background: #ecfdf5; color: #047857; border-color: #a7f3d0; }
+
+  /* ---------- 页脚 ---------- */
+  footer {
+    position: relative; flex: none;
+    display: flex; align-items: center; justify-content: space-between;
+    font-size: 13.5px; color: #64748b; font-weight: 500;
+    padding-top: 18px;
+  }
+  footer .repo { display: flex; align-items: center; gap: 9px; font-weight: 600; color: #334155; }
+  footer .repo svg { width: 17px; height: 17px; fill: #475569; }
+  footer .meta { display: flex; align-items: center; gap: 9px; }
+  footer .dot { width: 4px; height: 4px; border-radius: 99px; background: #cbd5e1; }
+</style>
+</head>
+<body>
+  <div class="stage">
+    <div class="grid"></div>
+
+    <div class="main">
+      <div class="left">
+        <div class="brandrow">
+          <div class="logo">WB</div>
+          <span class="pill">dsh-plugin</span>
+          <span class="pill mono">OpenAI-compatible</span>
+          <span class="pill ghost">MIT</span>
+        </div>
+
+        <h1>WorkBuddy <span class="to">&rarr;</span><br>DeepSeek Harness</h1>
+        <p class="sub">
+          把本机 WorkBuddy 桌面端<b>已登录的模型</b>，<br>
+          经本地桥<b>原生接进 DeepSeek Harness</b>
+        </p>
+
+        <ul class="feats">
+          <li><span class="tick"><svg viewBox="0 0 12 12"><path d="M1 6.4 4.3 9.6 11 2.4" fill="none" stroke="#059669" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></span>零依赖 · 零配置 · <b>双击即用</b></li>
+          <li><span class="tick"><svg viewBox="0 0 12 12"><path d="M1 6.4 4.3 9.6 11 2.4" fill="none" stroke="#059669" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></span><b>30+ 模型</b>原生可用，改完即生效</li>
+          <li><span class="tick"><svg viewBox="0 0 12 12"><path d="M1 6.4 4.3 9.6 11 2.4" fill="none" stroke="#059669" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></span><b>9 个标签页</b>数据面板 + 网页控制台</li>
+        </ul>
+
+        <div class="cmd">
+          <span class="dollar">$</span>
+          <span>dsh plugin <span class="flag">--profile desktop</span> add dsh-plugin-workbuddy</span>
+        </div>
+      </div>
+
+      <div class="right">
+        <div class="flow">
+          <h2>How it works</h2>
+
+          <div class="node">
+            <div class="ic" style="background:#eef2ff;color:#4f46e5">&#9673;</div>
+            <div>
+              <div class="tt">WorkBuddy 桌面端（已登录）</div>
+              <div class="dd">凭据现取现解，不落盘、不回写</div>
+            </div>
+          </div>
+
+          <div class="link"><div class="bar"></div></div>
+
+          <div class="node blue">
+            <div class="ic">&#8644;</div>
+            <div>
+              <div class="tt">本地桥 127.0.0.1:8790</div>
+              <div class="dd">/v1/chat/completions · 只绑回环</div>
+            </div>
+          </div>
+
+          <div class="link"><div class="bar"></div></div>
+
+          <div class="node dark">
+            <div class="ic">&#10022;</div>
+            <div>
+              <div class="tt">DeepSeek Harness</div>
+              <div class="dd">或任意支持自定义 Base URL 的客户端</div>
+            </div>
+          </div>
+
+          <div class="tagline">
+            <span class="hi">不新增对外监听</span>
+            <span>不上报数据</span>
+            <span>不内置密钥</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <footer>
+      <div class="repo">
+        <svg viewBox="0 0 16 16"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z"/></svg>
+        github.com/Ianzhyh/workbuddy-to-dsh
+      </div>
+      <div class="meta">
+        <span>Windows</span><span class="dot"></span>
+        <span>Node 18+</span><span class="dot"></span>
+        <span>MIT License</span>
+      </div>
+    </footer>
+  </div>
+
+<script>
+window.addEventListener('load', function(){
+  function m(sel){ var e=document.querySelector(sel); if(!e) return sel+': NOT FOUND';
+    var r=e.getBoundingClientRect();
+    return sel+' -> top='+Math.round(r.top)+' h='+Math.round(r.height)+' w='+Math.round(r.width)+' display='+getComputedStyle(e).display; }
+  var out=['viewport='+window.innerWidth+'x'+window.innerHeight,
+           'bodyScrollH='+document.body.scrollHeight,
+           'htmlScrollH='+document.documentElement.scrollHeight,
+           m('.stage'), m('.main'), m('.left'), m('.right'), m('footer'), m('.flow')];
+  document.body.innerHTML='<pre style="font:13px monospace;padding:10px;background:#fff">'+out.join('\n')+'</pre>';
+});
+</script>
+</body>
+</html>
