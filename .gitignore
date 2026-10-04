@@ -39,3 +39,8 @@ Thumbs.db
 
 # 含真实账号信息的旧截图（仅本地保留）
 .enhance-preview.local.png
+
+# promo 调试产物（只保留 social-preview.*）
+docs/promo/_*
+docs/promo/_dbg*
+docs/promo/_measure*
