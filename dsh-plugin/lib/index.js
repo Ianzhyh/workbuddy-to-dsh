@@ -582,8 +582,13 @@ export function apply(ctx, rawConfig = {}) {
       quotaError,
       /** 上次成功读到积分的时刻（ISO）；面板用它显示"更新于" */
       quotaAt: state.quotaCache.at ? new Date(state.quotaCache.at).toISOString() : null,
+      /** 这份积分属于哪个账号（health.auth.userId）；与 bridgeAccount 不一致说明缓存还没换新 */
+      quotaAccount: state.quotaCache.account,
+      /** 桥当前登录的账号（本快照探测到的）——重启 dsh 后可在面板核对它与 quotaAccount 一致 */
+      bridgeAccount: state.bridgeAccount,
       checkin: state.checkinCache.value,
       checkinError: state.checkinCache.error || '',
+      checkinAccount: state.checkinCache.account,
       dsh: { home: dshPaths.home, profileDir: dshPaths.profileDir, settingsPath: dshPaths.settingsPath, patchPath: dshPaths.patchPath },
       client: clientGraphSummary(ctx.get('clientModules')),
       runtime: { node: process.version, pid: process.pid, pluginDir: PLUGIN_DIR },

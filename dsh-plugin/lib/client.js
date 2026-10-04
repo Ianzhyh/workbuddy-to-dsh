@@ -527,6 +527,12 @@ window.__ModuleLoader__.load({
       const quota = status?.quota;
       const error = status?.quotaError || (quota && quota.ok === false ? String(quota.error || '读取失败') : '');
       const total = typeof quota?.total === 'number' ? quota.total : null;
+      /** 缓存的积分属于账号 X、桥却登录着账号 Y → 显示不匹配警告（正常情况两者一致或尚未探测到） */
+      const accountMismatch = Boolean(
+        status?.quotaAccount
+        && status?.bridgeAccount
+        && status.quotaAccount !== status.bridgeAccount
+      );
 
       const packages = useMemo(() => {
         const byName = new Map();
@@ -584,7 +590,14 @@ window.__ModuleLoader__.load({
                 ? '读取失败：' + error
                 : (packages.length
                   ? `${packages.length} 种套餐${status?.quotaAt ? ' · 更新于 ' + fmtClock(status.quotaAt) : ''}`
-                  : '还没有读到套餐明细'))),
+                  : '还没有读到套餐明细')),
+            accountMismatch
+              ? h('div', { className: 'wb-note', style: { margin: '2px 0 0', color: '#b45309' } },
+                '⚠ 积分还是上一个账号的（正在自动重读）—— 缓存 ' + String(status?.quotaAccount || '?').slice(0, 8) + '… / 桥 ' + String(status?.bridgeAccount || '?').slice(0, 8) + '…')
+              : (status?.quotaAccount
+                ? h('div', { className: 'wb-note', style: { margin: '2px 0 0' } },
+                  '归属账号 ' + String(status.quotaAccount).slice(0, 8) + '…（与桥一致）')
+                : null)),
           h('div', { className: 'wb-actions', style: { margin: 0 } },
             h(Btn, { primary: true, disabled: refreshing || busy, onClick: refreshQuota }, refreshing ? '刷新中…' : '刷新积分'),
             h(Btn, { onClick: () => onOpenTab('usage') }, '看用量'))),
