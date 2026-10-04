@@ -66,7 +66,15 @@ export function createTools(deps) {
         const bits = [];
         if (typeof q.total === 'number') bits.push(`总计 ${q.total}`);
         for (const p of q.packages || []) bits.push(`${p.name} ${p.remain}/${p.size}`);
-        if (bits.length) lines.push(`积分：${bits.join('，')}`);
+        if (bits.length) {
+          // 归属核对：积分的账号与桥当前账号不一致时必须提醒（换号后缓存尚未换新），
+          // 否则 agent 会把 A 账号的余额当成 B 账号的报给用户
+          if (state.quotaAccount && state.bridgeAccount && state.quotaAccount !== state.bridgeAccount) {
+            lines.push(`积分：⚠ 以下积分属于上一个账号（缓存 ${String(state.quotaAccount).slice(0, 8)}…，桥当前 ${String(state.bridgeAccount).slice(0, 8)}…），正在自动重读`);
+          } else {
+            lines.push(`积分：${bits.join('，')}${state.quotaAccount ? `（账号 ${String(state.quotaAccount).slice(0, 8)}…）` : ''}`);
+          }
+        }
       } else if (state.quotaError) {
         lines.push(`积分：读取失败（${state.quotaError}）`);
       }
