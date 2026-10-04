@@ -3303,17 +3303,137 @@ initQuickPrompts();
   loadRequests();
 })();
 
-setInterval(() => {
-  loadOverview();
-  loadModels();
-  loadUsage();
-  // 「暂停自动刷新」时不碰请求明细——排障时要盯住某一屏（手动「刷新」仍然可用）
-  if (!$('reqPause') || !$('reqPause').checked) loadRequests();
-}, 20000);
-// 「上次体检 N 分钟前」要跟着时间走，但不必重拉数据
-setInterval(refreshProbeStamp, 30000);
-// 账号读取要启动客户端取密钥（约 0.3s），因此放慢到 60s 一次
-setInterval(loadAccounts, 60000);
+/**
+ * 统一的轮询调度器。
+ *
+ * 页面被切到后台 / 标签页休眠 / 窗口最小化时，这些定时器照打请求：`/api/overview`
+ * 会打计费网关取余额、`/api/models` 透传到桥、`/api/accounts` 每次都要拉起
+ * WorkBuddy.exe 取密钥（最贵的一次，约 0.3s）。用户开着页面去干别的就是白烧
+ * 上游额度与 CPU。所以：**页面 hidden 时暂停全部轮询，变回 visible 时立刻补一次
+ * 再恢复定时** —— 补那一次是必须的，否则用户切回来要对着最多一个周期前的旧数据
+ * 干等（用量页 20 秒、账号页 60 秒），那看起来就像页面坏了。
+ *
+ * 与「暂停自动刷新」复选框（reqPause）是**两件不同的事**，不要合并：
+ *   - reqPause 是用户的手动意图，只管**请求明细**这一块，其它面板照常刷新；
+ *   - 可见性是浏览器给的事实，暂停**全部**轮询，但恢复后会自动补数据。
+ * 两者可以同时生效（页面在后台且勾了暂停），也可以各自单独生效。
+ *
+ * ## 为什么做成注入依赖的工厂而不是直接写全局变量
+ *
+ * 这段逻辑的**全部难点都在状态机**（初始可见 / 初始隐藏 / 反复切换 / 重复事件），
+ * 而它跑在单文件内联脚本里，页面本身没有测试入口。抽成 `createPollScheduler`
+ * 之后定时器与可见性都是参数，`dsh-plugin/tests/visibility.test.mjs` 就能直接
+ * 用假定时器把每条边界跑一遍 —— 而不是靠人眼读这段代码推。
+ *
+ * 这里踩过一次真实的坑，所以测试专门盯着它：**"页面一开始就是隐藏的"**。
+ * 那种页面（后台标签页里打开、浏览器恢复上次会话）从未调用过 `startPolls()`，
+ * 于是 `pollRunning` 一直是 false；早期版本的 `resumePollsNow()` 用
+ * `if (wasRunning) startPolls()` 想避免"顺手打开定时器"，结果把这条正常路径
+ * 一起挡掉了：切回可见时补了一次数据，但**定时器永远不再启动**，此后页面
+ * 静默停更（用户看不到任何报错）。所以现在**无条件** `startPolls()` ——
+ * 它自带幂等保护，重复调用无害。
+ */
+const pollers = [
+  {
+    every: 20000,
+    run() {
+      loadOverview();
+      loadModels();
+      loadUsage();
+      // 「暂停自动刷新」时不碰请求明细——排障时要盯住某一屏（手动「刷新」仍然可用）
+      if (!$('reqPause') || !$('reqPause').checked) loadRequests();
+    },
+  },
+  // 「上次体检 N 分钟前」要跟着时间走，但不必重拉数据
+  { every: 30000, run: refreshProbeStamp },
+  // 账号读取要启动客户端取密钥（约 0.3s），因此放慢到 60s 一次
+  { every: 60000, run: loadAccounts },
+];
+
+/**
+ * 轮询调度器。依赖全部注入，便于单测。
+ *
+ * @param {object} deps
+ * @param {Array<{every:number, run:Function}>} deps.pollers 轮询项
+ * @param {() => boolean} deps.isHidden 当前页面是否隐藏
+ * @param {(fn:Function, ms:number) => any} deps.setTimer setInterval
+ * @param {(t:any) => void} deps.clearTimer clearInterval
+ * @param {(cb:Function) => void} [deps.subscribe] 注册"可见性可能变了"的通知，
+ *   回调里再问 isHidden；返回注销函数。缺省 = 不订阅（测试里手动调 sync）
+ */
+function createPollScheduler({ pollers: items, isHidden, setTimer, clearTimer, subscribe }) {
+  let timers = [];
+  let running = false;
+  // 上一次**已知**的可见状态。必须记账，否则 sync() 无法区分
+  // "真的从隐藏变可见"（要补一次数据）与"本来就可见、只是又收到一个事件"
+  // （什么都不用做）—— 我们同时监听着 visibilitychange / focus / pageshow / blur
+  // 四个事件，浏览器切一次标签页常常一次派发好几个；不记账的话每切一次就补一轮
+  // 全量请求，反而比不做门控更费。
+  let lastHidden = null;
+
+  function start() {
+    if (running) return;
+    running = true;
+    timers = items.map((p) => setTimer(p.run, p.every));
+  }
+
+  function stop() {
+    running = false;
+    timers.forEach(clearTimer);
+    timers = [];
+  }
+
+  /** 可见性变化时的状态机：隐藏就停；转为可见就**先补一次再恢复定时**。 */
+  function sync() {
+    const hidden = isHidden();
+    if (hidden === lastHidden) return;   // 状态没变：重复事件直接忽略
+    lastHidden = hidden;
+    if (hidden) { stop(); return; }
+
+    // 先补数据再恢复定时 —— 顺序不能反，否则用户要干等一个周期才看到新数据
+    for (const p of items) p.run();
+    // **无条件**启动：初始隐藏时 running 本来就是 false，这里必须把它拉起来，
+    // 否则"后台标签页打开 → 切到前台"这条路径会永久停更（见上面的说明）。
+    start();
+  }
+
+  // 起手：页面本来就是隐藏的（后台标签页里恢复会话）就别起定时器。
+  // 这里用强制应用而不是 sync()：lastHidden 初始为 null，第一次必须走一遍状态机
+  // 才知道该不该起定时器（而此刻**不该**补数据 —— 脚本自己刚跑过一轮初始加载）。
+  lastHidden = isHidden();
+  if (!lastHidden) start();
+
+  const unsubscribe = typeof subscribe === 'function' ? subscribe(sync) : null;
+  return {
+    sync,
+    start,
+    stop,
+    isRunning: () => running,
+    dispose() { stop(); if (unsubscribe) unsubscribe(); },
+  };
+}
+
+const scheduler = createPollScheduler({
+  pollers,
+  isHidden: () => document.hidden === true,
+  setTimer: (fn, ms) => setInterval(fn, ms),
+  clearTimer: (t) => clearInterval(t),
+  // 有些宿主（含无头浏览器）不会可靠地派发 visibilitychange，focus / pageshow 是兜底。
+  // 多听几个事件是安全的：sync() 自己按状态去重（见 lastHidden），
+  // 同一次切换里重复触发不会重复补数据。
+  subscribe: (onChange) => {
+    document.addEventListener('visibilitychange', onChange);
+    window.addEventListener('focus', onChange);
+    window.addEventListener('pageshow', onChange);
+    window.addEventListener('blur', onChange);
+    return () => {
+      document.removeEventListener('visibilitychange', onChange);
+      window.removeEventListener('focus', onChange);
+      window.removeEventListener('pageshow', onChange);
+      window.removeEventListener('blur', onChange);
+    };
+  },
+});
 </script>
 </body>
 </html>

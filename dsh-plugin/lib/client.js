@@ -139,6 +139,57 @@ window.__ModuleLoader__.load({
 @media (prefers-reduced-motion: reduce){.wb-spinner{animation-duration:2s}}
 `;
 
+    // ─────────────────────── 页面可见性门控 ───────────────────────
+    /**
+     * 页面被切到后台 / 标签页休眠时**暂停轮询**，切回来立刻补一次。
+     *
+     * 为什么值得单独做一层：这一页的每个接口都会顺着桥打到上游 ——
+     * `/workbuddy/models` 透传桥的目录、概览里的签到每 5 分钟一次、
+     * 请求明细 5 秒一次。用户开着 dsh 去干别的（或把窗口最小化）时这些请求
+     * 照打，纯属白烧上游额度。
+     *
+     * **`document` 必须判存在**（这是硬要求，不是防御性编程）：这段代码跑在
+     * dsh 的 Web 客户端里，而客户端半边也会在非浏览器环境被加载/组装
+     * （SSR、纯 Node 的装配测试）。那些环境里没有 `document`，直接写
+     * `document.hidden` 会抛 ReferenceError —— 抛在 useEffect 里等于把整个
+     * 插件面板打成白屏，而且现场只能看到一句"面板没渲染出来"。
+     *
+     * 拿不到 `document` 时的语义刻意选"**照常轮询**"：门控只是省钱的优化，
+     * 优化失败不应该牺牲功能（少刷新比不刷新严重得多）。
+     *
+     * 宿主没有 `visibilitychange` 事件（老浏览器）时同样按"一直可见"处理 ——
+     * 宁可多轮询，也不要因为监听不上就永远暂停。
+     *
+     * 监听面刻意放宽到 focus / pageshow：它们与 `document.hidden` 状态机共用
+     * 同一份状态、重复触发会被去重，所以多听几个事件不会多打请求。
+     *
+     * @param {(hidden: boolean) => void} onStateChange 可见性**状态变化**时调用，
+     *   参数是新的 hidden；调用方据此决定"停定时器"还是"补一次再恢复定时"。
+     *   只在状态真的翻转时触发（重复的 focus 不会重复调用）。
+     * @returns {undefined | (() => void)} 注销函数；没有可监听对象时返回 undefined
+     */
+    function watchPageVisibility(onStateChange) {
+      if (typeof document === 'undefined' || !document) return undefined;
+      const read = () => document.hidden === true;
+      let hidden = read();
+      const onChange = () => {
+        const next = read();
+        if (next === hidden) return;
+        hidden = next;
+        onStateChange(next);
+      };
+      document.addEventListener('visibilitychange', onChange);
+      window.addEventListener('focus', onChange);
+      window.addEventListener('pageshow', onChange);
+      window.addEventListener('blur', onChange);
+      return () => {
+        document.removeEventListener('visibilitychange', onChange);
+        window.removeEventListener('focus', onChange);
+        window.removeEventListener('pageshow', onChange);
+        window.removeEventListener('blur', onChange);
+      };
+    }
+
     const styleId = 'dsh-plugin-workbuddy-style';
     function insertStyles() {
       if (document.getElementById(styleId)) return () => {};
@@ -185,6 +236,8 @@ window.__ModuleLoader__.load({
 
     /**
      * 轮询式取数；enabled=false 时完全不请求（面板切走就停）。
+     * 定时器**还受页面可见性门控**：页面隐藏时暂停，变回可见时先补一次再继续
+     * （见 {@link watchPageVisibility}）。
      *
      * 两处恢复机制，避免"一次失败挂很久"：
      *   1. 404 由 getJson 自己快速重试（插件启动窗口）；
@@ -226,10 +279,31 @@ window.__ModuleLoader__.load({
         }
         setState((s) => ({ ...s, loading: true }));
         reload();
-        const timer = opts.interval ? setInterval(reload, opts.interval) : null;
+        // 定时器不常驻：可见时才挂上。这样"不可见"就等价于停轮询，而不是
+        // 让定时器空转（空转在一个开着的后台标签页里会一直跑下去）。
+        let timer = null;
+        const startTimer = () => {
+          if (timer || !opts.interval) return;
+          timer = setInterval(reload, opts.interval);
+        };
+        const stopTimer = () => { if (timer) { clearInterval(timer); timer = null; } };
+        const onVisibilityChange = (hidden) => {
+          if (hidden) { stopTimer(); return; }
+          // 变回可见：**先补一次再恢复定时**，不等下一个周期。否则用户切回来
+          // 看到的是最多一个完整周期之前的旧数据（用量页 60 秒、模型页 120 秒）。
+          reload();
+          startTimer();
+        };
+        // 挂载时如果页面本来就是隐藏的，就别起定时器（省掉后台标签页的整轮空转）。
+        // 注意这里**不能**顺手 reload()：上面刚 reload() 过一次，否则首帧会对
+        // 同一个接口连打两次。
+        if (typeof document !== 'undefined' && document && document.hidden === true) stopTimer();
+        else startTimer();
+        const unwatch = watchPageVisibility(onVisibilityChange);
         return () => {
           alive.current = false;
-          if (timer) clearInterval(timer);
+          stopTimer();
+          if (unwatch) unwatch();
           if (retryTimer.current) { clearTimeout(retryTimer.current); retryTimer.current = null; }
         };
       }, [reload, opts.interval, opts.enabled]);
