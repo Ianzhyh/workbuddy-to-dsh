@@ -37,13 +37,16 @@ Thumbs.db
 # 临时探查产物（asar 抽取、面板渲染用的 React UMD 等）
 .tmp-*
 
-# ����ʵ�˺���Ϣ�ľɽ�ͼ�������ر�����
+# 含真实账号信息的旧截图（仅本地保留）
 .enhance-preview.local.png
 
-# promo ���Բ��ֻ���� social-preview.*��
+# promo 调试产物（只保留 social-preview.*）
 docs/promo/_*
 docs/promo/_dbg*
 docs/promo/_measure*
 
-# ��������ڲ��ʼǣ�����⣩
+# 发布相关内部笔记（不入库）
 .PUBLISH.local.md
+
+# 宣传文案与投放笔记（本地留存，不入库）
+.promo/

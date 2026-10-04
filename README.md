@@ -11,8 +11,9 @@ Base URL 的客户端使用。附带一个网页控制台，把状态、启停�
 只在本机回环地址上工作，不对外暴露，不内置任何密钥。
 
 ```sh
-# 装进 DeepSeek Harness（profile 名按需替换，如 web / desktop）
-dsh plugin --profile desktop add <本仓库路径>/dsh-plugin
+# 从源码安装（推荐；插件在 dsh-plugin/ 子目录）
+git clone https://github.com/Ianzhyh/workbuddy-to-dsh.git
+dsh plugin --profile desktop add workbuddy-to-dsh/dsh-plugin
 # 装完重启一次 dsh；之后：设置 → WorkBuddy
 ```
 
