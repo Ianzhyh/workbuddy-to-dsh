@@ -28,12 +28,51 @@ import { effectiveAuthFile, readState, writeState } from '../lib/state.mjs';
 
 // ── 基础工具 ────────────────────────────────────────────────────────────
 
+/**
+ * 所有响应的基础安全头。
+ *
+ * `nosniff`：不让浏览器猜 Content-Type。`frame-ancestors 'none'` + `X-Frame-Options`：
+ * 控制台带「停止桥 / 切换账号 / 写 dsh 配置」这类按钮，绝不能被其它页面用 iframe
+ * 嵌起来做点击劫持。`Referrer-Policy`：控制台 URL 不该出现在外链的 Referer 里。
+ *
+ * 刻意**不**加 `script-src`：页面是单文件、含一大段内联脚本，要上严格的
+ * script-src 只能配 `'unsafe-inline'`，那等于没加（规范也明确反对这种"快修"）。
+ * 真要上，得先把内联脚本抽成外部文件 —— 属于后续独立工作，不在本轮夹带。
+ */
+const SECURITY_HEADERS = {
+  'X-Content-Type-Options': 'nosniff',
+  'Referrer-Policy': 'no-referrer',
+  'X-Frame-Options': 'DENY',
+  'Content-Security-Policy': "frame-ancestors 'none'",
+};
+
 function sendJson(res, code, body) {
   res.writeHead(code, {
     'Content-Type': 'application/json; charset=utf-8',
     'Cache-Control': 'no-store',
+    ...SECURITY_HEADERS,
   });
   res.end(JSON.stringify(body));
+}
+
+/**
+ * 这个请求的 Origin 是否可以放行。
+ *
+ * **绑定 127.0.0.1 挡不住浏览器**：恶意网页可把域名解析到 127.0.0.1（DNS
+ * rebinding），让浏览器把请求发到本机服务。控制台的**写**操作已有面板头
+ * （会触发预检、跨站发不出），但**读**接口与静态页没有这一层 —— 补上 Origin
+ * 白名单后，跨站形状的请求在到达任何路由之前就被拒掉。
+ *
+ * 判据：本机 CLI / 脚本 / 插件（curl、dsh、内部代理）**不发 Origin**，一律放行；
+ * 带 Origin 的只放行**回环来源**（用户在本机另开网页访问控制台照常可用）。
+ */
+function originAllowed(req) {
+  const origin = req.headers.origin;
+  if (!origin) return true; // 非浏览器调用
+  let host;
+  try { host = new URL(origin).hostname; } catch { return false; } // 含 `Origin: null`
+  const bare = String(host).replace(/^\[|\]$/g, '');
+  return bare === '127.0.0.1' || bare === 'localhost' || bare === '::1';
 }
 
 // 控制台自身的版本信息（诊断报告要用）。读一次 package.json 就缓存，不每次请求都碰磁盘；
@@ -655,6 +694,7 @@ async function proxyChat(req, res, payload) {
       'Content-Type': 'text/event-stream; charset=utf-8',
       'Cache-Control': 'no-store',
       Connection: 'keep-alive',
+      ...SECURITY_HEADERS,
     });
     const reader = upstream.body.getReader();
     for (;;) {
@@ -700,6 +740,17 @@ function serveStatic(res, pathname) {
     res.end('403');
     return;
   }
+  // 只服务页面真正需要的文件：**拒绝点文件与备份/临时文件**。
+  // 实测 `GET /index.html.bak` 会 200 返回整份旧页面 —— 这不是密钥泄漏，但它把
+  // 工作副本（历史版本、编辑器残留）暴露给任何能打到本机端口的人。静态目录属于
+  // "发布物"，不该连带把工作区状态一起发出去。
+  const denied = rel.split(/[\\/]/).some((seg) => seg.startsWith('.'))
+    || /\.(bak|orig|tmp|swp|rej|save)(\.|$)/i.test(rel);
+  if (denied) {
+    res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
+    res.end('404');
+    return;
+  }
   if (!existsSync(full)) {
     res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
     res.end('404');
@@ -709,6 +760,7 @@ function serveStatic(res, pathname) {
   res.writeHead(200, {
     'Content-Type': MIME[ext] || 'application/octet-stream',
     'Cache-Control': 'no-store',
+    ...SECURITY_HEADERS,
   });
   res.end(readFileSync(full));
 }
@@ -720,6 +772,12 @@ const server = createServer(async (req, res) => {
   const route = url.pathname;
 
   try {
+    // 跨站来源一律拒（DNS rebinding 的防线，见 originAllowed 的说明）。
+    // 放在最前面：无论读还是写、无论路由存不存在，跨站形状的请求都进不来。
+    if (!originAllowed(req)) {
+      return sendJson(res, 403, { ok: false, error: 'cross-origin request rejected (this console serves local clients only)' });
+    }
+
     /**
      * 写操作的准入检查：必须带 `x-workbuddy-panel: 1`。
      *

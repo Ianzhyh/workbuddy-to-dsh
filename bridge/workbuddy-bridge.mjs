@@ -1413,15 +1413,51 @@ const readBody = (req, limit = MAX_BODY_BYTES) => new Promise((resolve, reject) 
   req.on('error', (e) => { if (!done) { done = true; reject(e); } });
 });
 
+/**
+ * 所有响应的基础安全头。
+ *
+ * `nosniff`：不让浏览器去猜 Content-Type（响应里既有 JSON 又有 SSE，猜错会
+ * 把数据当可执行内容处理）。`frame-ancestors 'none'`：本服务不该被任何页面嵌。
+ */
+const SECURITY_HEADERS = {
+  'X-Content-Type-Options': 'nosniff',
+  'Referrer-Policy': 'no-referrer',
+  'Content-Security-Policy': "frame-ancestors 'none'",
+};
+
 const json = (res, status, obj) => {
   const body = JSON.stringify(obj);
-  res.writeHead(status, { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) });
+  res.writeHead(status, { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body), ...SECURITY_HEADERS });
   res.end(body);
 };
+
+/**
+ * 这个请求的 Origin 是否可以放行。
+ *
+ * **为什么必须校验：绑定 127.0.0.1 挡不住浏览器。** 恶意网页可以把域名解析到
+ * 127.0.0.1（DNS rebinding），让浏览器把请求发到本机服务；响应被 CORS 挡住读不到，
+ * 但**副作用已经发生** —— 桥会照常转发、消耗账号配额。实测：带
+ * `Origin: https://evil.example` 的跨站形状请求（text/plain、无鉴权）得到 200，
+ * 打桩上游确实被调用。桥自身的本地令牌默认是**空**，所以不能只靠令牌兜底。
+ *
+ * 判据：本机 CLI / SDK（curl、dsh 插件、控制台）**不发 Origin**，一律放行；
+ * 带 Origin 的只放行**回环来源**（本机网页版客户端照常可用），其余一律拒绝。
+ */
+function originAllowed(req) {
+  const origin = req.headers.origin;
+  if (!origin) return true; // 非浏览器调用（CLI / SDK / 内部代理）
+  let host;
+  try { host = new URL(origin).hostname; } catch { return false; } // 含 `Origin: null`
+  const bare = String(host).replace(/^\[|\]$/g, '');
+  return bare === '127.0.0.1' || bare === 'localhost' || bare === '::1';
+}
 
 const server = createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host}`);
   try {
+    if (!originAllowed(req)) {
+      return json(res, 403, { error: { message: 'workbuddy-bridge: cross-origin request rejected (this bridge serves local clients only)' } });
+    }
     if (LOCAL_TOKEN && req.headers.authorization !== `Bearer ${LOCAL_TOKEN}`) {
       return json(res, 401, { error: { message: 'workbuddy-bridge: bad or missing local token' } });
     }
@@ -1575,7 +1611,7 @@ const server = createServer(async (req, res) => {
               type: 'payload_too_large',
             },
           });
-          res.writeHead(413, { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) });
+          res.writeHead(413, { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body), ...SECURITY_HEADERS });
           // 413 写完后 `resume()` 把剩余字节读掉丢弃。
           //
           // **不要改成 destroy()**：实测这样会让客户端在读到 413 之前就吃 RST
@@ -1682,6 +1718,7 @@ const server = createServer(async (req, res) => {
             'Cache-Control': 'no-cache, no-transform',
             Connection: 'keep-alive',
             'X-Accel-Buffering': 'no',
+            ...SECURITY_HEADERS,
           });
           const reader = up.body.getReader();
           const decoder = new TextDecoder();

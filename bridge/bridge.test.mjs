@@ -645,3 +645,81 @@ test('桥：上游流中途断开必须记成失败（与非流式路径一致�
     rmSync(bridge.dir, { recursive: true, force: true });
   }
 });
+
+test('桥：拒绝外来 Origin（DNS rebinding 防线），且不误伤本机调用', { timeout: 90_000 }, async () => {
+  // 刻意用**空令牌**启动 —— 那是桥自身的默认（`WORKBUDDY_LOCAL_TOKEN` 缺省为空），
+  // 也是 Origin 这道防线真正要覆盖的场景：没有令牌时，如果连 Origin 都不看，
+  // 一个恶意网页就能靠 DNS rebinding 把浏览器指向 127.0.0.1 来消耗账号配额。
+  const calls = { chat: 0 };
+  const upstream = createServer((req, res) => {
+    const path = new URL(req.url, 'http://127.0.0.1').pathname;
+    if (path === '/v2/enterprises/personal/models') {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      return res.end(JSON.stringify({ code: 0, data: { models: [{ id: 'origin-model', maxInputTokens: 128000, maxOutputTokens: 4096 }] } }));
+    }
+    if (path === '/v3/config') {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      return res.end(JSON.stringify({ code: 0, data: { models: [] } }));
+    }
+    if (path === '/v2/chat/completions') {
+      calls.chat += 1;
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      return res.end('data: {"choices":[{"delta":{"content":"ok"}}]}\n\ndata: [DONE]\n\n');
+    }
+    res.writeHead(404, { 'content-type': 'application/json' });
+    res.end('{}');
+  });
+  await new Promise((r) => upstream.listen(0, '127.0.0.1', r));
+  const upstreamBase = `http://127.0.0.1:${upstream.address().port}`;
+
+  const bridge = await startBridge(
+    { CODEBUDDY_ENDPOINT: upstreamBase, WORKBUDDY_LOCAL_TOKEN: '' },
+    { auth: READABLE_FAKE_AUTH },
+  );
+  const body = JSON.stringify({ model: 'origin-model', messages: [{ role: 'user', content: 'hi' }] });
+  try {
+    await fetch(bridge.baseUrl + '/v1/models?all=1'); // 预热目录，让预校验认识该模型
+
+    // ① 外来 Origin（跨站形状：text/plain 简单请求）→ 403，且**一次上游都不打**
+    const before = calls.chat;
+    const cross = await fetch(bridge.baseUrl + '/v1/chat/completions', {
+      method: 'POST',
+      headers: { Origin: 'https://evil.example', 'Content-Type': 'text/plain' },
+      body,
+      signal: AbortSignal.timeout(15000),
+    });
+    assert.equal(cross.status, 403, '外来 Origin 必须被 403 拒绝');
+    await cross.text();
+    assert.equal(calls.chat, before, '被拒的请求绝不能打到上游（副作用必须为零）');
+
+    // ② 回环 Origin 放行（本机网页版客户端仍然可用）
+    const loop = await fetch(bridge.baseUrl + '/v1/chat/completions', {
+      method: 'POST',
+      headers: { Origin: 'http://127.0.0.1:9999', 'Content-Type': 'application/json' },
+      body,
+      signal: AbortSignal.timeout(15000),
+    });
+    assert.equal(loop.status, 200, '回环 Origin 必须放行');
+    await loop.text();
+
+    // ③ 无 Origin（curl / dsh 插件 / 控制台内部代理）放行
+    const none = await fetch(bridge.baseUrl + '/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body,
+      signal: AbortSignal.timeout(15000),
+    });
+    assert.equal(none.status, 200, '无 Origin 必须放行（本机 CLI/SDK 不发这个头）');
+    await none.text();
+
+    // ④ 基础安全响应头
+    const models = await fetch(bridge.baseUrl + '/v1/models');
+    assert.equal(models.headers.get('x-content-type-options'), 'nosniff');
+    assert.match(models.headers.get('content-security-policy') || '', /frame-ancestors 'none'/);
+    await models.text();
+  } finally {
+    await bridge.stop();
+    try { upstream.close(); } catch { /* 忽略 */ }
+    rmSync(bridge.dir, { recursive: true, force: true });
+  }
+});
