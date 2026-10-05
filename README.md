@@ -4,8 +4,9 @@
 经一个本地桥暴露成 **OpenAI 兼容接口**，供 **DeepSeek Harness** 或任意支持自定义
 Base URL 的客户端使用。附带一个网页控制台，把状态、启停、诊断、模型注册集中到一屏。
 
-**关键词**：本地模型桥 · OpenAI 兼容接口 · DeepSeek Harness 插件 · 自定义 Base URL ·
-零依赖 Node.js · 仅监听 127.0.0.1 · 本机凭据自用
+**关键词**：WorkBuddy 插件 · WorkBuddy 接入 DeepSeek Harness · 本地模型桥 · OpenAI 兼容接口 ·
+Anthropic Messages 兼容 · 自定义 Base URL · opencode / Claude Code / Cursor / Trae /
+Cherry Studio / NextChat / LobeChat / Open WebUI 接入 · 零依赖 Node.js · 仅监听 127.0.0.1 · 本机凭据自用
 
 > ### ⚠️ 请先读这一段
 >
@@ -33,7 +34,7 @@ dsh plugin --profile desktop add github:Ianzhyh/workbuddy-to-dsh
 
 # 方式二：release 附件（tgz 安装包，无构建、无需 allowBuilds 授权）
 #   从 GitHub Releases 下载 dsh-plugin-workbuddy-<版本>.tgz 后：
-dsh plugin --profile desktop add ./dsh-plugin-workbuddy-1.1.0.tgz
+dsh plugin --profile desktop add ./dsh-plugin-workbuddy-1.2.0.tgz
 
 # 方式三：从源码（插件在 dsh-plugin/ 子目录）
 git clone https://github.com/Ianzhyh/workbuddy-to-dsh.git
@@ -158,6 +159,7 @@ dsh plugin --profile desktop add <本仓库路径>/dsh-plugin
 | 环境诊断 | 8 项检查，**按优先级排序**——红色项不解决，模型就不会出现 |
 | 可用模型 | 实际可用的全部模型（不能对话的内部模型已在桥的目录层过滤），含上下文、输出上限、**消耗倍率**与**实测成本**；**体检范围可选**（勾选的 / 已注册的 / 全部），可**一键取消勾选不可用的**、**同步可用模型到 dsh**、**手动刷新目录**；点 **ⓘ** 看模型详情（中文描述 / 厂商 / 标签 / 精确上下文与输出）；导出 CSV |
 | 对话测试 | **多轮对话**（带上下文）、按轮次分段、显示本轮 token / 扣分 / 耗时、回答可复制；流式输出可随时停止；附带桥日志（可按关键字过滤 / 只看错误 / 只看本次启动 / 清空） |
+| 客户端接入 | 桥的两套协议地址与本地令牌（**点一下即复制**），以及各客户端的完整配置片段与**如实的兼容性分档**（已实测 / 协议兼容 / 不支持）；「复制全部配置」一次抄走 |
 
 每个面板的表头都显示「数据更新于 HH:MM:SS」，页面上出现的结论都能对得上时间。
 所有图表都是自己画的**零依赖内联 SVG**（没有引入任何图表库）。
@@ -166,22 +168,67 @@ dsh plugin --profile desktop add <本仓库路径>/dsh-plugin
 
 ---
 
+## 接入其它客户端
+
+桥同时讲**两套协议**，填哪个地址取决于客户端讲哪套：
+
+| 协议 | Base URL | API Key |
+|---|---|---|
+| OpenAI 兼容 | `http://127.0.0.1:8790/v1` | `wb-local-bridge`（或你设的 `WORKBUDDY_LOCAL_TOKEN`） |
+| Anthropic Messages | `http://127.0.0.1:8790`（**不带 `/v1`**） | 同上 |
+
+控制台的「客户端接入」页签里有每个客户端的完整配置片段，点一下即可复制。
+
+**兼容性分三档，如实标注、不夸大：**
+
+| 客户端 | 协议 | 状态 |
+|---|---|---|
+| opencode | OpenAI | ✅ 已实测 —— 用其底层 AI SDK（`@ai-sdk/openai-compatible`）跑通生成 / 工具调用 / 流式 |
+| Claude Code | Anthropic | ✅ 已实测 —— 流式事件序列、`tool_use`、多轮 `tool_result` 往返均正确 |
+| Cursor / Trae | OpenAI | ⚪ 协议兼容，未在客户端内实测（Agent 模式依赖的工具调用桥侧可用） |
+| Cherry Studio / NextChat / LobeChat / ChatBox / Open WebUI | OpenAI | ⚪ 协议兼容，未在客户端内实测 |
+
+> 「协议兼容」= 这些客户端只用 `/v1/models` 与 `/v1/chat/completions` 两个端点，
+> 桥侧已验证；但**没有真的装一遍跑通**，所以不写成「支持」。
+
+**Claude Code 的模型名会被映射。** 它发的是 `claude-sonnet-4-…`，上游没有这些 id，
+桥会映射到真实模型（默认 `glm-5.3`）。想指定就用 `WORKBUDDY_ANTHROPIC_MODEL=<上游真实模型 id>`。
+
+**已知限制：知识库 / RAG 用不了。** 上游只提供对话模型，没有任何 embedding 模型，
+`POST /v1/embeddings` 会明确返回 **501**。需要 RAG 的客户端请另配一个 embedding
+提供方——桥不做「假的向量」，那会让知识库看起来建成了、实际全是噪声。
+
+---
+
 ## 工作原理
 
+桥同时讲**两套协议**，因为客户端说的是两套：
+
 ```
-任意 OpenAI 客户端 / DeepSeek Harness
-   │  POST http://127.0.0.1:8790/v1/chat/completions
+OpenAI 系客户端（opencode / Cursor / Trae / Cherry Studio …）
+   │  POST /v1/chat/completions
+   │
+Claude Code
+   │  POST /v1/messages            ← Anthropic Messages 协议
    ▼
-bridge/workbuddy-bridge.mjs          ← 只做三件事
+bridge/workbuddy-bridge.mjs
    │  1. 注入鉴权头（凭据现取现解，不落盘）
    │  2. 保证流式（上游不接受非流式请求）
-   │  3. 角色名适配（developer → system）
+   │  3. 请求体归一化（developer → system、tool_choice 对象 → 字符串）
+   │  4. Anthropic ↔ OpenAI 双向翻译（仅 /v1/messages 这条路径）
    ▼
-copilot.tencent.com/v2/chat/completions
+copilot.tencent.com/v2/chat/completions   ← 上游只说 OpenAI 协议，且只支持流式
 ```
 
-桥**不做协议翻译**——上游本来就说 OpenAI 协议。详见
-[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)。
+**OpenAI 那条路径基本不做协议翻译**——上游本来就说 OpenAI 协议，桥只做上面 1–3
+三件适配。**Anthropic 那条必须翻译**：Claude Code 的请求结构、响应结构、流式事件
+格式都与 OpenAI 不同，光把 Base URL 指过来会直接 404。
+
+两条路径最终汇到上游同一个端点，所以**用量、积分、账本、控制台是统一的**。
+
+上游比 OpenAI 规范更严的地方（`developer` 角色、`tool_choice` 只认字符串、首条必须
+是 `system`）都在同一次归一化里处理；缺的能力（embedding）明确返回 501 而不是伪造。
+详见 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)。
 
 ---
 
@@ -203,6 +250,8 @@ copy .env.example .env
 | `DASHBOARD_PORT` | `8792` | 控制台端口 |
 | `WORKBUDDY_APP_EXECUTABLE` | 自动探测 | WorkBuddy 客户端路径 |
 | `WORKBUDDY_AUTH_FILE` | 自动定位 | 登录文件；多账号时务必显式指定 |
+| `WORKBUDDY_ANTHROPIC_MODEL` | `glm-5.3` | Claude Code 的模型名映射到哪个真实模型（也可直接填上游真实 id） |
+| `WORKBUDDY_ANTHROPIC_FAST_MODEL` | `glm-5.3-flash` | Claude Code 后台任务（标题生成、文件摘要）用的小快模型 |
 
 完整列表见 [`.env.example`](.env.example) 与 [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md)。
 
@@ -217,7 +266,7 @@ copy .env.example .env
 config.mjs                 统一配置（唯一真源）
 .env.example               配置样例
 bridge/
-  workbuddy-bridge.mjs     桥本体（含 AtRest 解密层）
+  workbuddy-bridge.mjs     桥本体（AtRest 解密 + 请求体归一化 + Anthropic 兼容层）
   launch.mjs               按统一配置独立启动桥
   start-bridge.cmd         Windows 独立启动入口
 dsh-plugin/                DeepSeek Harness 原生插件（宿主端 + dsh 设置页）

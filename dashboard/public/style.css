@@ -1341,3 +1341,229 @@ pre.log {
   .diag-row { grid-template-columns: 1fr; gap: 4px; }
   .diag-row .s-dot { display: none; }
 }
+
+/* ── 20. 客户端接入面板 ──────────────────────────────────────────────── */
+
+/*
+ * 排版原则：这个面板是**照着抄**用的 —— 用户的动作是「看一眼、点复制、粘进客户端表单」。
+ * 因此：
+ *   1. 字段名 / 值 / 复制按钮 / 说明 四列**全表共用一套列宽**，眼睛能竖着扫下来；
+ *      接入值与字段表虽然语义不同，也用同一套网格，视觉上读作一张表。
+ *   2. 模型字段按模型**分组**，组标题带主色，不靠缩进让用户猜归属。
+ *   3. 行内边距压到 6px —— 十几行平铺时，松散间距会让整块没法扫读。
+ */
+
+.clientvalues {
+  display: grid;
+  gap: var(--space-2);
+  margin-bottom: var(--space-4);
+}
+
+/*
+ * 列宽**必须写死**，不能写成 `minmax(0, Npx)`：每个 `.fggroup` 是独立的 grid
+ * 容器，内容自适应会让各组的第 2 列宽度互不相同，第 4 列（说明）随之错位。
+ * 实测过：`minmax(0, 248px)` 下说明列出现 2 种左边缘，写死 `240px` 后归 1。
+ */
+.valuerow,
+.formrow {
+  display: grid;
+  grid-template-columns: 124px 240px 64px minmax(0, 1fr);
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.valuerow {
+  padding: 8px 12px;
+  background: var(--panel-subtle);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+.valuerow-k,
+.formrow-k {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.valuerow-v,
+.formrow-v {
+  font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  font-size: 12px;
+  color: var(--primary-text);
+  background: var(--primary-subtle);
+  border: 1px solid var(--primary-border);
+  border-radius: var(--radius-xs);
+  padding: 2px 8px;
+  cursor: pointer;
+  user-select: all;
+  justify-self: start;
+  max-width: 100%;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  transition: background-color 0.16s var(--ease);
+}
+
+.valuerow-v:hover,
+.formrow-v:hover { background: var(--primary-border); }
+
+.valuerow-h,
+.formrow-h {
+  font-size: 11.5px;
+  color: var(--faint);
+  line-height: 1.45;
+}
+
+/* 分组标题（提供商级 / 模型 N）。上分隔线让长面板有可数的段落 */
+.clienth {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--muted);
+  letter-spacing: 0.02em;
+  margin: var(--space-5) 0 var(--space-3);
+  padding-top: var(--space-4);
+  border-top: 1px solid var(--border-subtle);
+}
+
+.clienth:first-of-type {
+  margin-top: var(--space-3);
+  padding-top: 0;
+  border-top: none;
+}
+
+/* ── 逐字段复制表 ── */
+.formguide {
+  display: grid;
+  gap: var(--space-3);
+}
+
+.fggroup {
+  display: grid;
+  gap: 3px;
+}
+
+.fggh {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--primary-text);
+  padding: 2px 0 2px 2px;
+  letter-spacing: 0.02em;
+}
+
+.formrow {
+  padding: 6px 10px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-xs);
+  transition: background-color 0.16s var(--ease), border-color 0.16s var(--ease);
+}
+
+.formrow:hover {
+  background: var(--panel-muted);
+  border-color: var(--border);
+}
+
+.formrow-empty {
+  font-size: 12px;
+  color: var(--faint);
+  justify-self: start;
+}
+
+/* ── 客户端卡片 ── */
+.clientcard {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: var(--space-4);
+  margin-bottom: var(--space-3);
+  background: var(--panel);
+  transition: border-color 0.16s var(--ease);
+}
+
+.clientcard:hover { border-color: var(--border-strong); }
+
+.clientcard-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-bottom: var(--space-2);
+  font-size: 13.5px;
+  color: var(--text);
+}
+
+.clientcard-note {
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.65;
+  margin: 0 0 var(--space-3);
+}
+
+.clientcard-note:last-child { margin-bottom: 0; }
+
+.clientsteps {
+  margin: 0 0 var(--space-3);
+  padding-left: 20px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.75;
+}
+
+.codeblock {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  margin-top: var(--space-3);
+}
+
+.codeblock-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  padding: 7px 12px;
+  background: var(--panel-muted);
+  border-bottom: 1px solid var(--border);
+  font-size: 11.5px;
+  color: var(--muted);
+}
+
+.codeblock pre {
+  margin: 0;
+  padding: 12px 14px;
+  font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: var(--text-secondary);
+  overflow-x: auto;
+  white-space: pre;
+}
+
+.clientchips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-bottom: var(--space-3);
+}
+
+.clientchip {
+  font-size: 12px;
+  color: var(--text-secondary);
+  background: var(--panel-muted);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-full);
+  padding: 4px 12px;
+}
+
+/* 窄屏：字段名与说明各占一整行，值与复制按钮并排 —— 四列在窄屏下会挤成一团 */
+@media (max-width: 640px) {
+  .valuerow,
+  .formrow { grid-template-columns: minmax(0, 1fr) auto; row-gap: var(--space-1); }
+
+  .valuerow-k,
+  .formrow-k { grid-column: 1 / -1; }
+
+  .valuerow-h,
+  .formrow-h { grid-column: 1 / -1; }
+}

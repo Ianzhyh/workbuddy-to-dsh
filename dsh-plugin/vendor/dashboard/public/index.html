@@ -58,6 +58,10 @@
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
       对话测试与诊断
     </button>
+    <button type="button" class="nav-tab" data-tab="clients">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="4" width="20" height="13" rx="2"/><path d="M8 21h8M12 17v4"/></svg>
+      客户端接入
+    </button>
   </nav>
 
   <div id="alertBar" hidden></div>
@@ -149,6 +153,14 @@
       <span id="probeText"></span>
     </div>
     <div id="modelWrap"><div class="empty">桥未运行，暂无数据。</div></div>
+  </section>
+
+  <section class="panel" data-section="clients">
+    <h2>客户端接入 <span class="spacer"></span><span class="stamp" id="clientsStamp"></span>
+      <button class="mini" id="clientsCopyAllBtn">复制全部</button></h2>
+    <p class="hint">桥同时讲两套协议：<b>OpenAI</b>（<code>/v1/chat/completions</code>，绝大多数客户端走这条）
+      与 <b>Anthropic</b>（<code>/v1/messages</code>，Claude Code 走这条）。下面三个值填进客户端即可，点一下就能复制。</p>
+    <div id="clientsBox"><div class="empty">正在读取…</div></div>
   </section>
 
   <section class="panel" data-section="playground">
@@ -405,7 +417,7 @@ async function refreshAll() {
   try {
     await Promise.all([
       loadOverview(), loadModels(), loadDiag(), loadUsage(),
-      loadAccounts(), loadCheckin(), loadRequests(),
+      loadAccounts(), loadCheckin(), loadRequests(), loadClients(),
     ]);
     if (logPanel && logPanel.open) await loadLog();
     setMsg('已刷新全部面板（' + fmtTime(Date.now()) + '）', 'good');
@@ -2934,6 +2946,9 @@ function refreshLogIfOpen() {
 }
 
 $('refreshBtn').onclick = refreshAll;
+// 「复制全部」：贴进聊天/笔记用；面板里每一块也都有各自的复制按钮
+$('clientsCopyAllBtn').onclick = () => copyText(clientsCheatSheet(lastClients || {}))
+  .then((ok) => { if (ok) setMsg('已复制全部接入信息', 'good'); });
 
 $('diagBtn').onclick = () => { loadDiag(); };
 
@@ -3298,6 +3313,331 @@ if (themeBtn) {
   };
 }
 
+// ── 客户端接入 ───────────────────────────────────────────────────────────
+/**
+ * 各客户端的接入状态。**三档必须如实标注**：
+ *   ok    —— 桥侧已实测通过（证据写在 note 里，可复核）
+ *   proto —— 协议兼容，但**没在客户端里真跑过**。不能写成"支持"。
+ *   no    —— 不支持（上游或协议层面就缺能力）
+ *
+ * 把 proto 写成 ok 是欺骗：用户装完发现不对，会连带怀疑整个项目。
+ * 所以宁可用保守措辞，也不给"看起来更厉害"的表述。
+ */
+let lastClients = null;
+
+/**
+ * opencode 的 opencode.json 片段。
+ *
+ * `limit` **必须显式给**：opencode 只对内置 provider 自动从 models.dev 拉上下文
+ * 信息，自定义 provider 得自己声明，否则它会按 0 处理——界面上就是「上下文 0」。
+ * 这正是桥要把上游的 `context_window` / `max_output_tokens` 透出来的原因。
+ */
+function opencodeConfigText(d) {
+  const base = (d && d.baseUrlOpenAI) || 'http://127.0.0.1:8790/v1';
+  const details = (d && d.modelDetails && d.modelDetails.length) ? d.modelDetails : [];
+  const models = Object.fromEntries(details.map((m) => [m.id, {
+    name: m.name || m.id,
+    limit: { context: m.context || 128000, output: m.maxOutput || 8192 },
+  }]));
+  const obj = {
+    $schema: 'https://opencode.ai/config.json',
+    provider: {
+      workbuddy: {
+        npm: '@ai-sdk/openai-compatible',
+        name: 'WorkBuddy (local bridge)',
+        options: { baseURL: base },
+        models,
+      },
+    },
+  };
+  return JSON.stringify(obj, null, 2);
+}
+
+/** Claude Code 的环境变量片段。 */
+function claudeCodeConfigText(d) {
+  const base = (d && d.baseUrlAnthropic) || 'http://127.0.0.1:8790';
+  const key = (d && d.token) || 'wb-local-bridge';
+  return [
+    '# macOS / Linux',
+    'export ANTHROPIC_BASE_URL=' + base,
+    'export ANTHROPIC_API_KEY=' + key,
+    'claude',
+    '',
+    '# Windows PowerShell',
+    '$env:ANTHROPIC_BASE_URL="' + base + '"',
+    '$env:ANTHROPIC_API_KEY="' + key + '"',
+    'claude',
+  ].join('\n');
+}
+
+/**
+ * 图形界面「自定义 OpenAI 兼容提供商」表单的**逐字段取值**。
+ *
+ * 为什么返回结构化数组而不是一段文本：GUI 表单是**一格一格填**的，
+ * 给用户一整块表格他只能手工挑着抄。每格单独可复制才是能用的形态。
+ *
+ * 为什么每个模型都要带「上下文长度 / 输出上限」：这两格填 0 或留空，客户端会把
+ * 上下文显示成 **0**（实测现象），用户以为桥坏了。桥明明知道真实值
+ * （上游目录的 `context_window` / `max_output_tokens`），没理由让用户自己猜。
+ */
+/**
+ * 图形表单的字段**分组**：提供商级一组，每个模型一组。
+ *
+ * 为什么分组而不是拉平成一长列：模型字段有 4 项且会重复 N 次，平铺时用户得靠
+ * 缩进去猜「这几行属于哪个模型」。分组后组标题直接写明归属，扫读成本低得多。
+ */
+function providerFormGroups(d) {
+  const base = (d && d.baseUrlOpenAI) || 'http://127.0.0.1:8790/v1';
+  const key = (d && d.token) || 'wb-local-bridge';
+  const details = (d && d.modelDetails && d.modelDetails.length) ? d.modelDetails : [];
+
+  const groups = [{
+    title: '',
+    rows: [
+      { k: '提供商 ID', v: 'workbuddy', hint: '只允许小写字母 / 数字 / 连字符 / 下划线' },
+      { k: '显示名称', v: 'WorkBuddy', hint: '随便填，只影响界面显示' },
+      { k: '基础 URL', v: base, hint: '必须带 /v1 结尾' },
+      { k: 'API 密钥', v: key, hint: '本地回环令牌，不是上游凭据' },
+      { k: '请求头', v: '', hint: '留空 —— 桥不需要额外请求头' },
+    ],
+  }];
+
+  details.forEach((m, i) => {
+    groups.push({
+      title: '模型 ' + (i + 1),
+      rows: [
+        { k: 'model-id', v: m.id, hint: i === 0 ? '要填上游真实 id，不是 claude-* 那种' : '' },
+        { k: '显示名称', v: m.name || m.id, hint: '' },
+        {
+          k: '上下文长度',
+          v: String(m.context || ''),
+          hint: i === 0 ? '留空或填 0 → 客户端显示「上下文 0」' : '',
+        },
+        { k: '输出上限', v: String(m.maxOutput || ''), hint: '' },
+      ],
+    });
+  });
+
+  return groups;
+}
+
+/** 拉平版，供「复制全部」的纯文本速查表用。 */
+function providerFormFields(d) {
+  const out = [];
+  for (const g of providerFormGroups(d)) {
+    for (const r of g.rows) out.push({ ...r, k: g.title ? g.title + ' · ' + r.k : r.k });
+  }
+  return out;
+}
+
+/** 逐字段的复制行：每个值一个复制按钮，点值本身也能复制。 */
+function formGuideBox(d) {
+  const wrap = clientEl('div', 'formguide');
+  for (const g of providerFormGroups(d)) {
+    const box = clientEl('div', 'fggroup');
+    if (g.title) box.append(clientEl('div', 'fggh', g.title));
+    for (const f of g.rows) {
+      const row = clientEl('div', 'formrow');
+      row.append(clientEl('span', 'formrow-k', f.k));
+
+      // 值 + 复制按钮**始终占满两格**。没有值的那行（如「请求头 → 留空」）
+      // 若只放一个占位符，后面的说明就会滑进按钮列 —— 整张表的说明列随之错位。
+      if (f.v) {
+        const v = clientEl('code', 'formrow-v', f.v);
+        v.title = '点击复制';
+        v.onclick = () => copyText(f.v);
+        row.append(v);
+        const btn = clientEl('button', 'mini', '复制');
+        btn.onclick = () => copyText(f.v);
+        row.append(btn);
+      } else {
+        row.append(clientEl('span', 'formrow-empty', '（留空）'));
+        row.append(clientEl('span', 'formrow-gap'));
+      }
+
+      if (f.hint) row.append(clientEl('span', 'formrow-h', f.hint));
+      box.append(row);
+    }
+    wrap.append(box);
+  }
+  return wrap;
+}
+
+function clientEl(tag, cls, text) {
+  const n = document.createElement(tag);
+  if (cls) n.className = cls;
+  if (text != null) n.textContent = text;
+  return n;
+}
+
+/** 带「复制」按钮的代码块。用 textContent 写入——配置里有 < > {}，走 innerHTML 会渲染错。 */
+function clientCodeBlock(label, text) {
+  const wrap = clientEl('div', 'codeblock');
+  const head = clientEl('div', 'codeblock-head');
+  const btn = clientEl('button', 'mini', '复制');
+  btn.onclick = () => copyText(text);
+  head.append(clientEl('span', null, label), btn);
+  const pre = clientEl('pre');
+  pre.textContent = text;
+  wrap.append(head, pre);
+  return wrap;
+}
+
+/** 「值 + 复制按钮」一行。值本身也可点，但**必须有一个看得见的按钮**——
+ *  只靠"点一下试试"的隐含交互，用户根本不知道这里能复制。 */
+function clientValueRow(label, value, hint) {
+  const row = clientEl('div', 'valuerow');
+  row.append(clientEl('span', 'valuerow-k', label));
+  const v = clientEl('code', 'valuerow-v', value);
+  v.title = '点击复制';
+  v.onclick = () => copyText(value);
+  row.append(v);
+  const btn = clientEl('button', 'mini', '复制');
+  btn.onclick = () => copyText(value);
+  row.append(btn);
+  if (hint) row.append(clientEl('span', 'valuerow-h', hint));
+  return row;
+}
+
+/** 一个客户端卡片：名称 + 状态标签 + 说明 + 步骤 + 代码块。 */
+function clientCard(name, status, note, steps, blocks) {
+  const card = clientEl('div', 'clientcard');
+  const head = clientEl('div', 'clientcard-head');
+  head.append(clientEl('b', null, name));
+  const label = { ok: '已实测', proto: '协议兼容', no: '不支持' }[status] || status;
+  const cls = status === 'ok' ? ' ok' : (status === 'no' ? ' fail' : '');
+  head.append(clientEl('span', 'tag' + cls, label));
+  card.append(head);
+  card.append(clientEl('p', 'clientcard-note', note));
+  if (steps && steps.length) {
+    const ol = clientEl('ol', 'clientsteps');
+    for (const s of steps) ol.append(clientEl('li', null, s));
+    card.append(ol);
+  }
+  for (const pair of blocks || []) card.append(clientCodeBlock(pair[0], pair[1]));
+  return card;
+}
+
+async function loadClients() {
+  const box = $('clientsBox');
+  if (!box) return;
+  try {
+    lastClients = await api('/api/clients');
+  } catch (err) {
+    lastClients = null;
+    box.textContent = '';
+    box.append(clientEl('div', 'empty', '读取失败：' + ((err && err.message) || err)));
+    return;
+  }
+  renderClients();
+  const st = $('clientsStamp');
+  if (st) st.textContent = fmtTime(Date.now());
+}
+
+function renderClients() {
+  const box = $('clientsBox');
+  if (!box) return;
+  box.textContent = '';
+  const d = lastClients;
+  if (!d) { box.append(clientEl('div', 'empty', '暂无数据')); return; }
+
+  const vals = clientEl('div', 'clientvalues');
+  vals.append(
+    clientValueRow('OpenAI Base URL', d.baseUrlOpenAI, 'opencode / Cherry Studio / Cursor / Trae 等填这里'),
+    clientValueRow('Anthropic Base URL', d.baseUrlAnthropic, 'Claude Code 的 ANTHROPIC_BASE_URL（注意不带 /v1）'),
+    clientValueRow('API Key / 令牌', d.token, '本地回环令牌，不是上游凭据；只用于防止同机其它程序误用端口'),
+  );
+  box.append(vals);
+
+  // 图形表单的逐字段填法放在最前面：多数客户端是表单而不是配置文件，
+  // 只给 JSON 片段等于没教 —— 用户对着「提供商 ID / 基础 URL」这几格
+  // 不知道该填什么。
+  box.append(clientEl('h3', 'clienth', '弹「自定义提供商」表单时，逐字段这样填'));
+  const fcard = clientEl('div', 'clientcard');
+  const fhead = clientEl('div', 'clientcard-head');
+  fhead.append(clientEl('b', null, '任何「自定义 OpenAI 兼容提供商」表单'));
+  fhead.append(clientEl('span', 'tag ok', '逐格可复制'));
+  fcard.append(fhead);
+  fcard.append(clientEl('p', 'clientcard-note',
+    '提供商 ID / 显示名称 / 基础 URL / API 密钥 / 模型 / 请求头 —— 每格的值都能单独复制，照着填完点提交。'));
+  fcard.append(formGuideBox(d));
+  fcard.append(clientEl('p', 'clientcard-note',
+    '注意：不是每个表单都有「上下文长度 / 输出上限」这两格 —— opencode 的表单就没有，'
+      + '所以填完会看到「上下文 0」。这不是桥的问题，也不是填错了：上下文只能靠**配置文件**声明。'
+      + 'opencode 用下面那段 opencode.json，里面的 limit 就是干这个的（桥已按上游真实值填好）。'
+      + '表单里填的模型只是 id + 显示名，limit 得回到 JSON 里补。'));
+  box.append(fcard);
+
+  if (!d.running) box.append(clientEl('div', 'notice', '桥未运行，客户端连不上。先点上方「启动桥服务」。'));
+
+  box.append(clientEl('h3', 'clienth', '桥侧已实测通过'));
+  box.append(clientCard(
+    'opencode', 'ok',
+    '用它的底层 AI SDK（@ai-sdk/openai-compatible）实测：基础生成、工具调用、流式输出三项全通过。'
+      + '界面表单只填得进 id 和显示名，**上下文长度必须写在 opencode.json 的 limit 里**'
+      + '——不写就会显示「上下文 0」。下面这份已经按上游真实值填好了。',
+    ['把右边这段写进项目根目录的 opencode.json（表单里填过的模型，limit 要回到这里补）',
+      '运行 /connect → 选 Other，provider id 填 workbuddy，API Key 填上面的令牌',
+      '运行 /models，选 workbuddy 下的模型'],
+    [['opencode.json', opencodeConfigText(d)]],
+  ));
+  box.append(clientCard(
+    'Claude Code', 'ok',
+    'Anthropic 协议层全路径实测：流式事件序列、tool_use、多轮 tool_result 往返均正确。'
+      + '模型名照常填 claude-*，桥会映射到真实模型（当前 ' + d.anthropicModel
+      + '，小快模型 ' + d.anthropicFastModel + '）。',
+    ['设好右边两个环境变量后直接启动 claude'],
+    [['环境变量', claudeCodeConfigText(d)]],
+  ));
+
+  box.append(clientEl('h3', 'clienth', '协议兼容（桥侧端点已验证，未在客户端内实测）'));
+  const compat = clientEl('div', 'clientcard');
+  compat.append(clientEl('p', 'clientcard-note',
+    '下面这些都只用 /v1/models 与 /v1/chat/completions 两个端点，填同样的 Base URL 和令牌即可。'
+      + '「未实测」是指没有真的装一遍跑通，不是已知有问题——但也没法替你保证。'));
+  const chips = clientEl('div', 'clientchips');
+  for (const n of ['Cherry Studio', 'NextChat', 'LobeChat', 'ChatBox', 'Open WebUI', 'Cursor', 'Trae']) {
+    chips.append(clientEl('span', 'clientchip', n));
+  }
+  compat.append(chips);
+  compat.append(clientEl('p', 'clientcard-note',
+    'Cursor / Trae 这类带 Agent 模式的客户端依赖工具调用。桥已把上游只认字符串的 tool_choice 做了归一化'
+      + '（对象形式会被上游 400），工具调用本身也实测可用；但它们具体发哪种写法没有验证过。'));
+  box.append(compat);
+
+  box.append(clientEl('h3', 'clienth', '不支持'));
+  box.append(clientCard(
+    '知识库 / RAG 类功能', 'no',
+    '上游 30 个模型全是对话类，没有任何 embedding 模型，所以 /v1/embeddings 会明确返回 501。'
+      + '这里不做「假的向量」——那会让知识库看起来建成了、实际全是噪声，要等检索结果离谱时才发现。'
+      + '需要 RAG 的客户端请单独配一个 embedding 服务。',
+    [], [],
+  ));
+}
+
+/** 「复制全部」用的纯文本速查表：方便贴进聊天/笔记，或存成备忘。 */
+function clientsCheatSheet(d) {
+  d = d || {};
+  const lines = [
+    'WorkBuddy 本地桥 — 客户端接入',
+    '========================================',
+    'OpenAI 兼容 Base URL : ' + (d.baseUrlOpenAI || ''),
+    'Anthropic Base URL   : ' + (d.baseUrlAnthropic || '') + '   （Claude Code 用，注意不带 /v1）',
+    'API Key / 令牌       : ' + (d.token || ''),
+    '',
+    '--- 图形界面「自定义提供商」表单，逐格填 ---',
+  ];
+  for (const f of providerFormFields(d)) lines.push('  ' + f.k + ' : ' + (f.v || '（留空）'));
+  lines.push('', '--- opencode（opencode.json）---', opencodeConfigText(d));
+  lines.push('', '--- Claude Code（环境变量）---', claudeCodeConfigText(d));
+  lines.push('',
+    '--- 兼容性 ---',
+    '  已实测  : opencode、Claude Code（Anthropic 协议）',
+    '  协议兼容: Cherry Studio / NextChat / LobeChat / ChatBox / Open WebUI / Cursor / Trae',
+    '  不支持  : 知识库 / RAG（上游没有 embedding 模型，/v1/embeddings 返回 501）');
+  return lines.join('\n');
+}
+
 function initNavTabs() {
   const tabs = document.querySelectorAll('.nav-tab');
   tabs.forEach(tab => {
@@ -3343,6 +3683,9 @@ initQuickPrompts();
   loadCheckin();
   loadUsage();
   loadRequests();
+  // 客户端接入面板：内容全是静态的（地址/令牌/模型映射），**不进轮询**，
+  // 只在启动与手动刷新时取一次。
+  loadClients();
 })();
 
 /**

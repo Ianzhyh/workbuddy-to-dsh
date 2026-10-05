@@ -142,6 +142,20 @@ export const config = {
     /** 本地回环令牌，仅用于防止同机其它程序误用；并非上游凭据。 */
     token: env.WORKBUDDY_LOCAL_TOKEN || 'wb-local-bridge',
     upstreamTimeoutMs: Number(env.WORKBUDDY_TIMEOUT_MS || 0),
+    /**
+     * Anthropic 兼容层（`POST /v1/messages`，供 Claude Code 使用）的模型映射。
+     *
+     * Claude Code 发的是 `claude-sonnet-4-…` 这类名字，上游根本没有这些 id，
+     * 必须映射到一个真实存在的模型。这里给两个默认值：
+     *   - `anthropicModel`：主模型，取 `glm-5.3`（实测工具调用最稳的一个）
+     *   - `anthropicFastModel`：Claude Code 拿它跑标题生成、文件摘要这类后台活，
+     *     用小模型就够，用大的纯属浪费额度
+     *
+     * 想精确指定，把 `ANTHROPIC_MODEL` 设成任意上游真实模型 id 即可——
+     * 桥会先拿请求里的名字去上游目录精确匹配，命中就原样使用。
+     */
+    anthropicModel: env.WORKBUDDY_ANTHROPIC_MODEL || 'glm-5.3',
+    anthropicFastModel: env.WORKBUDDY_ANTHROPIC_FAST_MODEL || 'glm-5.3-flash',
   },
   dashboard: {
     host: '127.0.0.1',
@@ -198,6 +212,8 @@ export function bridgeEnv(overrides = {}) {
     WORKBUDDY_HOST: config.bridge.host,
     WORKBUDDY_PORT: String(config.bridge.port),
     WORKBUDDY_LOCAL_TOKEN: config.bridge.token,
+    WORKBUDDY_ANTHROPIC_MODEL: config.bridge.anthropicModel,
+    WORKBUDDY_ANTHROPIC_FAST_MODEL: config.bridge.anthropicFastModel,
     WORKBUDDY_AUTH_FILE: overrides.authFile || config.workbuddy.authFile,
     WORKBUDDY_APP_EXECUTABLE: config.workbuddy.exe,
     WORKBUDDY_LOG: env.WORKBUDDY_LOG || '1',

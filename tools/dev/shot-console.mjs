@@ -53,6 +53,31 @@ const REQUESTS = [
 
 const routes = {
   '/api/models': { body: { models: CATALOG } },
+  // 客户端接入面板：不打桩的话它会在截图里渲染成「读取失败」，而这张图要进 README。
+  // 令牌用文档里的默认值 —— 它是本地回环令牌、README 本来就写着，不是上游凭据。
+  '/api/clients': {
+    body: {
+      running: true,
+      host: '127.0.0.1',
+      port: 8790,
+      baseUrlOpenAI: 'http://127.0.0.1:8790/v1',
+      baseUrlAnthropic: 'http://127.0.0.1:8790',
+      token: 'wb-local-bridge',
+      anthropicModel: 'glm-5.3',
+      anthropicFastModel: 'glm-5.3-flash',
+      models: CATALOG.map((m) => m.id),
+      // 逐字段复制表要拿真实的上下文 / 输出上限；不给的话模型那几行会是空的，
+      // 而这张图是给用户看「该往表单里填什么」的，空着就失去意义了。
+      modelDetails: CATALOG.map((m) => ({
+        id: m.id,
+        name: m.name,
+        context: m.context_window,
+        maxOutput: m.max_output_tokens,
+        supportsReasoning: true,
+        supportsImages: false,
+      })),
+    },
+  },
   '/api/overview': {
     body: {
       bridge: { running: true, ok: true, host: '127.0.0.1', port: 8790, endpoint: 'http://127.0.0.1:8790/v1', pid: 18432, startedAt: new Date(now - 5400000).toISOString(), uptimeMs: 5400000, catalogSize: 4, catalogAt: new Date(now - 420000).toISOString() },

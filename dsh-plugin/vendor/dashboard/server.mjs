@@ -860,6 +860,60 @@ const server = createServer(async (req, res) => {
       return;
     }
 
+    /**
+     * 客户端接入信息。
+     *
+     * 为什么不塞进 `/api/overview`：overview 每 20 秒轮询一次，而这里返回的
+     * 东西**全是静态的**（地址、令牌、模型映射），没必要跟着轮询反复下发；
+     * 面板也只在打开时取一次。
+     *
+     * 关于返回本地令牌：它是 `WORKBUDDY_LOCAL_TOKEN`，作用是防止同机其它程序
+     * 误用这个回环端口，**不是上游凭据**（上游凭据全程不出桥、也从不落日志）。
+     * 面板存在的意义就是让人把这个值填进客户端，不给值面板就没用了。
+     * 接口与整个控制台一样只绑 127.0.0.1。
+     */
+    if (route === '/api/clients') {
+      const [health, catalog] = await Promise.all([bridgeHealth(), bridgeModels(8000)]);
+      /**
+       * 只取桥默认精选的那几个，口径与 `/v1/models` 保持一致，但**带上完整元数据**。
+       *
+       * 为什么必须带 `context` / `maxOutput`：GUI 客户端的「自定义提供商」表单里有
+       * 「上下文长度」「输出上限」两格，填 0 或留空会让客户端把上下文显示成 **0**，
+       * 用户以为桥坏了。桥明明知道真实值（`context_window` / `max_output_tokens`），
+       * 没理由让用户自己猜。
+       */
+      const featured = new Set(health.body?.models || []);
+      const details = (catalog.models || [])
+        .filter((m) => featured.has(m.id))
+        .map((m) => ({
+          id: m.id,
+          name: m.name || m.id,
+          context: Number(m.context_window) || 0,
+          maxOutput: Number(m.max_output_tokens) || 0,
+          supportsReasoning: m.supports_reasoning === true,
+          supportsImages: m.supports_images === true,
+        }));
+      sendJson(res, 200, {
+        running: health.running,
+        host: config.bridge.host,
+        port: config.bridge.port,
+        /** OpenAI 系客户端填这个（opencode / Cherry Studio / Cursor / Trae …） */
+        baseUrlOpenAI: `${config.bridge.url}/v1`,
+        /** Anthropic 系客户端填这个（Claude Code 走 ANTHROPIC_BASE_URL） */
+        baseUrlAnthropic: config.bridge.url,
+        token: config.bridge.token,
+        /**
+         * Anthropic 层的模型映射。必须如实展示：用户在 Claude Code 里选的是
+         * sonnet、实际跑的是 glm-5.3——不说清楚，他会以为桥把模型选错了。
+         */
+        anthropicModel: config.bridge.anthropicModel,
+        anthropicFastModel: config.bridge.anthropicFastModel,
+        models: details.map((m) => m.id),
+        modelDetails: details,
+      });
+      return;
+    }
+
     if (route === '/api/diagnose') {
       sendJson(res, 200, await diagnose());
       return;

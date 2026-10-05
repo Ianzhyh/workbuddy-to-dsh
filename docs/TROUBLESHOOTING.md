@@ -75,8 +75,94 @@ refreshToken : envelope keyId=9127dea1b44020a7 -> DECRYPTED len=698 jws-like=tru
 | 错误码 | 含义 | 说明 |
 |---|---|---|
 | `11101` | `Non-stream chat request is currently not supported` | 上游只接受流式。桥已自动转换；若仍出现，说明请求绕过了桥 |
+| `11101` | `cannot unmarshal object into Go struct field Request.tool_choice of type string` | 客户端发了 **OpenAI 对象形式**的 `tool_choice`（`{"type":"function",...}`），而上游的 Go 结构体只收字符串。桥已在 `normalizePayload` 里归一化，正常不会出现；若出现，说明请求绕过了桥 |
 | `11128` | `Illegal API invocation from an unapproved channel` | 请求结构或调用方身份不被认可。常见于 `system` 提示词被放在 `developer` 角色，或 User-Agent 不匹配 |
 | `11133` | 网关包装的瞬时上游故障 | 桥会退避重试；频繁出现请稍后再试 |
+
+> **`tool_choice` 为什么必须归一化**：OpenAI 规范允许两种写法 —— 字符串
+> （`none` / `auto` / `required`）和对象（`{"type":"function","function":{"name":"..."}}`，
+> 用于强制调用某个具体函数）。上游只认字符串，收到对象直接 400。
+> Cursor / Trae / opencode 这类基于 AI SDK 的 Agent 客户端会发对象形式。
+> 桥的处理是：`{type:'function'}` → `required`（语义最接近），认不出来的对象丢弃
+> 而不是原样转发（留着必然 400，丢掉最多退化成 `auto`）。
+
+### 429 / 频率限制
+
+```
+429  code 6004  您的使用量已超出频率限制，将在 <时刻> 重置
+```
+
+**按模型计**，不是按账号总量计。实测连续发 3 个请求就可能撞上，但报错文案本身
+提示了绕开方式：
+
+> 「您也可以切换其他模型继续使用」
+
+所以同一个时刻，`deepseek-v4.1-flash` 被限流了，换 `glm-5.3` 往往还能正常调。
+报错里带的重置时刻就是该模型配额恢复的时间。
+
+**这不是桥的问题，也不是 bug**——是上游对单模型的并发/频率约束。排查时不要
+反复重试同一个模型（只会一直 429），换模型或等重置。
+
+### Claude Code 接不上 / 报协议错误
+
+Claude Code 说的是 **Anthropic 的 Messages 协议**，不是 OpenAI 的 chat/completions。
+桥从 v1.2.0 起内置了 `/v1/messages` 兼容层，配置如下：
+
+```sh
+# macOS / Linux
+export ANTHROPIC_BASE_URL=http://127.0.0.1:8790   # 注意：不带 /v1
+export ANTHROPIC_API_KEY=wb-local-bridge           # 本地回环令牌
+claude
+```
+
+```powershell
+# Windows PowerShell
+$env:ANTHROPIC_BASE_URL="http://127.0.0.1:8790"
+$env:ANTHROPIC_API_KEY="wb-local-bridge"
+claude
+```
+
+| 现象 | 原因 |
+|---|---|
+| `404 no route for POST /v1/messages` | 桥版本太旧（早于 Anthropic 兼容层），或地址填成了别的服务 |
+| `404` 且地址里带了 `/v1` | `ANTHROPIC_BASE_URL` **不能**带 `/v1`，Claude Code 会自己拼 `/v1/messages` |
+| `401` | 令牌不对。桥同时接受 `Authorization: Bearer <token>` 和 `x-api-key: <token>` 两种写法 |
+| 模型名被「换掉」了 | **这是设计行为**：Claude Code 发的 `claude-sonnet-4-…` 在上游不存在，桥会映射到真实模型。默认 `glm-5.3`（小快模型走 `glm-5.3-flash`）。想指定就用 `WORKBUDDY_ANTHROPIC_MODEL=<上游真实模型 id>`，桥会优先精确匹配 |
+
+### 客户端里模型显示「上下文 0」
+
+**这不是桥的问题，也不是你填错了。**
+
+桥返回的模型元数据里上下文长度是有的（`context_window`），但**客户端不会去问**——
+尤其对「自定义 provider」，多数客户端只认自己内置的模型表（models.dev 之类），
+自定义模型的上下文一律按 0 处理。
+
+所以它必须在**客户端侧**声明：
+
+| 客户端 | 在哪里声明 |
+|---|---|
+| opencode | `opencode.json` 里每个模型的 `limit: { context, output }`。**界面表单里没有这两格**，只能写文件 |
+| 其他 GUI 表单 | 表单里若有「上下文长度 / 输出上限」就填；没有就找该客户端的配置文件 |
+
+控制台「客户端接入」页签给出的 opencode 片段**已按上游真实值填好 `limit`**，
+直接复制即可。想自己核对真实值：
+
+```cmd
+curl -H "Authorization: Bearer wb-local-bridge" "http://127.0.0.1:8790/v1/models?all=1"
+```
+
+每个模型都带 `context_window` 与 `max_output_tokens`。
+
+### 客户端报「知识库 / RAG 不可用」
+
+`POST /v1/embeddings` 会返回 **501**，这是**有意的**。
+
+上游 30 个模型全是对话类，目录里**没有任何 embedding 模型**。桥宁可明确报
+「不支持」，也不返回一堆无意义的向量——后者会让知识库看起来建成了、实际全是
+噪声，用户要等检索结果离谱时才发现问题。
+
+需要 RAG 的客户端（Cherry Studio / LobeChat / Open WebUI）请**另配一个
+embedding 提供方**，对话部分照常走本桥。
 
 ### 启动脚本（.cmd）里不能出现中文
 

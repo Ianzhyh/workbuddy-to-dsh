@@ -100,13 +100,27 @@ len(s) = uint32BE(utf8 字节长度) + utf8 字节
 
 ## 二、桥的四个适配点
 
-上游有三条不成文约束，都会直接返回 400/401：
+上游有四条不成文约束，都会直接返回 400/401：
 
 | 约束 | 上游响应 | 桥的处理 |
 |---|---|---|
 | 只接受流式请求 | `400 code 11101` | 非流式请求内部转流式，再把分片聚合成单个 `chat.completion` |
 | 不识别 `developer` 角色 | `400 code 11128` | 重写为 `system`（新版 OpenAI 规范客户端会踩这条） |
+| `tool_choice` 只认字符串 | `400 code 11101` | 对象形式归一化为字符串（见下） |
 | 校验调用方身份 | `400 code 11128` | 请求头伪装成官方客户端 |
+
+**关于 `tool_choice`**：OpenAI 规范允许字符串（`none`/`auto`/`required`）与对象
+（`{"type":"function","function":{"name":"…"}}`）两种写法，上游的 Go 结构体把它
+声明成了 `string`，收到对象会以
+`cannot unmarshal object into Go struct field Request.tool_choice of type string`
+拒绝。Cursor / Trae / opencode 这类基于 AI SDK 的 Agent 客户端会发对象形式。
+
+桥的映射规则是 `{type:'function'}` → `required`（上游没有「指定某一个函数」的
+表达，取语义最接近的一档）；**认不出来的对象一律丢弃而不是原样转发**——留着必然
+400，丢掉最多退化成 `auto`，后者显然更好。
+
+这条与 `developer` → `system` 是同一类问题（上游比规范更严），所以两者都放在
+`normalizePayload` 里，**在同一次改写中完成**，避免为每一条约束各写一个补丁。
 
 外加一条本地约束：**Windows 上用 `execFileSync` 启动 Electron 必定 `EBUSY`**，
 因为该 API 默认会为 stdin 打开管道。必须 `spawnSync` + `stdio: ['ignore','pipe','pipe']`。
@@ -321,6 +335,66 @@ const hit = /x\s*([0-9]*\.?[0-9]+)/i.exec(raw);   // "x0.11" → 0.11
 - `WORKBUDDY_BILLING_BASE`：覆盖计费网关。`billingBase()` 原本按域名硬编码
   `www.codebuddy.cn`，离线环境根本拦不到签到请求 —— 这个功能会变成「只能靠读代码相信」。
 - `WORKBUDDY_CHECKIN_COOLDOWN_MS`：覆盖冷却时长，让「当天最多 3 次」能在一次测试里观察到。
+
+## 二·七、Anthropic 兼容层（`POST /v1/messages`）
+
+### 为什么必须有这一层
+
+Claude Code 说的是 **Anthropic 的 Messages 协议**，不是 OpenAI 的
+chat/completions。两者在**请求结构、响应结构、流式事件格式**三处都不一样：
+
+| | OpenAI | Anthropic |
+|---|---|---|
+| system 提示 | 首条消息 | 顶层 `system` 字段 |
+| 工具调用 | `assistant.tool_calls` + 独立的 `role:"tool"` 消息 | 混在 `content` 块数组里的 `tool_use` / `tool_result` |
+| 工具定义 | `tools[].function.parameters` | `tools[].input_schema` |
+| 流式格式 | 扁平的 `choices[0].delta`，无事件名 | `event:` 行 + 块必须 start/delta/stop 配对 |
+| 结束原因 | `stop` / `tool_calls` / `length` | `end_turn` / `tool_use` / `max_tokens` |
+
+**光把 Base URL 指过来是接不上的**（原先直接 404，因为桥根本没有这个路由）。
+所以这一层做双向翻译：Anthropic 请求 → 上游认的 OpenAI 请求 → 再把 OpenAI 流
+翻译回 Anthropic 事件流。
+
+### 三处不可逆的映射，以及为什么这么选
+
+1. **`tool_choice`**：Anthropic 的 `{type:'any'}` 与 `{type:'tool',name}` 都映射成
+   OpenAI 的 `'required'`——上游只认字符串，而且没有「指定某一个函数」的表达。
+   语义上略有损失（不再限定是哪个函数），但保留了「必须调用工具」这个关键约束。
+2. **模型名**：Claude Code 发 `claude-sonnet-4-…`，上游没有这些 id。解析顺序是
+   ① 精确命中上游目录就原样用（允许用 `WORKBUDDY_ANTHROPIC_MODEL` 指定真实模型）；
+   ② 含 `haiku`/`flash` 等「小快」字样的走 fast 模型；③ 其余走默认模型。
+   默认取 `glm-5.3` 而非桥的通用默认 `deepseek-v4.1-flash`，因为 Claude Code 是
+   Agent、全程依赖工具调用，而 `glm-5.3` 是实测 tool_calls 最稳的一个。
+3. **`input_tokens`**：Anthropic 在 `message_start` 里就报 input_tokens，而上游只在
+   流的**最后一帧**给 usage。所以开头先用 `请求字节数 / 4` 粗估，真实值在
+   `message_delta` 里补正。给 0 会让 Claude Code 的上下文占用显示失真。
+
+### 流式事件为什么必须严格配对
+
+Anthropic 的流比 OpenAI 严格得多：每个内容块必须有
+`content_block_start` / `content_block_delta…` / `content_block_stop` 三件套，
+且块索引单调递增、**一旦关闭不再复用**。少任何一对，Claude Code 会判定流损坏
+并中断会话。
+
+实现上文本块与工具块**共用一个索引空间**：文本先来就占 0、工具接着占 1，反之
+亦然；开新块前必须先 `closeOpen()` 把上一个关掉。
+
+### 上游没有的能力：明确 501
+
+`POST /v1/embeddings` 直接返回 **501**，这是**有意的设计**，不是没做完。
+
+上游 30 个模型全是对话类，目录里没有任何 embedding 模型。返回一堆无意义的向量
+会让客户端的知识库「看起来建成了、实际全是噪声」，用户要等检索结果离谱时才发现
+问题——**错误的成功比明确的失败代价大得多**。
+
+### 鉴权：两种写法都收
+
+桥原先只认 `Authorization: Bearer <token>`（OpenAI 系客户端惯例）。Claude Code
+用 `x-api-key: <token>`（Anthropic 系惯例）。两者承载的是同一个「本机回环令牌」，
+用途完全一致，没有理由让用户为了换一个客户端就记两套写法，所以 `hasLocalToken()`
+同时接受两者。**只影响本机回环端口上的这一个校验点**，与上游凭据无关。
+
+---
 
 ## 三、dsh 侧集成
 

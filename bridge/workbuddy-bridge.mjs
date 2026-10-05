@@ -350,14 +350,47 @@ function persistRefreshed() {
 
 // ── Upstream payload normalization ───────────────────────────────────────
 /**
- * The WorkBuddy gateway (copilot.tencent.com) rejects the OpenAI-spec `developer`
- * 400 code 11128 "Illegal API invocation from an unapproved channel"。
- * role outright (400 code 11128). Newer OpenAI-spec clients carry the system
- * prompt in `developer`, while the official client only ever sends `system`.
+ * 上游（copilot.tencent.com）比 OpenAI 规范更严：有几处「规范允许、上游拒绝」
+ * 的写法，必须在转发前归一化，否则客户端一用就整条请求失败。目前三处：
+ *
+ * 1. `developer` 角色 —— 新版 OpenAI 规范用它承载 system 提示，而官方客户端
+ *    只发 `system`。上游只认后者，遇到 `developer` 直接 400 code 11128。
+ * 2. `tool_choice` 对象形式 —— 规范允许 `{type:'function', function:{name}}`
+ *    强制调用某个具体函数，上游的 Go 结构体把它声明成了 `string`，
+ *    收到对象会 400 code 11101。Cursor / Trae / opencode 这类基于 AI SDK
+ *    的 Agent 客户端会发对象形式。
+ * 3. 首条消息必须是 system —— 上游会以 `400 code 11128 first message is not
+ *    system prompt` 拒绝纯 user 开头的请求，而不少客户端（含自带的
+ *    「对话测试」和只发单轮的 CLI）并不发 system。
  */
 function normalizePayload(payload) {
-  const messages = payload.messages;
-  if (!Array.isArray(messages) || messages.length === 0) return payload;
+  let next = payload;
+
+  // ── tool_choice：对象 → 字符串 ─────────────────────────────────────────
+  // `{type:'function'}` 表达的是「必须调用工具」里最强的那档，而上游没有
+  // 「指定某一个函数」的表达，取语义最接近的 `required`（必须调用工具，
+  // 但不限定是哪一个）。
+  //
+  // 认不出来的对象**丢弃而不是原样转发**：留着必然 400，丢掉最多退化成
+  // `auto`（让模型自己决定），这比整条请求失败好得多。
+  const tc = next.tool_choice;
+  if (tc !== null && typeof tc === 'object' && !Array.isArray(tc)) {
+    const mapped = tc.type === 'function' ? 'required'
+      : (tc.type === 'auto' || tc.type === 'none' || tc.type === 'required') ? tc.type
+        : null;
+    next = { ...next };
+    if (mapped) {
+      next.tool_choice = mapped;
+      log(`normalize: tool_choice object -> "${mapped}"`);
+    } else {
+      delete next.tool_choice;
+      log('normalize: dropped unrecognized tool_choice object');
+    }
+  }
+
+  // ── messages：developer → system，并保证首条是 system ──────────────────
+  const messages = next.messages;
+  if (!Array.isArray(messages) || messages.length === 0) return next;
 
   let rewritten = 0;
   const fixed = messages.map((m) => {
@@ -368,9 +401,6 @@ function normalizePayload(payload) {
     return m;
   });
 
-  // 首条必须是 system：国际版网关会以 `400 code 11128 first message is not
-  // system prompt` 直接拒绝纯 user 开头的请求，而不少客户端（含自带的
-  // 「对话测试」和只发单轮的 CLI）并不发 system。
   let prepended = 0;
   const first = fixed[0];
   if (!first || (first.role !== 'system' && first.role !== 'System')) {
@@ -378,10 +408,10 @@ function normalizePayload(payload) {
     prepended = 1;
   }
 
-  if (!rewritten && !prepended) return payload;
   if (rewritten) log(`normalize: rewrote ${rewritten} developer message(s) -> system`);
   if (prepended) log('normalize: prepended a system message (upstream requires one first)');
-  return { ...payload, messages: fixed };
+  if (!rewritten && !prepended) return next;
+  return { ...next, messages: fixed };
 }
 
 // ── Request header construction ──────────────────────────────────────────
@@ -605,6 +635,395 @@ async function aggregateStream(res) {
     choices: [{ index: 0, message, finish_reason: finishReason || 'stop' }],
     ...(usage ? { usage } : {}),
   };
+}
+
+/**
+ * 上游 usage → 本地账本字段。
+ *
+ * **必须留在模块级**：OpenAI 的 `/v1/chat/completions` 与 Anthropic 的
+ * `/v1/messages` 两条协议路径都要用它。原先它定义在 chat/completions 的
+ * 块作用域里，Anthropic 路由根本看不到，一调就是 `ReferenceError`。
+ */
+const usageOf = (u) => ({
+  promptTokens: Number(u?.prompt_tokens) || 0,
+  completionTokens: Number(u?.completion_tokens) || 0,
+  // 上游在 usage 里回报本次实际扣减的积分，一并记进本地账本（只记数字）
+  ...(typeof u?.credit === 'number' ? { credit: u.credit } : {}),
+});
+
+// ── Anthropic Messages API 兼容层（POST /v1/messages）─────────────────────
+/**
+ * 为什么需要这一层
+ * ----------------
+ * Claude Code 说的是 Anthropic 的 Messages 协议，**不是** OpenAI 的
+ * chat/completions。两者在请求结构、响应结构、流式事件格式上都不一样，
+ * 光把 Base URL 指过来是接不上的（会直接 404，因为桥原先没有这个路由）。
+ *
+ * 这一层做两件事：把 Anthropic 请求翻译成上游认的 OpenAI 请求；再把上游的
+ * OpenAI 流翻译回 Anthropic 的事件流。翻译是**有损但语义等价**的，下面每处
+ * 不可逆的映射都单独注明了原因。
+ *
+ * 上游只支持流式，所以这里统一走上游流式：`stream:false` 的客户端先收完
+ * 再聚合成一个完整 message。
+ */
+
+/**
+ * 模型名解析。Claude Code 会发 `claude-sonnet-4-...` 这类名字，上游没有这些 id。
+ *
+ * 顺序：① 精确命中上游目录就原样用（允许用 `ANTHROPIC_MODEL` 指定真实模型）；
+ * ② 带 haiku/flash 这类「小快」字样的走 fast 模型（Claude Code 拿它跑标题生成、
+ * 文件摘要这类后台活，用大模型纯属浪费额度）；③ 其余走默认模型。
+ *
+ * 默认取 `glm-5.3` 而不是桥的通用默认 `deepseek-v4.1-flash`：Claude Code 是
+ * Agent，全程依赖工具调用，而 `glm-5.3` 是实测 tool_calls 最稳的一个。
+ */
+const ANTHROPIC_MODEL = process.env.WORKBUDDY_ANTHROPIC_MODEL || 'glm-5.3';
+const ANTHROPIC_FAST_MODEL = process.env.WORKBUDDY_ANTHROPIC_FAST_MODEL || 'glm-5.3-flash';
+
+function resolveAnthropicModel(requested) {
+  const name = typeof requested === 'string' ? requested : '';
+  if (name && catalogCache.models.some((m) => m.id === name)) return name;
+  if (name && /haiku|flash|mini|small|fast/i.test(name)) return ANTHROPIC_FAST_MODEL;
+  return ANTHROPIC_MODEL;
+}
+
+/** Anthropic 的 stop_reason 与 OpenAI 的 finish_reason 不是一一对应，需显式映射。 */
+function anthropicStopReason(finishReason) {
+  if (finishReason === 'tool_calls') return 'tool_use';
+  if (finishReason === 'length') return 'max_tokens';
+  return 'end_turn';
+}
+
+/** 上游给的 arguments 是字符串形式的 JSON；模型偶尔吐半截，别让整个请求炸掉。 */
+function safeJsonParse(s) {
+  if (typeof s !== 'string' || !s.trim()) return {};
+  try {
+    const v = JSON.parse(s);
+    // Anthropic 要求 tool_use.input 必须是对象
+    return v && typeof v === 'object' ? v : {};
+  } catch { return {}; }
+}
+
+/** Anthropic 的 `system` 可以是字符串，也可以是 `[{type:'text',text}]`。 */
+function anthropicSystemText(system) {
+  if (typeof system === 'string') return system;
+  if (Array.isArray(system)) {
+    return system
+      .filter((b) => b && b.type === 'text' && typeof b.text === 'string')
+      .map((b) => b.text)
+      .join('\n');
+  }
+  return '';
+}
+
+/** Anthropic 的 tool_result.content 同样有字符串 / 块数组两种形态。 */
+function anthropicToolResultText(content) {
+  if (typeof content === 'string') return content;
+  if (Array.isArray(content)) {
+    return content
+      .filter((b) => b && b.type === 'text' && typeof b.text === 'string')
+      .map((b) => b.text)
+      .join('\n');
+  }
+  if (content == null) return '';
+  return JSON.stringify(content);
+}
+
+/** Anthropic 的 image block → OpenAI 的 image_url（base64 走 data URI）。 */
+function anthropicImageToOpenAI(block) {
+  const src = block && block.source;
+  if (!src) return null;
+  if (src.type === 'base64' && src.data) {
+    return { type: 'image_url', image_url: { url: `data:${src.media_type || 'image/png'};base64,${src.data}` } };
+  }
+  if (src.type === 'url' && src.url) {
+    return { type: 'image_url', image_url: { url: src.url } };
+  }
+  return null;
+}
+
+/**
+ * Anthropic messages → OpenAI messages。
+ *
+ * 三处结构性差异必须处理，否则上游一定拒：
+ * 1. Anthropic 的 system 是**顶层字段**，OpenAI 是**首条消息**；而且上游要求
+ *    首条必须是 system，所以即使 system 为空也要补一条占位。
+ * 2. Anthropic 把工具调用和结果**混在 content 块数组**里（`tool_use` /
+ *    `tool_result`），OpenAI 拆成 assistant.tool_calls + 独立的 `role:"tool"` 消息。
+ * 3. 顺序不能乱：带 tool_calls 的 assistant 消息必须排在对应 `role:"tool"`
+ *    消息之前，否则上游会以「tool 消息没有前置调用」拒绝。
+ */
+function anthropicToOpenAIMessages(body) {
+  const out = [];
+  const sys = anthropicSystemText(body.system);
+  out.push({ role: 'system', content: sys || 'You are a helpful assistant.' });
+
+  for (const msg of Array.isArray(body.messages) ? body.messages : []) {
+    if (!msg || typeof msg !== 'object') continue;
+    const role = msg.role === 'assistant' ? 'assistant' : 'user';
+
+    // 纯字符串是最常见的形态，直接透传
+    if (typeof msg.content === 'string') {
+      out.push({ role, content: msg.content });
+      continue;
+    }
+    if (!Array.isArray(msg.content)) continue;
+
+    const parts = [];       // OpenAI content 数组（text / image_url）
+    const toolCalls = [];   // assistant 的 tool_calls
+    const toolResults = []; // user 的 tool_result → 独立的 role:"tool" 消息
+
+    for (const block of msg.content) {
+      if (!block || typeof block !== 'object') continue;
+      if (block.type === 'text' && typeof block.text === 'string') {
+        parts.push({ type: 'text', text: block.text });
+      } else if (block.type === 'image') {
+        const img = anthropicImageToOpenAI(block);
+        if (img) parts.push(img);
+      } else if (block.type === 'tool_use') {
+        toolCalls.push({
+          id: block.id || `call_${trace().slice(0, 20)}`,
+          type: 'function',
+          function: { name: block.name || '', arguments: JSON.stringify(block.input ?? {}) },
+        });
+      } else if (block.type === 'tool_result') {
+        toolResults.push({
+          role: 'tool',
+          tool_call_id: block.tool_use_id || '',
+          content: anthropicToolResultText(block.content),
+        });
+      }
+    }
+
+    if (role === 'assistant') {
+      const m = { role: 'assistant' };
+      const text = parts.filter((p) => p.type === 'text').map((p) => p.text).join('');
+      // 有 tool_calls 时 content 允许为 null（OpenAI 语义就是如此）
+      m.content = text || (toolCalls.length ? null : '');
+      if (toolCalls.length) m.tool_calls = toolCalls;
+      out.push(m);
+    } else {
+      // tool_result 逻辑上先于本轮的新内容
+      for (const tr of toolResults) out.push(tr);
+      if (parts.length) {
+        out.push({ role: 'user', content: parts.length === 1 && parts[0].type === 'text' ? parts[0].text : parts });
+      } else if (!toolResults.length) {
+        out.push({ role: 'user', content: '' });
+      }
+    }
+  }
+  return out;
+}
+
+/**
+ * Anthropic tools → OpenAI tools。`input_schema` 与 `parameters` 是同一份
+ * JSON Schema，只是字段名不同。
+ */
+function anthropicToolsToOpenAIMessages(tools) {
+  if (!Array.isArray(tools)) return null;
+  const out = tools
+    .filter((t) => t && typeof t.name === 'string' && t.name)
+    .map((t) => ({
+      type: 'function',
+      function: {
+        name: t.name,
+        description: t.description || '',
+        parameters: t.input_schema || { type: 'object', properties: {} },
+      },
+    }));
+  return out.length ? out : null;
+}
+
+/**
+ * Anthropic: {type:'auto'} | {type:'any'} | {type:'tool',name} | {type:'none'}
+ * OpenAI:    'auto' | 'required' | {type:'function',...} | 'none'
+ *
+ * 这里**直接产出字符串**：上游只收字符串，虽然 normalizePayload 会兜底把对象
+ * 转掉，但没必要多绕一圈。
+ */
+function anthropicToolChoiceToOpenAI(tc) {
+  if (!tc || typeof tc !== 'object') return null;
+  if (tc.type === 'any' || tc.type === 'tool') return 'required';
+  if (tc.type === 'auto' || tc.type === 'none') return tc.type;
+  return null;
+}
+
+/** 聚合后的 OpenAI 响应 → Anthropic message 对象（非流式）。 */
+function openAIToAnthropicMessage(agg, model) {
+  const choice = (agg.choices || [])[0] || {};
+  const msg = choice.message || {};
+  const content = [];
+
+  if (typeof msg.content === 'string' && msg.content) {
+    content.push({ type: 'text', text: msg.content });
+  }
+  for (const tc of msg.tool_calls || []) {
+    if (!tc) continue;
+    content.push({
+      type: 'tool_use',
+      id: tc.id || `toolu_${trace().slice(0, 24)}`,
+      name: tc.function?.name || '',
+      input: safeJsonParse(tc.function?.arguments),
+    });
+  }
+
+  return {
+    id: `msg_${String(agg.id || trace()).replace(/[^A-Za-z0-9]/g, '').slice(0, 40)}`,
+    type: 'message',
+    role: 'assistant',
+    model,
+    content,
+    stop_reason: anthropicStopReason(choice.finish_reason),
+    stop_sequence: null,
+    usage: {
+      input_tokens: Number(agg.usage?.prompt_tokens) || 0,
+      output_tokens: Number(agg.usage?.completion_tokens) || 0,
+    },
+  };
+}
+
+/**
+ * 把上游的 OpenAI SSE 流翻译成 Anthropic 的 SSE 事件流，直接写进 `res`。
+ *
+ * Anthropic 的流比 OpenAI 严格得多：它用 `event:` 行标注事件类型，而且
+ * **每个内容块必须有 start / delta… / stop 三件套配对**，块索引单调递增且
+ * 不复用。少任何一对，Claude Code 会判定流损坏并中断会话。
+ *
+ * 文本块与工具块共用一个索引空间：文本先来就占 0、工具接着占 1，反之亦然。
+ *
+ * 返回 `{ finishReason, usage, streamError }` 供调用方记账。
+ */
+async function relayAnthropicStream(up, res, model, estInputTokens) {
+  const write = (type, obj) => res.write(`event: ${type}\ndata: ${JSON.stringify(obj)}\n\n`);
+
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream; charset=utf-8',
+    'Cache-Control': 'no-cache, no-transform',
+    Connection: 'keep-alive',
+    'X-Accel-Buffering': 'no',
+    ...SECURITY_HEADERS,
+  });
+
+  write('message_start', {
+    type: 'message_start',
+    message: {
+      id: `msg_${trace().slice(0, 32)}`,
+      type: 'message',
+      role: 'assistant',
+      model,
+      content: [],
+      stop_reason: null,
+      stop_sequence: null,
+      // input_tokens 在流开始时上游还没给，先用字符数粗估；真实值在
+      // message_delta 里补正。给 0 会让 Claude Code 的上下文占用显示失真。
+      usage: { input_tokens: estInputTokens, output_tokens: 0 },
+    },
+  });
+
+  let blockIndex = -1;
+  let openKind = null; // null | 'text' | 'tool'
+  const toolSlots = new Map(); // 上游 tool_calls 的 index -> { blockIndex, id, name }
+
+  const closeOpen = () => {
+    if (openKind !== null) {
+      write('content_block_stop', { type: 'content_block_stop', index: blockIndex });
+      openKind = null;
+    }
+  };
+
+  let finishReason = null;
+  let usage = null;
+  let streamError = null;
+  const reader = up.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() ?? '';
+      for (const line of lines) {
+        if (!line.startsWith('data:')) continue;
+        const raw = line.slice(5).trim();
+        if (!raw || raw === '[DONE]') continue;
+        let j; try { j = JSON.parse(raw); } catch { continue; }
+        if (j.usage) usage = j.usage;
+        const choice = (j.choices || [])[0];
+        if (!choice) continue;
+        if (choice.finish_reason) finishReason = choice.finish_reason;
+        const d = choice.delta || {};
+
+        if (typeof d.content === 'string' && d.content) {
+          if (openKind !== 'text') {
+            closeOpen();
+            blockIndex++;
+            openKind = 'text';
+            write('content_block_start', {
+              type: 'content_block_start',
+              index: blockIndex,
+              content_block: { type: 'text', text: '' },
+            });
+          }
+          write('content_block_delta', {
+            type: 'content_block_delta',
+            index: blockIndex,
+            delta: { type: 'text_delta', text: d.content },
+          });
+        }
+
+        for (const tc of d.tool_calls || []) {
+          if (!tc) continue;
+          const upIdx = typeof tc.index === 'number' ? tc.index : 0;
+          let slot = toolSlots.get(upIdx);
+          if (!slot) {
+            // 新工具块：必须先把上一个块关掉，索引才能前进
+            closeOpen();
+            blockIndex++;
+            slot = {
+              blockIndex,
+              id: tc.id || `toolu_${trace().slice(0, 24)}`,
+              name: tc.function?.name || '',
+            };
+            toolSlots.set(upIdx, slot);
+            openKind = 'tool';
+            write('content_block_start', {
+              type: 'content_block_start',
+              index: slot.blockIndex,
+              content_block: { type: 'tool_use', id: slot.id, name: slot.name, input: {} },
+            });
+          } else if (tc.function?.name && !slot.name) {
+            slot.name += tc.function.name;
+          }
+          if (typeof tc.function?.arguments === 'string' && tc.function.arguments) {
+            write('content_block_delta', {
+              type: 'content_block_delta',
+              index: slot.blockIndex,
+              delta: { type: 'input_json_delta', partial_json: tc.function.arguments },
+            });
+          }
+        }
+      }
+    }
+  } catch (e) {
+    streamError = e;
+    log('anthropic stream interrupted', e.message);
+  }
+
+  closeOpen();
+  write('message_delta', {
+    type: 'message_delta',
+    delta: { stop_reason: anthropicStopReason(finishReason), stop_sequence: null },
+    usage: {
+      input_tokens: Number(usage?.prompt_tokens) || estInputTokens,
+      output_tokens: Number(usage?.completion_tokens) || 0,
+    },
+  });
+  write('message_stop', { type: 'message_stop' });
+  res.end();
+  return { finishReason, usage, streamError };
 }
 
 // ── Usage accounting (local only) ────────────────────────────────────────
@@ -1573,13 +1992,27 @@ function originAllowed(req) {
   return bare === '127.0.0.1' || bare === 'localhost' || bare === '::1';
 }
 
+/**
+ * 本地令牌校验。两种写法都收：
+ *   - `Authorization: Bearer <token>` —— OpenAI 系客户端的惯例
+ *   - `x-api-key: <token>`            —— Anthropic 系客户端的惯例（Claude Code 用这个）
+ *
+ * 两者承载的是同一个「本机回环令牌」，用途完全一致，没有理由让用户为了换一个
+ * 客户端就记两套写法。**只影响本机回环端口上的这一个校验点**，与上游凭据无关。
+ */
+function hasLocalToken(req) {
+  if (req.headers.authorization === `Bearer ${LOCAL_TOKEN}`) return true;
+  const key = req.headers['x-api-key'];
+  return typeof key === 'string' && key === LOCAL_TOKEN;
+}
+
 const server = createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host}`);
   try {
     if (!originAllowed(req)) {
       return json(res, 403, { error: { message: 'workbuddy-bridge: cross-origin request rejected (this bridge serves local clients only)' } });
     }
-    if (LOCAL_TOKEN && req.headers.authorization !== `Bearer ${LOCAL_TOKEN}`) {
+    if (LOCAL_TOKEN && !hasLocalToken(req)) {
       return json(res, 401, { error: { message: 'workbuddy-bridge: bad or missing local token' } });
     }
 
@@ -1815,12 +2248,6 @@ const server = createServer(async (req, res) => {
       }
       log(`→ ${model} stream=${wantStream} msgs=${payload.messages?.length ?? 0} tools=${payload.tools?.length ?? 0}`);
       const startedAt = Date.now();
-      const usageOf = (u) => ({
-        promptTokens: Number(u?.prompt_tokens) || 0,
-        completionTokens: Number(u?.completion_tokens) || 0,
-        // 上游在 usage 里回报本次实际扣减的积分，一并记进本地账本（只记数字）
-        ...(typeof u?.credit === 'number' ? { credit: u.credit } : {}),
-      });
 
       // the backend is streaming-only: always stream upstream, aggregate for non-streaming clients
       const upstream = normalizePayload({ ...payload, stream: true, stream_options: { include_usage: true } });
@@ -1930,10 +2357,115 @@ const server = createServer(async (req, res) => {
       }
     }
 
+    // ── Anthropic Messages API（Claude Code 等）────────────────────────────
+    if (url.pathname === '/v1/messages' && req.method === 'POST') {
+      let raw;
+      try {
+        raw = await readBody(req);
+      } catch (e) {
+        if (e.code === 'BODY_TOO_LARGE') {
+          return json(res, 413, {
+            type: 'error',
+            error: { type: 'request_too_large', message: `request body too large (limit ${MAX_BODY_BYTES} bytes)` },
+          });
+        }
+        throw e;
+      }
+      let body;
+      try { body = JSON.parse(raw); }
+      catch { return json(res, 400, { type: 'error', error: { type: 'invalid_request_error', message: 'invalid JSON body' } }); }
+
+      // Anthropic 的 `stream` 缺省是 false（与 OpenAI 相反）
+      const wantStream = body.stream === true;
+      const model = resolveAnthropicModel(body.model);
+      const messages = anthropicToOpenAIMessages(body);
+      const tools = anthropicToolsToOpenAIMessages(body.tools);
+      const toolChoice = anthropicToolChoiceToOpenAI(body.tool_choice);
+
+      const oai = { model, messages, stream: true, stream_options: { include_usage: true } };
+      if (tools) oai.tools = tools;
+      if (toolChoice) oai.tool_choice = toolChoice;
+      if (typeof body.max_tokens === 'number') oai.max_tokens = body.max_tokens;
+      if (typeof body.temperature === 'number') oai.temperature = body.temperature;
+      if (typeof body.top_p === 'number') oai.top_p = body.top_p;
+      if (Array.isArray(body.stop_sequences) && body.stop_sequences.length) oai.stop = body.stop_sequences;
+
+      maybeAutoCheckin();
+      log(`→ [anthropic] ${body.model || '(no model)'} => ${model} stream=${wantStream} msgs=${messages.length} tools=${tools?.length ?? 0}`);
+
+      const startedAt = Date.now();
+      const ac = new AbortController();
+      req.on('aborted', () => ac.abort());
+      res.on('close', () => { if (!res.writableEnded) ac.abort(); });
+
+      try {
+        const { res: up, bodyText } = await callUpstream(
+          JSON.stringify(normalizePayload(oai)),
+          model,
+          req.headers['x-conversation-id'] || trace(),
+          ac.signal,
+        );
+        if (!up.ok) {
+          const text = bodyText ?? await up.text().catch(() => '');
+          let parsed; try { parsed = JSON.parse(text); } catch {}
+          log('upstream error (anthropic)', up.status, text.slice(0, 300));
+          recordRequest({
+            model,
+            stream: wantStream,
+            ms: Date.now() - startedAt,
+            ok: false,
+            status: up.status,
+            code: typeof parsed?.code === 'number' ? parsed.code : null,
+            error: parsed?.msg || parsed?.message || text,
+          });
+          // 错误体也必须是 Anthropic 的形状，否则客户端只会显示「未知错误」
+          return json(res, up.status === 200 ? 502 : up.status, {
+            type: 'error',
+            error: {
+              type: 'api_error',
+              message: parsed?.msg || parsed?.message || text || `upstream HTTP ${up.status}`,
+            },
+          });
+        }
+
+        if (wantStream) {
+          const r = await relayAnthropicStream(up, res, model, Math.max(1, Math.round(raw.length / 4)));
+          if (r.streamError && !ac.signal.aborted) {
+            recordRequest({ model, stream: true, ms: Date.now() - startedAt, ok: false, status: 0, code: null, error: r.streamError.message });
+          } else {
+            recordRequest({ model, stream: true, ok: true, ms: Date.now() - startedAt, ...usageOf(r.usage) });
+          }
+          return;
+        }
+
+        const aggregated = await aggregateStream(up);
+        recordRequest({ model, stream: false, ok: true, ms: Date.now() - startedAt, ...usageOf(aggregated.usage) });
+        return json(res, 200, openAIToAnthropicMessage(aggregated, model));
+      } catch (e) {
+        recordRequest({ model, stream: wantStream, ms: Date.now() - startedAt, ok: false, status: 0, code: null, error: e.message });
+        throw e;
+      }
+    }
+
+    // ── 上游没有的能力：明确 501，不做假的 ────────────────────────────────
+    // 上游 30 个模型全是对话类，**没有任何 embedding 模型**。这里若返回一堆
+    // 无意义的向量，客户端的知识库会"看起来建成了、实际全是噪声"，用户要等
+    // 检索结果离谱时才发现。宁可现在就讲清楚。
+    if (url.pathname === '/v1/embeddings' && req.method === 'POST') {
+      return json(res, 501, {
+        error: {
+          message: 'workbuddy-bridge: /v1/embeddings is not available — the upstream gateway serves chat models only '
+            + '(its catalog contains no embedding model). Clients that need embeddings for a knowledge base / RAG '
+            + 'should configure a separate embedding provider.',
+          type: 'not_implemented',
+        },
+      });
+    }
+
     if (url.pathname === '/' ) {
       return json(res, 200, {
         service: 'workbuddy-bridge',
-        usage: 'POST /v1/chat/completions · GET /v1/models · GET /v1/usage · GET /v1/requests · GET /v1/quota · GET /v1/checkin · GET /health',
+        usage: 'POST /v1/chat/completions · POST /v1/messages (Anthropic) · GET /v1/models · GET /v1/usage · GET /v1/requests · GET /v1/quota · GET /v1/checkin · GET /health',
         featured: FEATURED.map((m) => m.id),
       });
     }

@@ -47,6 +47,18 @@ function runPreflight(extraEnv) {
       env,
       encoding: 'utf8',
       timeout: 60000,
+      /**
+       * **必须显式给 `stdio`。**
+       *
+       * Windows 上 `spawnSync` 默认会为子进程的 stdin 打开管道，而在这台机器上
+       * 那样做直接 `EBUSY`：进程根本没起来，`stdout` 是空串、`status` 是 `null`，
+       * 于是断言全部失败并**误报成「preflight 没有输出」**——查了半天脚本，
+       * 其实脚本是好的，是测试自己没跑起来。
+       *
+       * 这与桥启动 Electron 用的是同一条约定（见 docs/TROUBLESHOOTING.md
+       * 「Node 子进程相关」）：`stdio: ['ignore','pipe','pipe']`。
+       */
+      stdio: ['ignore', 'pipe', 'pipe'],
     });
     return { ...r, stdout: r.stdout || '', stderr: r.stderr || '' };
   } finally {
@@ -111,6 +123,8 @@ test('preflight：登录目录整体不存在时也不崩（真实目录解析�
       },
       encoding: 'utf8',
       timeout: 60000,
+      // 不给 stdio 就会 EBUSY（原因见上面 runPreflight 的注释）
+      stdio: ['ignore', 'pipe', 'pipe'],
     });
     const stdout = r.stdout || '';
     assertNoCrash({ ...r, stdout, stderr: r.stderr || '' }, '登录目录不存在');
@@ -134,6 +148,8 @@ test('preflight：--json 模式下上述两种情况也必须产出合法 JSON�
     },
     encoding: 'utf8',
     timeout: 60000,
+    // 不给 stdio 就会 EBUSY（原因见上面 runPreflight 的注释）
+    stdio: ['ignore', 'pipe', 'pipe'],
   });
   const stdout = r.stdout || '';
   assertNoCrash({ ...r, stdout, stderr: r.stderr || '' }, '--json 模式');
