@@ -14,6 +14,7 @@
  * 判定方式是**直接量渲染宽度**，不是查有没有写某个 CSS 属性 —— 写了也可能不生效。
  */
 import { startStaticServer, openPage, q, sleep } from './ui-harness.mjs';
+import { baseRoutes, CATALOG } from './fixtures.mjs';
 
 let failures = 0;
 const pass = (m) => console.log('✓ ' + m);
@@ -22,52 +23,9 @@ const fail = (m) => { console.error('✗ ' + m); failures += 1; };
 const PORT = 8785;
 const URL_ = `http://127.0.0.1:${PORT}/`;
 
-const CATALOG = [
-  { id: 'deepseek-v4.1-flash', name: 'DeepSeek-V4.1-Flash', context_window: 1000000, max_output_tokens: 128000, credits: 0.11 },
-  { id: 'glm-5.3', name: 'GLM-5.3', context_window: 1000000, max_output_tokens: 48000, credits: 0.79 },
-];
-const now = Date.now();
-const USAGE = {
-  windowDays: 7,
-  // 字段名必须与真实接口一致（/api/usage 的 usage 里是 total / models / days）——
-  // 写错的话用量表会**静默地不渲染**，而页面看起来一切正常，很容易误判成"没问题"
-  total: { calls: 118, promptTokens: 241000, completionTokens: 51000, ms: 92000, credit: 1.28, creditCalls: 104, failed: 3 },
-  models: [
-    { model: 'deepseek-v4.1-flash', calls: 61, promptTokens: 128000, completionTokens: 30000, ms: 48000, credit: 0.61, creditCalls: 55 },
-    { model: 'glm-5.3', calls: 44, promptTokens: 97000, completionTokens: 19000, ms: 38000, credit: 0.62, creditCalls: 42 },
-  ],
-  days: [
-    { day: '2026-10-01', calls: 9, promptTokens: 38000, completionTokens: 9000, credit: 0.27, creditCalls: 8 },
-    { day: '2026-10-02', calls: 7, promptTokens: 30000, completionTokens: 7000, credit: 0.22, creditCalls: 7 },
-    { day: '2026-10-03', calls: 8, promptTokens: 44000, completionTokens: 11000, credit: 0.24, creditCalls: 7 },
-  ],
-  failures: [],
-};
-const REQUESTS = [
-  { t: now - 20000, model: 'deepseek-v4.1-flash', stream: true, ok: true, ms: 1180, promptTokens: 820, completionTokens: 240, credit: 0.03 },
-  { t: now - 60000, model: 'glm-5.3', stream: false, ok: true, ms: 2400, promptTokens: 1180, completionTokens: 380, credit: 0.11 },
-];
-
-const routes = {
-  '/api/models': { body: { models: CATALOG } },
-  '/api/clients': { body: { running: true, host: '127.0.0.1', port: 8790, baseUrlOpenAI: 'http://127.0.0.1:8790/v1', baseUrlAnthropic: 'http://127.0.0.1:8790', token: 'wb-local-bridge', anthropicModel: 'glm-5.3', anthropicFastModel: 'glm-5.3-flash', models: CATALOG.map((m) => m.id), modelDetails: CATALOG.map((m) => ({ id: m.id, name: m.name, context: m.context_window, maxOutput: m.max_output_tokens })) } },
-  '/api/overview': {
-    body: {
-      bridge: { running: true, ok: true, host: '127.0.0.1', port: 8790, endpoint: 'http://127.0.0.1:8790/v1', pid: 18432, startedAt: new Date(now - 5400000).toISOString(), uptimeMs: 5400000, catalogSize: 2, catalogAt: new Date(now - 420000).toISOString() },
-      credentials: { active: { account: '330101979236', userId: '330101979236', remainingMs: 37 * 86400000, expiresAt: now + 37 * 86400000 }, error: '' },
-      quota: { total: 715, packages: [{ name: '每日签到', remain: 18, size: 20 }] },
-      dsh: { routeLive: true, hasBridgeKey: true, bundlesOk: true, bundles: ['a'], registeredModels: ['glm-5.3'] },
-      console: { version: '1.0.0', node: 'v22.22.2' },
-    },
-  },
-  '/api/probe-results': { body: { updatedAt: null, results: {}, lastRun: null } },
-  '/api/diagnose': { body: { items: [] } },
-  '/api/usage': { body: { usage: USAGE } },
-  '/api/requests': { body: { requests: REQUESTS } },
-  '/api/accounts': { body: { accounts: [] } },
-  '/api/checkin': { body: { status: { active: true, todayCheckedIn: true, todayCredit: 18, streakDays: 3 } } },
-  '/api/bridge/log': { body: { lines: [] } },
-};
+// 桩数据来自共享夹具（tools/dev/fixtures.mjs）—— 形状由 ui-harness 自动校验。
+// 各工具不再手写桩：字段名写错时页面会静默地不渲染，而这个坑一天踩了三次。
+const routes = baseRoutes();
 
 const server = await startStaticServer(PORT);
 const { cdp, close } = await openPage(URL_, routes, { width: 1440, height: 1200 });

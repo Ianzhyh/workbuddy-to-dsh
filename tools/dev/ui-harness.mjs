@@ -197,7 +197,43 @@ export function fetchStubSource(routes) {
  * 每个新文档上的（含 iframe），而未命中路径一律回 `{}` —— 内嵌的真实页面
  * 会因此拿不到自己的数据。此时由调用方自己在页面里做打桩。
  */
-export async function openPage(url, routes, { cdpPort = 9333, width = 1440, height = 900, inject = '', injectStub = true } = {}) {
+export async function openPage(url, routes, { cdpPort = 9333, width = 1440, height = 900, inject = '', injectStub = true, skipShapeCheck = false } = {}) {
+  /*
+   * 打桩前先校验形状。
+   *
+   * 桩数据的字段名一旦与真实接口不一致，页面**不会报错**，只会静默地不渲染 ——
+   * 而页面看起来一切正常。这个坑一天里踩了三次（用量表整张没渲染、诊断面板
+   * 渲染出 undefined、签到面板显示了一个无依据的结论），每次都是
+   * 「以为发现了产品 bug，其实是自己的夹具错了」。
+   *
+   * 所以这里**默认拒绝形状不对的桩**，让问题在渲染前就暴露。
+   * 形状来自 tools/dev/api-shape.json（只有键名与类型，不含真实数据）。
+   */
+  if (injectStub && !skipShapeCheck) {
+    const { validateRoutes, loadShape } = await import('./api-shape.mjs');
+    const shape = loadShape();
+    if (shape) {
+      const problems = validateRoutes(routes, shape);
+      if (problems.length) {
+        const detail = problems.map((p) => {
+          const lines = [`  ${p.route}`];
+          if (p.missing && p.missing.length) {
+            lines.push(`    缺少：${p.missing.slice(0, 6).join(', ')}${p.missing.length > 6 ? ` …共 ${p.missing.length} 项` : ''}`);
+          }
+          if (p.unknown && p.unknown.length) {
+            lines.push(`    真实接口没有这些键（多半是名字写错了）：${p.unknown.slice(0, 6).join(', ')}`);
+          }
+          return lines.join('\n');
+        }).join('\n');
+        throw new Error(
+          '桩数据与真实接口形状不一致 —— 页面会静默地不渲染，先修夹具再跑：\n' + detail
+          + '\n  形状来源：tools/dev/api-shape.json（重取：node tools/dev/api-shape.mjs capture）'
+          + '\n  确实需要绕过时传 skipShapeCheck: true',
+        );
+      }
+    }
+  }
+
   let chrome = null;
   let profileDir = null;
   let wsUrl;

@@ -11,6 +11,7 @@ import { writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { startStaticServer, openPage, waitFor, click, q, sleep } from './ui-harness.mjs';
+import { baseRoutes } from './fixtures.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const OUT = join(root, 'docs', 'screenshot.png');
@@ -51,65 +52,9 @@ const REQUESTS = [
   { t: now - 150000, model: 'deepseek-v4.1-flash', stream: false, ok: true, ms: 1440, promptTokens: 1200, completionTokens: 380, credit: 0.04 },
 ];
 
-const routes = {
-  '/api/models': { body: { models: CATALOG } },
-  // 客户端接入面板：不打桩的话它会在截图里渲染成「读取失败」，而这张图要进 README。
-  // 令牌用文档里的默认值 —— 它是本地回环令牌、README 本来就写着，不是上游凭据。
-  '/api/clients': {
-    body: {
-      running: true,
-      host: '127.0.0.1',
-      port: 8790,
-      baseUrlOpenAI: 'http://127.0.0.1:8790/v1',
-      baseUrlAnthropic: 'http://127.0.0.1:8790',
-      token: 'wb-local-bridge',
-      anthropicModel: 'glm-5.3',
-      anthropicFastModel: 'glm-5.3-flash',
-      models: CATALOG.map((m) => m.id),
-      // 逐字段复制表要拿真实的上下文 / 输出上限；不给的话模型那几行会是空的，
-      // 而这张图是给用户看「该往表单里填什么」的，空着就失去意义了。
-      modelDetails: CATALOG.map((m) => ({
-        id: m.id,
-        name: m.name,
-        context: m.context_window,
-        maxOutput: m.max_output_tokens,
-        supportsReasoning: true,
-        supportsImages: false,
-      })),
-    },
-  },
-  '/api/overview': {
-    body: {
-      bridge: { running: true, ok: true, host: '127.0.0.1', port: 8790, endpoint: 'http://127.0.0.1:8790/v1', pid: 18432, startedAt: new Date(now - 5400000).toISOString(), uptimeMs: 5400000, catalogSize: 4, catalogAt: new Date(now - 420000).toISOString() },
-      credentials: { active: { account: 'example-account', userId: 'example-user-id', remainingMs: 44 * 86400000, expiresAt: now + 44 * 86400000 }, error: '' },
-      quota: { total: 118, packages: [{ name: '每日签到', remain: 18, size: 20 }, { name: '月度额度', remain: 100, size: 200 }] },
-      dsh: { routeLive: true, hasBridgeKey: true, bundlesOk: true, bundles: ['a', 'b', 'c'], registeredModels: ['deepseek-v4.1-flash', 'glm-5.3'] },
-      console: { version: '1.0.0', node: 'v22.22.2' },
-    },
-  },
-  '/api/probe-results': {
-    body: {
-      updatedAt: now - 180000,
-      results: {
-        'deepseek-v4.1-flash': { ok: true, ms: 1180, at: now - 200000, credit: 0 },
-        'glm-5.3': { ok: false, ms: 2400, at: now - 190000, error: 'HTTP 400' },
-        'kimi-k3': { ok: true, ms: 960, at: now - 185000, credit: 0 },
-      },
-      lastRun: { scope: 'checked', count: 2 },
-    },
-  },
-  '/api/diagnose': { body: { items: [] } },
-  '/api/usage': { body: { usage: USAGE } },
-  '/api/requests': { body: { requests: REQUESTS } },
-  '/api/accounts': { body: { accounts: [{ path: 'workbuddy-desktop.info', active: true, accountId: 'example-account' }] } },
-  '/api/checkin': {
-    body: {
-      status: { active: true, todayCheckedIn: true, todayCredit: 18, streakDays: 6 },
-      checkin: { auto: true, lastAt: now - 3600000, lastResult: 'ok', lastError: null, lastSource: 'startup' },
-    },
-  },
-  '/api/bridge/log': { body: { lines: [] } },
-};
+// 桩数据来自共享夹具（tools/dev/fixtures.mjs）—— 形状由 ui-harness 自动校验。
+// 只有「数值好看」的部分是自定义的：这张图要进 README，数字得具体、可读。
+const routes = baseRoutes({ catalog: CATALOG, usage: USAGE, requests: REQUESTS });
 
 const server = await startStaticServer(PORT);
 const { cdp, close } = await openPage(`http://127.0.0.1:${PORT}/`, routes, { width: 1500, height: 1400 });

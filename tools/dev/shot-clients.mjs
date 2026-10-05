@@ -8,52 +8,16 @@
 import { writeFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { startStaticServer, openPage, waitFor, q, sleep } from './ui-harness.mjs';
+import { baseRoutes } from './fixtures.mjs';
 
 const PORT = 8787;
 const URL_ = `http://127.0.0.1:${PORT}/`;
 const OUTDIR = join(process.cwd(), 'docs');
 
-const CLIENTS = {
-  running: true,
-  host: '127.0.0.1',
-  port: 8790,
-  baseUrlOpenAI: 'http://127.0.0.1:8790/v1',
-  baseUrlAnthropic: 'http://127.0.0.1:8790',
-  token: 'wb-local-bridge',
-  anthropicModel: 'glm-5.3',
-  anthropicFastModel: 'glm-5.3-flash',
-  models: ['glm-5.3', 'deepseek-v4.1-flash', 'deepseek-v4-pro'],
-  modelDetails: [
-    { id: 'glm-5.3', name: 'GLM-5.3', context: 1000000, maxOutput: 64000, supportsReasoning: true, supportsImages: true },
-    { id: 'deepseek-v4.1-flash', name: 'DeepSeek-V4.1-Flash', context: 1000000, maxOutput: 128000, supportsReasoning: true, supportsImages: true },
-    { id: 'deepseek-v4-pro', name: 'DeepSeek-V4-Pro', context: 1000000, maxOutput: 128000, supportsReasoning: true, supportsImages: true },
-  ],
-};
+// 桩数据来自共享夹具（tools/dev/fixtures.mjs）—— 形状由 ui-harness 自动校验
+const routes = baseRoutes();
 
-const FIX = { bridge: { running: true, ok: true, host: '127.0.0.1', port: 8790, endpoint: 'http://127.0.0.1:8790/v1', pid: 1, startedAt: new Date().toISOString(), uptimeMs: 1000, catalogSize: 3, catalogAt: new Date().toISOString(), error: null } };
-
-const routes = {
-  '/api/clients': { body: CLIENTS },
-  '/api/models': { body: { models: [] } },
-  '/api/overview': {
-    body: () => ({
-      bridge: window.__FIX.bridge,
-      credentials: { active: { account: '330000000000', userId: '330000000000', remainingMs: 40 * 86400000, expiresAt: Date.now() + 40 * 86400000 }, error: '' },
-      quota: { total: 10, packages: [] },
-      dsh: { routeLive: true, hasBridgeKey: true, bundlesOk: true, bundles: [], registeredModels: [] },
-      console: { version: '1.0.0', node: 'v22' },
-    }),
-  },
-  '/api/probe-results': { body: { updatedAt: null, results: {}, lastRun: null } },
-  '/api/diagnose': { body: { items: [] } },
-  '/api/usage': { body: { usage: null } },
-  '/api/requests': { body: { requests: [] } },
-  '/api/accounts': { body: { accounts: [] } },
-  '/api/checkin': { body: { status: { active: true, todayCheckedIn: true, todayCredit: 0, streakDays: 0 } } },
-  '/api/bridge/log': { body: { lines: [] } },
-};
-
-const INJECT = `window.__FIX = ${JSON.stringify(FIX)};`;
+const INJECT = '';
 
 mkdirSync(OUTDIR, { recursive: true });
 const server = await startStaticServer(PORT);

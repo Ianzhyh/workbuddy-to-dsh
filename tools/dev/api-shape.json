@@ -1,0 +1,1109 @@
+{
+  "_note": "由 tools/dev/api-shape.mjs capture 生成。只有键名与类型，不含真实数据。",
+  "routes": {
+    "/api/overview": {
+      "$": {
+        "type": "object"
+      },
+      "$.bridge": {
+        "type": "object"
+      },
+      "$.bridge.running": {
+        "type": "boolean"
+      },
+      "$.bridge.ok": {
+        "type": "boolean"
+      },
+      "$.bridge.host": {
+        "type": "string"
+      },
+      "$.bridge.port": {
+        "type": "number"
+      },
+      "$.bridge.endpoint": {
+        "type": "string"
+      },
+      "$.bridge.error": {
+        "type": "null"
+      },
+      "$.bridge.upstream": {
+        "type": "string"
+      },
+      "$.bridge.authFile": {
+        "type": "string"
+      },
+      "$.bridge.selectedAuthFile": {
+        "type": "string"
+      },
+      "$.bridge.pid": {
+        "type": "number"
+      },
+      "$.bridge.startedAt": {
+        "type": "string"
+      },
+      "$.bridge.uptimeMs": {
+        "type": "number"
+      },
+      "$.bridge.catalogSize": {
+        "type": "number"
+      },
+      "$.bridge.catalogAt": {
+        "type": "string"
+      },
+      "$.bridge.upstreamShape": {
+        "type": "object"
+      },
+      "$.bridge.upstreamShape.paths": {
+        "type": "array"
+      },
+      "$.bridge.upstreamShape.paths[]": {
+        "type": "string"
+      },
+      "$.bridge.upstreamShape.sources": {
+        "type": "object"
+      },
+      "$.bridge.upstreamShape.sources./v2/enterprises/personal/models": {
+        "type": "number"
+      },
+      "$.bridge.upstreamShape.sources./v3/config": {
+        "type": "number"
+      },
+      "$.bridge.upstreamShape.sources./v3/config#modelPromotions": {
+        "type": "number"
+      },
+      "$.bridge.upstreamShape.model": {
+        "type": "array"
+      },
+      "$.bridge.upstreamShape.model[]": {
+        "type": "string"
+      },
+      "$.bridge.upstreamShape.dataKeys": {
+        "type": "array"
+      },
+      "$.bridge.upstreamShape.dataKeys[]": {
+        "type": "string"
+      },
+      "$.bridge.upstreamShape.agentsWithModels": {
+        "type": "number"
+      },
+      "$.bridge.upstreamShape.agentModelsSample": {
+        "type": "string"
+      },
+      "$.bridge.upstreamShape.agentName": {
+        "type": "string"
+      },
+      "$.bridge.upstreamShape.agents": {
+        "type": "string"
+      },
+      "$.bridge.upstreamShape.fillToolCallContentModelWhitelist": {
+        "type": "string"
+      },
+      "$.bridge.upstreamShape.productFeatures": {
+        "type": "string"
+      },
+      "$.bridge.upstreamShape.whitelistSample": {
+        "type": "string"
+      },
+      "$.bridge.upstreamShape.promotionFields": {
+        "type": "array"
+      },
+      "$.bridge.upstreamShape.promotionFields[]": {
+        "type": "string"
+      },
+      "$.bridge.upstreamShape.promotionDetail": {
+        "type": "array"
+      },
+      "$.bridge.upstreamShape.promotionDetail[]": {
+        "type": "object"
+      },
+      "$.bridge.upstreamShape.promotionDetail[].badge": {
+        "type": "string"
+      },
+      "$.bridge.upstreamShape.promotionDetail[].enabled": {
+        "type": "boolean"
+      },
+      "$.bridge.upstreamShape.promotionDetail[].kind": {
+        "type": "string"
+      },
+      "$.bridge.upstreamShape.promotionDetail[].models": {
+        "type": "array"
+      },
+      "$.bridge.upstreamShape.promotionDetail[].models[]": {
+        "type": "string"
+      },
+      "$.bridge.upstreamShape.promotionDetail[].discount": {
+        "type": "object",
+        "optional": true
+      },
+      "$.bridge.upstreamShape.promotionDetail[].discount.discountedCredits": {
+        "type": "string",
+        "optional": true
+      },
+      "$.bridge.upstreamShape.promotionDetail[].discount.displayMode": {
+        "type": "string",
+        "optional": true
+      },
+      "$.bridge.upstreamShape.promotionDetail[].discount.factor": {
+        "type": "number",
+        "optional": true
+      },
+      "$.bridge.upstreamShape.droppedNonChat": {
+        "type": "array"
+      },
+      "$.bridge.upstreamShape.droppedNonChat[]": {
+        "type": "string"
+      },
+      "$.bridge.autoCheckin": {
+        "type": "object"
+      },
+      "$.bridge.autoCheckin.at": {
+        "type": "string"
+      },
+      "$.bridge.autoCheckin.result": {
+        "type": "string"
+      },
+      "$.bridge.autoCheckin.credit": {
+        "type": "number"
+      },
+      "$.bridge.autoCheckinEnabled": {
+        "type": "boolean"
+      },
+      "$.console": {
+        "type": "object"
+      },
+      "$.console.version": {
+        "type": "string"
+      },
+      "$.console.node": {
+        "type": "string"
+      },
+      "$.credentials": {
+        "type": "object"
+      },
+      "$.credentials.files": {
+        "type": "array"
+      },
+      "$.credentials.files[]": {
+        "type": "object"
+      },
+      "$.credentials.files[].name": {
+        "type": "string"
+      },
+      "$.credentials.files[].isActiveTarget": {
+        "type": "boolean"
+      },
+      "$.credentials.files[].account": {
+        "type": "string"
+      },
+      "$.credentials.files[].domain": {
+        "type": "string"
+      },
+      "$.credentials.files[].encrypted": {
+        "type": "boolean"
+      },
+      "$.credentials.files[].expiresAt": {
+        "type": "number"
+      },
+      "$.credentials.files[].modifiedAt": {
+        "type": "number"
+      },
+      "$.credentials.active": {
+        "type": "object"
+      },
+      "$.credentials.active.keyId": {
+        "type": "string"
+      },
+      "$.credentials.active.envelopeKeyId": {
+        "type": "string"
+      },
+      "$.credentials.active.keyIdMatches": {
+        "type": "boolean"
+      },
+      "$.credentials.active.encrypted": {
+        "type": "boolean"
+      },
+      "$.credentials.active.account": {
+        "type": "string"
+      },
+      "$.credentials.active.userId": {
+        "type": "string"
+      },
+      "$.credentials.active.domain": {
+        "type": "string"
+      },
+      "$.credentials.active.tokenLen": {
+        "type": "number"
+      },
+      "$.credentials.active.expiresAt": {
+        "type": "number"
+      },
+      "$.credentials.active.remainingMs": {
+        "type": "number"
+      },
+      "$.credentials.error": {
+        "type": "null"
+      },
+      "$.credentials.authFile": {
+        "type": "string"
+      },
+      "$.quota": {
+        "type": "object"
+      },
+      "$.quota.ok": {
+        "type": "boolean"
+      },
+      "$.quota.total": {
+        "type": "number"
+      },
+      "$.quota.packages": {
+        "type": "array"
+      },
+      "$.quota.packages[]": {
+        "type": "object"
+      },
+      "$.quota.packages[].name": {
+        "type": "string"
+      },
+      "$.quota.packages[].remain": {
+        "type": "number"
+      },
+      "$.quota.packages[].size": {
+        "type": "number"
+      },
+      "$.quota.packages[].monthly": {
+        "type": "boolean"
+      },
+      "$.quota.packages[].expiresAt": {
+        "type": "string",
+        "optional": true
+      },
+      "$.quota.productCode": {
+        "type": "string"
+      },
+      "$.dsh": {
+        "type": "object"
+      },
+      "$.dsh.settingsExists": {
+        "type": "boolean"
+      },
+      "$.dsh.settingsHasRoute": {
+        "type": "boolean"
+      },
+      "$.dsh.patchHasRoute": {
+        "type": "boolean"
+      },
+      "$.dsh.routeLive": {
+        "type": "boolean"
+      },
+      "$.dsh.routeSource": {
+        "type": "string"
+      },
+      "$.dsh.hasBridgeKey": {
+        "type": "boolean"
+      },
+      "$.dsh.bundlesOk": {
+        "type": "boolean"
+      },
+      "$.dsh.bundles": {
+        "type": "array"
+      },
+      "$.dsh.bundles[]": {
+        "type": "object"
+      },
+      "$.dsh.bundles[].name": {
+        "type": "string"
+      },
+      "$.dsh.bundles[].installed": {
+        "type": "boolean"
+      },
+      "$.dsh.registeredModels": {
+        "type": "array"
+      }
+    },
+    "/api/models": {
+      "$": {
+        "type": "object"
+      },
+      "$.models": {
+        "type": "array"
+      },
+      "$.models[]": {
+        "type": "object"
+      },
+      "$.models[].id": {
+        "type": "string"
+      },
+      "$.models[].object": {
+        "type": "string"
+      },
+      "$.models[].created": {
+        "type": "number"
+      },
+      "$.models[].owned_by": {
+        "type": "string"
+      },
+      "$.models[].name": {
+        "type": "string"
+      },
+      "$.models[].context_window": {
+        "type": "number"
+      },
+      "$.models[].max_output_tokens": {
+        "type": "number"
+      },
+      "$.models[].supports_images": {
+        "type": "boolean",
+        "optional": true
+      },
+      "$.models[].supports_reasoning": {
+        "type": "boolean",
+        "optional": true
+      },
+      "$.models[].only_reasoning": {
+        "type": "boolean",
+        "optional": true
+      },
+      "$.models[].vendor": {
+        "type": "string"
+      },
+      "$.models[].tags": {
+        "type": "array",
+        "optional": true
+      },
+      "$.models[].tags[]": {
+        "type": "string"
+      },
+      "$.models[].description_zh": {
+        "type": "string",
+        "optional": true
+      },
+      "$.models[].description_en": {
+        "type": "string",
+        "optional": true
+      },
+      "$.models[].credits": {
+        "type": "number",
+        "optional": true
+      },
+      "$.models[].badge": {
+        "type": "string",
+        "optional": true
+      },
+      "$.models[].free": {
+        "type": "boolean",
+        "optional": true
+      }
+    },
+    "/api/clients": {
+      "$": {
+        "type": "object"
+      },
+      "$.running": {
+        "type": "boolean"
+      },
+      "$.host": {
+        "type": "string"
+      },
+      "$.port": {
+        "type": "number"
+      },
+      "$.baseUrlOpenAI": {
+        "type": "string"
+      },
+      "$.baseUrlAnthropic": {
+        "type": "string"
+      },
+      "$.token": {
+        "type": "string"
+      },
+      "$.anthropicModel": {
+        "type": "string"
+      },
+      "$.anthropicFastModel": {
+        "type": "string"
+      },
+      "$.models": {
+        "type": "array"
+      },
+      "$.models[]": {
+        "type": "string"
+      },
+      "$.modelDetails": {
+        "type": "array"
+      },
+      "$.modelDetails[]": {
+        "type": "object"
+      },
+      "$.modelDetails[].id": {
+        "type": "string"
+      },
+      "$.modelDetails[].name": {
+        "type": "string"
+      },
+      "$.modelDetails[].context": {
+        "type": "number"
+      },
+      "$.modelDetails[].maxOutput": {
+        "type": "number"
+      },
+      "$.modelDetails[].supportsReasoning": {
+        "type": "boolean"
+      },
+      "$.modelDetails[].supportsImages": {
+        "type": "boolean"
+      }
+    },
+    "/api/diagnose": {
+      "$": {
+        "type": "object"
+      },
+      "$.items": {
+        "type": "array"
+      },
+      "$.items[]": {
+        "type": "object"
+      },
+      "$.items[].id": {
+        "type": "string"
+      },
+      "$.items[].label": {
+        "type": "string"
+      },
+      "$.items[].status": {
+        "type": "string"
+      },
+      "$.items[].detail": {
+        "type": "string"
+      },
+      "$.items[].hint": {
+        "type": "string"
+      },
+      "$.summary": {
+        "type": "object"
+      },
+      "$.summary.fail": {
+        "type": "number"
+      },
+      "$.summary.warn": {
+        "type": "number"
+      },
+      "$.summary.ok": {
+        "type": "number"
+      },
+      "$.bridge": {
+        "type": "object"
+      },
+      "$.bridge.running": {
+        "type": "boolean"
+      },
+      "$.bridge.ok": {
+        "type": "boolean"
+      },
+      "$.bridge.body": {
+        "type": "object"
+      },
+      "$.bridge.body.ok": {
+        "type": "boolean"
+      },
+      "$.bridge.body.pid": {
+        "type": "number"
+      },
+      "$.bridge.body.startedAt": {
+        "type": "string"
+      },
+      "$.bridge.body.uptimeMs": {
+        "type": "number"
+      },
+      "$.bridge.body.auth": {
+        "type": "object"
+      },
+      "$.bridge.body.auth.userId": {
+        "type": "string"
+      },
+      "$.bridge.body.auth.endpoint": {
+        "type": "string"
+      },
+      "$.bridge.body.auth.expiresAt": {
+        "type": "string"
+      },
+      "$.bridge.body.auth.expired": {
+        "type": "boolean"
+      },
+      "$.bridge.body.authFile": {
+        "type": "string"
+      },
+      "$.bridge.body.models": {
+        "type": "array"
+      },
+      "$.bridge.body.models[]": {
+        "type": "string"
+      },
+      "$.bridge.body.catalogSize": {
+        "type": "number"
+      },
+      "$.bridge.body.catalogAt": {
+        "type": "string"
+      },
+      "$.bridge.body.catalogRefreshing": {
+        "type": "boolean"
+      },
+      "$.bridge.body.upstreamShape": {
+        "type": "object"
+      },
+      "$.bridge.body.upstreamShape.paths": {
+        "type": "array"
+      },
+      "$.bridge.body.upstreamShape.paths[]": {
+        "type": "string"
+      },
+      "$.bridge.body.upstreamShape.sources": {
+        "type": "object"
+      },
+      "$.bridge.body.upstreamShape.sources./v2/enterprises/personal/models": {
+        "type": "number"
+      },
+      "$.bridge.body.upstreamShape.sources./v3/config": {
+        "type": "number"
+      },
+      "$.bridge.body.upstreamShape.sources./v3/config#modelPromotions": {
+        "type": "number"
+      },
+      "$.bridge.body.upstreamShape.model": {
+        "type": "array"
+      },
+      "$.bridge.body.upstreamShape.model[]": {
+        "type": "string"
+      },
+      "$.bridge.body.upstreamShape.dataKeys": {
+        "type": "array"
+      },
+      "$.bridge.body.upstreamShape.dataKeys[]": {
+        "type": "string"
+      },
+      "$.bridge.body.upstreamShape.agentsWithModels": {
+        "type": "number"
+      },
+      "$.bridge.body.upstreamShape.agentModelsSample": {
+        "type": "string"
+      },
+      "$.bridge.body.upstreamShape.agentName": {
+        "type": "string"
+      },
+      "$.bridge.body.upstreamShape.agents": {
+        "type": "string"
+      },
+      "$.bridge.body.upstreamShape.fillToolCallContentModelWhitelist": {
+        "type": "string"
+      },
+      "$.bridge.body.upstreamShape.productFeatures": {
+        "type": "string"
+      },
+      "$.bridge.body.upstreamShape.whitelistSample": {
+        "type": "string"
+      },
+      "$.bridge.body.upstreamShape.promotionFields": {
+        "type": "array"
+      },
+      "$.bridge.body.upstreamShape.promotionFields[]": {
+        "type": "string"
+      },
+      "$.bridge.body.upstreamShape.promotionDetail": {
+        "type": "array"
+      },
+      "$.bridge.body.upstreamShape.promotionDetail[]": {
+        "type": "object"
+      },
+      "$.bridge.body.upstreamShape.promotionDetail[].badge": {
+        "type": "string"
+      },
+      "$.bridge.body.upstreamShape.promotionDetail[].enabled": {
+        "type": "boolean"
+      },
+      "$.bridge.body.upstreamShape.promotionDetail[].kind": {
+        "type": "string"
+      },
+      "$.bridge.body.upstreamShape.promotionDetail[].models": {
+        "type": "array"
+      },
+      "$.bridge.body.upstreamShape.promotionDetail[].models[]": {
+        "type": "string"
+      },
+      "$.bridge.body.upstreamShape.promotionDetail[].discount": {
+        "type": "object",
+        "optional": true
+      },
+      "$.bridge.body.upstreamShape.promotionDetail[].discount.discountedCredits": {
+        "type": "string",
+        "optional": true
+      },
+      "$.bridge.body.upstreamShape.promotionDetail[].discount.displayMode": {
+        "type": "string",
+        "optional": true
+      },
+      "$.bridge.body.upstreamShape.promotionDetail[].discount.factor": {
+        "type": "number",
+        "optional": true
+      },
+      "$.bridge.body.upstreamShape.droppedNonChat": {
+        "type": "array"
+      },
+      "$.bridge.body.upstreamShape.droppedNonChat[]": {
+        "type": "string"
+      },
+      "$.bridge.body.autoCheckinEnabled": {
+        "type": "boolean"
+      },
+      "$.bridge.body.autoCheckin": {
+        "type": "object"
+      },
+      "$.bridge.body.autoCheckin.at": {
+        "type": "string"
+      },
+      "$.bridge.body.autoCheckin.result": {
+        "type": "string"
+      },
+      "$.bridge.body.autoCheckin.credit": {
+        "type": "number"
+      },
+      "$.credentials": {
+        "type": "object"
+      },
+      "$.credentials.files": {
+        "type": "array"
+      },
+      "$.credentials.files[]": {
+        "type": "object"
+      },
+      "$.credentials.files[].name": {
+        "type": "string"
+      },
+      "$.credentials.files[].isActiveTarget": {
+        "type": "boolean"
+      },
+      "$.credentials.files[].account": {
+        "type": "string"
+      },
+      "$.credentials.files[].domain": {
+        "type": "string"
+      },
+      "$.credentials.files[].encrypted": {
+        "type": "boolean"
+      },
+      "$.credentials.files[].expiresAt": {
+        "type": "number"
+      },
+      "$.credentials.files[].modifiedAt": {
+        "type": "number"
+      },
+      "$.credentials.active": {
+        "type": "object"
+      },
+      "$.credentials.active.keyId": {
+        "type": "string"
+      },
+      "$.credentials.active.envelopeKeyId": {
+        "type": "string"
+      },
+      "$.credentials.active.keyIdMatches": {
+        "type": "boolean"
+      },
+      "$.credentials.active.encrypted": {
+        "type": "boolean"
+      },
+      "$.credentials.active.account": {
+        "type": "string"
+      },
+      "$.credentials.active.userId": {
+        "type": "string"
+      },
+      "$.credentials.active.domain": {
+        "type": "string"
+      },
+      "$.credentials.active.tokenLen": {
+        "type": "number"
+      },
+      "$.credentials.active.expiresAt": {
+        "type": "number"
+      },
+      "$.credentials.active.remainingMs": {
+        "type": "number"
+      },
+      "$.credentials.error": {
+        "type": "null"
+      },
+      "$.credentials.authFile": {
+        "type": "string"
+      },
+      "$.dsh": {
+        "type": "object"
+      },
+      "$.dsh.home": {
+        "type": "string"
+      },
+      "$.dsh.settingsPath": {
+        "type": "string"
+      },
+      "$.dsh.credentialsPath": {
+        "type": "string"
+      },
+      "$.dsh.patchPath": {
+        "type": "string"
+      },
+      "$.dsh.settingsExists": {
+        "type": "boolean"
+      },
+      "$.dsh.settingsHasRoute": {
+        "type": "boolean"
+      },
+      "$.dsh.patchHasRoute": {
+        "type": "boolean"
+      },
+      "$.dsh.settingsText": {
+        "type": "string"
+      },
+      "$.dsh.settingsModels": {
+        "type": "array"
+      },
+      "$.dsh.patchModels": {
+        "type": "array"
+      },
+      "$.dsh.registeredModels": {
+        "type": "array"
+      },
+      "$.dsh.hasBridgeKey": {
+        "type": "boolean"
+      },
+      "$.dsh.refNames": {
+        "type": "array"
+      },
+      "$.dsh.refNames[]": {
+        "type": "string"
+      },
+      "$.dsh.bundles": {
+        "type": "array"
+      },
+      "$.dsh.bundles[]": {
+        "type": "object"
+      },
+      "$.dsh.bundles[].name": {
+        "type": "string"
+      },
+      "$.dsh.bundles[].installed": {
+        "type": "boolean"
+      },
+      "$.dsh.bundlesOk": {
+        "type": "boolean"
+      },
+      "$.dsh.routeLive": {
+        "type": "boolean"
+      },
+      "$.dsh.routeSource": {
+        "type": "string"
+      }
+    },
+    "/api/usage": {
+      "$": {
+        "type": "object"
+      },
+      "$.usage": {
+        "type": "object"
+      },
+      "$.usage.ok": {
+        "type": "boolean"
+      },
+      "$.usage.windowDays": {
+        "type": "number"
+      },
+      "$.usage.total": {
+        "type": "object"
+      },
+      "$.usage.total.calls": {
+        "type": "number"
+      },
+      "$.usage.total.promptTokens": {
+        "type": "number"
+      },
+      "$.usage.total.completionTokens": {
+        "type": "number"
+      },
+      "$.usage.total.ms": {
+        "type": "number"
+      },
+      "$.usage.total.credit": {
+        "type": "number"
+      },
+      "$.usage.total.creditCalls": {
+        "type": "number"
+      },
+      "$.usage.total.failed": {
+        "type": "number"
+      },
+      "$.usage.models": {
+        "type": "array"
+      },
+      "$.usage.models[]": {
+        "type": "object"
+      },
+      "$.usage.models[].model": {
+        "type": "string"
+      },
+      "$.usage.models[].calls": {
+        "type": "number"
+      },
+      "$.usage.models[].promptTokens": {
+        "type": "number"
+      },
+      "$.usage.models[].completionTokens": {
+        "type": "number"
+      },
+      "$.usage.models[].ms": {
+        "type": "number"
+      },
+      "$.usage.models[].credit": {
+        "type": "number"
+      },
+      "$.usage.models[].creditCalls": {
+        "type": "number"
+      },
+      "$.usage.days": {
+        "type": "array"
+      },
+      "$.usage.days[]": {
+        "type": "object"
+      },
+      "$.usage.days[].day": {
+        "type": "string"
+      },
+      "$.usage.days[].calls": {
+        "type": "number"
+      },
+      "$.usage.days[].promptTokens": {
+        "type": "number"
+      },
+      "$.usage.days[].completionTokens": {
+        "type": "number"
+      },
+      "$.usage.days[].credit": {
+        "type": "number"
+      },
+      "$.usage.days[].creditCalls": {
+        "type": "number"
+      },
+      "$.usage.failures": {
+        "type": "array"
+      },
+      "$.usage.failures[]": {
+        "type": "object"
+      },
+      "$.usage.failures[].t": {
+        "type": "number"
+      },
+      "$.usage.failures[].model": {
+        "type": "string"
+      },
+      "$.usage.failures[].stream": {
+        "type": "boolean"
+      },
+      "$.usage.failures[].ms": {
+        "type": "number"
+      },
+      "$.usage.failures[].status": {
+        "type": "number"
+      },
+      "$.usage.failures[].code": {
+        "type": "mixed"
+      },
+      "$.usage.failures[].error": {
+        "type": "string"
+      }
+    },
+    "/api/requests": {
+      "$": {
+        "type": "object"
+      },
+      "$.requests": {
+        "type": "array"
+      },
+      "$.requests[]": {
+        "type": "object"
+      },
+      "$.requests[].t": {
+        "type": "number"
+      },
+      "$.requests[].model": {
+        "type": "string"
+      },
+      "$.requests[].stream": {
+        "type": "boolean"
+      },
+      "$.requests[].ms": {
+        "type": "number"
+      },
+      "$.requests[].ok": {
+        "type": "boolean"
+      },
+      "$.requests[].promptTokens": {
+        "type": "number",
+        "optional": true
+      },
+      "$.requests[].completionTokens": {
+        "type": "number",
+        "optional": true
+      },
+      "$.requests[].credit": {
+        "type": "number",
+        "optional": true
+      },
+      "$.requests[].status": {
+        "type": "number",
+        "optional": true
+      },
+      "$.requests[].code": {
+        "type": "mixed",
+        "optional": true
+      },
+      "$.requests[].error": {
+        "type": "string",
+        "optional": true
+      }
+    },
+    "/api/accounts": {
+      "$": {
+        "type": "object"
+      },
+      "$.dir": {
+        "type": "string"
+      },
+      "$.active": {
+        "type": "string"
+      },
+      "$.accounts": {
+        "type": "array"
+      },
+      "$.accounts[]": {
+        "type": "object"
+      },
+      "$.accounts[].name": {
+        "type": "string"
+      },
+      "$.accounts[].path": {
+        "type": "string"
+      },
+      "$.accounts[].active": {
+        "type": "boolean"
+      },
+      "$.accounts[].usable": {
+        "type": "boolean"
+      },
+      "$.accounts[].account": {
+        "type": "string"
+      },
+      "$.accounts[].domain": {
+        "type": "string"
+      },
+      "$.accounts[].encrypted": {
+        "type": "boolean"
+      },
+      "$.accounts[].expiresAt": {
+        "type": "number"
+      },
+      "$.accounts[].remainingMs": {
+        "type": "number"
+      },
+      "$.accounts[].modifiedAt": {
+        "type": "number"
+      },
+      "$.accounts[].userId": {
+        "type": "string"
+      },
+      "$.keyError": {
+        "type": "null"
+      }
+    },
+    "/api/checkin": {
+      "$": {
+        "type": "object"
+      },
+      "$.ok": {
+        "type": "boolean"
+      },
+      "$.status": {
+        "type": "object"
+      },
+      "$.status.active": {
+        "type": "boolean"
+      },
+      "$.status.todayCheckedIn": {
+        "type": "boolean"
+      },
+      "$.status.streakDays": {
+        "type": "number"
+      },
+      "$.status.dailyCredit": {
+        "type": "number"
+      },
+      "$.status.todayCredit": {
+        "type": "number"
+      },
+      "$.status.isStreakDay": {
+        "type": "boolean"
+      },
+      "$.status.nextStreakDay": {
+        "type": "number"
+      },
+      "$.status.streakBonusDays": {
+        "type": "number"
+      },
+      "$.status.streakBonusCredit": {
+        "type": "number"
+      },
+      "$.checkin": {
+        "type": "object"
+      },
+      "$.checkin.auto": {
+        "type": "boolean"
+      },
+      "$.checkin.lastAt": {
+        "type": "number"
+      },
+      "$.checkin.lastResult": {
+        "type": "string"
+      },
+      "$.checkin.lastError": {
+        "type": "null"
+      },
+      "$.checkin.lastSource": {
+        "type": "string"
+      }
+    },
+    "/api/probe-results": {
+      "$": {
+        "type": "object"
+      },
+      "$.updatedAt": {
+        "type": "number"
+      },
+      "$.results": {
+        "type": "object"
+      },
+      "$.results.hy3": {
+        "type": "object"
+      },
+      "$.results.hy3.ok": {
+        "type": "boolean"
+      },
+      "$.results.hy3.ms": {
+        "type": "number"
+      },
+      "$.results.hy3.at": {
+        "type": "number"
+      },
+      "$.results.hy3.credit": {
+        "type": "number"
+      },
+      "$.lastRun": {
+        "type": "null"
+      }
+    }
+  }
+}
