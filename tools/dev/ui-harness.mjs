@@ -226,6 +226,24 @@ export async function openPage(url, routes, { cdpPort = 9333, width = 1440, heig
   await cdp.send('Page.enable');
   await cdp.send('Runtime.enable');
   await cdp.send('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 1, mobile: false });
+
+  /**
+   * 清空目标源的 local/sessionStorage —— 必须在**导航之前**。
+   *
+   * 为什么需要：openPage 会**复用**已在调试端口上的浏览器（为了多个脚本串跑
+   * 时不必反复冷启动），而复用的页面带着上一次运行留下的存储。实测：重复跑
+   * test-r3-alerts 时，上一轮点过的「知道了」把 `wb.muted.token=1` 留在了
+   * localStorage 里，令牌提醒就不再出现 —— 断言全部以脏状态开跑，且看起来
+   * 像产品坏了。测试脚本永远假设自己从干净状态开始，这里统一兑现这个前提。
+   * （新起的 profile 本来就是干净的，这一步对它是无害的空操作。）
+   */
+  try {
+    await cdp.send('Storage.clearDataForOrigin', {
+      origin: new URL(url).origin,
+      storageTypes: 'local_storage,session_storage',
+    });
+  } catch { /* 个别发行版没有该命令时忽略：新 profile 不受影响 */ }
+
   if (injectStub) await cdp.send('Page.addScriptToEvaluateOnNewDocument', { source: fetchStubSource(routes) });
   if (inject) await cdp.send('Page.addScriptToEvaluateOnNewDocument', { source: inject });
 

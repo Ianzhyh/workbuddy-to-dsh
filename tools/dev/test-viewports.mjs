@@ -99,7 +99,10 @@ try {
         const rect = el.getBoundingClientRect();
         if (rect.width === 0) return;
         if (rect.right > vw + 1) {
-          const wrap = el.closest('.tablewrap, #chatOut, pre.log, #alertBar');
+          // 可横向滚动的容器内部允许超出：.nav-tabs 是刻意做成 overflow-x:auto
+          // 的标签条（窄屏时横向滚动，见 style.css），它的最后一个标签越出
+          // 视口右缘是设计行为，不是溢出 bug。
+          const wrap = el.closest('.tablewrap, #chatOut, pre.log, #alertBar, .nav-tabs');
           if (wrap) return; // 可横向滚动的容器内部允许超出
           over.push((el.id ? '#' + el.id : (el.className || el.tagName)) + ' right=' + Math.round(rect.right));
         }

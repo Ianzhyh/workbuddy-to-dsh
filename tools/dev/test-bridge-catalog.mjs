@@ -194,4 +194,8 @@ console.log(`桥实例就绪：${BASE}\n`);
 
 cleanup();
 console.log(failures ? `\n存在 ${failures} 项失败` : '\n全部通过');
-process.exit(failures ? 1 : 0);
+// 用 exitCode 而不是 process.exit()：上面刚 kill 了子进程，而 process.exit()
+// 会在子进程的管道/undici 连接还没收尾时强拆 libuv 句柄 —— Windows 上实测
+// 稳定触发 `Assertion failed: !(handle->flags & UV_HANDLE_CLOSING)` 并让进程
+// 以 0xC0000409 崩溃退出（断言全过，退出码却是失败）。让事件循环自然排空即可。
+process.exitCode = failures ? 1 : 0;

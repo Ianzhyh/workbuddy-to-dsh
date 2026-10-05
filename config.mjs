@@ -122,7 +122,10 @@ export function resolveAuthFile() {
   const preferred = join(dir, 'workbuddy-desktop.info');
   if (existsSync(preferred)) return preferred;
   try {
-    const hit = readdirSync(dir).find((f) => f.endsWith('.info'));
+    // 兜底必须**排序后取第一个**，与桥的 resolveAuthPath() 同一判据：
+    // readdir 的顺序不受任何保证（随平台与文件系统而异），不排序就可能出现
+    // "控制台认的是 A 账号、桥实际读的是 B 账号"这种两边不一致。
+    const hit = readdirSync(dir).filter((f) => f.endsWith('.info')).sort()[0];
     if (hit) return join(dir, hit);
   } catch {
     /* 目录不存在 */

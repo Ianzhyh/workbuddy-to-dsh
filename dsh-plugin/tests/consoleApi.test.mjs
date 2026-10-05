@@ -38,14 +38,20 @@ async function call(handler, { method = 'GET', path, headers = {}, body } = {}) 
   return { status, json };
 }
 
-/** 假控制台：原样回显收到的请求。 */
+/** 假控制台：原样回显收到的请求（含面板头 —— 控制台的写接口也要求它）。 */
 async function startFakeConsole() {
   const server = createServer(async (req, res) => {
     const chunks = [];
     for await (const chunk of req) chunks.push(chunk);
     const body = Buffer.concat(chunks).toString('utf8');
     res.writeHead(200, { 'content-type': 'application/json' });
-    res.end(JSON.stringify({ echoed: true, method: req.method, url: req.url, body: body ? JSON.parse(body) : null }));
+    res.end(JSON.stringify({
+      echoed: true,
+      method: req.method,
+      url: req.url,
+      panel: req.headers['x-workbuddy-panel'] || null,
+      body: body ? JSON.parse(body) : null,
+    }));
   });
   await new Promise((r) => server.listen(0, '127.0.0.1', r));
   return { port: server.address().port, close: () => new Promise((r) => server.close(r)) };
@@ -103,6 +109,9 @@ test('console-api 透传：白名单 / 方法 / 面板头 / 控制台未运行',
     assert.equal(switched.status, 200);
     assert.equal(switched.json.method, 'POST');
     assert.deepEqual(switched.json.body, { file: 'a.info' });
+    // 透传时也要替下游补上面板头：控制台自己的写接口同样拒绝缺头的请求
+    // （它就是"浏览器打得到的本地服务"），漏了会 403、整条链路断掉。
+    assert.equal(switched.json.panel, '1', '转发到控制台的请求必须带 x-workbuddy-panel');
 
     // 6) 删体检结论（DELETE）同样能透传
     const cleared = await call(running, { method: 'DELETE', path: `${CONSOLE_API_PREFIX}/probe-results`, headers: { 'x-workbuddy-panel': '1' } });

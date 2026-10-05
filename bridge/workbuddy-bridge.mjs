@@ -1690,6 +1690,7 @@ const server = createServer(async (req, res) => {
           // prompt_tokens_details 这类**嵌套对象**，`\{[^{}]*\}` 根本匹配不上，
           // 结果是流式请求的 token 与扣分全被记成 0。
           let tail = '';
+          let streamError = null;
           try {
             for (;;) {
               const { done, value } = await reader.read();
@@ -1710,8 +1711,29 @@ const server = createServer(async (req, res) => {
               // 兜底：上游若不按行收尾，别让 tail 无限增长
               if (tail.length > 100000) tail = tail.slice(-4096);
             }
-          } catch (e) { log('stream interrupted', e.message); }
-          recordRequest({ model, stream: true, ok: true, ms: Date.now() - startedAt, ...usageOf(usageSeen) });
+          } catch (e) {
+            streamError = e;
+            log('stream interrupted', e.message);
+          }
+          // 上游在流中途断了（连接被掐 / 网络故障）**不是成功**：客户端的回答
+          // 已被截断，账本要如实记一笔失败，否则「回答为什么少了一半」在控制台上
+          // 完全不可见 —— 与非流式路径的处理保持一致（那里同样记 ok:false）。
+          //
+          // 客户端自己断开（用户点了停止 / 关了页面）不是失败的另一种：请求已经
+          // 服务过了，照旧记成功。用 ac.signal.aborted 区分这两者。
+          if (streamError && !ac.signal.aborted) {
+            recordRequest({
+              model,
+              stream: true,
+              ms: Date.now() - startedAt,
+              ok: false,
+              status: 0,
+              code: null,
+              error: streamError.message,
+            });
+          } else {
+            recordRequest({ model, stream: true, ok: true, ms: Date.now() - startedAt, ...usageOf(usageSeen) });
+          }
           return res.end();
         }
 

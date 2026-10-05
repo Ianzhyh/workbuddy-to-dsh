@@ -163,7 +163,11 @@ const setProbeScopeAll = (cdp) => cdp.evaluate(`(() => {
 })()`);
 
 const apiJson = async (path, options) => {
-  const res = await fetch(API + path, options);
+  // 写操作要带面板头（控制台后端据此拒绝跨站请求）；读操作带上也无害
+  const res = await fetch(API + path, {
+    ...options,
+    headers: { 'x-workbuddy-panel': '1', ...((options && options.headers) || {}) },
+  });
   const text = await res.text();
   try { return JSON.parse(text); } catch { return { error: text }; }
 };

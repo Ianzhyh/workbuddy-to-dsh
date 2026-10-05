@@ -112,6 +112,10 @@ export function createConsoleApiHandler({ consoleSupervisor, log = () => {}, onU
         headers: {
           'content-type': req.headers['content-type'] || 'application/json',
           accept: req.headers.accept || 'application/json',
+          // 控制台自身的写接口也要求面板头（它同样是"浏览器打得到的本地服务"，
+          // 需要挡跨站简单请求）。调用方已经在本路由的入口被校验过，这里补齐
+          // 下游需要的头，否则透传会被控制台以 403 拒绝。
+          'x-workbuddy-panel': '1',
         },
         body,
         signal: ac.signal,

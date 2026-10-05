@@ -191,7 +191,12 @@
 const $ = (id) => document.getElementById(id);
 
 async function api(path, options) {
-  const res = await fetch(path, options);
+  // 每个请求都带 x-workbuddy-panel:1 —— 后端用它拒绝跨站写操作（自定义头会
+  // 强制 CORS 预检，别的网页发不出预检请求）。GET 带上它也无害，统一加省得漏。
+  const res = await fetch(path, {
+    ...options,
+    headers: { 'x-workbuddy-panel': '1', ...((options && options.headers) || {}) },
+  });
   const text = await res.text();
   try { return JSON.parse(text); } catch { return { error: text }; }
 }
@@ -816,7 +821,8 @@ async function probeOne(id, signal) {
   try {
     const res = await fetch('/api/probe', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      // 面板头是后端对写操作的硬要求（拒绝跨站请求），漏了会 403
+      headers: { 'Content-Type': 'application/json', 'x-workbuddy-panel': '1' },
       body: JSON.stringify({ model: id }),
       signal,
     });
@@ -3130,7 +3136,7 @@ async function sendChat() {
   try {
     const res = await fetch('/api/chat', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'x-workbuddy-panel': '1' },
       // 整段历史一起带上（含固定 system 首条）
       body: JSON.stringify({ model, messages: chatHistory, stream: true }),
       signal: ctrl.signal,

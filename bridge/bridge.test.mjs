@@ -585,3 +585,63 @@ test('桥：账本改用内存镜像后，/v1/usage 与 /v1/requests 的形状�
     rmSync(bridge.dir, { recursive: true, force: true });
   }
 });
+
+test('桥：上游流中途断开必须记成失败（与非流式路径一致）', { timeout: 90_000 }, async () => {
+  // 打桩上游：发一帧正文后**掐断连接**，模拟"回答到一半上游断了"。
+  // 这是真实会出现的情况（网络抖动 / 上游重启），而客户端只会看到回答被截断。
+  const upstream = createServer((req, res) => {
+    const path = new URL(req.url, 'http://127.0.0.1').pathname;
+    if (path === '/v2/enterprises/personal/models') {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      return res.end(JSON.stringify({ code: 0, data: { models: [{ id: 'stub-stream', name: 'Stub', maxInputTokens: 128000, maxOutputTokens: 4096 }] } }));
+    }
+    if (path === '/v3/config') {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      return res.end(JSON.stringify({ code: 0, data: { models: [] } }));
+    }
+    if (path === '/v2/chat/completions') {
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      res.write('data: {"choices":[{"delta":{"content":"部分"}}]}\n\n');
+      setTimeout(() => { try { res.socket.destroy(); } catch { /* 已断 */ } }, 50);
+      return;
+    }
+    res.writeHead(404, { 'content-type': 'application/json' });
+    res.end('{}');
+  });
+  await new Promise((r) => upstream.listen(0, '127.0.0.1', r));
+  const upstreamBase = `http://127.0.0.1:${upstream.address().port}`;
+
+  const bridge = await startBridge({ CODEBUDDY_ENDPOINT: upstreamBase }, { auth: READABLE_FAKE_AUTH });
+  try {
+    // 先抓一次目录：让模型预校验认识 stub-stream（否则会被本地 400 拦下）
+    await fetch(bridge.baseUrl + '/v1/models?all=1', { headers: auth });
+
+    const res = await fetch(bridge.baseUrl + '/v1/chat/completions', {
+      method: 'POST',
+      headers: { ...auth, 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'stub-stream', stream: true, messages: [{ role: 'user', content: 'hi' }] }),
+      signal: AbortSignal.timeout(15000),
+    });
+    // 流已经以 200 开始，错误无法再改 HTTP 状态 —— 只能反映在账本里
+    assert.equal(res.status, 200, '流已开始后状态只能是 200');
+    try {
+      const reader = res.body.getReader();
+      for (;;) { const { done } = await reader.read(); if (done) break; }
+    } catch { /* 上游被掐断，客户端读流异常属预期 */ }
+
+    await new Promise((r) => setTimeout(r, 300)); // 等落账（异步写文件）
+    const requests = await (await fetch(bridge.baseUrl + '/v1/requests', { headers: auth })).json();
+    const row = (requests.requests || []).find((r) => r.model === 'stub-stream');
+    assert.ok(row, '这次调用必须落账');
+    assert.equal(row.ok, false, '上游流中断不是成功：必须记失败（曾长期被错记为 ok:true）');
+    assert.ok(row.error, '失败行必须带错误原文，控制台才能显示"为什么被截断"');
+
+    // 对照：账本的失败汇总也要能看到它（否则"失败数"统计漏报）
+    const usage = await (await fetch(bridge.baseUrl + '/v1/usage?days=1', { headers: auth })).json();
+    assert.equal(usage.total.failed, 1, '失败数必须把这笔算进去');
+  } finally {
+    await bridge.stop();
+    try { upstream.close(); } catch { /* 忽略 */ }
+    rmSync(bridge.dir, { recursive: true, force: true });
+  }
+});

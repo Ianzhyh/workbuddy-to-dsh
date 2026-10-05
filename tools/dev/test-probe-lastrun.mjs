@@ -70,7 +70,8 @@ async function waitReady() {
 
 const post = (body) => fetch(`${BASE}/api/probe-results`, {
   method: 'POST',
-  headers: { 'Content-Type': 'application/json' },
+  // 面板头：控制台对写操作的要求（挡跨站请求），少一个就 403
+  headers: { 'Content-Type': 'application/json', 'x-workbuddy-panel': '1' },
   body: JSON.stringify(body),
 }).then((r) => r.json());
 
@@ -168,7 +169,7 @@ const entry = (id) => ({ [id]: { ok: true, ms: 120, at: Date.now(), credit: 0 } 
 
 // 7. 清空体检结果 → lastRun 一并消失
 {
-  await fetch(`${BASE}/api/probe-results`, { method: 'DELETE' });
+  await fetch(`${BASE}/api/probe-results`, { method: 'DELETE', headers: { 'x-workbuddy-panel': '1' } });
   const g = await get();
   if (g.lastRun === null && Object.keys(g.results || {}).length === 0) {
     pass('R9.3-2 DELETE 清空体检结果后 lastRun 一并消失');

@@ -236,6 +236,11 @@ id 往往重合，混着看会直接误导。
 
 控制台可被脚本直接调用：
 
+> **写操作（POST / DELETE）必须带 `x-workbuddy-panel: 1` 请求头**，否则一律 403。
+> 这是刻意加的跨站防护：浏览器会对带自定义头的跨站请求强制预检，而控制台不解答
+> 预检 —— 别的网页就无法在用户不知情时停桥 / 切账号 / 写 dsh 配置 / 消耗额度。
+> 只读的 GET 不需要该头。
+
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET | `/api/overview` | 桥状态 + 凭据状态 + 积分 + dsh 配置摘要（**不含**模型目录与用量，另有专用接口）。另含 `bridge.catalogAt`（目录抓取时刻）、`bridge.upstreamShape`（目录治理诊断，含被排除的 id）与 `console.{version,node}` |
@@ -267,7 +272,7 @@ id 往往重合，混着看会直接误导。
 ```cmd
 curl -H "Authorization: Bearer wb-local-bridge" http://127.0.0.1:8790/health
 curl http://127.0.0.1:8792/api/overview
-curl -X POST http://127.0.0.1:8792/api/bridge/restart
+curl -X POST -H "x-workbuddy-panel: 1" http://127.0.0.1:8792/api/bridge/restart
 ```
 
 安全边界：所有接口**不返回任何令牌明文**；读取 `.credentials.yaml` 时只看键名。

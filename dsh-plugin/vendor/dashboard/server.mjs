@@ -720,6 +720,22 @@ const server = createServer(async (req, res) => {
   const route = url.pathname;
 
   try {
+    /**
+     * 写操作的准入检查：必须带 `x-workbuddy-panel: 1`。
+     *
+     * 为什么需要：控制台是"浏览器里任何网页都打得通的本地 HTTP 服务"。跨站的
+     * **简单请求**（POST + 简单 Content-Type）浏览器不做预检、直接发出，恶意页面
+     * 可以在用户不知情的情况下触发停桥 / 切账号 / 写 dsh 配置 / 消耗额度 ——
+     * 响应它读不到，但副作用已经发生（实测：外部页面 POST /api/checkin/settings
+     * 真的改动了 .state.json）。要求一个自定义头会强制 CORS 预检，而本服务不解答
+     * 预检 → 跨站请求根本发不出来。与插件侧数据面（lib/routes.mjs）同一套做法。
+     *
+     * 读操作（GET/HEAD）不拦：只暴露非敏感元数据，且插件/脚本要能直接读。
+     */
+    if (req.method !== 'GET' && req.method !== 'HEAD' && req.headers['x-workbuddy-panel'] !== '1') {
+      return sendJson(res, 403, { ok: false, error: 'missing x-workbuddy-panel header' });
+    }
+
     if (route === '/api/overview') {
       // 只包含页面真正使用的字段：**不带** model 目录（另有 /api/models），
       // 桥冷启动时抓目录要串行打两个上游端点，不能让徽章陪着一起等。

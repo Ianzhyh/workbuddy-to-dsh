@@ -105,7 +105,10 @@ const stateCheckin = () => {
   try { return JSON.parse(readFileSync(STATE, 'utf8')).checkin || null; } catch { return null; }
 };
 const post = (path, body) => fetch(`http://127.0.0.1:${CONSOLE_PORT}${path}`, {
-  method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+  method: 'POST',
+  // 面板头：控制台对写操作的要求（挡跨站请求），少一个就 403
+  headers: { 'Content-Type': 'application/json', 'x-workbuddy-panel': '1' },
+  body: JSON.stringify(body),
 }).then((r) => r.json());
 
 // ── 开跑 ────────────────────────────────────────────────────────────────
