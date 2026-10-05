@@ -1,5 +1,5 @@
 # ============================================================================
-# dsh-plugin-workbuddy —— bundle patch
+# dsh-plugin-workbuddy —— bundle patch（单文件夹分发形态用）
 #
 # 只做一件事：把本插件自己的 Loader 条目插进配置树。
 #
@@ -7,6 +7,14 @@
 #     $DSH_HOME/profiles/<profile>/cordis.patch.yml 里覆盖 config
 #     （例如 projectRoot 指向 workbuddy-to-dsh 的检出目录）。
 #   - name 是包名，由 profile 的 node_modules 解析。
+#
+# 两种安装形态，name 必须与实际安装的包名一致（dsh 对 unknown name 的
+# Loader 行会静默跳过而不是报错，所以单一 name 无法同时服务两种形态）：
+#   - 单文件夹分发（把 dsh-plugin/ 拷给别人，vendor 形态）
+#     → 包名 = dsh-plugin-workbuddy（本文件，dsh-plugin/package.json 引用）；
+#   - github 直装（dsh plugin add github:Ianzhyh/workbuddy-to-dsh）
+#     → npm 装的是**仓库根**，包名 = workbuddy-to-dsh，由根目录自己的
+#       cordis.patch.yml 提供（内容除 name 外与本文件一致 —— 同步改）。
 #
 # 这里**不动**任何官方条目：模型路由由插件的宿主端在运行时
 # 用 ctx.llm.registerAdapter() 注册，不写 settings.yaml，也不需要

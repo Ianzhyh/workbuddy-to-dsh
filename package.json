@@ -1,12 +1,43 @@
 {
   "name": "workbuddy-to-dsh",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": true,
-  "description": "把 WorkBuddy 桌面端已登录的模型，经本地桥暴露为 OpenAI 兼容接口，供 DeepSeek Harness 或任意 OpenAI 客户端调用。",
+  "description": "把 WorkBuddy 桌面端已登录的模型，经本地桥暴露为 OpenAI 兼容接口，供 DeepSeek Harness 或任意 OpenAI 客户端调用。根包即 dsh bundle：dsh plugin add github:Ianzhyh/workbuddy-to-dsh 可直装。",
   "type": "module",
   "license": "MIT",
   "engines": {
     "node": ">=18"
+  },
+  "main": "./dsh-plugin/lib/index.js",
+  "exports": {
+    ".": "./dsh-plugin/lib/index.js",
+    "./client": "./dsh-plugin/lib/client.js",
+    "./cordis.patch.yml": "./dsh-plugin/cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "bridge",
+    "dashboard",
+    "config.mjs",
+    "cordis.patch.yml",
+    "lib",
+    "dsh-plugin/lib",
+    "dsh-plugin/scripts",
+    "dsh-plugin/vendor",
+    "dsh-plugin/cordis.patch.yml",
+    "dsh-plugin/README.md",
+    "dsh-plugin/package.json",
+    "LICENSE",
+    "NOTICE.md",
+    ".env.example"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web"
+    }
   },
   "scripts": {
     "start": "node dashboard/server.mjs",
@@ -22,6 +53,16 @@
     "pack:plugin": "node dsh-plugin/scripts/vendor.mjs && cd dsh-plugin && npm pack",
     "release:check": "npm run vendor:check && npm run test:plugin && npm run verify:standalone"
   },
+  "keywords": [
+    "deepseek-harness",
+    "dsh-plugin",
+    "dsh-bundle",
+    "workbuddy",
+    "codebuddy",
+    "llm-provider",
+    "openai-compatible",
+    "local-bridge"
+  ],
   "repository": {
     "type": "git",
     "url": "git+https://github.com/Ianzhyh/workbuddy-to-dsh.git"

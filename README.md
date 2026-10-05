@@ -28,11 +28,23 @@ Base URL 的客户端使用。附带一个网页控制台，把状态、启停�
 只在本机回环地址上工作，不对外暴露，不内置任何密钥。
 
 ```sh
-# 从源码安装（推荐；插件在 dsh-plugin/ 子目录）
+# 方式一：一条命令直装（v1.1.0 起，仓库根已声明 dsh.bundle）
+dsh plugin --profile desktop add github:Ianzhyh/workbuddy-to-dsh
+
+# 方式二：release 附件（tgz 安装包，无构建、无需 allowBuilds 授权）
+#   从 GitHub Releases 下载 dsh-plugin-workbuddy-<版本>.tgz 后：
+dsh plugin --profile desktop add ./dsh-plugin-workbuddy-1.1.0.tgz
+
+# 方式三：从源码（插件在 dsh-plugin/ 子目录）
 git clone https://github.com/Ianzhyh/workbuddy-to-dsh.git
 dsh plugin --profile desktop add workbuddy-to-dsh/dsh-plugin
 # 装完重启一次 dsh；之后：设置 → WorkBuddy
 ```
+
+> 三种方式装的是**同一个插件**。方式一/二由 npm 装仓库根包（Loader 行 name =
+> `workbuddy-to-dsh`，对应根目录的 cordis.patch.yml）；方式三按子目录安装
+> （name = `dsh-plugin-workbuddy`，对应 dsh-plugin/cordis.patch.yml）。
+> 两份 patch 除 name 外完全一致，改动时需同步。
 
 > 插件是**自带一切**的独立包（`npm run vendor` 生成的 `vendor/` 里含桥与控制台），
 > 可以直接把 `dsh-plugin/` 文件夹拷给别人，对方不需要本仓库。

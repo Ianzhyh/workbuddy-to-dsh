@@ -1875,8 +1875,21 @@ body.dark .wb-root,
      * 模型选择由容器持有（`model` / `setModel`）—— 这样切标签页回来不会被重置，
      * 也就不会给人"模型是写死的"错觉。未选时回落到推荐模型（sampleModel）。
      */
-    function ChatPanel({ onStartConsole, busy, sampleModel, model, setModel, messages, setMessages }) {
-      const { data: modelsData } = useJson('/workbuddy/models', { interval: 300000 });
+    function ChatPanel({ onStartConsole, busy, sampleModel, model, setModel, messages, setMessages, accountKey }) {
+      /**
+       * 模型目录用 `refreshKey` 跟着**桥的登录账号**走。
+       *
+       * 这是实测踩出来的：切换账号后，桥的目录是新的（不同账号可见模型不同），
+       * 但这里原先只有 `interval: 300000`（5 分钟）兜底轮询 —— 切号后面板最长
+       * 5 分钟仍显示上一个账号的模型清单，而且已选中的模型 id 可能在新账号下
+       * 根本不存在，发出去必然失败。宿主端在切号时已经 `adapter.invalidate()`
+       * 并把新账号带进快照（`status.bridge.health.auth.userId`），把它接成
+       * refreshKey 就能让目录随账号即时重拉 —— 不必为它单独高频轮询。
+       */
+      const { data: modelsData } = useJson('/workbuddy/models', {
+        interval: 300000,
+        refreshKey: accountKey || undefined,
+      });
       const models = modelsData?.models || [];
       const [input, setInput] = useState('');
       const [streaming, setStreaming] = useState(false);
@@ -1889,12 +1902,23 @@ body.dark .wb-root,
       const shown = filter.trim()
         ? models.filter((m) => (m.id + ' ' + (m.name || '')).toLowerCase().includes(filter.trim().toLowerCase()))
         : models;
+      // 当前选中的模型在新账号的目录里不存在时（切号残留），不能拿它发请求 ——
+      // 静默回落到目录里的第一个可用模型，并提示用户（诚实优于悄悄换）。
+      const modelValid = !models.length || models.some((m) => m.id === activeModel);
+      // ── 请求参数（max_tokens / temperature / 推理提示）──────────────────
+      // 上游是 OpenAI 协议：max_tokens / temperature 直接透传；"思考强度"没有
+      // 跨模型统一字段，这里提供 reasoning_effort（OpenAI o 系 / 新版 GPT 语义，
+      // 部分上游模型会接受），选"默认"就不发该字段 —— 未知参数上游可能 400。
+      const [maxTokens, setMaxTokens] = useState('');
+      const [temperature, setTemperature] = useState('');
+      const [effort, setEffort] = useState('');
 
       useEffect(() => { if (boxRef.current) boxRef.current.scrollTop = boxRef.current.scrollHeight; }, [messages, streaming]);
 
       const send = async () => {
         const text = input.trim();
         if (!text || streaming || !activeModel) return;
+        if (!modelValid) { setError(`模型 ${activeModel} 不在当前账号的目录里（可能刚切换过账号）—— 请重新选择。`); return; }
         setError('');
         setInput('');
         // 历史里丢掉"空的助手消息"（上一次失败/中断留下的占位），否则会被当成
@@ -1927,11 +1951,20 @@ body.dark .wb-root,
             return next;
           });
         };
+        // 请求参数：空字符串 = 用户没设 = 不发该字段（不猜默认值，交给上游）。
+        // reasoning_effort 选"默认"时同样不发 —— 这是刻意的不猜：不同上游模型
+        // 对未知参数的容忍度不同，发了反而可能 400。
+        const overrides = {};
+        const maxN = Number(maxTokens);
+        if (maxTokens.trim() && Number.isFinite(maxN) && maxN > 0) overrides.max_tokens = maxN;
+        const tempN = Number(temperature);
+        if (temperature.trim() && Number.isFinite(tempN) && tempN >= 0 && tempN <= 2) overrides.temperature = tempN;
+        if (effort) overrides.reasoning_effort = effort;
         try {
           const res = await fetch(CONSOLE_API + '/chat', {
             method: 'POST',
             headers: PANEL_HEADERS,
-            body: JSON.stringify({ model: activeModel, stream: true, messages: history }),
+            body: JSON.stringify({ model: activeModel, stream: true, messages: history, ...overrides }),
             signal: ac.signal,
           });
           if (res.status === 503) { setError('对话测试由控制台代发（它管着流式透传）。先启动控制台。'); setStreaming(false); return; }
@@ -1983,7 +2016,8 @@ body.dark .wb-root,
       };
 
       return h(Card, { title: '对话测试' },
-        h('p', { className: 'wb-note', style: { marginTop: 0 } }, '会消耗你账号的额度（与控制器里的对话测试同一回事）。多轮对话带上下文，流式输出可随时停止。这里的模型只作用于本页测试。'),
+        h('p', { className: 'wb-note', style: { marginTop: 0 } }, '会消耗你账号的额度（与控制器里的对话测试同一回事）。多轮对话带上下文，流式输出可随时停止。这里的模型与参数只作用于本页测试。'),
+        !modelValid && models.length ? h(Alert, { bad: true }, `已选模型 ${activeModel} 不在当前账号的目录里（切换过账号？）—— 请重新选择。`) : null,
         h('div', { className: 'wb-actions split', style: { margin: '12px 0' } },
           h('div', { className: 'wb-actions-group' },
             h('span', { className: 'wb-label' }, '模型'),
@@ -1997,6 +2031,32 @@ body.dark .wb-root,
               })),
             }),
             h('span', { className: 'wb-note', style: { margin: 0 } }, `共 ${shown.length} 个可选`)),
+          h('div', { className: 'wb-actions-group' },
+            h('span', { className: 'wb-label' }, 'max_tokens'),
+            h('input', {
+              className: 'wb-input', type: 'number', min: '1', step: '1',
+              placeholder: '默认', value: maxTokens, style: { width: '90px' },
+              onChange: (e) => setMaxTokens(e.target.value),
+              title: '单次回复的最大 token 数；留空 = 上游默认',
+            }),
+            h('span', { className: 'wb-label' }, 'temperature'),
+            h('input', {
+              className: 'wb-input', type: 'number', min: '0', max: '2', step: '0.1',
+              placeholder: '默认', value: temperature, style: { width: '80px' },
+              onChange: (e) => setTemperature(e.target.value),
+              title: '采样温度 0~2；留空 = 上游默认',
+            }),
+            h('span', { className: 'wb-label' }, '思考强度'),
+            h(DropdownSelect, {
+              value: effort,
+              onChange: (e) => setEffort(e.target.value),
+              options: [
+                { value: '', label: '默认' },
+                { value: 'low', label: '低' },
+                { value: 'medium', label: '中' },
+                { value: 'high', label: '高' },
+              ],
+            })),
           h('div', { className: 'wb-actions-group' },
             h(Btn, { disabled: streaming || !messages.length, onClick: () => { setMessages([]); setMeta(null); } }, '清空对话'),
             streaming ? h(Btn, { onClick: () => abortRef.current && abortRef.current.abort() }, '停止') : null)),
@@ -2134,6 +2194,17 @@ body.dark .wb-root,
       const [chatModel, setChatModel] = useState('');
       const [chatMessages, setChatMessages] = useState([]);
       const { data: status, reload: reloadStatus } = useJson('/workbuddy/status', { interval: 8000 });
+      /**
+       * 桥当前登录账号 —— 作为模型目录的 refreshKey（见 ChatPanel 内的说明）。
+       * 没有旧账号信息可比时（旧宿主/桥未跑）给 undefined，refreshKey 退化无效。
+       */
+      const accountKey = status?.bridge?.health?.auth?.userId || undefined;
+      // 切号后 chatModel 里存的可能是旧账号才有的模型 id：目录刷新完（models 到位）
+      // 且发现当前选中值不在目录里时，清空让 activeModel 回落到目录推荐值。
+      const chatModelValid = !chatModel || !status?.directory?.length || status.directory.some((m) => m.id === chatModel);
+      useEffect(() => {
+        if (!chatModelValid) { setChatModel(''); }
+      }, [chatModelValid]);
 
       const act = useCallback(async (action) => {
         setBusy(true);
@@ -2234,6 +2305,7 @@ body.dark .wb-root,
             setModel: setChatModel,
             messages: chatMessages,
             setMessages: setChatMessages,
+            accountKey,
           }) : null,
           tab === 'log' ? h(LogPanel, { status }) : null) : null);
     }
