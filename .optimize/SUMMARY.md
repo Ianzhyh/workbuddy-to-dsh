@@ -114,3 +114,38 @@ FEATURED 仍参与**放行**、但不参与**激活**。
 | 设置里 9 个标签页 | client.js 恰好 9 个 tab | ✅ |
 | 5 个工具 | tools.mjs 恰好 5 个 | ✅ |
 | 零依赖 | `dependencies` 与 `devDependencies` 均空 | ✅ |
+
+---
+
+## 附：签到界面感知修复（2026-10-05）
+
+用户报告『自动签到没生效』。实测链路：桥 16:12 自动签到成功（日志 `auto checkin ok 100`），
+控制台 `.state.json` 也记录了 `already` —— **签到一直生效**，没生效的是**界面显示**：
+签到面板不在任何轮询里，后台签到了页面也不知道。
+
+修法（用户拍板的方向）：**事件驱动，不用轮询** ——
+- `/api/overview` 透出桥已有的 `autoCheckin` 信号（零额外上游请求）；
+- 页面比对 `autoCheckin.at`，变了才刷新签到面板；
+- 插件 `useJson` 新增 `refreshKey`，签到面板接 `/workbuddy/status` 每 8 秒轮询里的同一信号。
+
+验证：58/58 + 7/7 全绿；变异测试 4/4（结构断言曾漏网，改为 vm 沙箱真执行后全部抓住）；
+端到端实测控制台已透出信号。本地提交 `cbbc8d8`。
+
+---
+
+## 附：折线图与长度变化动效全面打磨（2026-10-05）
+
+**折线图切换生硬突兀（大幅度跳变）的彻底根治：**
+
+- 引入 `getCurvedPath(pts)` Catmull-Rom → 三阶贝塞尔样条曲线算法（张力 0.18），所有数据点间形成柔和的水波弧度，彻底消灭硬折角与尖刺。
+- 顶部 18% 呼吸裕度（`max = ceil(rawMax × 1.18)`），防止峰值撞顶突兀。
+- 移除圆点的横向位移补间（`cx/cy transition`），统一由底基准线微升渐现（`.wb-curve-enter`，`opacity 0.12→1` + `scaleY(0.93→1)`，0.32s），根除切换时圆点横冲直撞的视觉噪音。
+
+**全局筛选引起的长度变化补齐平滑过渡：**
+
+- `ModelBarChart` SVG `<rect>` 柱长补齐 `cubic-bezier(0.16,1,0.3,1)` 缓动（修复 SVG 属性无法触发 CSS transition 的渲染痛点）；
+- `ModelProportionBar` 彩条宽度升级为同款缓动，排序稳定化防止切换指标时色块乱换位；
+- 积分套餐进度条 `.wb-bar i`、明细表迷你占比条全部统一为 0.45s 贝塞尔缓动 + `will-change: width`；
+- 相应 CSS 类 `.wb-bar-rect` 补充统一，`@media prefers-reduced-motion` 全部关闭。
+
+验证：58/58 单元测试 + 4 大无头浏览器场景 + `release:check` 全绿，已更新全套渲染截图。
