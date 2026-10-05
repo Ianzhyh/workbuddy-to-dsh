@@ -149,3 +149,28 @@ FEATURED 仍参与**放行**、但不参与**激活**。
 - 相应 CSS 类 `.wb-bar-rect` 补充统一，`@media prefers-reduced-motion` 全部关闭。
 
 验证：58/58 单元测试 + 4 大无头浏览器场景 + `release:check` 全绿，已更新全套渲染截图。
+
+---
+
+## 附2：v1.1.0 发布与模型/参数控制（2026-10-05）
+
+**发布**：https://github.com/Ianzhyh/workbuddy-to-dsh/releases/tag/v1.1.0
+（tag 指向 30f2d11，附件 tgz 242KB，CI 全绿后才打 tag）
+
+**github 直装短板修复**：dsh 的 git 来源安装由 npm 把仓库根当包根，此前根
+package.json 没有 dsh.bundle（只在 dsh-plugin/ 子包）→ 一条命令装不上。已给根包
+声明 dsh.bundle + 双 patch（两种安装形态包名不同，dsh 对 unknown name 静默跳过，
+单一 name 服务不了两种形态）。
+
+**用户反馈的两个问题**：
+1. 切换账号后对话页残留旧账号模型 —— 模型目录接上账号身份信号
+   （refreshKey = bridge.health.auth.userId），目录随账号即时重拉；已选模型在
+   新目录失效时清空并显式警示。
+2. 自己控制面板里出现几个模型而不是全出现 —— 模型面板新增显示勾选列，
+   存 .model-prefs.json（刻意不碰 .state.json 的单写者领地），POST 即时生效
+   无需重启；agent 链路默认参数（defaultMaxTokens/defaultTemperature/
+   defaultReasoningEffort）走 patch 配置，合并优先级「调用方显式 > 插件默认 >
+   不发」，temperature=0 必须保留。
+
+**测试教训**：plugin.test.mjs 的路由清单断言（11→12）正确抓住了新路由 ——
+既有断言写得具体（逐个路径列出）时，防回归是真实生效的。
