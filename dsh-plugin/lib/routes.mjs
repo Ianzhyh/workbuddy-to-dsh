@@ -48,7 +48,7 @@ async function readJsonBody(req, limit = 64 * 1024) {
  * @param {(line: string, detail?: unknown) => void} deps.log
  */
 export function createRouteTable(deps) {
-  const { snapshot, supervisor, consoleSupervisor, client, adapter, paths, provider, log, onUpstreamMutation = () => {} } = deps;
+  const { snapshot, supervisor, consoleSupervisor, client, adapter, paths, provider, log, onUpstreamMutation = () => {}, readPrefs = () => null, onWritePrefs = () => {} } = deps;
 
   /** 写操作的准入检查。 */
   const guard = (req) => req.headers['x-workbuddy-panel'] === '1';
@@ -115,6 +115,33 @@ export function createRouteTable(deps) {
           sendJson(res, 200, { ok: true, models: toDirectory(catalog), at: adapter.catalogCache.at, error: adapter.catalogError || '' });
         } catch (error) {
           sendJson(res, 200, { ok: false, models: [], error: String(error?.message || error) });
+        }
+      },
+    },
+    {
+      // 模型显示偏好：GET 读当前生效清单，POST 写并即时生效（无需重启）。
+      // 读：任何 GET 都行（非敏感）；写：要面板头（挡跨站，与其它写路由一致）。
+      // 注意这里**没有**碰 .state.json —— 那份文件是控制台的单写者领地，
+      // 偏好存在插件自己的 .model-prefs.json（见 index.js 里的说明）。
+      kind: 'exact',
+      path: '/workbuddy/model-visibility',
+      async handler(req, res) {
+        try {
+          if (req.method === 'POST') {
+            if (!guard(req)) return sendJson(res, 403, { ok: false, error: 'missing x-workbuddy-panel header' });
+            const body = await readJsonBody(req);
+            const visible = Array.isArray(body?.visible) ? body.visible.map(String).filter(Boolean) : [];
+            // 目录里不存在的 id 也照存：上游目录可能暂时没抓到，用户勾选的意图优先，
+            // 目录恢复后自然重新生效。
+            adapter.setFilter({ allow: visible });
+            onWritePrefs(visible);
+            return sendJson(res, 200, { ok: true, visible, count: visible.length });
+          }
+          if (readOnly(req, res)) return;
+          const current = typeof deps.readPrefs === 'function' ? deps.readPrefs() : null;
+          sendJson(res, 200, { ok: true, visible: current, at: adapter.catalogCache.at });
+        } catch (error) {
+          sendJson(res, 500, { ok: false, error: String(error?.message || error) });
         }
       },
     },

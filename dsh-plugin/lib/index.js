@@ -25,7 +25,7 @@
  * （只调用 providerInfo / providerRetryPolicy，没有 instanceof 检查）。
  */
 
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -44,6 +44,32 @@ export const inject = ['llm'];
 
 const PLUGIN_DIR = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * 面板勾选的模型显示偏好（哪些模型出现在 dsh 选择器里）。
+ *
+ * 为什么不存 .state.json：那份文件由**控制台**单写者维护（它有进程内缓存，
+ * 外部写入会让缓存悄悄过期），而控制台没有"模型显示"这个概念。这是插件
+ * 自己的功能，存自己的小文件最干净 —— 与控制台零耦合，也不会在 vendor
+ * 分发形态下写脏仓库根。
+ *
+ * 文件位于插件目录旁（安装形态下是 profile 的 node_modules 内），与插件
+ * 同生命周期；git 安装到 node_modules 里写文件是常见做法（pnpm 不清理）。
+ */
+const MODEL_PREFS_PATH = join(PLUGIN_DIR, '.model-prefs.json');
+
+function readModelPrefs() {
+  try {
+    const j = JSON.parse(readFileSync(MODEL_PREFS_PATH, 'utf8'));
+    return Array.isArray(j.visible) ? j.visible.map(String) : null;
+  } catch { return null; }
+}
+
+function writeModelPrefs(visible) {
+  try {
+    writeFileSync(MODEL_PREFS_PATH, `${JSON.stringify({ visible, at: Date.now() }, null, 2)}\n`, 'utf8');
+  } catch { /* 只读介质：本次运行生效，不持久化 */ }
+}
 
 /** 默认值集中在一处，README 与面板都读它。 */
 export const DEFAULTS = {
@@ -68,6 +94,14 @@ export const DEFAULTS = {
   catalogTtlMs: 60_000,
   modelAllow: [],
   modelDeny: [],
+  /**
+   * 给 agent 实际调用模型时的默认参数（对话测试面板另有独立的即时控制）。
+   * undefined = 不下发该字段，交给上游默认 —— 刻意不猜：不同模型对
+   * reasoning_effort 的接受度不同，硬发可能 400。
+   */
+  defaultMaxTokens: undefined,
+  defaultTemperature: undefined,
+  defaultReasoningEffort: undefined,
   migrateLegacy: true,
   tools: true,
   commands: true,
@@ -116,6 +150,15 @@ export function resolveConfig(raw = {}) {
     catalogTtlMs: Number(cfg.catalogTtlMs) || DEFAULTS.catalogTtlMs,
     modelAllow: asStringArray(cfg.modelAllow),
     modelDeny: asStringArray(cfg.modelDeny),
+    defaultMaxTokens: cfg.defaultMaxTokens === undefined || cfg.defaultMaxTokens === null || cfg.defaultMaxTokens === ''
+      ? undefined
+      : (Number(cfg.defaultMaxTokens) > 0 ? Number(cfg.defaultMaxTokens) : undefined),
+    defaultTemperature: cfg.defaultTemperature === undefined || cfg.defaultTemperature === null || cfg.defaultTemperature === ''
+      ? undefined
+      : (Number.isFinite(Number(cfg.defaultTemperature)) ? Number(cfg.defaultTemperature) : undefined),
+    defaultReasoningEffort: ['low', 'medium', 'high'].includes(String(cfg.defaultReasoningEffort))
+      ? String(cfg.defaultReasoningEffort)
+      : undefined,
     migrateLegacy: asBool(cfg.migrateLegacy, DEFAULTS.migrateLegacy),
     tools: asBool(cfg.tools, DEFAULTS.tools),
     commands: asBool(cfg.commands, DEFAULTS.commands),
@@ -345,8 +388,12 @@ export function apply(ctx, rawConfig = {}) {
     resolveImage,
     log: (message, detail) => log(message, detail),
     filter: { allow: config.modelAllow, deny: config.modelDeny },
-    catalogTtlMs: config.catalogTtlMs,
-    ensureReady: async () => {
+    defaults: {
+      maxTokens: config.defaultMaxTokens,
+      temperature: config.defaultTemperature,
+      reasoningEffort: config.defaultReasoningEffort,
+    },
+    catalogTtlMs: config.catalogTtlMs,    ensureReady: async () => {
       // 每次取用前保证桥在跑：桥挂了自动拉起来，用户不必管
       if (!config.autoStart) return client;
       if (state.readyPromise) return state.readyPromise;
@@ -362,6 +409,17 @@ export function apply(ctx, rawConfig = {}) {
       return state.readyPromise;
     },
   });
+
+  // ── 0. 应用面板勾选的模型显示偏好 ─────────────────────────────────────
+  // 用户在模型面板勾选"在 dsh 中显示"的清单持久化在 .model-prefs.json；
+  // 启动时读回并应用到 adapter（与配置文件的 modelAllow 叠加：勾选清单优先 ——
+  // 它是用户在界面上表达的最新意图）。
+  const savedPrefs = readModelPrefs();
+  if (savedPrefs) {
+    adapter.setFilter({ allow: savedPrefs });
+    state.modelVisibility = { source: 'prefs', allow: savedPrefs };
+    log(`已应用模型显示偏好：${savedPrefs.length} 个模型`);
+  }
 
   // ── 1. 旧路由清理（必须在注册自己的路由之前） ──────────────────────────
   try {
@@ -716,7 +774,19 @@ export function apply(ctx, rawConfig = {}) {
   // ── 6. HTTP 数据面（入口页用） ─────────────────────────────────────────
   if (config.routes) {
     useService('webServer', (webServer) => {
-      const routes = createRouteTable({ snapshot, supervisor, consoleSupervisor, client, adapter, paths: dshPaths, provider: config.provider, log, onUpstreamMutation: invalidateUpstreamCaches });
+      const routes = createRouteTable({
+        snapshot,
+        supervisor,
+        consoleSupervisor,
+        client,
+        adapter,
+        paths: dshPaths,
+        provider: config.provider,
+        log,
+        onUpstreamMutation: invalidateUpstreamCaches,
+        readPrefs: readModelPrefs,
+        onWritePrefs: writeModelPrefs,
+      });
       const disposeRoutes = mountRoutes(webServer, routes, log);
       ctx.effect(() => disposeRoutes, 'workbuddy.panel-routes');
     });

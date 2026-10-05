@@ -1703,6 +1703,53 @@ body.dark .wb-root,
       const [message, setMessage] = useState('');
       const models = data?.models || [];
       const results = probes?.results || {};
+      // ── 模型显示偏好：控制哪些模型出现在 dsh 的模型选择器里 ──────────────
+      // 存偏好（.model-prefs.json）与读目录是两个接口：POST 后 adapter.setFilter
+      // 立即生效（选择器下一次 listModels 就是新清单），无需重启 dsh。
+      const prefsApi = useJson('/workbuddy/model-visibility', {});
+      const [visibility, setVisibility] = useState(null);   // null = 跟随目录（全部显示）
+      const [prefsLoaded, setPrefsLoaded] = useState(false);
+      const [prefsDirty, setPrefsDirty] = useState(false);
+      const [prefsSaving, setPrefsSaving] = useState(false);
+      useEffect(() => {
+        // 只在首次拿到响应时初始化勾选状态（后续 reload 不覆盖用户的未保存改动）
+        if (!prefsLoaded && prefsApi.data && prefsApi.data.ok) {
+          setVisibility(Array.isArray(prefsApi.data.visible) ? prefsApi.data.visible : null);
+          setPrefsLoaded(true);
+        }
+      }, [prefsApi.data, prefsLoaded]);
+      const isVisible = (id) => {
+        if (!Array.isArray(visibility)) return true;   // 未设置 = 全显示（默认）
+        return visibility.includes(id);
+      };
+      const toggleVisible = (id) => {
+        setVisibility((prev) => {
+          const base = Array.isArray(prev) ? prev : models.map((m) => m.id);
+          return base.includes(id) ? base.filter((x) => x !== id) : [...base, id];
+        });
+        setPrefsDirty(true);
+      };
+      const savePrefs = async (nextVisible) => {
+        setPrefsSaving(true);
+        const list = Array.isArray(nextVisible) ? nextVisible : visibility;
+        const res = await postJson('/workbuddy/model-visibility', { visible: list });
+        setPrefsSaving(false);
+        if (res.data?.ok) {
+          setVisibility(res.data.visible);
+          setPrefsDirty(false);
+          setMessage(res.data.count
+            ? `已保存：dsh 选择器将显示 ${res.data.count} 个模型（即时生效，无需重启）。`
+            : '已保存：未勾选任何模型 —— dsh 选择器将不显示 WorkBuddy 模型（重新勾选即可恢复）。');
+        } else {
+          setMessage('保存失败：' + (res.data?.error || res.status));
+        }
+      };
+      const selectAllVisible = () => { setVisibility(models.map((m) => m.id)); setPrefsDirty(true); };
+      const selectNoneVisible = () => { setVisibility([]); setPrefsDirty(true); };
+      const onlyAvailableVisible = () => {
+        setVisibility(models.filter((m) => { const r = resultOf(m.id); return !r || r.ok !== false; }).map((m) => m.id));
+        setPrefsDirty(true);
+      };
       // 只有确认控制台可用（availability 判定为 ok）才允许体检/清除：
       // 加载中或 404/503 时都禁用，避免对不存在的接口空点。
       const consoleReady = probesApi.availability.state === 'ok';
@@ -1806,17 +1853,36 @@ body.dark .wb-root,
               ['id', 'name', 'contextWindow', 'maxTokens', 'credits', 'free', 'images', 'probe', 'probeMs', 'probeError'],
               models.map((m) => [m.id, m.name, m.contextWindow || '', m.maxTokens || '', m.credits ?? '', m.free ? 1 : 0, m.images ? 1 : 0, resultOf(m.id) ? (resultOf(m.id).ok ? 'ok' : 'fail') : '', resultOf(m.id)?.ms ?? '', resultOf(m.id)?.error || ''])) }, '导出 CSV'))),
         !consoleReady ? h('p', { className: 'wb-note' }, '体检需要控制台在跑（结论只由它写，保证两边一致）。') : null,
+        // ── 模型显示偏好：勾选决定哪些模型出现在 dsh 的模型选择器里 ─────────
+        h('div', { className: 'wb-actions split', style: { marginBottom: '10px' } },
+          h('div', { className: 'wb-actions-group' },
+            h('span', { className: 'wb-label' }, 'dsh 选择器显示'),
+            h(Btn, { disabled: prefsSaving, onClick: selectAllVisible }, '全选'),
+            h(Btn, { disabled: prefsSaving, onClick: selectNoneVisible }, '全不选'),
+            h(Btn, { disabled: prefsSaving || !consoleReady, onClick: onlyAvailableVisible, title: '按体检结论隐藏"不可用"的模型' }, '只留可用的'),
+            !Array.isArray(visibility) ? h('span', { className: 'wb-note', style: { margin: 0 } }, '当前：全部显示（未做过筛选）') : h('span', { className: 'wb-note', style: { margin: 0 } }, `已勾选 ${visibility.length} / ${models.length}`)),
+          h('div', { className: 'wb-actions-group' },
+            h(Btn, { primary: prefsDirty, disabled: prefsSaving || !prefsDirty, onClick: () => savePrefs() }, prefsSaving ? '保存中…' : prefsDirty ? '保存显示设置' : '已保存'),
+            Array.isArray(visibility) ? h(Btn, { disabled: prefsSaving, onClick: () => { setVisibility(null); setPrefsDirty(true); }, title: '恢复为全部显示（与从未筛选一致）' }, '恢复全部') : null)),
+        prefsDirty ? h('p', { className: 'wb-note', style: { margin: '0 0 8px' } }, '有未保存的勾选改动 —— 点「保存显示设置」后才会应用到 dsh 的模型选择器。') : null,
         h('div', { className: 'wb-scroll' },
           h('table', { className: 'wb-table' },
             h('thead', null, h('tr', null,
-              // 列数压到 6 列：上下文与输出合并（详情里有拆分），体检列不再塞实测扣分 ——
-              // 之前 7 列在设置页宽度下必然横向滚动，最后一列被压窄后按钮还会竖着堆。
+              // 列数压到 7 列：显示勾选 + 模型 + 名称 + 上下文/输出 + 倍率 + 体检 + 操作。
+              // 显示勾选决定该模型是否出现在 dsh 的模型选择器里（保存后即时生效）。
+              h('th', { title: '勾选 = 出现在 dsh 的模型选择器里（保存后生效）' }, '显示'),
               h('th', null, '模型'), h('th', null, '名称'), h('th', { className: 'num' }, '上下文 / 输出'),
               h('th', { className: 'num' }, '倍率'), h('th', null, '体检'), h('th', { className: 'wb-actions-col' }, '操作'))),
             h('tbody', null, visible.flatMap((m) => {
               const probe = resultOf(m.id);
               const open = detail === m.id;
               const rows = [h('tr', { key: m.id, className: (probe && probe.ok === false ? 'bad ' : '') + (open ? 'open' : '') },
+                h('td', null, h('input', {
+                  type: 'checkbox',
+                  checked: isVisible(m.id),
+                  onChange: () => toggleVisible(m.id),
+                  title: isVisible(m.id) ? '已显示在 dsh 选择器' : '已隐藏（保存后 dsh 选择器不再出现）',
+                })),
                 h('td', null, m.id + (m.id === sampleModel ? ' ★' : '')),
                 h('td', null, (m.name || ''),
                   m.images ? h('span', { className: 'wb-badge', title: '支持图片输入（多模态）' }, '图片') : null,
@@ -1836,7 +1902,7 @@ body.dark .wb-root,
               // 详情**紧跟这一行**展开（而不是挂到整张表下面 —— 那会让人找不到是哪个模型的）
               if (open) {
                 rows.push(h('tr', { key: m.id + ':detail', className: 'wb-detail-row' },
-                  h('td', { colSpan: 6 },
+                  h('td', { colSpan: 7 },
                     h('div', { className: 'wb-detail' },
                       h('div', { className: 'wb-detail-grid' },
                         h(DetailItem, { label: '模型 ID', value: m.id }),

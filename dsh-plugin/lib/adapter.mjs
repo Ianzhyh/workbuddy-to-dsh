@@ -327,6 +327,9 @@ export class WorkBuddyAdapter {
    * @param {(ref: object) => Promise<string|null>} [options.resolveImage]
    * @param {(message: string, detail?: unknown) => void} [options.log]
    * @param {{ allow?: string[], deny?: string[] }} [options.filter] 模型允许/排除清单
+   * @param {{ maxTokens?: number, temperature?: number, reasoningEffort?: string }} [options.defaults]
+   *   agent 链路的默认请求参数：调用方没显式给时用这里的值下发。undefined 的字段
+   *   完全不下发（交给上游默认）—— 不同模型对 reasoning_effort 接受度不同，不猜。
    */
   constructor(options) {
     this.provider = options.provider;
@@ -336,6 +339,7 @@ export class WorkBuddyAdapter {
     this.resolveImage = options.resolveImage || (async () => null);
     this.log = options.log || (() => {});
     this.filter = options.filter || {};
+    this.defaults = options.defaults || {};
     this.catalogTtlMs = options.catalogTtlMs ?? 60_000;
     /** 目录缓存，避免每次模型选择都打一次桥。 */
     this.catalogCache = { at: 0, models: [] };
@@ -376,6 +380,20 @@ export class WorkBuddyAdapter {
   /** 失效缓存（面板里「刷新目录」/ 启停桥之后调用）。 */
   invalidate() {
     this.catalogCache = { at: 0, models: [] };
+  }
+
+  /**
+   * 运行时更新模型过滤器（面板勾选"在 dsh 中显示"时调用）。
+   *
+   * 为什么不重建适配器：adapter 已注册进 dsh 的 llm 路由，重建意味着解绑重绑
+   * （模型选择器会闪断）。过滤只影响 listModels 的输出，改一个字段就够。
+   * allow 语义是"只显示勾选的"（空 = 全显示），与配置文件里的 modelAllow 一致。
+   */
+  setFilter(filter) {
+    this.filter = {
+      allow: Array.isArray(filter?.allow) ? filter.allow.map(String) : [],
+      deny: Array.isArray(filter?.deny) ? filter.deny.map(String) : [],
+    };
   }
 
   /** 模型选择器看到的目录。 */
@@ -450,8 +468,16 @@ export class WorkBuddyAdapter {
       payload = { model, messages: sanitizeWire(messages), stream: true };
       const tools = toWireTools(options);
       if (tools.length) payload.tools = tools;
-      if (typeof options.temperature === 'number') payload.temperature = options.temperature;
-      if (typeof options.maxTokens === 'number' && options.maxTokens > 0) payload.max_tokens = options.maxTokens;
+      // 参数优先级：调用方显式给的 > 插件配置的默认值 > 不发（上游默认）。
+      // 刻意不用 ?? 链合并成一层：显式 undefined 与"没配"是同一件事，
+      // 但显式 0（temperature=0 是合法值）必须被保留。
+      const hasCallerTemp = typeof options.temperature === 'number';
+      const temperature = hasCallerTemp ? options.temperature : this.defaults.temperature;
+      if (typeof temperature === 'number') payload.temperature = temperature;
+      const callerMax = typeof options.maxTokens === 'number' && options.maxTokens > 0;
+      const maxTokens = callerMax ? options.maxTokens : this.defaults.maxTokens;
+      if (typeof maxTokens === 'number' && maxTokens > 0) payload.max_tokens = maxTokens;
+      if (this.defaults.reasoningEffort) payload.reasoning_effort = this.defaults.reasoningEffort;
       if (Array.isArray(options.stop) && options.stop.length) payload.stop = options.stop;
     } catch (error) {
       yield { type: 'finish', reason: { kind: 'error', failure: { message: `请求组装失败：${error?.message || error}`, code: CODE.INVALID } } };
