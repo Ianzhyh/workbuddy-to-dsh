@@ -855,3 +855,70 @@ test('桥：刷新失败时不得把响应体写进日志（响应体可能带 a
     rmSync(bridge.dir, { recursive: true, force: true });
   }
 });
+
+test('桥：keep-alive 连接被复用，且复用连接被掐断时自动换新连接重试', { timeout: 90_000 }, async () => {
+  // 两个断言点：
+  //  ① 复用：第二次对话请求命中上游**同一个** TCP socket（server 端连接计数不涨）；
+  //  ② 稳定：上游把空闲 socket 掐断后，下一次请求必须成功（桥换新连接重试一次），
+  //     客户端看到的是正常回答，而不是 ECONNRESET。
+  let socketsOpened = 0;
+  let chatCalls = 0;
+  const upstream = createServer((req, res) => {
+    const path = new URL(req.url, 'http://127.0.0.1').pathname;
+    if (path === '/v2/enterprises/personal/models') {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      return res.end(JSON.stringify({ code: 0, data: { models: [{ id: 'ka-model', maxInputTokens: 128000, maxOutputTokens: 4096 }] } }));
+    }
+    if (path === '/v3/config') {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      return res.end(JSON.stringify({ code: 0, data: { models: [] } }));
+    }
+    if (path === '/v2/chat/completions') {
+      chatCalls += 1;
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      res.end(`data: {"choices":[{"delta":{"content":"call${chatCalls}"}}]}\n\ndata: [DONE]\n\n`);
+      if (chatCalls === 3) {
+        // 第 3 次：应答完整返回**之后**掐掉底层 socket，
+        // 让 Agent 池里留一条**服务端已关闭**的死连接给第 4 次。
+        setTimeout(() => { try { res.socket.destroy(); } catch { /* 已断 */ } }, 30);
+      }
+      return;
+    }
+    res.writeHead(404, { 'content-type': 'application/json' });
+    res.end('{}');
+  });
+  upstream.on('connection', () => { socketsOpened += 1; });
+  await new Promise((r) => upstream.listen(0, '127.0.0.1', r));
+  const upstreamBase = `http://127.0.0.1:${upstream.address().port}`;
+
+  const bridge = await startBridge({ CODEBUDDY_ENDPOINT: upstreamBase }, { auth: READABLE_FAKE_AUTH });
+  const chat = () => fetch(bridge.baseUrl + '/v1/chat/completions', {
+    method: 'POST',
+    headers: { ...auth, 'content-type': 'application/json' },
+    body: JSON.stringify({ model: 'ka-model', messages: [{ role: 'user', content: 'hi' }] }),
+    signal: AbortSignal.timeout(15000),
+  }).then((r) => r.text());
+  try {
+    await fetch(bridge.baseUrl + '/v1/models?all=1'); // 预热目录，让预校验认识 ka-model
+
+    const r1 = await chat();
+    const socketsAfterFirst = socketsOpened;
+    const r2 = await chat();
+    assert.match(r1, /call1/);
+    assert.match(r2, /call2/);
+    assert.equal(socketsOpened, socketsAfterFirst, '第二次请求必须复用同一条 keep-alive 连接（不得新开 socket）');
+
+    // 第 3 次：正常拿到回答，但上游随后掐掉 socket（池子里留下一条死连接）
+    const r3 = await chat();
+    assert.match(r3, /call3/);
+    await new Promise((r) => setTimeout(r, 100)); // 等 socket 真正被掐断
+
+    // 第 4 次：撞上死连接 → 桥自动换新连接重试并成功（对客户端透明）
+    const r4 = await chat();
+    assert.match(r4, /call4/, '复用连接被掐断后必须自动重试成功，客户端无感');
+  } finally {
+    await bridge.stop();
+    try { upstream.close(); } catch { /* 忽略 */ }
+    rmSync(bridge.dir, { recursive: true, force: true });
+  }
+});

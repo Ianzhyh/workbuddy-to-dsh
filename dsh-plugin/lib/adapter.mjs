@@ -46,16 +46,69 @@ export function classifyError(message, status) {
   return 'PROVIDER_ERROR';
 }
 
-/** OpenAI usage → dsh TokenUsage。缺失字段省略，不编造 0。 */
+/**
+ * 取一组「同义字段」里最大的有限数值。
+ *
+ * 上游对同一件事常有多种写法，且**会同时下发真实值与恒 0 的占位**：本机实测
+ * `prompt_tokens_details.cached_tokens = 1280` 与顶层 `cached_tokens = 0` 并存，
+ * 用 `??` 逐个回退会被那个 0 直接挡住（0 不是 nullish）。取最大值只在这组确实
+ * 是同一语义的别名时才安全，而它们全都是「缓存读」。
+ */
+function maxAlias(values) {
+  let best = 0;
+  for (const value of values) {
+    const n = Number(value);
+    if (Number.isFinite(n) && n > best) best = n;
+  }
+  return best;
+}
+
+/**
+ * OpenAI usage → dsh TokenUsage。缺失字段省略，不编造 0。
+ *
+ * **`inputTokens` 是「未命中缓存的输入」，不是上游的 `prompt_tokens`。**
+ * 契约依据（均来自 dsh 自身实现，非推测）：
+ *   - `dsh-token-meter` 的 usage 投影：`uncachedInputTokens: usage.inputTokens`
+ *     —— 它把适配器给的 inputTokens 直接当作「未命中」桶；
+ *   - 会话命中率 = `cacheReadTokens / (uncachedInputTokens + cacheReadTokens +
+ *     cacheWriteTokens)`（三个互斥计费桶之和）；
+ *   - 内置适配器的算法：`input = max(0, prompt_tokens - cacheRead - cacheWrite)`，
+ *     且 `totalTokens = input + output + cacheRead + cacheWrite`。
+ *
+ * 上游的 `prompt_tokens` 恰恰相反，是**含缓存**的全部输入（实测
+ * `cached_tokens=1280` + `prompt_cache_miss_tokens=176` = `prompt_tokens=1456`）。
+ * 所以把 prompt_tokens 直接映射过去，等于把缓存部分在分母里再算一遍：
+ * 命中率会变成 `cached / (prompt + cached)`，**上限被死死压到 50%**（全命中时
+ * 1280/(1456+1280) = 46.8%，而真实值是 87.9%）。
+ */
 export function mapUsage(raw) {
   if (!raw || typeof raw !== 'object') return null;
-  const input = Number(raw.prompt_tokens ?? raw.input_tokens ?? 0) || 0;
+  const promptTokens = Number(raw.prompt_tokens ?? raw.input_tokens ?? 0) || 0;
   const output = Number(raw.completion_tokens ?? raw.output_tokens ?? 0) || 0;
-  const total = Number(raw.total_tokens ?? 0) || input + output;
-  const cacheRead = Number(raw.prompt_tokens_details?.cached_tokens ?? raw.cache_read_tokens ?? 0) || 0;
+  // 缓存读（命中）/ 缓存写：字段名与内置适配器同一套，另兼容 Anthropic 风格别名
+  const cacheRead = maxAlias([
+    raw.prompt_tokens_details?.cached_tokens,
+    raw.prompt_cache_hit_tokens,
+    raw.cache_read_tokens,
+    raw.cache_read_input_tokens,
+    raw.cached_tokens,
+  ]);
+  const cacheWrite = maxAlias([
+    raw.prompt_tokens_details?.cache_write_tokens,
+    raw.prompt_cache_write_tokens,
+    raw.cache_creation_input_tokens,
+  ]);
+  // 上游若直接给了未命中计数（DeepSeek 原生 prompt_cache_miss_tokens），优先采信它 ——
+  // 但只在与另外两个桶**自洽**（相加等于 prompt_tokens）时才采信，避免上游漏报时倒推。
+  const miss = Number(raw.prompt_cache_miss_tokens);
+  const missSelfConsistent = Number.isFinite(miss) && miss >= 0
+    && miss + cacheRead + cacheWrite === promptTokens;
+  const input = missSelfConsistent ? miss : Math.max(0, promptTokens - cacheRead - cacheWrite);
+  const total = Number(raw.total_tokens ?? 0) || input + output + cacheRead + cacheWrite;
   const reasoning = Number(raw.completion_tokens_details?.reasoning_tokens ?? raw.reasoning_tokens ?? 0) || 0;
   const usage = { inputTokens: input, outputTokens: output, totalTokens: total };
   if (cacheRead > 0) usage.cacheReadTokens = cacheRead;
+  if (cacheWrite > 0) usage.cacheWriteTokens = cacheWrite;
   if (reasoning > 0) usage.reasoningTokens = reasoning;
   return usage;
 }
@@ -338,6 +391,8 @@ export class WorkBuddyAdapter {
     this.ensureReady = options.ensureReady || (async () => this.client);
     this.resolveImage = options.resolveImage || (async () => null);
     this.log = options.log || (() => {});
+    /** 对话 TRANSPORT 失败时回调（宿主端用来作废「桥活着」的短 TTL 缓存）。 */
+    this.onTransportFailure = options.onTransportFailure || (() => {});
     this.filter = options.filter || {};
     this.defaults = options.defaults || {};
     this.catalogTtlMs = options.catalogTtlMs ?? 60_000;
@@ -468,6 +523,7 @@ export class WorkBuddyAdapter {
     try {
       client = await this.ensureReady();
     } catch (error) {
+      this.onTransportFailure();
       yield { type: 'finish', reason: { kind: 'error', failure: { message: `本地桥不可用：${error?.message || error}`, code: CODE.TRANSPORT } } };
       return;
     }
@@ -512,6 +568,7 @@ export class WorkBuddyAdapter {
       res = await client.chat(payload, { signal });
     } catch (error) {
       const aborted = signal?.aborted === true;
+      if (!aborted) this.onTransportFailure(); // 桥可能刚挂：作废「活着」缓存，下次先探测
       yield {
         type: 'finish',
         reason: aborted

@@ -843,11 +843,25 @@ export interface TokenUsage {
 
   | wire | harness |
   |---|---|
-  | `usage.prompt_tokens` | `inputTokens` |
+  | `usage.prompt_tokens` | ⚠ **不能**直接映射到 `inputTokens`（它含缓存，见下） |
+  | `prompt_tokens - cached_tokens - cache_write_tokens` | `inputTokens`（**未命中缓存的输入**） |
   | `usage.completion_tokens` | `outputTokens` |
-  | `usage.total_tokens` | `totalTokens` |
+  | `usage.total_tokens` | `totalTokens`（`input + output + cacheRead + cacheWrite`，即上游原值） |
   | `usage.prompt_tokens_details.cached_tokens` | `cacheReadTokens` (omit when 0) |
   | `usage.completion_tokens_details.reasoning_tokens` | `reasoningTokens` (omit when 0) |
+
+  **`inputTokens` 是「未命中缓存的输入」，不是上游的 `prompt_tokens`。** 上游沿用 OpenAI 语义：
+  `prompt_tokens` 是**含缓存**的全部输入（本机实测 `cached_tokens = 1280` +
+  `prompt_cache_miss_tokens = 176` = `prompt_tokens = 1456`）。harness 却把这一个字段当作未命中桶：
+
+  * `dsh-token-meter` 的 usage 投影逐字写着 `uncachedInputTokens: usage.inputTokens`；
+  * 会话命中率 = `cacheReadTokens / (uncachedInputTokens + cacheReadTokens + cacheWriteTokens)`
+    —— 分母是**三个互斥**的计费桶之和。
+
+  所以直接把 `prompt_tokens` 映射过去，等于把缓存部分在分母里再算一遍：命中率变成
+  `cached / (prompt + cached)`，**上限被死死压到 50%**（全命中时与上例一致，显示 46.8%，
+  真实值是 87.9%）。内置适配器的算法可作权威参照（`parseChunkUsage`）：
+  `input = Math.max(0, promptTokens - cacheReadTokens - cacheWriteTokens)`。
 
   Reference behaviour: `dsh-llm-pi-ai` maps `{input, output, totalTokens}` and includes the cache fields
   **only when non-zero**, "cache fields appear only when non-zero (pi-ai reports zeros, not absence)"

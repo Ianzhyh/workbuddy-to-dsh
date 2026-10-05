@@ -92,6 +92,8 @@ export const DEFAULTS = {
   fallbackProvider: 'workbuddy-native',
   displayName: 'WorkBuddy',
   catalogTtlMs: 60_000,
+  /** 桥「已确认活着」结论的缓存时长（ensureReady 短路用）。对话失败会立即作废。 */
+  bridgeAliveTtlMs: 5_000,
   modelAllow: [],
   modelDeny: [],
   /**
@@ -148,6 +150,7 @@ export function resolveConfig(raw = {}) {
     fallbackProvider: String(cfg.fallbackProvider || DEFAULTS.fallbackProvider),
     displayName: String(cfg.displayName || DEFAULTS.displayName),
     catalogTtlMs: Number(cfg.catalogTtlMs) || DEFAULTS.catalogTtlMs,
+    bridgeAliveTtlMs: Number(cfg.bridgeAliveTtlMs) ?? DEFAULTS.bridgeAliveTtlMs,
     modelAllow: asStringArray(cfg.modelAllow),
     modelDeny: asStringArray(cfg.modelDeny),
     defaultMaxTokens: cfg.defaultMaxTokens === undefined || cfg.defaultMaxTokens === null || cfg.defaultMaxTokens === ''
@@ -349,6 +352,8 @@ export function apply(ctx, rawConfig = {}) {
     checkinCache: { at: 0, value: null, error: '', account: null },
     checkinInflight: null,
     bridgeAccount: null,
+    /** 桥最近一次确认「活着」的时刻；ensureReady 的短 TTL 缓存用。 */
+    bridgeAliveAt: 0,
   };
 
   /**
@@ -387,6 +392,9 @@ export function apply(ctx, rawConfig = {}) {
     client,
     resolveImage,
     log: (message, detail) => log(message, detail),
+    // 对话出现 TRANSPORT 失败 = 桥可能刚挂：立刻作废「活着」缓存，
+    // 下一次对话重新探测/拉起，而不是在 5 秒 TTL 内对着死桥空转。
+    onTransportFailure: () => { state.bridgeAliveAt = 0; },
     filter: { allow: config.modelAllow, deny: config.modelDeny },
     defaults: {
       maxTokens: config.defaultMaxTokens,
@@ -394,11 +402,19 @@ export function apply(ctx, rawConfig = {}) {
       reasoningEffort: config.defaultReasoningEffort,
     },
     catalogTtlMs: config.catalogTtlMs,    ensureReady: async () => {
-      // 每次取用前保证桥在跑：桥挂了自动拉起来，用户不必管
+      // 每次取用前保证桥在跑：桥挂了自动拉起来，用户不必管。
+      // 桥刚被确认活着的一小段时间内直接复用结论 —— 省掉每次对话前那次
+      // 串行的 /health 探测（本机回环也要 2-3ms，且在请求关键路径上）。
+      // 对话失败时 reset() 会立刻作废缓存（见 stream 的 TRANSPORT 路径）。
       if (!config.autoStart) return client;
       if (state.readyPromise) return state.readyPromise;
+      const now = Date.now();
+      if (now - (state.bridgeAliveAt || 0) < config.bridgeAliveTtlMs) return client;
       const probe = await supervisor.probe();
-      if (probe.state === 'running') return client;
+      if (probe.state === 'running') {
+        state.bridgeAliveAt = now;
+        return client;
+      }
       state.readyPromise = (async () => {
         const result = await supervisor.ensure({ readyTimeoutMs: config.autoStartTimeoutMs });
         state.lastEnsure = { at: Date.now(), ...result };

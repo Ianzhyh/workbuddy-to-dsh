@@ -22,7 +22,10 @@
  * any conversation content.
  */
 import { readFileSync, writeFileSync, appendFileSync, existsSync, readdirSync, statSync } from 'node:fs';
-import { createServer } from 'node:http';
+import { createServer, request as httpRequest } from 'node:http';
+import { request as httpsRequest } from 'node:https';
+import { Agent as HttpAgent } from 'node:http';
+import { Agent as HttpsAgent } from 'node:https';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createDecipheriv, createHash, randomUUID } from 'node:crypto';
@@ -38,6 +41,23 @@ const REFRESH_SKEW_MS = 5 * 60 * 1000;
 const REFRESH_COOLDOWN_MS = 15 * 1000;
 const TRANSIENT_400_DELAYS = [1000, 4000, 10000, 25000];
 const UPSTREAM_TIMEOUT_MS = Number(process.env.WORKBUDDY_TIMEOUT_MS || 0); // 0 = unlimited (long answers need it)
+
+// ── Upstream keep-alive connection pool ────────────────────────────────────
+// 为什么要自己管连接：Node 全局 fetch（undici）的空闲连接只保留 ~4 秒。写代码
+// 的间隙一过，下一次请求就要重付一遍 DNS + TLS 握手（实测 ~150ms，温连接 ~82ms）。
+// 用 http/https 的 keep-alive Agent：空闲连接保留 5 分钟，跨请求复用同一条
+// TLS 会话，「首 token 延迟」稳定砍掉一大截。测试桩走纯 HTTP，所以两套都要。
+const KEEPALIVE_MS = Number(process.env.WORKBUDDY_KEEPALIVE_MS || 300_000); // 5 min, 0 = off
+const httpAgent = new HttpAgent({ keepAlive: KEEPALIVE_MS > 0, keepAliveMsecs: Math.max(1000, KEEPALIVE_MS), maxSockets: 8, scheduling: 'lifo' });
+const httpsAgent = new HttpsAgent({
+  keepAlive: KEEPALIVE_MS > 0,
+  keepAliveMsecs: Math.max(1000, KEEPALIVE_MS),
+  maxSockets: 8,
+  scheduling: 'lifo',
+  // 刻意**不设** socket timeout：LLM 流式回答中间可能有几十秒的 reasoning 停顿，
+  // 空闲超时会在流中间掐断长回答。死连接靠 sendWithRetry 的 reusedSocket 重试兜底。
+});
+const agentFor = (endpoint) => (String(endpoint).startsWith('https:') ? httpsAgent : httpAgent);
 
 const PORT = Number(process.env.WORKBUDDY_PORT || 8790);
 const HOST = process.env.WORKBUDDY_HOST || '127.0.0.1';
@@ -410,6 +430,71 @@ function buildHeaders(auth, model, conversationId) {
 }
 
 // ── Upstream call (with refresh retry and transient-400 retry) ───────────
+/**
+ * 用 node:http/https + keep-alive Agent 发一次上游请求，返回 IncomingMessage。
+ *
+ * 为什么不用全局 fetch：Node 内建 fetch（undici）的连接池不开放、空闲连接只留
+ * ~4 秒，达不到「跨请求复用 TLS 连接」的目的。node:http 的 Agent 可以。
+ * 返回的 res 兼容 bridge 现有消费方式（res.ok / res.status / res.text() /
+ * res.body.getReader() 由下面的 shim 补齐）。
+ */
+function upstreamRequest(endpointUrl, { headers, body, signal }) {
+  const url = new URL(endpointUrl);
+  const doRequest = url.protocol === 'https:' ? httpsRequest : httpRequest;
+  return new Promise((resolve, reject) => {
+    const req = doRequest(
+      {
+        protocol: url.protocol,
+        hostname: url.hostname,
+        port: url.port || (url.protocol === 'https:' ? 443 : 80),
+        path: `${url.pathname}${url.search}`,
+        method: 'POST',
+        headers,
+        agent: agentFor(url.protocol),
+      },
+      (res) => resolve(res),
+    );
+    req.on('error', reject);
+    if (signal) {
+      if (signal.aborted) { req.destroy(new Error('aborted')); return; }
+      const onAbort = () => req.destroy(new Error(signal.reason?.message || 'aborted'));
+      signal.addEventListener('abort', onAbort, { once: true });
+      req.on('close', () => signal.removeEventListener('abort', onAbort));
+      req.on('response', (res) => res.on('close', () => signal.removeEventListener('abort', onAbort)));
+    }
+    req.end(body);
+  });
+}
+
+/** http.IncomingMessage → 与 fetch Response 兼容的最小面（bridge 现有消费代码不动）。 */
+function shimResponse(res) {
+  return {
+    ok: res.statusCode >= 200 && res.statusCode < 300,
+    status: res.statusCode,
+    headers: res.headers,
+    text: () => new Promise((resolve, reject) => {
+      const chunks = [];
+      res.on('data', (c) => chunks.push(c));
+      res.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
+      res.on('error', reject);
+    }),
+    body: new ReadableStream({
+      start(controller) {
+        res.on('data', (c) => controller.enqueue(new Uint8Array(c)));
+        res.on('end', () => controller.close());
+        res.on('error', (e) => controller.error(e));
+      },
+      cancel() { res.destroy(); },
+    }),
+    // 诊断/重试逻辑用：这条连接是不是复用的（见 sendWithRetry）
+    reusedSocket: res.reusedSocket === true,
+  };
+}
+
+/**
+ * 发送并处理「复用的空闲连接已被服务端掐断」：ECONNRESET / socket hang up
+ * 发生在**复用** socket 且还没收到任何响应字节时，换新连接重试一次。
+ */
 async function callUpstream(bodyString, model, conversationId, clientSignal) {
   // API-key mode needs no login file; supply a minimal endpoint/domain instead
   let auth = API_KEY
@@ -420,19 +505,37 @@ async function callUpstream(bodyString, model, conversationId, clientSignal) {
     if (next) auth = next;
   }
 
-  const send = (a) => fetch(`${a.endpoint}${CHAT_PATH}`, {
-    method: 'POST',
-    headers: buildHeaders(a, model, conversationId),
-    body: bodyString,
-    signal: clientSignal
-      ? AbortSignal.any([clientSignal, ...(UPSTREAM_TIMEOUT_MS ? [AbortSignal.timeout(UPSTREAM_TIMEOUT_MS)] : [])])
-      : (UPSTREAM_TIMEOUT_MS ? AbortSignal.timeout(UPSTREAM_TIMEOUT_MS) : undefined),
-  });
+  const attempt = (a) => {
+    // WORKBUDDY_TIMEOUT_MS > 0 时给整个上游往返加超时（0/未设 = 不限，
+    // LLM 长回答需要）；与客户端取消信号合并。
+    const timeoutSignal = UPSTREAM_TIMEOUT_MS > 0 ? AbortSignal.timeout(UPSTREAM_TIMEOUT_MS) : null;
+    const signal = clientSignal && timeoutSignal ? AbortSignal.any([clientSignal, timeoutSignal])
+      : (clientSignal || timeoutSignal || undefined);
+    return upstreamRequest(`${a.endpoint}${CHAT_PATH}`, {
+      headers: buildHeaders(a, model, conversationId),
+      body: bodyString,
+      signal,
+    }).then(shimResponse);
+  };
 
-  let res = await send(auth);
+  const attemptWithStaleRetry = async (a) => {
+    try {
+      return await attempt(a);
+    } catch (error) {
+      // 复用的空闲连接被上游掐断（服务器先关）→ 换新连接重试一次。
+      // 新连接必然不是 reused；首次连接就失败属于真故障，不重试。
+      if (!clientSignal?.aborted && /ECONNRESET|socket hang up|EPIPE/i.test(String(error?.message || error?.code || ''))) {
+        log('stale keep-alive socket, retrying once on a fresh connection');
+        return attempt(a);
+      }
+      throw error;
+    }
+  };
+
+  let res = await attemptWithStaleRetry(auth);
   if (!API_KEY && (res.status === 401 || res.status === 403) && auth.refresh) {
     const next = await refreshAuth(auth);
-    if (next) { auth = next; res = await send(auth); }
+    if (next) { auth = next; res = await attemptWithStaleRetry(auth); }
   }
 
   // the gateway occasionally wraps a momentary upstream failure as 400 code 11133: retry idempotently
@@ -445,7 +548,7 @@ async function callUpstream(bodyString, model, conversationId, clientSignal) {
     log(`transient 400 (11133), retry ${i + 1}`);
     await new Promise((r) => setTimeout(r, TRANSIENT_400_DELAYS[i]));
     if (clientSignal?.aborted) return { res, bodyText: text };
-    res = await send(auth);
+    res = await attemptWithStaleRetry(auth);
   }
   return { res, bodyText: null };
 }
@@ -1870,6 +1973,28 @@ server.listen(PORT, HOST, () => {
   console.log(`auth       : ${API_KEY ? 'API key (CODEBUDDY_API_KEY)' : `desktop session ${who}`}`);
   console.log(`auth file  : ${AUTH_PATH}`);
   console.log(`models     : ${FEATURED.map((m) => m.id).join(', ')}  (all models: /v1/models?all=1)`);
+  console.log(`keep-alive : ${KEEPALIVE_MS > 0 ? `${Math.round(KEEPALIVE_MS / 1000)}s idle pool` : 'off'}`);
+
+  // ── 连接预热：listen 后立刻向上游开一条 TLS 连接放进池子 ─────────────────
+  // 首次对话请求就免去 DNS + TCP + TLS 握手（实测 ~150ms）。只预热、不发请求体；
+  // 失败完全无害 —— Agent 会在真正请求时重连。
+  try {
+    const endpoint = API_KEY ? (EXPLICIT_ENDPOINT || 'https://copilot.tencent.com') : pickUpstream(JSON.parse(readFileSync(AUTH_PATH, 'utf8'))?.auth?.domain || '');
+    const url = new URL(endpoint);
+    const req = (url.protocol === 'https:' ? httpsRequest : httpRequest)({
+      hostname: url.hostname,
+      port: url.port || (url.protocol === 'https:' ? 443 : 80),
+      path: '/',
+      method: 'GET',
+      agent: agentFor(url.protocol),
+      timeout: 8000,
+    });
+    // 拿到响应就算预热完成（连接已进池）；上游 4xx/5xx 都无所谓，我们要的只是连接
+    req.on('response', (res) => { res.resume(); log(`warmed upstream connection to ${url.hostname}`); });
+    req.on('error', () => {});   // 预热失败不吵不闹
+    req.on('timeout', () => req.destroy());
+    req.end();
+  } catch { /* 登录文件读不出来等：真正请求时自会报错 */ }
 });
 
 for (const sig of ['SIGINT', 'SIGTERM']) {

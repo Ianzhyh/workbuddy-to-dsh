@@ -12,7 +12,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 
-import { WorkBuddyAdapter } from '../lib/adapter.mjs';
+import { WorkBuddyAdapter, mapUsage } from '../lib/adapter.mjs';
 import { BridgeClient } from '../lib/bridge.mjs';
 
 /** 起一个假桥：/health、/v1/models、/v1/chat/completions（SSE 回放）。 */
@@ -118,6 +118,79 @@ test('文本流：block-start → text-delta → block-end → usage → finish'
     assert.deepEqual(out[4].usage, { inputTokens: 11, outputTokens: 2, totalTokens: 13 });
     assert.deepEqual(out[5].reason, { kind: 'stop' });
   } finally { await stub.close(); }
+});
+
+test('文本流：命中缓存的 usage 如实映射进 dsh 用量桶（端到端）', async () => {
+  const stub = await startStub({
+    sseFrames: [
+      delta({ role: 'assistant', content: '' }),
+      delta({ content: 'OK' }),
+      {
+        choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
+        usage: {
+          prompt_tokens: 1456,
+          completion_tokens: 1,
+          total_tokens: 1457,
+          prompt_tokens_details: { cached_tokens: 1280 },
+          prompt_cache_hit_tokens: 1280,
+          prompt_cache_miss_tokens: 176,
+          cached_tokens: 0,
+        },
+      },
+    ],
+  });
+  try {
+    const adapter = makeAdapter(stub.baseUrl);
+    const out = [];
+    for await (const chunk of adapter.stream({ provider: 'workbuddy', model: 'stub-model', messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }] })) out.push(chunk);
+    const usage = out.find((c) => c.type === 'usage')?.usage;
+    assert.deepEqual(usage, { inputTokens: 176, outputTokens: 1, totalTokens: 1457, cacheReadTokens: 1280 });
+  } finally { await stub.close(); }
+});
+
+test('usage 映射：inputTokens 是「未命中缓存」的输入（回归：命中率上限被压到 50%）', () => {
+  // 本机上游**实测**的真实 payload：prompt_tokens 含缓存，命中 + 未命中 = prompt_tokens
+  const warm = mapUsage({
+    prompt_tokens: 1456,
+    completion_tokens: 1,
+    total_tokens: 1457,
+    prompt_tokens_details: { cached_tokens: 1280 },
+    prompt_cache_hit_tokens: 1280,
+    prompt_cache_miss_tokens: 176,
+    cached_tokens: 0, // 上游同时下发的恒 0 占位，不许挡住真实值
+    cache_read_input_tokens: 0,
+    prompt_cache_write_tokens: 0,
+  });
+  assert.equal(warm.inputTokens, 176, '未命中缓存的那部分才是 inputTokens');
+  assert.equal(warm.cacheReadTokens, 1280);
+  assert.equal(warm.outputTokens, 1);
+  assert.equal(warm.totalTokens, 1457);
+  // dsh 的会话命中率 = cacheRead / (uncachedInput + cacheRead + cacheWrite)
+  const hitRate = warm.cacheReadTokens / (warm.inputTokens + warm.cacheReadTokens);
+  assert.ok(Math.abs(hitRate - 0.879) < 0.001, `真实命中率应约 87.9%，实际 ${(hitRate * 100).toFixed(1)}%`);
+
+  // 冷启动：全未命中
+  const cold = mapUsage({ prompt_tokens: 1456, completion_tokens: 1, total_tokens: 1457, prompt_cache_hit_tokens: 0, prompt_cache_miss_tokens: 1456 });
+  assert.equal(cold.inputTokens, 1456);
+  assert.equal(cold.cacheReadTokens, undefined, '零缓存字段必须省略，不编造 0');
+
+  // 全命中：命中率上限必须能到 100%（旧实现这里恰好只有 50%）
+  const full = mapUsage({ prompt_tokens: 1000, completion_tokens: 5, total_tokens: 1005, prompt_cache_hit_tokens: 1000, prompt_cache_miss_tokens: 0 });
+  assert.equal(full.inputTokens, 0);
+  assert.equal(full.cacheReadTokens / (full.inputTokens + full.cacheReadTokens), 1);
+});
+
+test('usage 映射：字段别名、缓存写、脏数据防御', () => {
+  // 只有 Anthropic 风格别名时也要认
+  assert.equal(mapUsage({ prompt_tokens: 100, completion_tokens: 1, cache_read_input_tokens: 60 }).inputTokens, 40);
+  // 缓存写单列：三个桶互斥，input 要把写的那部分一并减掉
+  assert.equal(mapUsage({ prompt_tokens: 100, completion_tokens: 1, prompt_cache_write_tokens: 30 }).inputTokens, 70);
+  // miss 与另外两个桶不自洽（上游漏报 hit）→ 不信 miss，按减法倒推
+  assert.equal(mapUsage({ prompt_tokens: 100, completion_tokens: 1, prompt_cache_hit_tokens: 50, prompt_cache_miss_tokens: 10 }).inputTokens, 50);
+  // 脏数据：负数忽略、超量兜底到 0（input 永不为负）
+  assert.equal(mapUsage({ prompt_tokens: 10, completion_tokens: 1, prompt_cache_hit_tokens: -5 }).inputTokens, 10);
+  assert.equal(mapUsage({ prompt_tokens: 10, completion_tokens: 1, prompt_cache_hit_tokens: 999 }).inputTokens, 0);
+  assert.equal(mapUsage(null), null);
 });
 
 test('工具调用：tool-call-delta 累积出完整的 JSON 参数，finish 为 tool-calls', async () => {
