@@ -2,6 +2,11 @@
 node_modules/
 *.log
 
+# 构建产物：插件的 tgz 由 `npm run pack:plugin` 生成，走 GitHub Releases 分发，
+# **不入库**（二进制体积会随每次发布膨胀，而且 release 附件本来就有独立存档）
+*.tgz
+*.tar.gz
+
 # 本地用量账本（只记元数据，但属运行时产物）
 usage.jsonl
 
