@@ -1086,6 +1086,12 @@ async function fetchCatalog() {
           maxOutput: m.maxOutputTokens,
           images: !!m.supportsImages,
           credits: m.credits,
+          // 上游的推理能力标记：supportsReasoning=true 表示该模型接受推理强度控制
+          //（选择器要据此显示"推理等级"下拉）；onlyReasoning 表示该模型只能以
+          // 推理模式使用。不上报数据里的这两个字段，插件就无法给模型声明
+          // reasoning 元数据 —— dsh 的选择器会少一个有用的控件。
+          supportsReasoning: m.supportsReasoning === true,
+          onlyReasoning: m.onlyReasoning === true,
           // 保留上游的说明与标签：国际版把具体型号写在 description 里，
           // 光看 id（default-model 这类档位名）无法判断它其实是哪个模型
           vendor: m.vendor,
@@ -1495,6 +1501,8 @@ const server = createServer(async (req, res) => {
           ...(m.maxOutput ? { max_output_tokens: m.maxOutput } : {}),
           ...(typeof credits === 'number' ? { credits } : {}),
           ...(m.images ? { supports_images: true } : {}),
+          ...(m.supportsReasoning ? { supports_reasoning: true } : {}),
+          ...(m.onlyReasoning ? { only_reasoning: true } : {}),
           ...(m.vendor ? { vendor: m.vendor } : {}),
           ...(Array.isArray(m.tags) && m.tags.length ? { tags: m.tags } : {}),
           ...(m.descriptionZh ? { description_zh: m.descriptionZh } : {}),

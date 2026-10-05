@@ -413,12 +413,28 @@ export class WorkBuddyAdapter {
     }));
   }
 
-  /** 单个模型的精确元数据（上下文 / 输出上限）。 */
+  /**
+   * 单个模型的精确元数据（上下文 / 输出上限 / 推理等级）。
+   *
+   * reasoning 元数据的形状由 dsh 的 llm 服务校验（INVALID_MODEL_REASONING）：
+   * `efforts` 每项 {id, name} 且 id 非空不重复；`defaultEffort` 必须在 efforts 里。
+   * 选择器据此显示"推理等级"下拉；用户选的值经 stream(options.reasoningEffort)
+   * 回到我们这里，翻成上游的 reasoning_effort（见 stream 内）。
+   *
+   * 只对"声明支持推理"的模型给出：目录里 reasoning === true 的模型（上游目录
+   * 有该标记）直接给低/中/高三档；其余模型不返回 reasoning 字段 —— 选择器
+   * 就不会显示这个下拉（发了上游也可能 400，与"不猜参数"同一原则）。
+   */
   async resolveModel(provider, model) {
     const catalog = await this.catalog();
     const hit = catalog.find((m) => m && m.id === model);
     if (!hit) return { provider, id: model, name: model };
     const [mapped] = toAdapterModels([hit]);
+    const efforts = [
+      { id: 'low', name: 'Low' },
+      { id: 'medium', name: 'Medium' },
+      { id: 'high', name: 'High' },
+    ];
     return {
       provider,
       id: model,
@@ -426,6 +442,7 @@ export class WorkBuddyAdapter {
       ...(mapped?.contextWindow ? { context: { contextWindow: mapped.contextWindow } } : {}),
       ...(mapped?.maxTokens ? { defaultMaxTokens: mapped.maxTokens } : {}),
       ...(mapped?.inputModalities ? { inputModalities: mapped.inputModalities } : {}),
+      ...(mapped?.reasoning ? { reasoning: { efforts, defaultEffort: 'medium' } } : {}),
     };
   }
 
@@ -477,7 +494,13 @@ export class WorkBuddyAdapter {
       const callerMax = typeof options.maxTokens === 'number' && options.maxTokens > 0;
       const maxTokens = callerMax ? options.maxTokens : this.defaults.maxTokens;
       if (typeof maxTokens === 'number' && maxTokens > 0) payload.max_tokens = maxTokens;
-      if (this.defaults.reasoningEffort) payload.reasoning_effort = this.defaults.reasoningEffort;
+      // 推理强度：选择器里用户选的（options.reasoningEffort）优先；没选时用
+      // 配置默认。两者都没有就完全不发 —— 上游对未知/无意义参数的容忍度不一，
+      // 不猜（与 max_tokens/temperature 同一原则）。
+      const reasoningEffort = typeof options.reasoningEffort === 'string' && options.reasoningEffort
+        ? options.reasoningEffort
+        : this.defaults.reasoningEffort;
+      if (reasoningEffort) payload.reasoning_effort = reasoningEffort;
       if (Array.isArray(options.stop) && options.stop.length) payload.stop = options.stop;
     } catch (error) {
       yield { type: 'finish', reason: { kind: 'error', failure: { message: `请求组装失败：${error?.message || error}`, code: CODE.INVALID } } };

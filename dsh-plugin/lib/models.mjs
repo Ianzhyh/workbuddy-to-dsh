@@ -31,7 +31,9 @@ export function toAdapterModel(model) {
   const contextWindow = Number(model.context_window || model.contextWindow || 0) || undefined;
   const maxTokens = Number(model.max_output_tokens || model.maxTokens || 0) || undefined;
   const images = model.supports_images === true || model.images === true;
-  const reasoning = model.reasoning === true;
+  // 推理能力：桥以 supports_reasoning（上游 supportsReasoning 的透传）标记；
+  // 兼容直接给 reasoning:true 的旧形状。
+  const reasoning = model.supports_reasoning === true || model.supportsReasoning === true || model.reasoning === true;
   return {
     id,
     name: String(model.name || id),

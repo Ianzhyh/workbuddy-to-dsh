@@ -143,6 +143,69 @@ test('toAdapterModels：allow 非空 = 白名单；deny 永远排除', () => {
   assert.ok(!denyOnly.some((m) => m.id === 'model-b'));
 });
 
+// ── 推理等级（reasoning）元数据与下发 ─────────────────────────────────
+
+test('resolveModel：supports_reasoning 的模型必须带 reasoning 元数据（选择器据此显示推理下拉）', async () => {
+  const adapter = new WorkBuddyAdapter({
+    provider: 'workbuddy', displayName: 'WB',
+    client: { models: async () => ({ data: [
+      { id: 'thinker', name: 'Thinker', context_window: 100000, max_output_tokens: 8000, supports_reasoning: true },
+      { id: 'plain', name: 'Plain', context_window: 100000, max_output_tokens: 8000 },
+    ] }) },
+  });
+  const thinker = await adapter.resolveModel('workbuddy', 'thinker');
+  assert.ok(thinker.reasoning, '支持推理的模型必须返回 reasoning 元数据');
+  assert.ok(Array.isArray(thinker.reasoning.efforts) && thinker.reasoning.efforts.length >= 2,
+    'efforts 必须是非空数组（dsh 校验 efforts.length===0 直接抛 INVALID_MODEL_REASONING）');
+  for (const e of thinker.reasoning.efforts) {
+    assert.equal(typeof e.id, 'string');
+    assert.ok(e.id.length > 0, 'effort.id 必须非空（dsh 校验）');
+    assert.equal(typeof e.name, 'string');
+    assert.ok(e.name.length > 0);
+  }
+  // defaultEffort 必须在 efforts 里（dsh 校验：unknown defaultEffort 抛错）
+  if (thinker.reasoning.defaultEffort !== undefined) {
+    assert.ok(thinker.reasoning.efforts.some((e) => e.id === thinker.reasoning.defaultEffort),
+      'defaultEffort 必须是 efforts 中的一员');
+  }
+  const plain = await adapter.resolveModel('workbuddy', 'plain');
+  assert.equal('reasoning' in plain, false, '不支持推理的模型不能带 reasoning（不猜能力）');
+});
+
+test('stream：选择器选的 reasoningEffort 必须翻成上游 reasoning_effort，未选且无默认时不发', async () => {
+  // 用两套 adapter 分别验证"选择器值优先"与"完全不发"
+  const make = (defaults) => {
+    const adapter = new WorkBuddyAdapter({
+      provider: 'workbuddy', displayName: 'WB', defaults,
+      client: { models: async () => ({ data: CATALOG }) },
+    });
+    let captured = null;
+    adapter.client.chat = async (payload) => {
+      captured = payload;
+      return { ok: true, body: (async function* () { /* 拿到 payload 即可 */ })() };
+    };
+    return { adapter, get: () => captured };
+  };
+
+  // a) 用户在选择器选了 high → 必须下发 reasoning_effort: 'high'
+  const a = make({});
+  const s1 = a.adapter.stream({ model: 'model-a', messages: [{ role: 'user', content: 'hi' }], reasoningEffort: 'high' });
+  for await (const c of s1) { void c; break; }
+  assert.equal(a.get().reasoning_effort, 'high', '选择器选的等级必须下发');
+
+  // b) 什么都没选、也没配默认 → 完全不下发（不猜）
+  const b = make({});
+  const s2 = b.adapter.stream({ model: 'model-a', messages: [{ role: 'user', content: 'hi' }] });
+  for await (const c of s2) { void c; break; }
+  assert.equal('reasoning_effort' in b.get(), false, '未选择且无默认时不能发 reasoning_effort');
+
+  // c) 没选但配置了默认 → 下发默认值
+  const c2 = make({ reasoningEffort: 'low' });
+  const s3 = c2.adapter.stream({ model: 'model-a', messages: [{ role: 'user', content: 'hi' }] });
+  for await (const c of s3) { void c; break; }
+  assert.equal(c2.get().reasoning_effort, 'low', '配置的默认等级应下发');
+});
+
 // ── 偏好文件的持久化（.model-prefs.json）─────────────────────────────
 
 test('readModelPrefs/writeModelPrefs：持久化且对损坏文件健壮', async () => {
