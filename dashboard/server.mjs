@@ -922,8 +922,14 @@ const server = createServer(async (req, res) => {
         }
         return;
       }
+      // lines 必须做数值校验：`Number('abc')` 是 NaN，而 `list.slice(-NaN)` 等价于
+      // `slice(0)` —— 会把**整份日志**返回。实测 lines=abc / 0 / 999999 都返回了全部
+      // 1919 行（而不是 80 行）。这里与插件侧 /workbuddy/log 用同一套 clamp，
+      // 非法值回落到本接口的默认 80，有效值上限 2000。
+      const rawLines = Number(url.searchParams.get('lines'));
+      const lineCount = Number.isFinite(rawLines) && rawLines > 0 ? Math.min(Math.floor(rawLines), 2000) : 80;
       sendJson(res, 200, {
-        lines: readBridgeLog(Number(url.searchParams.get('lines') || 80), {
+        lines: readBridgeLog(lineCount, {
           currentOnly: url.searchParams.get('current') === '1',
         }),
       });

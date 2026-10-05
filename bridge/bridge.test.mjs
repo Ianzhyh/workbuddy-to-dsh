@@ -723,3 +723,135 @@ test('桥：拒绝外来 Origin（DNS rebinding 防线），且不误伤本机�
     rmSync(bridge.dir, { recursive: true, force: true });
   }
 });
+
+test('桥：客户端可控的 model 必须收敛类型与长度（账本/日志/回显都不能被撑爆）', { timeout: 90_000 }, async () => {
+  const calls = { chat: 0 };
+  const upstream = createServer((req, res) => {
+    const path = new URL(req.url, 'http://127.0.0.1').pathname;
+    if (path === '/v2/enterprises/personal/models') {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      return res.end(JSON.stringify({ code: 0, data: { models: [{ id: 'len-model', maxInputTokens: 128000, maxOutputTokens: 4096 }] } }));
+    }
+    if (path === '/v3/config') {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      return res.end(JSON.stringify({ code: 0, data: { models: [] } }));
+    }
+    if (path === '/v2/chat/completions') {
+      calls.chat += 1;
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      return res.end('data: {"choices":[{"delta":{"content":"ok"}}]}\n\ndata: [DONE]\n\n');
+    }
+    res.writeHead(404, { 'content-type': 'application/json' });
+    res.end('{}');
+  });
+  await new Promise((r) => upstream.listen(0, '127.0.0.1', r));
+  const upstreamBase = `http://127.0.0.1:${upstream.address().port}`;
+
+  const bridge = await startBridge({ CODEBUDDY_ENDPOINT: upstreamBase }, { auth: READABLE_FAKE_AUTH });
+  const post = (body) => fetch(bridge.baseUrl + '/v1/chat/completions', {
+    method: 'POST',
+    headers: { ...auth, 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(15000),
+  });
+  try {
+    await fetch(bridge.baseUrl + '/v1/models?all=1', { headers: auth }); // 预热目录
+
+    // ① 超长 model：本地 400，且响应体**不能**原样回显那 30 万字符
+    const huge = 'x'.repeat(300000);
+    const over = await post({ model: huge, messages: [{ role: 'user', content: 'hi' }] });
+    assert.equal(over.status, 400, '超长 model 必须被本地拒绝');
+    const overText = await over.text();
+    assert.ok(overText.length < 1000, `400 响应体必须短（实际 ${overText.length} 字符）—— 不能回显客户端输入`);
+    assert.ok(!overText.includes(huge), '响应体里不得原样回显超长 model');
+
+    // ② 账本行必须有界，否则反复打就能把磁盘灌爆
+    await new Promise((r) => setTimeout(r, 300));
+    const ledger = readFileSync(join(bridge.dir, 'usage.jsonl'), 'utf8').trim().split('\n');
+    const lastRow = JSON.parse(ledger[ledger.length - 1]);
+    assert.ok(String(lastRow.model).length <= 210, `账本行 model 必须被截断（实际 ${String(lastRow.model).length} 字符）`);
+    assert.equal(lastRow.ok, false);
+
+    // ③ /v1/requests 回显也必须是有界的
+    const reqs = await (await fetch(bridge.baseUrl + '/v1/requests', { headers: auth })).json();
+    assert.ok(String(reqs.requests[0].model || '').length <= 210, '/v1/requests 的 model 不得原样回显超长串');
+
+    // ④ model 不是字符串（数组/对象/数字/布尔）→ 类型混淆会让"长度"判断失效，必须拒
+    for (const badModel of [['a', 'b'], { id: 'x' }, 123, true]) {
+      const r = await post({ model: badModel, messages: [{ role: 'user', content: 'hi' }] });
+      assert.equal(r.status, 400, `model=${JSON.stringify(badModel)} 必须被拒（必须是字符串）`);
+      await r.text();
+    }
+
+    // ⑤ `null` / 缺省视同"没给" → 沿用原有的默认模型回落（不算类型错误）
+    for (const missing of [null, undefined]) {
+      const r = await post({ model: missing, messages: [{ role: 'user', content: 'hi' }] });
+      assert.equal(r.status, 200, `model=${String(missing)} 应当回落到默认模型，而不是被拒`);
+      await r.text();
+    }
+
+    // ⑥ 正常模型不受影响
+    const before = calls.chat;
+    const okModel = await post({ model: 'len-model', messages: [{ role: 'user', content: 'hi' }] });
+    assert.equal(okModel.status, 200);
+    await okModel.text();
+    assert.equal(calls.chat, before + 1, '合法模型必须照常打到上游');
+  } finally {
+    await bridge.stop();
+    try { upstream.close(); } catch { /* 忽略 */ }
+    rmSync(bridge.dir, { recursive: true, force: true });
+  }
+});
+
+test('桥：刷新失败时不得把响应体写进日志（响应体可能带 accessToken）', { timeout: 90_000 }, async () => {
+  const SENTINEL = 'SENTINEL-ACCESS-TOKEN-MUST-NOT-BE-LOGGED';
+  const upstream = createServer((req, res) => {
+    const path = new URL(req.url, 'http://127.0.0.1').pathname;
+    if (path === '/v2/plugin/auth/token/refresh') {
+      // 关键形状：**非 2xx，但响应体里带着 accessToken** —— 这正是"打印响应体"
+      // 会把令牌落进 bridge.log 的场景（失败条件含 !res.ok）。
+      res.writeHead(401, { 'content-type': 'application/json' });
+      return res.end(JSON.stringify({ code: 0, data: { accessToken: SENTINEL, refreshToken: SENTINEL } }));
+    }
+    if (path === '/v2/chat/completions') {
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      return res.end('data: {"choices":[{"delta":{"content":"ok"}}]}\n\ndata: [DONE]\n\n');
+    }
+    res.writeHead(404, { 'content-type': 'application/json' });
+    res.end('{}');
+  });
+  await new Promise((r) => upstream.listen(0, '127.0.0.1', r));
+  const upstreamBase = `http://127.0.0.1:${upstream.address().port}`;
+
+  // expiresAt 只剩 60 秒（< 5 分钟 skew）→ 请求会先触发一次 token 刷新
+  const nearExpiry = {
+    auth: {
+      accessToken: 'fake-access-token',
+      refreshToken: 'fake-refresh-token',
+      domain: 'example.invalid',
+      expiresAt: Date.now() + 60_000,
+    },
+  };
+  const bridge = await startBridge(
+    { CODEBUDDY_ENDPOINT: upstreamBase, WORKBUDDY_LOG: '1' },
+    { auth: nearExpiry },
+  );
+  try {
+    const r = await fetch(bridge.baseUrl + '/v1/chat/completions', {
+      method: 'POST',
+      headers: { ...auth, 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'deepseek-v4.1-flash', messages: [{ role: 'user', content: 'hi' }] }),
+      signal: AbortSignal.timeout(15000),
+    });
+    await r.text().catch(() => '');
+    await new Promise((res) => setTimeout(res, 400));
+
+    // 路径确实走到了（否则这条断言是空转）
+    assert.match(bridge.out(), /refresh failed/, '应当记录了一次刷新失败（用例必须真的覆盖到目标路径）');
+    assert.ok(!bridge.out().includes(SENTINEL), '日志里不得出现刷新响应体里的令牌（违反"不落盘令牌"）');
+  } finally {
+    await bridge.stop();
+    try { upstream.close(); } catch { /* 忽略 */ }
+    rmSync(bridge.dir, { recursive: true, force: true });
+  }
+});

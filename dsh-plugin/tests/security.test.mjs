@@ -165,6 +165,14 @@ test('安全：控制台拒绝外来 Origin、拒绝备份文件、带基础安�
     assert.equal(page.headers.get('x-frame-options'), 'DENY');
     assert.match(page.headers.get('content-security-policy') || '', /frame-ancestors 'none'/);
     await page.text();
+
+    // ⑥ 日志行数参数必须做数值校验：`Number('abc')` 是 NaN，而 `slice(-NaN)` 等价于
+    //    `slice(0)` —— 会把整份日志返回（实测曾返回全部 1919 行而不是 80 行）。
+    for (const [q, limit] of [['lines=abc', 80], ['lines=0', 80], ['lines=80', 80], ['lines=999999', 2000]]) {
+      const j = await (await fetch(`${base}/api/bridge/log?${q}`)).json();
+      const n = (j.lines || []).length;
+      assert.ok(n <= limit, `${q} 返回了 ${n} 行，超过上限 ${limit}（参数没有被 clamp）`);
+    }
   } finally {
     child.kill();
     await sleep(200);

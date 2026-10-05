@@ -289,7 +289,14 @@ async function refreshAuth(auth) {
     const body = await res.json().catch(() => null);
     if (!res.ok || !body || body.code !== 0 || !body.data?.accessToken) {
       lastRefreshFailedAt = Date.now();
-      log('refresh failed', res.status, JSON.stringify(body)?.slice(0, 200));
+      // **绝不打印响应体全文**：失败条件里含 `!res.ok`，也就是说非 2xx 的响应体
+      // 仍可能带着 `data.accessToken` —— 而这一行会落进 bridge.log（控制台的日志
+      // 面板还会把它显示出来），那就直接违反了「不落盘令牌 / 凭据不落盘」的承诺。
+      // 只取协议层的 code 与 msg：定位问题够用，且不含凭据。
+      const reason = body && typeof body === 'object'
+        ? `${body.code ?? ''} ${body.msg || body.message || ''}`.trim()
+        : '';
+      log('refresh failed', res.status, shortError(reason || '(no protocol message)'));
       return null;
     }
     persistRefreshed();
@@ -874,6 +881,17 @@ async function upstreamCatalog() {
  * 是绝大多数拼错 id 的调用），但必须给用户一个立刻能关掉它的出口。
  */
 const MODEL_PREFLIGHT_ENABLED = process.env.WORKBUDDY_SKIP_MODEL_PREFLIGHT !== '1';
+
+/**
+ * 客户端送来的模型 id 长度上限。
+ *
+ * 为什么必须有：model 是**客户端可控**且会被**存进账本、写进日志、原样回显**
+ * 的字段（400 响应体、/v1/requests、/v1/usage 的分组键）。实测：一个 30 万字符
+ * 的 model 会让账本单行变成 30 万字符（文件 600KB/次）、让 400 响应体也是
+ * 30 万字符、让 /v1/requests 回显 30 万字符 —— 反复打就能把磁盘/内存灌爆。
+ * 真实模型 id 都很短（`deepseek-v4.1-flash` 19 字符），200 是极宽松的上限。
+ */
+const MAX_MODEL_ID_LEN = 200;
 
 /**
  * chat 前的本地模型预校验。返回错误文本表示「该拒」，返回 null 表示「放行」。
@@ -1627,7 +1645,25 @@ const server = createServer(async (req, res) => {
       let payload;
       try { payload = JSON.parse(raw); } catch { return json(res, 400, { error: { message: 'invalid JSON body' } }); }
       const wantStream = payload.stream === true;
+      // model 的类型与长度必须**先收敛**：它是客户端可控字段，会进账本、进日志、
+      // 还会被原样回显（见 MAX_MODEL_ID_LEN 的说明）。数组/对象/数字/布尔一律拒绝
+      // —— 否则类型混淆会让"长度"判断失效（如数组的 length 是元素个数），而且
+      // 静默换成默认模型等于"替用户换了个要计费的模型"，比直接报错更糟。
+      // `null` 与缺省视同"没给"（沿用原有的回落行为），不当成类型错误。
+      if (payload.model != null && typeof payload.model !== 'string') {
+        return json(res, 400, { error: { message: 'workbuddy-bridge: "model" must be a string', type: 'invalid_request' } });
+      }
       const model = payload.model || 'deepseek-v4.1-flash';
+      if (model.length > MAX_MODEL_ID_LEN) {
+        const message = `workbuddy-bridge: model id too long (${model.length} chars, max ${MAX_MODEL_ID_LEN})`;
+        // 落账与日志都只留**截断版**：账本行必须有界，也绝不把这段垃圾原样回显
+        const trimmed = shortError(model, MAX_MODEL_ID_LEN);
+        log('rejected oversized model id', trimmed);
+        recordRequest({
+          model: trimmed, stream: wantStream, ms: 0, ok: false, status: 400, code: null, error: message,
+        });
+        return json(res, 400, { error: { message, type: 'invalid_request' } });
+      }
 
       // 模型预校验：桥手里就有目录，拼错的 id 不该花一次上游往返（详见
       // preflightModelError 的注释）。放在 maybeAutoCheckin 之前是刻意的 ——
