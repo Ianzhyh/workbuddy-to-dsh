@@ -50,6 +50,11 @@ docs/promo/_*
 docs/promo/_dbg*
 docs/promo/_measure*
 
+# 设计审查用的临时分区截图（tools/dev/shot-regions.mjs 产出）。
+# 它们是**过程材料**：用来放大看细节，看完就该丢，不承担文档职责；
+# 真正要进文档的截图是 docs/screenshot.png 与 docs/clients-panel-*.png。
+docs/_review/
+
 # 发布相关内部笔记（不入库）
 .PUBLISH.local.md
 

@@ -165,6 +165,20 @@ body {
                "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
   font-size: 13px;
   line-height: 1.55;
+  /*
+   * 数字一律等宽（tabular figures）。
+   *
+   * 为什么必须**显式声明**，而不是指望「字体自己会处理」—— 实测这台机器上
+   * Segoe UI 的 **Regular(400) 与 Bold(700) 用等宽数字，而 Medium(500) 与
+   * Semibold(600) 用比例数字**（不同字重落在不同的字体文件上）。
+   * 结果是同一个控制台里，数字对不对得齐取决于那个元素恰好用了哪个字重：
+   * 19px/700 的状态卡大数字是齐的，而它下面 13.5px/600 的小数字、
+   * 11.5px/600 的表头、500 的徽章全都不齐。
+   *
+   * 更糟的是**数值刷新时会横向抖动**：位数一变（9 → 10），整段文字宽度跳变。
+   * 声明 `tabular-nums` 之后就不依赖字体挑哪一套字形了。
+   */
+  font-variant-numeric: tabular-nums;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   min-height: 100vh;
@@ -744,6 +758,18 @@ td {
   vertical-align: middle;
   transition: background-color 0.12s ease;
 }
+
+/*
+ * 数值列右对齐。
+ *
+ * 为什么：数据表的数值列左对齐时小数点各起各的（倍率 0.06 / 0.11 / 1.62），
+ * 量级没法竖着扫 —— 而「哪个模型更便宜」正是这张表要回答的问题。
+ * 右对齐配合等宽数字（见 body 的 `font-variant-numeric`）后，一列数字像账本一样对齐。
+ *
+ * 为什么用显式的 `.num` 类而不是直接对齐 `td.mono`：mono 里混着**时间戳**和
+ * **模型 id**，那些是文本，右对齐反而更难读。所以必须逐列标明，不能按字体一刀切。
+ */
+td.num, th.num { text-align: right; }
 tr:hover td {
   background: var(--panel-hover);
 }

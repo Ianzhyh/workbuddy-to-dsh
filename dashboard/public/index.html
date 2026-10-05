@@ -1483,20 +1483,20 @@ function renderUsage() {
   if (u.models.length) {
     // 明细表在窄屏下会宽于容器：必须放进可横向滚动的壳里，否则整页横向溢出
     html += '<div class="tablewrap" style="max-height:340px">'
-      + '<table><thead><tr><th>模型</th><th>次数</th><th>输入</th><th>输出</th><th>积分</th><th>积分/次</th><th>总耗时</th></tr></thead><tbody>';
+      + '<table><thead><tr><th>模型</th><th class="num">次数</th><th class="num">输入</th><th class="num">输出</th><th class="num">积分</th><th class="num">积分/次</th><th class="num">总耗时</th></tr></thead><tbody>';
     for (const m of u.models) {
       const mc = Number(m.creditCalls) || 0;
       const per = mc ? fmtCredit((Number(m.credit) || 0) / mc, true) : '—';
       const active = !!reqModelFilter && reqModelFilter === m.model;
       html += '<tr class="pickrow' + (active ? ' rowactive' : '') + '" data-model="' + escapeAttr(m.model)
         + '" title="点击筛选「最近请求」">'
-        + '<td class="mono">' + escapeAttr(m.model) + '</td><td>' + m.calls +
-        '</td><td class="mono">' + fmtNum(m.promptTokens) +
-        '</td><td class="mono">' + fmtNum(m.completionTokens) +
-        '</td><td class="mono"' + (mc ? '' : ' title="上游未回报该模型的扣分"') + '>'
+        + '<td class="mono">' + escapeAttr(m.model) + '</td><td class="num">' + m.calls +
+        '</td><td class="mono num">' + fmtNum(m.promptTokens) +
+        '</td><td class="mono num">' + fmtNum(m.completionTokens) +
+        '</td><td class="mono num"' + (mc ? '' : ' title="上游未回报该模型的扣分"') + '>'
         + fmtCredit(m.credit, mc) +
-        '</td><td class="mono">' + per +
-        '</td><td class="mono">' + fmtNum(m.ms) + ' ms</td></tr>';
+        '</td><td class="mono num">' + per +
+        '</td><td class="mono num">' + fmtNum(m.ms) + ' ms</td></tr>';
     }
     html += '</tbody></table></div>';
   } else {
@@ -1694,16 +1694,16 @@ function renderRequests() {
       '<td class="mono">' + fmtTime(r.t) + '</td>' +
       '<td class="mono">' + escapeAttr(r.model) + '</td>' +
       '<td>' + (r.stream ? '流式' : '非流式') + '</td>' +
-      '<td class="mono">' + fmtNum(r.ms) + ' ms</td>' +
-      '<td class="mono">' + tokens + '</td>' +
-      '<td class="mono">' + fmtCredit(r.credit, typeof r.credit === 'number') + '</td>' +
+      '<td class="mono num">' + fmtNum(r.ms) + ' ms</td>' +
+      '<td class="mono num">' + tokens + '</td>' +
+      '<td class="mono num">' + fmtCredit(r.credit, typeof r.credit === 'number') + '</td>' +
       '<td>' + result + '</td>' +
       '</tr>';
   }).join('');
 
   box.innerHTML = notice +
     '<div class="tablewrap" id="reqTableWrap" style="max-height:320px"><table><thead><tr>' +
-    '<th>时间</th><th>模型</th><th>方式</th><th>耗时</th><th>输入/输出</th><th>积分</th><th>结果</th>' +
+    '<th>时间</th><th>模型</th><th>方式</th><th class="num">耗时</th><th class="num">输入/输出</th><th class="num">积分</th><th>结果</th>' +
     '</tr></thead><tbody>' + rows + '</tbody></table></div>';
   // 恢复滚动位置（放最后：innerHTML 一换 scrollTop 就归零了）
   const nextWrap = $('reqTableWrap');
@@ -2534,10 +2534,10 @@ function renderModelTable(models, registered) {
           '<button type="button" class="infobtn" data-info="' + escapeAttr(m.id)
           + '" aria-expanded="false" title="查看模型详情">ⓘ</button></td>' +
         '<td class="name">' + escapeAttr(m.name || '—') + '</td>' +
-        '<td class="mono" title="' + escapeAttr(fmtNum(m.context_window || 0)) + '">' + escapeAttr(fmtCompact(m.context_window)) + '</td>' +
-        '<td class="mono" title="' + escapeAttr(fmtNum(m.max_output_tokens || 0)) + '">' + escapeAttr(fmtCompact(m.max_output_tokens)) + '</td>' +
-        '<td class="mono">' + rateCell + '</td>' +
-        '<td class="mono" data-cost="' + escapeAttr(m.id) + '" title="正在计算…">—</td>' +
+        '<td class="mono num" title="' + escapeAttr(fmtNum(m.context_window || 0)) + '">' + escapeAttr(fmtCompact(m.context_window)) + '</td>' +
+        '<td class="mono num" title="' + escapeAttr(fmtNum(m.max_output_tokens || 0)) + '">' + escapeAttr(fmtCompact(m.max_output_tokens)) + '</td>' +
+        '<td class="mono num">' + rateCell + '</td>' +
+        '<td class="mono num" data-cost="' + escapeAttr(m.id) + '" title="正在计算…">—</td>' +
         '<td>' + (on ? '<span class="tag ok">已注册</span>' : '<span class="tag">未注册</span>') + '</td>' +
         '<td data-probe="' + escapeAttr(m.id) + '">' + renderProbe(m.id) + '</td>' +
       '</tr>';
@@ -2579,8 +2579,8 @@ function renderModelTable(models, registered) {
         '<span class="msg" id="regMsg"></span>' +
       '</div>' +
       '<div class="tablewrap" id="modelTableWrap"><table id="modelTable"><thead><tr>' +
-      '<th style="width:38px"></th><th>模型 id</th><th>显示名</th><th>上下文</th><th>最大输出</th><th>倍率</th>'
-      + '<th title="账本最近 N 天：扣分合计 ÷ token 合计 × 1000，只含成功且回报了扣分的调用">实测成本</th><th>dsh</th>' +
+      '<th style="width:38px"></th><th>模型 id</th><th>显示名</th><th class="num">上下文</th><th class="num">最大输出</th><th class="num">倍率</th>'
+      + '<th class="num" title="账本最近 N 天：扣分合计 ÷ token 合计 × 1000，只含成功且回报了扣分的调用">实测成本</th><th>dsh</th>' +
       '<th class="th-probe" id="probeSortTh" title="点击切换排序：可用优先 / 耗时升序 / 耗时降序">可用性'
         + '<span class="sortmark" id="probeSortMark"></span> <span class="stamp" id="probeStamp"></span></th>' +
       '</tr></thead><tbody>' + rows + '</tbody></table></div>';
