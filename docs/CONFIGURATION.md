@@ -27,6 +27,8 @@ copy .env.example .env
 | `WORKBUDDY_LOCAL_TOKEN` | `wb-local-bridge` | 本地回环令牌。仅用于阻止同机其它程序误用该端口，**不是**上游凭据。需与 dsh 的 `WORKBUDDY_BRIDGE_KEY` 值一致 |
 | `WORKBUDDY_TIMEOUT_MS` | `0` | 上游请求超时（毫秒）。`0` = 不限——长回答需要保持 0 |
 | `WORKBUDDY_LOG` | `1` | `1` 时打印每次请求的模型、消息数、工具数（**不含对话内容**） |
+| `WORKBUDDY_ANTHROPIC_MODEL` | `glm-5.3` | Claude Code 的模型名映射到哪个上游真实模型。可填任意 `/v1/models` 里的 id |
+| `WORKBUDDY_ANTHROPIC_FAST_MODEL` | `glm-5.3-flash` | Claude Code 后台任务（标题生成、文件摘要）用的小快模型 |
 
 ### 控制台
 
@@ -34,6 +36,7 @@ copy .env.example .env
 |---|---|---|
 | `DASHBOARD_PORT` | `8792` | 控制台端口 |
 | `DASHBOARD_AUTO_START_BRIDGE` | `1` | 控制台启动时自动拉起桥（"双击即用"的关键）。设为 `0` 则改为手动点「启动桥服务」 |
+| `WORKBUDDY_QUOTA_TTL_MS` | `60000` | 积分余额的缓存时长。总览每 20 秒轮询一次，而积分要打上游计费网关；调小可更快反映余额变化（如签到后），代价是更频繁的上游查询 |
 
 ### WorkBuddy 客户端
 

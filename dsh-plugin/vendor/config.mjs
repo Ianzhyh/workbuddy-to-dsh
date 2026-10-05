@@ -143,6 +143,16 @@ export const config = {
     token: env.WORKBUDDY_LOCAL_TOKEN || 'wb-local-bridge',
     upstreamTimeoutMs: Number(env.WORKBUDDY_TIMEOUT_MS || 0),
     /**
+     * 积分余额的缓存时长（毫秒）。
+     *
+     * 积分要打上游计费网关，控制台每 20 秒轮询一次总览 —— 不加缓存等于每 20 秒
+     * 打一次计费端点，既没必要也容易触发限流。默认 60 秒。
+     *
+     * 调小可以让页面更快反映余额变化（签到后等），代价是更频繁的上游查询；
+     * 自动化测试也用它来构造「缓存已过期但仍有旧值」这条分支，不必真等 60 秒。
+     */
+    quotaTtlMs: Number(env.WORKBUDDY_QUOTA_TTL_MS || 60 * 1000),
+    /**
      * Anthropic 兼容层（`POST /v1/messages`，供 Claude Code 使用）的模型映射。
      *
      * Claude Code 发的是 `claude-sonnet-4-…` 这类名字，上游根本没有这些 id，
