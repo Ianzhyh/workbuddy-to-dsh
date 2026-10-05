@@ -160,6 +160,9 @@
       <button class="mini" id="clientsCopyAllBtn">复制全部</button></h2>
     <p class="hint">桥同时讲两套协议：<b>OpenAI</b>（<code>/v1/chat/completions</code>，绝大多数客户端走这条）
       与 <b>Anthropic</b>（<code>/v1/messages</code>，Claude Code 走这条）。下面三个值填进客户端即可，点一下就能复制。</p>
+    <!-- 复制结果对屏幕阅读器不可见，必须有一个 live region 播报；
+         视觉上用 .sr-only 隐藏，但它一直在 DOM 里等消息。 -->
+    <div id="clientsLive" class="sr-only" role="status" aria-live="polite"></div>
     <div id="clientsBox"><div class="empty">正在读取…</div></div>
   </section>
 
@@ -1822,10 +1825,16 @@ async function copyText(text, opts = {}) {
     }
   }
 
-  // quiet：内容很长时（如整份诊断报告）不要把全文塞进提示条，由调用方自己给文案
+  // 提示条只说「复制了什么」，**不塞内容**：调用方给了 `label` 就用它，没给就不带宾语。
+  //
+  // 原来是把整段文本拼进提示条 —— 复制一份配置、一条上游错误详情或一轮对话回答时，
+  // 提示条会被撑成几百字（实测复制 opencode 配置时，整份 JSON 都被贴了上去），
+  // 既挤掉旁边的按钮，也让「复制成功」这个信号本身被淹没。
+  // 全文改放进 tooltip（`setMsg` 的第三个参数），信息一点没丢。
   if (!opts.quiet) {
-    if (ok) setMsg('已复制：' + text, 'good');
-    else setMsg('复制失败，请手动复制：' + text, 'err');
+    const what = opts.label ? '：' + opts.label : '';
+    if (ok) setMsg('已复制' + what, 'good', text);
+    else setMsg('复制失败' + what + '，请手动选择复制', 'err', text);
   }
   return ok;
 }
@@ -2947,8 +2956,9 @@ function refreshLogIfOpen() {
 
 $('refreshBtn').onclick = refreshAll;
 // 「复制全部」：贴进聊天/笔记用；面板里每一块也都有各自的复制按钮
-$('clientsCopyAllBtn').onclick = () => copyText(clientsCheatSheet(lastClients || {}))
-  .then((ok) => { if (ok) setMsg('已复制全部接入信息', 'good'); });
+$('clientsCopyAllBtn').onclick = () => runCopy(
+  $('clientsCopyAllBtn'), '全部接入信息', clientsCheatSheet(lastClients || {}),
+);
 
 $('diagBtn').onclick = () => { loadDiag(); };
 
@@ -3442,14 +3452,10 @@ function formGuideBox(d) {
 
       // 值 + 复制按钮**始终占满两格**。没有值的那行（如「请求头 → 留空」）
       // 若只放一个占位符，后面的说明就会滑进按钮列 —— 整张表的说明列随之错位。
+      const fullLabel = (g.title ? g.title + ' ' : '') + f.k;
       if (f.v) {
-        const v = clientEl('code', 'formrow-v', f.v);
-        v.title = '点击复制';
-        v.onclick = () => copyText(f.v);
-        row.append(v);
-        const btn = clientEl('button', 'mini', '复制');
-        btn.onclick = () => copyText(f.v);
-        row.append(btn);
+        row.append(copyChip(' ' + fullLabel, f.v, 'formrow-v'));
+        row.append(copyButton(' ' + fullLabel, f.v));
       } else {
         row.append(clientEl('span', 'formrow-empty', '（留空）'));
         row.append(clientEl('span', 'formrow-gap'));
@@ -3470,13 +3476,75 @@ function clientEl(tag, cls, text) {
   return n;
 }
 
+/**
+ * 复制按钮的统一实现。下面三件事必须**一起**做对，缺任何一件都等于没做：
+ *
+ * 1. **就地反馈**：点击后按钮自己变成「已复制」，1.6 秒后变回来。
+ *    原来只有页面顶部的提示条，而用户常常滚在长面板下方 —— 实测滚到底部再点复制时，
+ *    提示条 `top = -1873px`，完全在视口外，用户根本不知道到底复制成没成。
+ * 2. **可访问名唯一**：面板里有 21 个按钮，原先全都叫「复制」。屏幕阅读器用户听到的
+ *    是一串无法区分的「复制」，不知道哪个对应哪一格。每个按钮必须带
+ *    `aria-label="复制 <字段名>"`。
+ * 3. **状态播报**：视觉反馈对屏幕阅读器不可见，必须同时写进 `aria-live` 区域。
+ */
+function copyButton(label, text) {
+  const btn = clientEl('button', 'mini copybtn', '复制');
+  btn.type = 'button';
+  btn.setAttribute('aria-label', '复制' + label);
+  btn.title = '复制' + label;
+  btn.onclick = () => runCopy(btn, label, text);
+  return btn;
+}
+
+/**
+ * 值本身也可点（鼠标用户的顺手操作）。
+ *
+ * **故意不进 Tab 顺序**：每一行旁边已经有带可访问名的复制按钮，键盘用户走那条路
+ * 就够了；20 行 × 2 个焦点停靠点会让 Tab 键变成折磨。所以这里不加 `tabindex`，
+ * 也不挂键盘事件 —— 功能没有丢失，只是不重复提供第二个入口。
+ */
+function copyChip(label, value, cls) {
+  const v = clientEl('code', cls, value);
+  v.title = '点击复制' + label;
+  v.onclick = () => runCopy(v, label, value);
+  return v;
+}
+
+/** 执行一次复制：就地反馈 + 屏幕阅读器播报；失败时才升级到顶部提示条。 */
+async function runCopy(el, label, text) {
+  const ok = await copyText(text, { label, quiet: true });
+  if (!ok) {
+    // 失败罕见、且需要用户动手，值得占用顶部提示条；全文放进 tooltip 而不是撑满提示条
+    setMsg('复制失败：' + label + '，请手动选择复制', 'err', text);
+  }
+  announce(ok ? '已复制 ' + label : '复制失败：' + label);
+  if (!el) return;
+  const isButton = el.tagName === 'BUTTON';
+  clearTimeout(el.__copyTimer);
+  if (isButton) {
+    // 记下原文再改，回退时才不会把「复制全部」写成「复制」
+    el.__origText = el.__origText || el.textContent;
+    el.textContent = ok ? '已复制' : '失败';
+  }
+  el.classList.toggle('copied', ok);
+  el.classList.toggle('copyfail', !ok);
+  el.__copyTimer = setTimeout(() => {
+    if (isButton) el.textContent = el.__origText || '复制';
+    el.classList.remove('copied', 'copyfail');
+  }, 1600);
+}
+
+/** 写进 aria-live 区域：屏幕阅读器朗读，视觉上不可见。 */
+function announce(msg) {
+  const live = $('clientsLive');
+  if (live) live.textContent = msg;
+}
+
 /** 带「复制」按钮的代码块。用 textContent 写入——配置里有 < > {}，走 innerHTML 会渲染错。 */
 function clientCodeBlock(label, text) {
   const wrap = clientEl('div', 'codeblock');
   const head = clientEl('div', 'codeblock-head');
-  const btn = clientEl('button', 'mini', '复制');
-  btn.onclick = () => copyText(text);
-  head.append(clientEl('span', null, label), btn);
+  head.append(clientEl('span', null, label), copyButton(' ' + label, text));
   const pre = clientEl('pre');
   pre.textContent = text;
   wrap.append(head, pre);
@@ -3488,13 +3556,8 @@ function clientCodeBlock(label, text) {
 function clientValueRow(label, value, hint) {
   const row = clientEl('div', 'valuerow');
   row.append(clientEl('span', 'valuerow-k', label));
-  const v = clientEl('code', 'valuerow-v', value);
-  v.title = '点击复制';
-  v.onclick = () => copyText(value);
-  row.append(v);
-  const btn = clientEl('button', 'mini', '复制');
-  btn.onclick = () => copyText(value);
-  row.append(btn);
+  row.append(copyChip(' ' + label, value, 'valuerow-v'));
+  row.append(copyButton(' ' + label, value));
   if (hint) row.append(clientEl('span', 'valuerow-h', hint));
   return row;
 }

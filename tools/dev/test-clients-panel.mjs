@@ -62,7 +62,63 @@ const routes = {
   '/api/bridge/log': { body: { lines: [] } },
 };
 
-const INJECT = `window.__FIX = ${JSON.stringify(FIX)};`;
+/** 在页面里注入的对比度测量工具（与 audit-clients-panel.mjs 同源）。 */
+const MEASURE_HELPERS = `
+window.__AUDIT = {
+  parseRgb(s) {
+    const m = String(s).match(/rgba?\\(([^)]+)\\)/);
+    if (!m) return null;
+    const p = m[1].split(',').map(x => parseFloat(x.trim()));
+    return { r: p[0], g: p[1], b: p[2], a: p.length > 3 ? p[3] : 1 };
+  },
+  lum(c) {
+    const f = (v) => { v /= 255; return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4); };
+    return 0.2126 * f(c.r) + 0.7152 * f(c.g) + 0.0722 * f(c.b);
+  },
+  contrast(a, b) {
+    const l1 = this.lum(a), l2 = this.lum(b);
+    const hi = Math.max(l1, l2), lo = Math.min(l1, l2);
+    return (hi + 0.05) / (lo + 0.05);
+  },
+  effBg(el) {
+    let node = el, stack = [];
+    while (node && node !== document.documentElement) {
+      const bg = this.parseRgb(getComputedStyle(node).backgroundColor);
+      if (bg && bg.a > 0) {
+        if (bg.a >= 0.999) return { r: bg.r, g: bg.g, b: bg.b, a: 1 };
+        stack.push(bg);
+      }
+      node = node.parentElement;
+    }
+    let base = { r: 255, g: 255, b: 255 };
+    const htmlBg = this.parseRgb(getComputedStyle(document.documentElement).backgroundColor);
+    if (htmlBg && htmlBg.a >= 0.999) base = { r: htmlBg.r, g: htmlBg.g, b: htmlBg.b };
+    for (let i = stack.length - 1; i >= 0; i--) {
+      const s = stack[i];
+      base = {
+        r: base.r * (1 - s.a) + s.r * s.a,
+        g: base.g * (1 - s.a) + s.g * s.a,
+        b: base.b * (1 - s.a) + s.b * s.a,
+      };
+    }
+    return base;
+  },
+  ratioOf(el) {
+    const cs = getComputedStyle(el);
+    const fg = this.parseRgb(cs.color);
+    const bg = this.effBg(el);
+    if (!fg || !bg) return null;
+    const f = fg.a >= 0.999 ? fg : {
+      r: bg.r * (1 - fg.a) + fg.r * fg.a,
+      g: bg.g * (1 - fg.a) + fg.g * fg.a,
+      b: bg.b * (1 - fg.a) + fg.b * fg.a,
+    };
+    return { ratio: this.contrast(f, bg), size: parseFloat(cs.fontSize), weight: cs.fontWeight };
+  },
+};
+`;
+
+const INJECT = `window.__FIX = ${JSON.stringify(FIX)};${MEASURE_HELPERS}`;
 
 const server = await startStaticServer(PORT);
 const { cdp, close } = await openPage(URL_, routes, { inject: INJECT });
@@ -247,9 +303,81 @@ const clickOk = await q(cdp, `(() => {
 })()`);
 eq(clickOk, true, '点击复制按钮不抛错');
 
+// ── 6b. 可访问性：可访问名、播报区、命中区 ──────────────────────────────
+const a11y = await q(cdp, `(() => {
+  const panel = document.querySelector('[data-section="clients"]');
+  const box = document.getElementById('clientsBox');
+  const btns = [...box.querySelectorAll('button')];
+  const names = btns.map(b => (b.getAttribute('aria-label') || '').trim()).filter(Boolean);
+  // 有效命中区 = 视觉 rect ∪ 伪元素 ::after（Chromium 读不到 inset 简写，得逐边读）
+  const hit = (el) => {
+    const r = el.getBoundingClientRect();
+    const a = getComputedStyle(el, '::after');
+    if (!a.content || a.content === 'none') return { w: r.width, h: r.height };
+    const t = parseFloat(a.top) || 0, bo = parseFloat(a.bottom) || 0;
+    const l = parseFloat(a.left) || 0, ri = parseFloat(a.right) || 0;
+    return { w: r.width - l - ri, h: r.height - t - bo };
+  };
+  return {
+    total: btns.length,
+    labelled: names.length,
+    unique: new Set(names).size,
+    live: panel.querySelectorAll('[aria-live]').length,
+    small: btns.filter(b => { const h = hit(b); return h.h < 32 || h.w < 32; }).length,
+  };
+})()`);
+eq(a11y.labelled, a11y.total, '每个复制按钮都有 aria-label');
+eq(a11y.unique, a11y.total, '可访问名互不重复（21 个按钮不能都叫「复制」）');
+if (a11y.live >= 1) pass('存在 aria-live 播报区'); else fail('缺少 aria-live 播报区');
+eq(a11y.small, 0, '有效命中区均 ≥ 32px');
+
+// ── 6c. 交互：就地反馈（顶部提示条在长面板底部够不着）────────────────────
+await q(cdp, `document.querySelector('#clientsBox .codeblock-head button').click()`);
+await sleep(200);
+const fbState = await q(cdp, `(() => {
+  const b = document.querySelector('#clientsBox .codeblock-head button');
+  const live = document.getElementById('clientsLive');
+  return { text: (b.textContent || '').trim(), live: (live ? live.textContent : '').trim() };
+})()`);
+if (fbState.text === '已复制' || fbState.text === '失败') pass(`就地反馈生效（按钮文本 → "${fbState.text}"）`);
+else fail(`就地反馈未生效，按钮文本仍是 "${fbState.text}"`);
+if (fbState.live) pass(`aria-live 收到播报（"${fbState.live}"）`);
+else fail('aria-live 未收到播报');
+await sleep(1800);
+eq(await q(cdp, `document.querySelector('#clientsBox .codeblock-head button').textContent.trim()`), '复制', '1.8 秒后按钮文本恢复');
+
+// ── 6d. 对比度（WCAG AA 4.5:1）──────────────────────────────────────────
+for (const theme of ['light', 'dark']) {
+  await q(cdp, `document.documentElement.setAttribute('data-theme','${theme}')`);
+  await sleep(150);
+  const rows = await q(cdp, `(() => {
+    const sel = {
+      '字段名': '#clientsBox .formrow-k',
+      '说明文字': '#clientsBox .formrow-h',
+      '值': '#clientsBox .formrow-v',
+      '卡片说明': '#clientsBox .clientcard-note',
+      '代码块头': '#clientsBox .codeblock-head',
+      '值行说明': '#clientsBox .valuerow-h',
+      '时间戳': '#clientsStamp',
+    };
+    return Object.entries(sel).map(([k, s]) => {
+      const el = document.querySelector(s);
+      if (!el) return { k, ratio: null };
+      const m = window.__AUDIT.ratioOf(el);
+      return { k, ratio: m ? Number(m.ratio.toFixed(2)) : null };
+    });
+  })()`);
+  for (const r of rows) {
+    if (r.ratio === null) { fail(`[${theme}] 找不到元素「${r.k}」`); continue; }
+    if (r.ratio >= 4.5) pass(`[${theme}] ${r.k} 对比度 ${r.ratio}:1`);
+    else fail(`[${theme}] ${r.k} 对比度仅 ${r.ratio}:1，低于 WCAG AA 的 4.5:1`);
+  }
+}
+await q(cdp, `document.documentElement.setAttribute('data-theme','light')`);
+
 // ── 7. 多视口横向溢出扫描 ───────────────────────────────────────────────
-for (const w of [1440, 1024, 768, 390]) {
-  await cdp.send('Emulation.setDeviceMetricsOverride', { width: w, height: 900, deviceScaleFactor: 1, mobile: false });
+for (const w of [320, 390, 768, 1024, 1440]) {
+  await cdp.send('Emulation.setDeviceMetricsOverride', { width: w, height: 900, deviceScaleFactor: 1, mobile: w < 768 });
   await sleep(200);
   const ov = await q(cdp, `(() => {
     const box = document.getElementById('clientsBox');
@@ -258,10 +386,13 @@ for (const w of [1440, 1024, 768, 390]) {
       const r = el.getBoundingClientRect();
       return r.width > 0 && r.right > de.clientWidth + 1;
     }).slice(0, 3).map(el => el.className || el.tagName);
-    return { doc: de.scrollWidth - de.clientWidth, bad };
+    // 配置片段不该需要横向滚动：窄屏上没有「横着滚一下」这个习惯，
+    // 用户会以为内容被截断了（而这些片段本来就是整段复制走的，换行不影响用途）
+    const scrollers = [...box.querySelectorAll('pre')].filter(p => p.scrollWidth > p.clientWidth + 1).length;
+    return { doc: de.scrollWidth - de.clientWidth, bad, scrollers };
   })()`);
-  if (ov.doc <= 1 && ov.bad.length === 0) pass(`视口 ${w}px 无横向溢出`);
-  else fail(`视口 ${w}px 溢出：doc=${ov.doc}px 元素=${JSON.stringify(ov.bad)}`);
+  if (ov.doc <= 1 && ov.bad.length === 0 && ov.scrollers === 0) pass(`视口 ${w}px 无横向溢出，配置片段无需横向滚动`);
+  else fail(`视口 ${w}px：doc=${ov.doc}px 溢出元素=${JSON.stringify(ov.bad)} 需横向滚动的代码块=${ov.scrollers}`);
 }
 await cdp.send('Emulation.clearDeviceMetricsOverride');
 

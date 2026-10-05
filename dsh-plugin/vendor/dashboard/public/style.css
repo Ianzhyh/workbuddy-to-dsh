@@ -36,6 +36,17 @@
   --text-secondary: #334155; /* 700: 正文、表头、按钮 */
   --muted: #64748b;          /* 500: 说明副文本、辅助标签 */
   --faint: #94a3b8;          /* 400: 时间戳、占位符、边框辅助 */
+  /*
+   * 需要在浅色卡片底上**承载信息**的说明文字专用。
+   *
+   * 为什么不直接用 --faint：实测 --faint (#94a3b8) 在 --panel-subtle (#f8fafc) 上
+   * 只有 **2.45:1**，远低于 WCAG AA 要求的 4.5:1 —— 而这类文字写的往往是
+   * 「必须带 /v1 结尾」「留空会显示上下文 0」这种**不看就会填错**的提示。
+   * --muted (#64748b) 在 --panel-subtle 上是 4.55:1（勉强过），但在
+   * --panel-muted (#f1f5f9) 上掉到 4.34:1 又不及格。
+   * 这个色值在两种底色上分别是 5.26:1 / 5.02:1，都留有余量。
+   */
+  --hint: #5b6a80;
 
   /* 语义色彩 (纯实色配合柔和底色，无任何杂乱渐变) */
   --ok: #059669;
@@ -113,6 +124,8 @@
   --text-secondary: #cbd5e1;
   --muted: #94a3b8;
   --faint: #64748b;
+  /* 深色下 --muted (#94a3b8) 在两种卡片底上分别是 7.18:1 / 6.49:1，够用，直接复用 */
+  --hint: #94a3b8;
 
   --ok: #10b981;
   --ok-hover: #34d399;
@@ -632,7 +645,7 @@ button.mini {
 .tag {
   display: inline-flex;
   align-items: center;
-  font-size: 11px;
+  font-size: 11.5px;
   font-weight: 500;
   padding: 1px 8px;
   border-radius: var(--radius-xs);
@@ -670,9 +683,13 @@ button.tag.fail:hover {
 }
 
 /* 时间戳与辅助文字 */
+/*
+ * 时间戳是**信息**（「数据更新于 HH:MM:SS」是判断数据新旧的唯一依据），
+ * 不是装饰。--faint (#94a3b8) 在浅色卡片上只有 2.45:1，读不清就等于没有。
+ */
 .stamp {
-  color: var(--faint);
-  font-size: 11px;
+  color: var(--hint);
+  font-size: 11.5px;
   font-weight: 400;
   white-space: nowrap;
 }
@@ -1411,10 +1428,15 @@ pre.log {
 .valuerow-v:hover,
 .formrow-v:hover { background: var(--primary-border); }
 
+/*
+ * 说明文字用 --hint 而不是 --faint：后者实测只有 2.45:1，而这些文字写的是
+ * 「必须带 /v1 结尾」这类**不看就会填错**的提示，不能当装饰处理。
+ * 字号从 11.5 提到 12px —— 4.5:1 是下限，小字号下同样对比度更难读。
+ */
 .valuerow-h,
 .formrow-h {
-  font-size: 11.5px;
-  color: var(--faint);
+  font-size: 12px;
+  color: var(--hint);
   line-height: 1.45;
 }
 
@@ -1525,15 +1547,17 @@ pre.log {
   padding: 7px 12px;
   background: var(--panel-muted);
   border-bottom: 1px solid var(--border);
-  font-size: 11.5px;
-  color: var(--muted);
+  font-size: 12px;
+  /* --muted 在 --panel-muted 上只有 4.34:1，差一点没过 AA */
+  color: var(--hint);
 }
 
 .codeblock pre {
   margin: 0;
   padding: 12px 14px;
   font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
-  font-size: 11.5px;
+  /* 配置片段是**要人核对**的内容（id 有没有填对、/v1 有没有漏），不是装饰 */
+  font-size: 12px;
   line-height: 1.6;
   color: var(--text-secondary);
   overflow-x: auto;
@@ -1556,6 +1580,77 @@ pre.log {
   padding: 4px 12px;
 }
 
+/* ── 复制反馈与无障碍 ── */
+
+/*
+ * 就地反馈：按钮自己变成「已复制」。
+ * 为什么必须有：实测用户滚到长面板底部再点复制时，顶部提示条的 top = -1873px，
+ * 完全在视口外 —— 只靠提示条等于没有反馈。
+ */
+#clientsBox button.mini.copied,
+.copybtn.copied {
+  color: var(--ok);
+  border-color: var(--ok-border);
+  background: var(--ok-soft);
+}
+
+#clientsBox button.mini.copyfail,
+.copybtn.copyfail {
+  color: var(--fail);
+  border-color: var(--fail-border);
+  background: var(--fail-soft);
+}
+
+/* 值本身点一下也会闪一下：它没有空间改文案，只能靠底色反馈 */
+.valuerow-v.copied,
+.formrow-v.copied {
+  background: var(--ok-soft);
+  border-color: var(--ok-border);
+  color: var(--ok);
+}
+
+.valuerow-v.copyfail,
+.formrow-v.copyfail {
+  background: var(--fail-soft);
+  border-color: var(--fail-border);
+  color: var(--fail);
+}
+
+/*
+ * 命中区扩展：视觉高度仍是 24px（与控制台其它按钮一致，不破坏既有布局），
+ * 但用伪元素把实际可点区域撑到 32px。
+ *
+ * 说明：24×24 **其实已经满足 WCAG 2.2 AA 的 Target Size (Minimum)**，所以这不是
+ * 合规问题而是手感问题 —— 鼠标 / 触控板下 24px 偏小，尤其在一屏二十几个按钮的
+ * 面板里。伪元素扩命中区是标准做法，零布局影响。
+ */
+#clientsBox button.mini {
+  position: relative;
+}
+
+#clientsBox button.mini::after {
+  content: '';
+  position: absolute;
+  inset: -4px -2px;
+}
+
+/*
+ * 屏幕阅读器专用：视觉隐藏但**仍在无障碍树里**。
+ * 用 clip-path 而不是 display:none / visibility:hidden —— 后两者会把元素从无障碍
+ * 树里摘掉，live region 就不再播报了，等于没加。
+ */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
 /* 窄屏：字段名与说明各占一整行，值与复制按钮并排 —— 四列在窄屏下会挤成一团 */
 @media (max-width: 640px) {
   .valuerow,
@@ -1566,4 +1661,15 @@ pre.log {
 
   .valuerow-h,
   .formrow-h { grid-column: 1 / -1; }
+
+  /*
+   * 窄屏下配置片段不再横向滚动。
+   * 实测 320 / 360 / 414px 下有 2 个 <pre> 需要横向滚动 —— 手机上没有「横向滚一下」
+   * 这个习惯，用户会以为内容被截断了。而这些片段本来就是「整段复制走」、
+   * 不是逐字阅读的，换行不影响用途。
+   */
+  .codeblock pre {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
 }
