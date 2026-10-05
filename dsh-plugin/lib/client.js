@@ -1737,8 +1737,13 @@ body.dark .wb-root,
         if (res.data?.ok) {
           setVisibility(res.data.visible);
           setPrefsDirty(false);
+          // applied = 宿主是否成功广播了 llm/adapters-updated（dsh 选择器重拉模型
+          // 清单的信号）。广播失败（旧版 dsh 没有该内部方法）时偏好其实已保存，
+          // 但选择器不会自动刷新 —— 必须如实区分，不能让人以为"保存了没生效"。
           setMessage(res.data.count
-            ? `已保存：dsh 选择器将显示 ${res.data.count} 个模型（即时生效，无需重启）。`
+            ? (res.data.applied
+              ? `已保存并即时生效：dsh 选择器现在显示 ${res.data.count} 个模型。`
+              : `已保存（${res.data.count} 个模型）。此 dsh 版本不支持即时刷新 —— 重启一次 dsh 后生效。`)
             : '已保存：未勾选任何模型 —— dsh 选择器将不显示 WorkBuddy 模型（重新勾选即可恢复）。');
         } else {
           setMessage('保存失败：' + (res.data?.error || res.status));

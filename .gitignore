@@ -58,3 +58,6 @@ docs/promo/_measure*
 # 与上面 .promo/ / .PUBLISH.local.md 是同一个意图。
 .optimize/*
 !.optimize/SUMMARY.md
+
+# 插件面板的模型显示偏好（用户本机数据，同 .state.json 一类）
+.model-prefs.json

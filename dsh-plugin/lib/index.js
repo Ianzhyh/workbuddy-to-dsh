@@ -458,6 +458,31 @@ export function apply(ctx, rawConfig = {}) {
     return adapterHandle;
   };
 
+  /**
+   * 通知 dsh 的 UI「模型拓扑变了」，让模型选择器重拉 listModels()。
+   *
+   * 为什么需要它：模型选择器不在每次打开时重查目录 —— 它订阅
+   * `llm/adapters-updated` 事件（settings/document-updated、凭据变更、连接重置
+   * 也会触发）。保存模型显示偏好只改了 adapter 内部的 filter，不产生任何事件，
+   * UI 就一直显示旧清单 —— 用户保存完看到"模型数量没变"，就是这个原因。
+   *
+   * 实现取巧但安全：emitAdaptersUpdated() 本是 registerAdapter 的内部通知，
+   * 这里把它当作"拓扑可能变了"的公开通知来用。防御式调用 —— 它不是文档化
+   * 的公开 API，旧版 dsh 可能没有；没有就静默跳过，面板上会提示"重启一次 dsh
+   * 后生效"作为兜底（见 onWritePrefs 的返回）。
+   */
+  const notifyAdaptersUpdated = () => {
+    try {
+      if (typeof llm?.emitAdaptersUpdated === 'function') {
+        llm.emitAdaptersUpdated();
+        return true;
+      }
+    } catch (error) {
+      log('广播 llm/adapters-updated 失败（不影响偏好已保存）', error);
+    }
+    return false;
+  };
+
   try {
     registerRoute(config.provider);
     log(`已注册原生模型路由：provider=${config.provider}（${config.displayName}）`);
@@ -786,6 +811,7 @@ export function apply(ctx, rawConfig = {}) {
         onUpstreamMutation: invalidateUpstreamCaches,
         readPrefs: readModelPrefs,
         onWritePrefs: writeModelPrefs,
+        notifyAdaptersUpdated,
       });
       const disposeRoutes = mountRoutes(webServer, routes, log);
       ctx.effect(() => disposeRoutes, 'workbuddy.panel-routes');

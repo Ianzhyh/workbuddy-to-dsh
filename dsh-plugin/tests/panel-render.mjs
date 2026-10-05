@@ -173,10 +173,10 @@ async function gather() {
     if (!status?.console) {
       status.console = { state: 'running', url: 'http://127.0.0.1:8792', error: '', managed: false, autoStart: true };
     }
-    return { data: { status, models, usage, checkin, log, requests }, source: `实时数据（${LIVE}）` };
+    return { data: { status, models, usage, checkin, log, requests }, source: `实时数据（${LIVE}）`, liveStatus: status };
   } catch (error) {
     console.warn(`抓实时数据失败（${error.message}），改用内置样例`);
-    return { data: FIXTURES, source: '内置样例（实时端点不可用）' };
+    return { data: FIXTURES, source: '内置样例（实时端点不可用）', liveStatus: null };
   }
 }
 
@@ -315,7 +315,7 @@ async function inspect(cdp) {
   };
 }
 
-const { data, source } = await gather();
+const { data, source, liveStatus } = await gather();
 const { react, reactDom } = await ensureVendor();
 const clientSource = readFileSync(join(PLUGIN, 'lib', 'client.js'), 'utf8');
 
@@ -682,7 +682,23 @@ try {
   await sleep(600);
   const overviewText = await page.cdp.evaluate("document.querySelector('.wb-root') ? document.querySelector('.wb-root').innerText : ''");
   if (!/今日还没签到/.test(overviewText)) problems.push('概览没有提示「今日还没签到」');
-  if (!/条失败|失败请求/.test(overviewText)) problems.push('概览没有提示最近有失败请求');
+  // 失败提醒的期望取决于数据源：离线/旧宿主模式（桩覆盖 requests 通道）必须出现；
+  // 实时模式走真宿主快照的 recentFailed（真实账本），没有失败就没有提醒 —— 正确行为。
+  // 失败提醒的期望取决于数据源：离线/旧宿主模式（桩覆盖 requests 通道）必须出现；
+  // 实时模式走真宿主快照的 recentFailed（真实账本），没有失败就没有提醒 —— 正确行为。
+  const failedRecentExpectation = offline
+    ? 'present'
+    : (Array.isArray(liveStatus?.recentFailed) && liveStatus.recentFailed.length ? 'present' : 'conditional');
+  // 「最近失败请求」提醒**不能**在这里无条件断言：概览的失败数据有两条来源 ——
+  //   新宿主走快照 status.recentFailed（来自真实账本），旧宿主才回落拉
+  //   /workbuddy/requests（桩里注入的 syntheticFailure 只覆盖这一条路）。
+  // 本场景跑的是真宿主 + 实时账本：若最近 20 条恰好没有失败，提醒**本就不该出现**
+  // —— 那是正确行为，不是缺陷（曾经因此误报失败，把桩打在了已不再使用的通道上）。
+  // 断言改为：有失败数据时必须出现提醒；并单独验证桩覆盖的 fallback 路径
+  // （旧宿主场景 2 里 requests 面板用的是同一套桩数据）。
+  if (failedRecentExpectation === 'present' && !/条失败|失败请求/.test(overviewText)) {
+    problems.push('概览没有提示最近有失败请求');
+  }
   if (/重新诊断/.test(overviewText)) problems.push('概览还留着一个点了不动的「重新诊断」按钮（应改成刷新状态 + 去诊断）');
 
   // 请求页的模型筛选必须来自完整目录（不是只列当前页出现过的模型）

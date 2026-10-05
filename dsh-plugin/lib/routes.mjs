@@ -48,7 +48,7 @@ async function readJsonBody(req, limit = 64 * 1024) {
  * @param {(line: string, detail?: unknown) => void} deps.log
  */
 export function createRouteTable(deps) {
-  const { snapshot, supervisor, consoleSupervisor, client, adapter, paths, provider, log, onUpstreamMutation = () => {}, readPrefs = () => null, onWritePrefs = () => {} } = deps;
+  const { snapshot, supervisor, consoleSupervisor, client, adapter, paths, provider, log, onUpstreamMutation = () => {}, readPrefs = () => null, onWritePrefs = () => {}, notifyAdaptersUpdated = () => false } = deps;
 
   /** 写操作的准入检查。 */
   const guard = (req) => req.headers['x-workbuddy-panel'] === '1';
@@ -135,7 +135,12 @@ export function createRouteTable(deps) {
             // 目录恢复后自然重新生效。
             adapter.setFilter({ allow: visible });
             onWritePrefs(visible);
-            return sendJson(res, 200, { ok: true, visible, count: visible.length });
+            // 广播 llm/adapters-updated：dsh 的模型选择器**不轮询**目录，只认这个
+            // 事件。不广播的话 filter 虽已生效，但 UI 会一直显示旧清单 —— 用户保存
+            // 完看模型数量没变，报的就是这个。返回 applied 让前端如实告知：
+            // 旧版 dsh 没有这个内部方法时 applied=false，前端提示"重启一次 dsh"。
+            const applied = notifyAdaptersUpdated();
+            return sendJson(res, 200, { ok: true, visible, count: visible.length, applied });
           }
           if (readOnly(req, res)) return;
           const current = typeof deps.readPrefs === 'function' ? deps.readPrefs() : null;
