@@ -89,22 +89,58 @@ function consoleVersion() {
   return consoleVersionCache;
 }
 
+/**
+ * 读取请求体，超过 limit 立刻失败。
+ *
+ * **超限时不 destroy，调用方回完 413 再 resume() 把剩余字节读掉。**
+ * 这是桥那边踩过两次坑才定下来的做法（详见 `bridge/workbuddy-bridge.mjs` 里
+ * `readBody` 的长注释），控制台原先漏改了，后果实测可见：
+ *
+ *   往 `/api/chat` 发 600KB（>512KB 上限）→ 客户端拿到的是
+ *   `curl: (56) Recv failure: Connection was reset`，**没有任何错误信息**。
+ *   而「对话测试」的历史是**不自动裁剪**的，聊久了就会撞上。
+ *
+ * `destroy()` 会把 socket 直接拆掉，响应还没来得及写就 RST 了；`resume()` 之后
+ * 没有任何东西被累计进内存，每条请求 512KB 的硬上限依然成立。
+ *
+ * 另外补了 `done` 守卫：Node 的 `data` 事件是同步派发的，`fail()` 之后仍可能有
+ * 在途 chunk 被 push 进数组 —— 桥那边有这个守卫，控制台原来没有。
+ */
 function readBody(req, limit = 1024 * 512) {
   return new Promise((ok, fail) => {
     let size = 0;
+    let done = false;
     const chunks = [];
     req.on('data', (c) => {
+      if (done) return; // 已判定超限：后续在途 chunk 一律丢弃，不再累计
       size += c.length;
       if (size > limit) {
-        fail(new Error('请求体过大'));
-        req.destroy();
+        done = true;
+        req.pause(); // 只是暂停；真正丢弃剩余字节要等 413 写完之后
+        const err = new Error(`请求体过大（${size} > ${limit} 字节）`);
+        err.code = 'BODY_TOO_LARGE';
+        fail(err);
         return;
       }
       chunks.push(c);
     });
-    req.on('end', () => ok(Buffer.concat(chunks).toString('utf8')));
-    req.on('error', fail);
+    req.on('end', () => { if (!done) { done = true; ok(Buffer.concat(chunks).toString('utf8')); } });
+    req.on('error', (e) => { if (!done) { done = true; fail(e); } });
   });
+}
+
+/**
+ * 请求体过大时的统一收尾：回**明确的 413**，再把剩余字节读掉丢弃。
+ *
+ * 见 `readBody` 的注释 —— 不 resume 的话连接会被客户端判成异常断开。
+ */
+function bodyTooLarge(req, res) {
+  sendJson(res, 413, {
+    ok: false,
+    code: 'BODY_TOO_LARGE',
+    error: '请求体过大，已被拒绝。若是「对话测试」的历史太长，请点「清空对话」后重试。',
+  });
+  req.resume();
 }
 
 /** Windows 系统工具的绝对路径，避免依赖 PATH 解析。 */
@@ -1035,6 +1071,7 @@ const server = createServer(async (req, res) => {
         try {
           sendJson(res, 200, writeProbeResults(JSON.parse(await readBody(req))));
         } catch (err) {
+          if (err.code === 'BODY_TOO_LARGE') return bodyTooLarge(req, res);
           sendJson(res, 400, { saved: false, error: err.message });
         }
         return;
@@ -1078,6 +1115,7 @@ const server = createServer(async (req, res) => {
           warning: started.warning || started.error || null,
         });
       } catch (err) {
+        if (err.code === 'BODY_TOO_LARGE') return bodyTooLarge(req, res);
         sendJson(res, 400, { switched: false, error: err.message });
       }
       return;
@@ -1091,6 +1129,7 @@ const server = createServer(async (req, res) => {
         if (typeof auto !== 'boolean') throw new Error('auto 必须是布尔值');
         sendJson(res, 200, { saved: true, checkin: writeCheckinState({ auto }) });
       } catch (err) {
+        if (err.code === 'BODY_TOO_LARGE') return bodyTooLarge(req, res);
         sendJson(res, 400, { saved: false, error: err.message });
       }
       return;
@@ -1134,13 +1173,25 @@ const server = createServer(async (req, res) => {
         if (typeof model !== 'string' || !model) throw new Error('缺少 model');
         sendJson(res, 200, await probeModel(model));
       } catch (err) {
+        if (err.code === 'BODY_TOO_LARGE') return bodyTooLarge(req, res);
         sendJson(res, 400, { model: null, ok: false, error: err.message });
       }
       return;
     }
 
     if (route === '/api/chat' && req.method === 'POST') {
-      await proxyChat(req, res, JSON.parse(await readBody(req)));
+      // 「对话测试」的历史**不自动裁剪**，聊久了请求体就会超 512KB 上限。
+      // 这条路径原来是直接 `readBody` 往外抛、由外层 catch 成 500 —— 而那时
+      // socket 已经被 destroy，客户端只看到 `Connection was reset`，
+      // 完全不知道发生了什么（实测 curl: (56)）。这里单独接住，回明确的 413。
+      let raw;
+      try {
+        raw = await readBody(req);
+      } catch (e) {
+        if (e.code === 'BODY_TOO_LARGE') return bodyTooLarge(req, res);
+        throw e;
+      }
+      await proxyChat(req, res, JSON.parse(raw));
       return;
     }
 
@@ -1149,6 +1200,7 @@ const server = createServer(async (req, res) => {
         const { models } = JSON.parse(await readBody(req));
         sendJson(res, 200, writeRegistration(models));
       } catch (err) {
+        if (err.code === 'BODY_TOO_LARGE') return bodyTooLarge(req, res);
         sendJson(res, 400, { saved: false, error: err.message });
       }
       return;

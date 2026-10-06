@@ -86,6 +86,44 @@ refreshToken : envelope keyId=9127dea1b44020a7 -> DECRYPTED len=698 jws-like=tru
 > 桥的处理是：`{type:'function'}` → `required`（语义最接近），认不出来的对象丢弃
 > 而不是原样转发（留着必然 400，丢掉最多退化成 `auto`）。
 
+### 模型名含中文 / 特殊字符 → 500 且报 `Invalid character in header content`
+
+```
+500  {"error":{"message":"Invalid character in header content [\"X-Model-ID\"]"}}
+```
+
+**原因**：桥把 `body.model` 原样放进 `X-Model-ID` 请求头发给上游。含非可见 ASCII
+（中文、emoji、控制字符）时 Node 的 `http.request` 会直接抛异常，外层只能回 500 ——
+客户端看到的是「未知错误」，完全不知道是模型名的问题。
+
+**这条与「模型在不在目录里」无关**，所以不能靠 `preflightModelError` 拦：
+它在目录没拿到时会直接放行（`upstreamModelCount === 0`）。而目录没拿到是常见状态 ——
+冷启动、上游目录接口抖动，以及你自己按桥的提示设了 `WORKBUDDY_SKIP_MODEL_PREFLIGHT=1`。
+
+**已修**：入口按字符集校验（可见 ASCII），不合法回 **400** 并说明原因；`buildHeaders`
+再兜一道，防止将来新增的调用方绕过入口校验。
+
+**你要做的**：模型 id 用 `/v1/models` 里的真实 id（都是 ASCII）。中文的「显示名」
+只在界面上用，不要填进客户端配置的 model 字段。
+
+### 「对话测试」发长对话 → `Connection was reset`（没有任何错误信息）
+
+```
+curl: (56) Recv failure: Connection was reset
+```
+
+**原因**：控制台的 `readBody` 在请求体超限时是「`fail()` + `req.destroy()`」。
+`destroy()` 会把 socket 直接拆掉，**413 还没来得及写就 RST 了**，所以客户端拿不到
+任何解释。而「对话测试」的历史是**不自动裁剪**的（只提示清空），聊久了就会撞上
+512KB 上限。
+
+**已修**：改成「暂停读取 → 回明确的 413（带 `code: BODY_TOO_LARGE` 与可操作文案）
+→ 再 `resume()` 把剩余字节读掉丢弃」。桥那边一直就是这么做的，控制台原先漏改 ——
+两边现在一致。
+
+**你要做的**：看到 413 就点「清空对话」再试。桥侧的请求体上限是 32MB（多模态
+对话需要），控制台内部管理请求是 512KB，两者用途不同、刻意不一致。
+
 ### 429 / 频率限制
 
 ```

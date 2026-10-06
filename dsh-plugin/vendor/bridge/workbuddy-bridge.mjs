@@ -446,7 +446,16 @@ function buildHeaders(auth, model, conversationId) {
     'X-B3-SpanId': spanId,
     'X-B3-Sampled': '1',
   };
-  if (model) h['X-Model-ID'] = model;
+  if (model) {
+    // 兜底。入口（/v1/chat/completions）已按 HEADER_SAFE_RE 校验并回 400，这里再挡
+    // 一次是为了防止**将来新增的调用方**绕过入口校验、把非法值直接送进 http.request ——
+    // 那样抛出的 `Invalid character in header content` 会变成 500，而根因（谁传的）
+    // 在栈里完全看不出来。Anthropic 路径的模型名会先被映射成真实 id，天然安全。
+    if (!HEADER_SAFE_RE.test(model)) {
+      throw new Error(`model id would produce an invalid X-Model-ID header: ${shortError(model, 60)}`);
+    }
+    h['X-Model-ID'] = model;
+  }
   if (API_KEY) {
     h.Authorization = `Bearer ${API_KEY}`;
     h['X-API-Key'] = API_KEY;
@@ -1416,6 +1425,23 @@ const MODEL_PREFLIGHT_ENABLED = process.env.WORKBUDDY_SKIP_MODEL_PREFLIGHT !== '
 const MAX_MODEL_ID_LEN = 200;
 
 /**
+ * 模型 id 会被当作 `X-Model-ID` 请求头发给上游，所以**必须只含 HTTP 头能承载的字符**。
+ *
+ * 这条约束与「模型在不在目录里」无关，因此**不能交给 `preflightModelError`** ——
+ * 后者在目录没拿到时会直接放行（`upstreamModelCount === 0`）。而目录没拿到是常见状态：
+ * 冷启动、上游目录接口抖动，以及用户按桥自己的提示设了
+ * `WORKBUDDY_SKIP_MODEL_PREFLIGHT=1`。
+ *
+ * 不校验的后果（实测）：传 `模型-中文名` → Node 的 `http.request` 抛
+ * `Invalid character in header content ["X-Model-ID"]` → 外层 catch 把它当未知故障，
+ * 客户端收到 **500** 与一段内部报错。含 CR/LF 同理（Node 会拒绝，所以**不存在注入**，
+ * 但用户拿到的仍是一个无法理解的 500）。
+ *
+ * 真实模型 id 都是可见 ASCII（见 `/v1/models`），所以这个约束挡不掉任何合法请求。
+ */
+const HEADER_SAFE_RE = /^[\x20-\x7e]*$/;
+
+/**
  * chat 前的本地模型预校验。返回错误文本表示「该拒」，返回 null 表示「放行」。
  *
  * **启用条件只有一个：`catalogCache.upstreamModelCount > 0`** —— 即这一轮缓存里
@@ -2195,6 +2221,21 @@ const server = createServer(async (req, res) => {
         // 落账与日志都只留**截断版**：账本行必须有界，也绝不把这段垃圾原样回显
         const trimmed = shortError(model, MAX_MODEL_ID_LEN);
         log('rejected oversized model id', trimmed);
+        recordRequest({
+          model: trimmed, stream: wantStream, ms: 0, ok: false, status: 400, code: null, error: message,
+        });
+        return json(res, 400, { error: { message, type: 'invalid_request' } });
+      }
+
+      // 字符集校验：模型 id 会进 `X-Model-ID` 请求头，非可见 ASCII 会让
+      // Node 的 http.request 直接抛异常（外层只能回 500）。见 HEADER_SAFE_RE 的说明。
+      // **放在 preflightModelError 之前**：这是格式错误，与目录无关，任何时候都该拦。
+      if (!HEADER_SAFE_RE.test(model)) {
+        const message = 'workbuddy-bridge: model id must be printable ASCII'
+          + ' (it is forwarded as the X-Model-ID header)';
+        const trimmed = shortError(model, MAX_MODEL_ID_LEN);
+        log('rejected non-ascii model id', trimmed);
+        // 与其它拒绝路径一致地落账：否则这次拒绝在控制台「最近请求」里不可见
         recordRequest({
           model: trimmed, stream: wantStream, ms: 0, ok: false, status: 400, code: null, error: message,
         });
