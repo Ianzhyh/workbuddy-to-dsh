@@ -24,7 +24,7 @@ const server = await startStaticServer(PORT);
 const { cdp, close } = await openPage(URL_, routes, { inject: INJECT, width: 1280, height: 1200 });
 
 await q(cdp, `document.querySelector('.nav-tab[data-tab="clients"]').click()`);
-await waitFor(cdp, `document.querySelectorAll('#clientsBox .clientcard').length >= 4`, 8000, '面板渲染');
+await waitFor(cdp, `document.querySelectorAll('#clientsBox .clientpicker button').length >= 4`, 8000, '面板渲染');
 
 // 展开 opencode 与 Claude Code 的代码块（它们是 details？不是——直接渲染的，无需展开）
 await sleep(400);

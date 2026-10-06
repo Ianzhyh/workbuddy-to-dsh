@@ -99,6 +99,9 @@
     <span class="msg" id="actionMsg"></span>
   </div>
 
+  <!-- 「下一步」引导条：内容由 renderNextStep() 按状态生成，无事可做时保持 hidden -->
+  <div id="nextStepBar" hidden></div>
+
   <div class="cards" id="cards" data-section="overview"></div>
 
   <section class="panel" data-section="overview">
@@ -2261,6 +2264,7 @@ async function loadOverview() {
   // 桥状态变了：标题与提示条都要重算
   refreshTitle();
   renderAlerts();
+  renderNextStep();
 
   if (b.ok) setBadge('ok', '桥运行中');
   else if (b.running) setBadge('warn', '桥有响应但异常');
@@ -3344,7 +3348,8 @@ let lastClients = null;
  */
 function opencodeConfigText(d) {
   const base = (d && d.baseUrlOpenAI) || 'http://127.0.0.1:8790/v1';
-  const details = (d && d.modelDetails && d.modelDetails.length) ? d.modelDetails : [];
+  // 用用户勾选的那几个，而不是写死的精选集
+  const details = clientModels(d);
   const models = Object.fromEntries(details.map((m) => [m.id, {
     name: m.name || m.id,
     limit: { context: m.context || 128000, output: m.maxOutput || 8192 },
@@ -3399,7 +3404,7 @@ function claudeCodeConfigText(d) {
 function providerFormGroups(d) {
   const base = (d && d.baseUrlOpenAI) || 'http://127.0.0.1:8790/v1';
   const key = (d && d.token) || 'wb-local-bridge';
-  const details = (d && d.modelDetails && d.modelDetails.length) ? d.modelDetails : [];
+  const details = clientModels(d);
 
   const groups = [{
     title: '',
@@ -3540,14 +3545,34 @@ function announce(msg) {
   if (live) live.textContent = msg;
 }
 
-/** 带「复制」按钮的代码块。用 textContent 写入——配置里有 < > {}，走 innerHTML 会渲染错。 */
-function clientCodeBlock(label, text) {
-  const wrap = clientEl('div', 'codeblock');
+/**
+ * 带「复制」按钮的代码块。用 textContent 写入——配置里有 < > {}，走 innerHTML 会渲染错。
+ *
+ * `collapsed` 为真时默认折叠：只留标题行（标题本身是展开开关）与复制按钮。
+ *
+ * 为什么需要折叠：`opencode.json` 会随上游目录一起长 —— 30 个模型时这一段就有
+ * 1500px 高。而它的用途是「整段复制走」而不是逐行阅读，默认铺开只是把面板撑长。
+ * **复制按钮始终可用**，折叠不影响一键拿走全文。
+ */
+function clientCodeBlock(label, text, { collapsed = false } = {}) {
+  const wrap = clientEl('div', 'codeblock' + (collapsed ? ' collapsed' : ''));
   const head = clientEl('div', 'codeblock-head');
-  head.append(clientEl('span', null, label), copyButton(' ' + label, text));
+  const toggle = clientEl('button', 'codeblock-toggle', label);
+  toggle.type = 'button';
+  toggle.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+  toggle.title = collapsed ? '展开查看' : '收起';
+  head.append(toggle, copyButton(' ' + label, text));
   const pre = clientEl('pre');
   pre.textContent = text;
   wrap.append(head, pre);
+  if (collapsed) {
+    toggle.onclick = () => {
+      // classList.toggle 返回「切换后是否含该类」；返回 false = 现在已展开
+      const open = wrap.classList.toggle('collapsed') === false;
+      toggle.setAttribute('aria-expanded', String(open));
+      toggle.title = open ? '收起' : '展开查看';
+    };
+  }
   return wrap;
 }
 
@@ -3563,7 +3588,7 @@ function clientValueRow(label, value, hint) {
 }
 
 /** 一个客户端卡片：名称 + 状态标签 + 说明 + 步骤 + 代码块。 */
-function clientCard(name, status, note, steps, blocks) {
+function clientCard(name, status, note, steps, blocks, blockOpts = {}) {
   const card = clientEl('div', 'clientcard');
   const head = clientEl('div', 'clientcard-head');
   head.append(clientEl('b', null, name));
@@ -3577,7 +3602,7 @@ function clientCard(name, status, note, steps, blocks) {
     for (const s of steps) ol.append(clientEl('li', null, s));
     card.append(ol);
   }
-  for (const pair of blocks || []) card.append(clientCodeBlock(pair[0], pair[1]));
+  for (const pair of blocks || []) card.append(clientCodeBlock(pair[0], pair[1], blockOpts));
   return card;
 }
 
@@ -3597,6 +3622,130 @@ async function loadClients() {
   if (st) st.textContent = fmtTime(Date.now());
 }
 
+/**
+ * 「客户端接入」面板要包含哪些模型。
+ *
+ * **为什么用户要能选**：`/api/clients` 只回桥精选的那几个（口径与 `/v1/models`
+ * 一致），但上游 30 个模型都是可用的，精选只是「默认推荐」。原实现把精选集写死进
+ * 配置片段 —— 用户想加别的模型就只能手改 JSON。现在勾什么就生成什么。
+ *
+ * `null` = 还没初始化过；首次渲染时用精选集打底（保持「开箱即用」的默认）。
+ * 初始化后不再重置：面板每次刷新（20 秒轮询）不该把用户的选择冲掉。
+ */
+let clientChosenModels = null;
+
+/**
+ * 完整目录（/api/models）按 id 建索引，字段名统一成与精选集一致的形状。
+ *
+ * 注意 `lastModels` **本身就是模型数组**（`loadModels` 里是 `lastModels = d.models`），
+ * 不是 `{models:[...]}` —— 写成 `lastModels.models` 会永远拿到空目录，
+ * 表现为「选择器只列得出精选集、用户加不了别的模型」。
+ */
+function catalogById() {
+  const map = new Map();
+  for (const m of (Array.isArray(lastModels) ? lastModels : [])) {
+    map.set(m.id, {
+      id: m.id,
+      name: m.name || m.id,
+      context: Number(m.context_window) || 0,
+      maxOutput: Number(m.max_output_tokens) || 0,
+    });
+  }
+  return map;
+}
+
+/** 当前选中的模型 id 集合（首次调用用精选集打底）。 */
+function clientModelIds(d) {
+  if (!clientChosenModels) {
+    clientChosenModels = new Set(((d && d.modelDetails) || []).map((m) => m.id));
+  }
+  return clientChosenModels;
+}
+
+/**
+ * 用户选中的模型（带完整上下文 / 输出上限）。
+ *
+ * 元数据优先取完整目录 —— 用户选的可能是精选集之外的模型，那些只在
+ * `/api/models` 里有 `context_window` / `max_output_tokens`。
+ */
+function clientModels(d) {
+  const chosen = clientModelIds(d);
+  const cat = catalogById();
+  const featured = new Map(((d && d.modelDetails) || []).map((m) => [m.id, m]));
+  const out = [];
+  for (const id of chosen) {
+    const m = cat.get(id) || featured.get(id);
+    if (m) out.push(m);
+  }
+  return out;
+}
+
+/**
+ * 模型选择器：勾什么，下面的配置片段就生成什么。
+ *
+ * 目录（`/api/models`）可能还没到（它与桥状态解耦、允许后到），此时退回精选集
+ * —— 有东西可选总比空着好。
+ */
+function clientModelPicker(d) {
+  const chosen = clientModelIds(d);
+  const all = [...catalogById().values()];
+  const list = all.length ? all : ((d && d.modelDetails) || []).map((m) => ({ id: m.id, name: m.name || m.id }));
+
+  const wrap = clientEl('div', 'modelpick');
+  const head = clientEl('div', 'modelpick-head');
+  head.append(clientEl('b', null, '要包含哪些模型？'));
+  head.append(clientEl('span', 'modelpick-count', '已选 ' + chosen.size + ' / ' + list.length));
+  const allBtn = clientEl('button', 'mini', '全选');
+  allBtn.type = 'button';
+  allBtn.onclick = () => { for (const m of list) chosen.add(m.id); renderClients(); };
+  const noneBtn = clientEl('button', 'mini', '清空');
+  noneBtn.type = 'button';
+  noneBtn.onclick = () => { chosen.clear(); renderClients(); };
+  head.append(allBtn, noneBtn);
+  wrap.append(head);
+  wrap.append(clientEl('p', 'modelpick-note',
+    '上游所有可用模型都能加，不限桥默认精选的那几个。勾选后下面的配置片段立刻按你的选择重算。'));
+
+  const chips = clientEl('div', 'modelpick-chips');
+  for (const m of list) {
+    const on = chosen.has(m.id);
+    const b = clientEl('button', 'modelpick-chip' + (on ? ' on' : ''), (on ? '✓ ' : '') + m.id);
+    b.type = 'button';
+    b.setAttribute('aria-pressed', String(on));
+    b.title = (m.name || m.id) + (on ? '（点击移除）' : '（点击加入）');
+    b.onclick = () => {
+      if (on) chosen.delete(m.id); else chosen.add(m.id);
+      renderClients();
+    };
+    chips.append(b);
+  }
+  wrap.append(chips);
+  return wrap;
+}
+
+/**
+ * 「客户端接入」面板的选中项。默认 opencode —— 它是唯一既有现成配置片段、
+ * 又已实测通过的客户端，留空的话用户还得先做一次选择才能看到任何东西。
+ */
+let clientsChoice = 'opencode';
+const CLIENT_CHOICES = [
+  { id: 'opencode', label: 'opencode' },
+  { id: 'claude', label: 'Claude Code' },
+  { id: 'form', label: '图形表单' },
+  { id: 'other', label: '其它客户端' },
+];
+
+/**
+ * 客户端接入：**先选后展开**。
+ *
+ * 原先把每个客户端的完整配置同时铺开。实测这一块占 3220px，是整页 6918px 的
+ * 47%，26 个复制按钮同时可见 —— 其中「逐字段表单指引」1135px、「opencode」1061px。
+ * 而用户的真实任务是「接上我自己那一个」，不是「读完所有的」。
+ *
+ * 现在：三个接入值常驻（谁都要填），中间一排选择器，**只渲染选中的那一块**，
+ * 协议兼容清单与 RAG 说明常驻（都是短文本）。配置块默认折叠、复制按钮始终可用。
+ * 内容一个没删，只是不再同时铺开。
+ */
 function renderClients() {
   const box = $('clientsBox');
   if (!box) return;
@@ -3604,6 +3753,7 @@ function renderClients() {
   const d = lastClients;
   if (!d) { box.append(clientEl('div', 'empty', '暂无数据')); return; }
 
+  // 三个接入值：接哪个客户端都要填，常驻
   const vals = clientEl('div', 'clientvalues');
   vals.append(
     clientValueRow('OpenAI Base URL', d.baseUrlOpenAI, 'opencode / Cherry Studio / Cursor / Trae 等填这里'),
@@ -3612,62 +3762,83 @@ function renderClients() {
   );
   box.append(vals);
 
-  // 图形表单的逐字段填法放在最前面：多数客户端是表单而不是配置文件，
-  // 只给 JSON 片段等于没教 —— 用户对着「提供商 ID / 基础 URL」这几格
-  // 不知道该填什么。
-  box.append(clientEl('h3', 'clienth', '弹「自定义提供商」表单时，逐字段这样填'));
-  const fcard = clientEl('div', 'clientcard');
-  const fhead = clientEl('div', 'clientcard-head');
-  fhead.append(clientEl('b', null, '任何「自定义 OpenAI 兼容提供商」表单'));
-  fhead.append(clientEl('span', 'tag ok', '逐格可复制'));
-  fcard.append(fhead);
-  fcard.append(clientEl('p', 'clientcard-note',
-    '提供商 ID / 显示名称 / 基础 URL / API 密钥 / 模型 / 请求头 —— 每格的值都能单独复制，照着填完点提交。'));
-  fcard.append(formGuideBox(d));
-  fcard.append(clientEl('p', 'clientcard-note',
-    '注意：不是每个表单都有「上下文长度 / 输出上限」这两格 —— opencode 的表单就没有，'
-      + '所以填完会看到「上下文 0」。这不是桥的问题，也不是填错了：上下文只能靠**配置文件**声明。'
-      + 'opencode 用下面那段 opencode.json，里面的 limit 就是干这个的（桥已按上游真实值填好）。'
-      + '表单里填的模型只是 id + 显示名，limit 得回到 JSON 里补。'));
-  box.append(fcard);
-
   if (!d.running) box.append(clientEl('div', 'notice', '桥未运行，客户端连不上。先点上方「启动桥服务」。'));
 
-  box.append(clientEl('h3', 'clienth', '桥侧已实测通过'));
-  box.append(clientCard(
-    'opencode', 'ok',
-    '用它的底层 AI SDK（@ai-sdk/openai-compatible）实测：基础生成、工具调用、流式输出三项全通过。'
-      + '界面表单只填得进 id 和显示名，**上下文长度必须写在 opencode.json 的 limit 里**'
-      + '——不写就会显示「上下文 0」。下面这份已经按上游真实值填好了。',
-    ['把右边这段写进项目根目录的 opencode.json（表单里填过的模型，limit 要回到这里补）',
-      '运行 /connect → 选 Other，provider id 填 workbuddy，API Key 填上面的令牌',
-      '运行 /models，选 workbuddy 下的模型'],
-    [['opencode.json', opencodeConfigText(d)]],
-  ));
-  box.append(clientCard(
-    'Claude Code', 'ok',
-    'Anthropic 协议层全路径实测：流式事件序列、tool_use、多轮 tool_result 往返均正确。'
-      + '模型名照常填 claude-*，桥会映射到真实模型（当前 ' + d.anthropicModel
-      + '，小快模型 ' + d.anthropicFastModel + '）。',
-    ['设好右边两个环境变量后直接启动 claude'],
-    [['环境变量', claudeCodeConfigText(d)]],
-  ));
-
-  box.append(clientEl('h3', 'clienth', '协议兼容（桥侧端点已验证，未在客户端内实测）'));
-  const compat = clientEl('div', 'clientcard');
-  compat.append(clientEl('p', 'clientcard-note',
-    '下面这些都只用 /v1/models 与 /v1/chat/completions 两个端点，填同样的 Base URL 和令牌即可。'
-      + '「未实测」是指没有真的装一遍跑通，不是已知有问题——但也没法替你保证。'));
-  const chips = clientEl('div', 'clientchips');
-  for (const n of ['Cherry Studio', 'NextChat', 'LobeChat', 'ChatBox', 'Open WebUI', 'Cursor', 'Trae']) {
-    chips.append(clientEl('span', 'clientchip', n));
+  // ── 选择器 ────────────────────────────────────────────────────────────
+  const pickHead = clientEl('h3', 'clienth', '你要接哪个？选一个，只看它');
+  box.append(pickHead);
+  const picker = clientEl('div', 'clientpicker');
+  picker.setAttribute('role', 'tablist');
+  picker.setAttribute('aria-label', '选择要接入的客户端');
+  for (const c of CLIENT_CHOICES) {
+    const on = c.id === clientsChoice;
+    const b = clientEl('button', 'clientchip' + (on ? ' active' : ''), c.label);
+    b.type = 'button';
+    b.setAttribute('role', 'tab');
+    b.setAttribute('aria-selected', String(on));
+    b.onclick = () => { clientsChoice = c.id; renderClients(); };
+    picker.append(b);
   }
-  compat.append(chips);
-  compat.append(clientEl('p', 'clientcard-note',
-    'Cursor / Trae 这类带 Agent 模式的客户端依赖工具调用。桥已把上游只认字符串的 tool_choice 做了归一化'
-      + '（对象形式会被上游 400），工具调用本身也实测可用；但它们具体发哪种写法没有验证过。'));
-  box.append(compat);
+  box.append(picker);
 
+  const pane = clientEl('div', 'clientpane');
+  box.append(pane);
+
+  if (clientsChoice === 'opencode') {
+    pane.append(clientModelPicker(d));
+    pane.append(clientCard(
+      'opencode', 'ok',
+      '用它的底层 AI SDK（@ai-sdk/openai-compatible）实测：基础生成、工具调用、流式输出三项全通过。'
+        + '界面表单只填得进 id 和显示名，**上下文长度必须写在 opencode.json 的 limit 里**'
+        + '——不写就会显示「上下文 0」。下面这份已经按上游真实值填好了。',
+      ['把下面这段写进项目根目录的 opencode.json（表单里填过的模型，limit 要回到这里补）',
+        '运行 /connect → 选 Other，provider id 填 workbuddy，API Key 填上面的令牌',
+        '运行 /models，选 workbuddy 下的模型'],
+      [['opencode.json', opencodeConfigText(d)]],
+    ));
+  } else if (clientsChoice === 'claude') {
+    pane.append(clientCard(
+      'Claude Code', 'ok',
+      'Anthropic 协议层全路径实测：流式事件序列、tool_use、多轮 tool_result 往返均正确。'
+        + '模型名照常填 claude-*，桥会映射到真实模型（当前 ' + d.anthropicModel
+        + '，小快模型 ' + d.anthropicFastModel + '）。',
+      ['设好下面两个环境变量后直接启动 claude'],
+      [['环境变量', claudeCodeConfigText(d)]],
+    ));
+  } else if (clientsChoice === 'form') {
+    // 图形表单的逐字段填法。多数客户端是表单而不是配置文件，只给 JSON 片段等于没教
+    // —— 用户对着「提供商 ID / 基础 URL」这几格不知道该填什么。
+    pane.append(clientModelPicker(d));
+    const fcard = clientEl('div', 'clientcard');
+    const fhead = clientEl('div', 'clientcard-head');
+    fhead.append(clientEl('b', null, '任何「自定义 OpenAI 兼容提供商」表单'));
+    fhead.append(clientEl('span', 'tag ok', '逐格可复制'));
+    fcard.append(fhead);
+    fcard.append(clientEl('p', 'clientcard-note',
+      '提供商 ID / 显示名称 / 基础 URL / API 密钥 / 模型 / 请求头 —— 每格的值都能单独复制，照着填完点提交。'));
+    fcard.append(formGuideBox(d));
+    fcard.append(clientEl('p', 'clientcard-note',
+      '注意：不是每个表单都有「上下文长度 / 输出上限」这两格 —— opencode 的表单就没有，'
+        + '所以填完会看到「上下文 0」。这不是桥的问题，也不是填错了：上下文只能靠**配置文件**声明。'
+        + 'opencode 请切到上面的「opencode」页签，那段 opencode.json 里的 limit 就是干这个的。'));
+    pane.append(fcard);
+  } else {
+    const compat = clientEl('div', 'clientcard');
+    compat.append(clientEl('p', 'clientcard-note',
+      '下面这些都只用 /v1/models 与 /v1/chat/completions 两个端点，填同样的 Base URL 和令牌即可。'
+        + '「未实测」是指没有真的装一遍跑通，不是已知有问题——但也没法替你保证。'));
+    const chips = clientEl('div', 'clientchips');
+    for (const n of ['Cherry Studio', 'NextChat', 'LobeChat', 'ChatBox', 'Open WebUI', 'Cursor', 'Trae']) {
+      chips.append(clientEl('span', 'clientchip', n));
+    }
+    compat.append(chips);
+    compat.append(clientEl('p', 'clientcard-note',
+      'Cursor / Trae 这类带 Agent 模式的客户端依赖工具调用。桥已把上游只认字符串的 tool_choice 做了归一化'
+        + '（对象形式会被上游 400），工具调用本身也实测可用；但它们具体发哪种写法没有验证过。'));
+    pane.append(compat);
+  }
+
+  // ── 常驻尾注：都是短文本，且与「选哪个客户端」无关 ────────────────────
   box.append(clientEl('h3', 'clienth', '不支持'));
   box.append(clientCard(
     '知识库 / RAG 类功能', 'no',
@@ -3676,6 +3847,53 @@ function renderClients() {
       + '需要 RAG 的客户端请单独配一个 embedding 服务。',
     [], [],
   ));
+}
+
+/**
+ * 「下一步」引导条。
+ *
+ * 为什么需要：实测页面里**没有任何**「首次使用 / 下一步」类提示 —— 新用户打开看到
+ * 的是 9 块面板、19 个可操作元素，得自己推断出「客户端接入」页签才是入口。
+ * README 里写了「首次使用建议…」，但页面自己不说。
+ *
+ * 文案随状态走，**只在确实有事可做时出现**：
+ *   桥未运行            → 不显示（上面的告警条已经在说这件事，不重复）
+ *   桥在跑 + dsh 未配置  → 引导接客户端（这是唯一「两种接入都没走通」的状态）
+ *   都就绪              → 不显示（日常用户不该被引导条占地方）
+ *
+ * 关掉后记在 localStorage：这是纯前端的呈现偏好，不值得为它动服务端状态。
+ */
+const NEXT_STEP_DISMISSED = 'wb.muted.nextStep';
+
+function renderNextStep() {
+  const bar = $('nextStepBar');
+  if (!bar) return;
+  const o = lastOverview || {};
+  const bridgeOk = !!(o.bridge && o.bridge.running);
+  const dshOk = !!(o.dsh && o.dsh.routeLive);
+
+  if (!bridgeOk || dshOk || lsGet(NEXT_STEP_DISMISSED, '') === '1') {
+    bar.hidden = true;
+    bar.textContent = '';
+    return;
+  }
+
+  bar.hidden = false;
+  bar.textContent = '';
+  bar.append(clientEl('span', 'nextstep-icon', '→'));
+  const text = clientEl('span', 'nextstep-text');
+  text.append(clientEl('b', null, '桥已就绪。下一步：'));
+  text.append(document.createTextNode(
+    '把 Base URL 与令牌填进你的客户端（Claude Code / opencode / Cursor …）；'
+    + '若用 DeepSeek Harness，则去「可用模型」勾选后保存。',
+  ));
+  const go = clientEl('button', 'mini', '去接客户端');
+  go.type = 'button';
+  go.onclick = () => switchTab('clients');
+  const close = clientEl('button', 'mini nextstep-close', '知道了');
+  close.type = 'button';
+  close.onclick = () => { lsSet(NEXT_STEP_DISMISSED, '1'); renderNextStep(); };
+  bar.append(text, go, close);
 }
 
 /** 「复制全部」用的纯文本速查表：方便贴进聊天/笔记，或存成备忘。 */
@@ -3701,21 +3919,24 @@ function clientsCheatSheet(d) {
   return lines.join('\n');
 }
 
+/**
+ * 切到某个页签。
+ *
+ * 抽成独立函数（而不是只在 initNavTabs 里内联）是因为「下一步」引导条也要跳页签 ——
+ * 复制一份选中态与显隐逻辑迟早会分叉。
+ */
+function switchTab(name) {
+  document.querySelectorAll('.nav-tab').forEach((t) => {
+    t.classList.toggle('active', t.dataset.tab === name);
+  });
+  document.querySelectorAll('[data-section]').forEach((sec) => {
+    sec.style.display = (name === 'all' || sec.dataset.section === name) ? '' : 'none';
+  });
+}
+
 function initNavTabs() {
-  const tabs = document.querySelectorAll('.nav-tab');
-  tabs.forEach(tab => {
-    tab.onclick = () => {
-      tabs.forEach(t => t.classList.remove('active'));
-      tab.classList.add('active');
-      const target = tab.dataset.tab;
-      document.querySelectorAll('[data-section]').forEach(sec => {
-        if (target === 'all' || sec.dataset.section === target) {
-          sec.style.display = '';
-        } else {
-          sec.style.display = 'none';
-        }
-      });
-    };
+  document.querySelectorAll('.nav-tab').forEach((tab) => {
+    tab.onclick = () => switchTab(tab.dataset.tab);
   });
 }
 

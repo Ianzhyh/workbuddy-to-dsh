@@ -516,6 +516,39 @@ button.mini {
   gap: var(--space-2);
   margin: 0 0 var(--space-4);
 }
+
+/*
+ * 「下一步」引导条。
+ *
+ * 与告警条刻意区分开：告警条是**出问题了**（红/黄），这条是**一切正常、只是还没接完**
+ * —— 用主色调而不是警示色，否则会被当成又一个错误。
+ * 只在「桥在跑但两种接入都没走通」时出现，关掉后不再出现（见 renderNextStep）。
+ */
+#nextStepBar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+  margin: 0 0 var(--space-4);
+  padding: var(--space-3) var(--space-4);
+  font-size: 12.5px;
+  border: 1px solid var(--primary-border);
+  border-radius: var(--radius);
+  background: var(--primary-subtle);
+  color: var(--text-secondary);
+}
+
+#nextStepBar[hidden] { display: none; }
+
+.nextstep-icon {
+  color: var(--primary);
+  font-weight: 700;
+}
+
+.nextstep-text { flex: 1 1 320px; }
+
+.nextstep-close { margin-left: auto; }
+
 .alert {
   display: flex;
   align-items: center;
@@ -1604,6 +1637,138 @@ pre.log {
   border: 1px solid var(--border);
   border-radius: var(--radius-full);
   padding: 4px 12px;
+}
+
+/*
+ * 客户端选择器：先选后展开。
+ *
+ * 为什么要有它：原先每个客户端的完整配置同时铺开，实测这一块占 3220px ——
+ * 整页 6918px 的 47%，26 个复制按钮同时可见。而用户的任务是「接上我自己那一个」。
+ * 选择器把「同时铺开」换成「选一个看一个」，内容一个没删。
+ */
+.clientpicker {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-bottom: var(--space-3);
+}
+
+/* 限定在 .clientpicker 内：.clientchip 本身是「协议兼容」清单里的静态标签样式 */
+.clientpicker button.clientchip {
+  cursor: pointer;
+  font-size: 12.5px;
+  padding: 6px 14px;
+  color: var(--text-secondary);
+  background: var(--panel);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-full);
+  transition: var(--transition-fast);
+}
+
+.clientpicker button.clientchip:hover {
+  color: var(--primary);
+  border-color: var(--primary);
+}
+
+.clientpicker button.clientchip.active {
+  color: #fff;
+  background: var(--primary);
+  border-color: var(--primary);
+  font-weight: 600;
+}
+
+/*
+ * 可折叠的代码块。
+ *
+ * 长配置（opencode.json 随上游目录增长，30 个模型时约 1500px）默认折叠，
+ * 但**复制按钮始终可见可用** —— 它的用途是整段复制走，不是逐行阅读。
+ */
+.codeblock.collapsed pre { display: none; }
+
+.codeblock-toggle {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+  text-align: left;
+}
+
+.codeblock-toggle::before {
+  content: '▸';
+  display: inline-block;
+  width: 13px;
+  opacity: 0.65;
+}
+
+.codeblock:not(.collapsed) .codeblock-toggle::before { content: '▾'; }
+
+.codeblock-toggle:hover { color: var(--primary); }
+
+/*
+ * 模型选择器：勾什么，下面的配置片段就生成什么。
+ *
+ * 为什么需要：`/api/clients` 只回桥精选的那几个模型，但上游 30 个都是可用的。
+ * 原实现把精选集写死进配置片段，用户想加别的只能手改 JSON。
+ */
+.modelpick {
+  margin-bottom: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  background: var(--panel-subtle);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.modelpick-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+  margin-bottom: var(--space-1);
+  font-size: 12.5px;
+}
+
+.modelpick-count {
+  color: var(--hint);
+  font-size: 12px;
+}
+
+.modelpick-head button.mini { margin-left: 0; }
+.modelpick-head button.mini + button.mini { margin-left: calc(-1 * var(--space-2)); }
+
+.modelpick-note {
+  margin: 0 0 var(--space-2);
+  font-size: 12px;
+  color: var(--hint);
+  line-height: 1.45;
+}
+
+.modelpick-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.modelpick-chip {
+  font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  font-size: 11.5px;
+  padding: 4px 10px;
+  cursor: pointer;
+  color: var(--text-secondary);
+  background: var(--panel);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-full);
+  transition: var(--transition-fast);
+}
+
+.modelpick-chip:hover { border-color: var(--primary); color: var(--primary); }
+
+.modelpick-chip.on {
+  color: var(--primary);
+  background: var(--primary-subtle);
+  border-color: var(--primary);
+  font-weight: 600;
 }
 
 /* ── 复制反馈与无障碍 ── */

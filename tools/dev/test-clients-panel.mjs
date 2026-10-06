@@ -9,7 +9,7 @@
  * 不启真控制台、不消耗上游额度：静态服务 + 无头 Chromium，`/api/*` 全打桩。
  */
 import { startStaticServer, openPage, waitFor, q, sleep } from './ui-harness.mjs';
-import { baseRoutes, clientsFixture } from './fixtures.mjs';
+import { baseRoutes, clientsFixture, CATALOG } from './fixtures.mjs';
 
 const PORT = 8788;
 const URL_ = `http://127.0.0.1:${PORT}/`;
@@ -26,7 +26,13 @@ const eq = (actual, expected, label) => {
 // 桩数据来自共享夹具（tools/dev/fixtures.mjs）—— 形状由 ui-harness 自动校验。
 // CLIENTS 与页面实际收到的 /api/clients 是同一份，断言直接对着它写。
 const CLIENTS = clientsFixture();
-const routes = baseRoutes();
+/**
+ * 目录里**多放一个精选集之外的模型**：用来验证「用户能把任意可用模型加进配置」。
+ * 注意桩数据在 openPage 时就序列化进页面了，**事后改 routes 对象没用** ——
+ * 必须在打开页面之前就准备好。
+ */
+const EXTRA_MODEL = { id: 'kimi-k3-9', name: 'Kimi-K3.9', context_window: 512000, max_output_tokens: 16000, credits: 0.5 };
+const routes = baseRoutes({ catalog: [...CATALOG, EXTRA_MODEL] });
 
 /** 在页面里注入的对比度测量工具（与 audit-clients-panel.mjs 同源）。 */
 const MEASURE_HELPERS = `
@@ -91,6 +97,29 @@ const { cdp, close } = await openPage(URL_, routes, { inject: INJECT });
 const cleanup = () => { try { cdp.close(); } catch { /* 忽略 */ } try { server.close(); } catch { /* 忽略 */ } };
 process.on('exit', cleanup);
 
+/**
+ * 切到某个客户端页签。
+ *
+ * 「客户端接入」现在是**先选后展开**（只渲染选中的那一块），所以每一节断言之前
+ * 都要先切到对应页签 —— 否则量到的是空面板，断言会成片地假失败。
+ */
+const CLIENT_CHIP = { opencode: 'opencode', claude: 'Claude Code', form: '图形表单', other: '其它客户端' };
+async function selectClient(id) {
+  const label = JSON.stringify(CLIENT_CHIP[id]);
+  await q(cdp, '(() => { const b = [...document.querySelectorAll("#clientsBox .clientpicker button")]'
+    + '.find((x) => x.textContent.trim() === ' + label + '); if (b) b.click(); })()');
+  await sleep(150);
+}
+
+/** 读当前页签里的卡片（先选后展开，所以每次切换后都要重读）。 */
+async function readCards() {
+  return q(cdp, `[...document.querySelectorAll('#clientsBox .clientcard')].map(c => ({
+    name: c.querySelector('.clientcard-head b')?.textContent || '',
+    tag: c.querySelector('.clientcard-head .tag')?.textContent || '',
+    code: [...c.querySelectorAll('.codeblock pre')].map(p => p.textContent).join('\\n'),
+  }))`);
+}
+
 // ── 1. 页签可达 ──────────────────────────────────────────────────────────
 const tabCount = await q(cdp, `document.querySelectorAll('.nav-tab').length`);
 eq(tabCount, 5, '导航页签数量');
@@ -123,12 +152,8 @@ eq(vals[1].v, CLIENTS.baseUrlAnthropic, 'Anthropic Base URL');
 eq(vals[2].v, CLIENTS.token, '令牌（必须来自接口，不能写死）');
 
 // ── 3. opencode 片段 ────────────────────────────────────────────────────
-const cards = await q(cdp, `[...document.querySelectorAll('#clientsBox .clientcard')].map(c => ({
-  name: c.querySelector('.clientcard-head b')?.textContent || '',
-  tag: c.querySelector('.clientcard-head .tag')?.textContent || '',
-  code: [...c.querySelectorAll('.codeblock pre')].map(p => p.textContent).join('\\n'),
-}))`);
-const opencode = cards.find((c) => c.name === 'opencode');
+await selectClient('opencode');
+const opencode = (await readCards()).find((c) => c.name === 'opencode');
 if (opencode) {
   pass(`opencode 卡片存在（状态「${opencode.tag}」）`);
   if (opencode.code.includes('@ai-sdk/openai-compatible')) pass('opencode 片段含 @ai-sdk/openai-compatible');
@@ -143,8 +168,92 @@ if (opencode) {
   } else fail('opencode 片段缺少 limit，客户端会显示「上下文 0」');
 } else fail('缺少 opencode 卡片');
 
+// ── 3b. 模型选择器：勾什么，配置就生成什么 ──────────────────────────────
+// 选择器列的是完整目录（/api/models），要等它到 —— 它与桥状态解耦、允许后到
+await waitFor(cdp, `!!(Array.isArray(lastModels) && lastModels.length > 4)`, 8000, '完整目录');
+await selectClient('opencode');
+
+const pick = await q(cdp, `(() => {
+  const w = document.querySelector('#clientsBox .modelpick');
+  if (!w) return null;
+  return {
+    count: (w.querySelector('.modelpick-count') || {}).textContent || '',
+    chips: [...w.querySelectorAll('.modelpick-chip')].map((c) => ({
+      id: c.textContent.replace(/^✓\s*/, '').trim(), on: c.classList.contains('on'),
+    })),
+    blockVisible: (() => {
+      const pre = document.querySelector('#clientsBox .codeblock pre');
+      return !!pre && pre.getBoundingClientRect().height > 0;
+    })(),
+    blockText: (document.querySelector('#clientsBox .codeblock pre') || {}).textContent || '',
+  };
+})()`);
+if (pick) pass('存在模型选择器'); else fail('缺少模型选择器');
+if (pick && pick.blockVisible) pass('配置块默认**展开可见**（看不到内容却要人复制是自相矛盾的）');
+else fail('配置块默认不可见 —— 用户看不到自己要复制的东西');
+if (pick && pick.chips.some((c) => c.id === 'kimi-k3-9')) pass('目录里精选集之外的模型也出现在选择器里');
+else fail('选择器只列了精选集，用户加不了别的模型');
+if (pick && pick.blockText.includes('kimi-k3-9') === false) pass('未勾选的模型不在配置里');
+else fail('未勾选的模型却出现在配置里');
+
+// 勾上目录外的模型 → 配置里应出现，且带上真实上下文
+await q(cdp, `(() => {
+  const c = [...document.querySelectorAll('#clientsBox .modelpick-chip')].find((x) => x.textContent.includes('kimi-k3-9'));
+  if (c) c.click();
+})()`);
+await sleep(250);
+const afterAdd = await q(cdp, `(() => {
+  const pre = document.querySelector('#clientsBox .codeblock pre');
+  const w = document.querySelector('#clientsBox .modelpick');
+  return {
+    has: pre ? pre.textContent.includes('kimi-k3-9') : false,
+    ctx: pre ? pre.textContent.includes('512000') : false,
+    count: (w.querySelector('.modelpick-count') || {}).textContent || '',
+  };
+})()`);
+if (afterAdd.has) pass('勾选后该模型出现在配置片段里');
+else fail('勾选后配置片段没有更新 —— 选择器没接线');
+if (afterAdd.ctx) pass('新加入的模型带上了真实上下文长度（512000）');
+else fail('新加入的模型缺少真实上下文长度，客户端会显示「上下文 0」');
+
+// 取消勾选 → 应从配置里消失
+await q(cdp, `(() => {
+  const c = [...document.querySelectorAll('#clientsBox .modelpick-chip')].find((x) => x.textContent.includes('kimi-k3-9'));
+  if (c) c.click();
+})()`);
+await sleep(250);
+const afterRemove = await q(cdp, `(() => {
+  const pre = document.querySelector('#clientsBox .codeblock pre');
+  return pre ? pre.textContent.includes('kimi-k3-9') : false;
+})()`);
+if (!afterRemove) pass('取消勾选后该模型从配置里消失');
+else fail('取消勾选后模型仍在配置里');
+
+// 「清空」后配置里不应残留任何模型
+await q(cdp, `(() => {
+  const b = [...document.querySelectorAll('#clientsBox .modelpick-head button')].find((x) => x.textContent.trim() === '清空');
+  if (b) b.click();
+})()`);
+await sleep(250);
+// 注意：页面求值的字符串里引用不到 Node 侧的变量，要先把值插进去
+const firstId = JSON.stringify(CLIENTS.modelDetails[0].id);
+const cleared = await q(cdp, '(() => {'
+  + ' const pre = document.querySelector("#clientsBox .codeblock pre");'
+  + ' return pre ? pre.textContent.includes(' + firstId + ') : true;'
+  + ' })()');
+if (!cleared) pass('「清空」后配置里不再残留模型');
+else fail('「清空」没有生效');
+
+// 复原，后面的用例还要用
+await q(cdp, `(() => {
+  const b = [...document.querySelectorAll('#clientsBox .modelpick-head button')].find((x) => x.textContent.trim() === '全选');
+  if (b) b.click();
+})()`);
+await sleep(250);
+
 // ── 4. Claude Code 片段 ─────────────────────────────────────────────────
-const cc = cards.find((c) => c.name === 'Claude Code');
+await selectClient('claude');
+const cc = (await readCards()).find((c) => c.name === 'Claude Code');
 if (cc) {
   pass(`Claude Code 卡片存在（状态「${cc.tag}」）`);
   if (cc.code.includes('ANTHROPIC_BASE_URL=' + CLIENTS.baseUrlAnthropic)) pass('Claude Code 片段含正确 ANTHROPIC_BASE_URL');
@@ -154,6 +263,7 @@ if (cc) {
 } else fail('缺少 Claude Code 卡片');
 
 // ── 5. 图形表单：逐格可复制 ─────────────────────────────────────────────
+await selectClient('form');
 // 字段按「提供商级 / 模型 N」分组渲染，这里把组标题拼回 key，断言仍是扁平的
 const frows = await q(cdp, `[...document.querySelectorAll('#clientsBox .formguide .fggroup')].flatMap(g => {
   const t = g.querySelector('.fggh')?.textContent || '';
@@ -166,8 +276,10 @@ const frows = await q(cdp, `[...document.querySelectorAll('#clientsBox .formguid
 if (frows.length >= 5) pass(`图形表单字段行 ${frows.length} 条`);
 else fail(`图形表单字段行不足：${frows.length}`);
 
+// 分组数 = 1 个提供商级 + **当前勾选的模型数**（选择器可增删，不能写死精选集长度）
+const chosenNow = await q(cdp, `document.querySelectorAll('#clientsBox .modelpick-chip.on').length`);
 const groupCount = await q(cdp, `document.querySelectorAll('#clientsBox .formguide .fggroup').length`);
-eq(groupCount, CLIENTS.modelDetails.length + 1, '字段分组数（提供商级 + 每个模型一组）');
+eq(groupCount, chosenNow + 1, `字段分组数（提供商级 + 已勾选的 ${chosenNow} 个模型各一组）`);
 
 // 分组标题必须写明归属，不能靠缩进让用户猜
 const groupTitles = await q(cdp, `[...document.querySelectorAll('#clientsBox .formguide .fggh')].map(e => e.textContent)`);
@@ -200,7 +312,7 @@ else fail(`以下字段缺复制按钮：${JSON.stringify(noBtn)}`);
 
 // 模型行：桥返回的每个模型都要能单独复制
 const modelRows = frows.filter((r) => r.k.includes('model-id'));
-eq(modelRows.length, CLIENTS.models.length, '模型行数（应与桥返回的模型数一致）');
+eq(modelRows.length, chosenNow, '模型行数（应与选择器里勾选的数量一致）');
 
 // ── 5a. 排版：四列必须全表对齐 ──────────────────────────────────────────
 // 「照着抄」的场景里，值列如果每行起点不同，眼睛就没法竖着扫下来
@@ -242,9 +354,14 @@ const allBtnClick = await q(cdp, `(() => {
 eq(allBtnClick, true, '点击「复制全部」不抛错');
 
 // ── 6. 兼容性分档 ───────────────────────────────────────────────────────
-const tags = await q(cdp, `[...document.querySelectorAll('#clientsBox .clientcard-head .tag')].map(e => e.textContent)`);
-if (tags.includes('已实测')) pass('存在「已实测」档'); else fail('缺少「已实测」档');
-if (tags.includes('不支持')) pass('存在「不支持」档'); else fail('缺少「不支持」档');
+await selectClient('other');
+// 「不支持」是常驻尾注；「已实测」只在对应的客户端页签里（先选后展开）
+const otherTags = await q(cdp, `[...document.querySelectorAll('#clientsBox .clientcard-head .tag')].map(e => e.textContent)`);
+if (otherTags.includes('不支持')) pass('存在「不支持」档'); else fail('缺少「不支持」档');
+await selectClient('opencode');
+const okTags = await q(cdp, `[...document.querySelectorAll('#clientsBox .clientcard-head .tag')].map(e => e.textContent)`);
+if (okTags.includes('已实测')) pass('存在「已实测」档'); else fail('缺少「已实测」档');
+await selectClient('other');
 
 const chips = await q(cdp, `[...document.querySelectorAll('#clientsBox .clientchip')].map(e => e.textContent)`);
 for (const need of ['Cursor', 'Trae', 'Cherry Studio', 'LobeChat']) {
@@ -259,6 +376,8 @@ if (ragText.includes('501') && ragText.includes('embedding')) pass('RAG 卡片�
 else fail('RAG 卡片说明不完整');
 
 // ── 6. 复制按钮接线 ─────────────────────────────────────────────────────
+// 代码块只在具体客户端的页签里（opencode / Claude Code），先切过去
+await selectClient('opencode');
 const copyBtns = await q(cdp, `document.querySelectorAll('#clientsBox .codeblock-head button').length`);
 if (copyBtns >= 2) pass(`代码块复制按钮 ${copyBtns} 个`); else fail('复制按钮缺失');
 
@@ -284,24 +403,32 @@ const a11y = await q(cdp, `(() => {
     const l = parseFloat(a.left) || 0, ri = parseFloat(a.right) || 0;
     return { w: r.width - l - ri, h: r.height - t - bo };
   };
+  // 只有**自身没有可辨识文案**的按钮才需要 aria-label —— 页签芯片、展开开关
+  // 都有可见文字，给它们也套 aria-label 反而啰嗦。要盯住的是那些全叫「复制」的。
+  const copyBtns = btns.filter(b => (b.textContent || '').trim() === '复制');
+  const copyNames = copyBtns.map(b => (b.getAttribute('aria-label') || '').trim());
   return {
     total: btns.length,
-    labelled: names.length,
-    unique: new Set(names).size,
+    copyCount: copyBtns.length,
+    copyLabelled: copyNames.filter(Boolean).length,
+    copyUnique: new Set(copyNames.filter(Boolean)).size,
     live: panel.querySelectorAll('[aria-live]').length,
     small: btns.filter(b => { const h = hit(b); return h.h < 32 || h.w < 32; }).length,
   };
 })()`);
-eq(a11y.labelled, a11y.total, '每个复制按钮都有 aria-label');
-eq(a11y.unique, a11y.total, '可访问名互不重复（21 个按钮不能都叫「复制」）');
+if (a11y.copyCount > 0) pass(`当前页签有 ${a11y.copyCount} 个「复制」按钮`);
+else fail('当前页签一个「复制」按钮都没有 —— 复制功能丢了');
+eq(a11y.copyLabelled, a11y.copyCount, '每个「复制」按钮都有 aria-label');
+eq(a11y.copyUnique, a11y.copyCount, '「复制」按钮的可访问名互不重复');
 if (a11y.live >= 1) pass('存在 aria-live 播报区'); else fail('缺少 aria-live 播报区');
 eq(a11y.small, 0, '有效命中区均 ≥ 32px');
 
 // ── 6c. 交互：就地反馈（顶部提示条在长面板底部够不着）────────────────────
-await q(cdp, `document.querySelector('#clientsBox .codeblock-head button').click()`);
+// head 里现在是 [展开开关, 复制按钮]，要点的必须是复制那个
+await q(cdp, `document.querySelector('#clientsBox .codeblock-head button.copybtn').click()`);
 await sleep(200);
 const fbState = await q(cdp, `(() => {
-  const b = document.querySelector('#clientsBox .codeblock-head button');
+  const b = document.querySelector('#clientsBox .codeblock-head button.copybtn');
   const live = document.getElementById('clientsLive');
   return { text: (b.textContent || '').trim(), live: (live ? live.textContent : '').trim() };
 })()`);
@@ -310,9 +437,11 @@ else fail(`就地反馈未生效，按钮文本仍是 "${fbState.text}"`);
 if (fbState.live) pass(`aria-live 收到播报（"${fbState.live}"）`);
 else fail('aria-live 未收到播报');
 await sleep(1800);
-eq(await q(cdp, `document.querySelector('#clientsBox .codeblock-head button').textContent.trim()`), '复制', '1.8 秒后按钮文本恢复');
+eq(await q(cdp, `document.querySelector('#clientsBox .codeblock-head button.copybtn').textContent.trim()`), '复制', '1.8 秒后按钮文本恢复');
 
 // ── 6d. 对比度（WCAG AA 4.5:1）──────────────────────────────────────────
+// .formrow-* 只在「图形表单」页签里渲染，先切过去
+await selectClient('form');
 for (const theme of ['light', 'dark']) {
   await q(cdp, `document.documentElement.setAttribute('data-theme','${theme}')`);
   await sleep(150);
@@ -322,7 +451,6 @@ for (const theme of ['light', 'dark']) {
       '说明文字': '#clientsBox .formrow-h',
       '值': '#clientsBox .formrow-v',
       '卡片说明': '#clientsBox .clientcard-note',
-      '代码块头': '#clientsBox .codeblock-head',
       '值行说明': '#clientsBox .valuerow-h',
       '时间戳': '#clientsStamp',
     };
@@ -338,6 +466,23 @@ for (const theme of ['light', 'dark']) {
     if (r.ratio >= 4.5) pass(`[${theme}] ${r.k} 对比度 ${r.ratio}:1`);
     else fail(`[${theme}] ${r.k} 对比度仅 ${r.ratio}:1，低于 WCAG AA 的 4.5:1`);
   }
+}
+await q(cdp, `document.documentElement.setAttribute('data-theme','light')`);
+
+// 代码块头只在有代码块的页签里（先选后展开），单独量
+await selectClient('opencode');
+for (const theme of ['light', 'dark']) {
+  await q(cdp, `document.documentElement.setAttribute('data-theme','${theme}')`);
+  await sleep(120);
+  const m = await q(cdp, `(() => {
+    const el = document.querySelector('#clientsBox .codeblock-head');
+    if (!el) return null;
+    const r = window.__AUDIT.ratioOf(el);
+    return r ? Number(r.ratio.toFixed(2)) : null;
+  })()`);
+  if (m === null) fail(`[${theme}] 找不到代码块头`);
+  else if (m >= 4.5) pass(`[${theme}] 代码块头 对比度 ${m}:1`);
+  else fail(`[${theme}] 代码块头 对比度仅 ${m}:1，低于 WCAG AA 的 4.5:1`);
 }
 await q(cdp, `document.documentElement.setAttribute('data-theme','light')`);
 
