@@ -1,12 +1,23 @@
-# WorkBuddy → DeepSeek Harness 中转
+# WorkBuddy 本地 API 桥
 
 把本机 **WorkBuddy 桌面端**已登录的模型能力（DeepSeek / GLM / Kimi / MiniMax 等），
-经一个本地桥暴露成 **OpenAI 兼容接口**，供 **DeepSeek Harness** 或任意支持自定义
-Base URL 的客户端使用。附带一个网页控制台，把状态、启停、诊断、模型注册集中到一屏。
+经一个本地桥变成本机的 **OpenAI 兼容**与 **Anthropic 兼容**两套接口 ——
+**Claude Code**、**opencode**、**Cursor**、**Trae**、**Cherry Studio**、**NextChat**、
+**LobeChat**、**Open WebUI** 等任何支持自定义 Base URL 的客户端都能直连。
 
-**关键词**：WorkBuddy 插件 · WorkBuddy 接入 DeepSeek Harness · 本地模型桥 · OpenAI 兼容接口 ·
-Anthropic Messages 兼容 · 自定义 Base URL · opencode / Claude Code / Cursor / Trae /
-Cherry Studio / NextChat / LobeChat / Open WebUI 接入 · 零依赖 Node.js · 仅监听 127.0.0.1 · 本机凭据自用
+另附一个网页控制台（状态 / 启停 / 诊断 / 模型注册 / 用量 / 体检 / 对话测试），
+以及一个可选的 **DeepSeek Harness（dsh）原生插件**（见下方说明）。
+
+> **一句话**：WorkBuddy 的模型额度 → 本地 API → 你惯用的任意 AI 客户端。
+
+**关键词**（便于检索，按关心的问题分组）：
+
+| 你在找什么 | 相关词 |
+|---|---|
+| 把 WorkBuddy 用起来 | WorkBuddy · WorkBuddy 本地 API · WorkBuddy 模型桥 · WorkBuddy 中转 · WorkBuddy 插件 |
+| 接某个客户端 | **WorkBuddy 接入 Claude Code** · WorkBuddy OpenAI 兼容 API · WorkBuddy Anthropic Messages 兼容 · Claude Code 自定义 API · opencode / Cursor / Trae / Cherry Studio / NextChat / LobeChat / ChatBox / Open WebUI 接入 |
+| 接 DeepSeek Harness | DeepSeek Harness 插件 · dsh 插件 · dsh 模型路由 · provider workbuddy |
+| 技术特性 | openai-compatible · anthropic-compatible · llm proxy · local model bridge · 零依赖 Node.js · 仅监听 127.0.0.1 · 本机凭据自用 |
 
 > ### ⚠️ 请先读这一段
 >
@@ -22,13 +33,30 @@ Cherry Studio / NextChat / LobeChat / Open WebUI 接入 · 零依赖 Node.js · 
 >   凭据存储而不落盘密钥）。若你需要长期稳定、可商用的模型接入，**请申请官方 API**。
 > - 详细的风险与边界见 [注意事项](#注意事项) 与 [docs/SECURITY.md](docs/SECURITY.md)。
 
-**本仓库还提供一个 dsh 原生插件**（[`dsh-plugin/`](dsh-plugin/README.md)）：装进 dsh 后，
-模型选择器里直接多出 provider `WorkBuddy`，设置里多一页 9 个标签页的数据面板；
-插件自带桥与控制台，拷一个文件夹就能用。
+**本仓库还提供一个 DeepSeek Harness 原生插件**（[`dsh-plugin/`](dsh-plugin/README.md)）：
+装进 dsh 后，模型选择器里直接多出 provider `WorkBuddy`，设置里多一页 9 个标签页的数据面板；
+插件自带桥与控制台，拷一个文件夹就能用。**它是可选的** —— 不用 dsh 的话，
+前面说的本地 API 照常可用，只是没有那个原生集成。
 
 只在本机回环地址上工作，不对外暴露，不内置任何密钥。
 
 ```sh
+# ── 第 1 步：跑起来（所有用法都需要，与 dsh 无关）──────────────────────
+git clone https://github.com/Ianzhyh/workbuddy-to-dsh.git
+cd workbuddy-to-dsh
+# 然后双击 启动.cmd —— 桥和控制台都会自动起来，不需要 npm install
+
+# 或者只要桥、不开控制台：
+bridge\start-bridge.cmd
+```
+
+跑起来后，去控制台「客户端接入」页签拿 Base URL 与令牌填进你的客户端
+（见 [接入你的客户端](#接入你的客户端)）。**到这里就已经能用了。**
+
+```sh
+# ── 第 2 步（可选）：再装进 DeepSeek Harness ──────────────────────────
+# 只有用 dsh 的人需要。三种方式装的是同一个插件，任选一种。
+
 # 方式一：一条命令直装（v1.1.0 起，仓库根已声明 dsh.bundle）
 dsh plugin --profile desktop add github:Ianzhyh/workbuddy-to-dsh
 
@@ -36,8 +64,7 @@ dsh plugin --profile desktop add github:Ianzhyh/workbuddy-to-dsh
 #   从 GitHub Releases 下载 dsh-plugin-workbuddy-<版本>.tgz 后：
 dsh plugin --profile desktop add ./dsh-plugin-workbuddy-1.2.0.tgz
 
-# 方式三：从源码（插件在 dsh-plugin/ 子目录）
-git clone https://github.com/Ianzhyh/workbuddy-to-dsh.git
+# 方式三：从源码（插件在 dsh-plugin/ 子目录，接第 1 步的 git clone）
 dsh plugin --profile desktop add workbuddy-to-dsh/dsh-plugin
 # 装完重启一次 dsh；之后：设置 → WorkBuddy
 ```
@@ -92,8 +119,10 @@ WorkBuddy 的上游后端本身就讲 OpenAI 协议，官方只是没有开放�
 它会自动定位 Node.js、启动服务、并在浏览器里打开控制台——桥也会被自动拉起，
 不需要任何手工操作。打开后即可看到桥已就绪和完整的模型列表。
 
-> 首次使用建议在「可用模型」里勾选所需模型并点「保存到 dsh 设置」，
-> 然后重启一次 DeepSeek Harness，模型就会出现在它的选择器里。
+> **首次使用**：桥起来之后，去「客户端接入」页签拿到 Base URL 与令牌，填进你的客户端即可
+> —— 见下方[接入你的客户端](#接入你的客户端)。
+> 若用 DeepSeek Harness，另外在「可用模型」里勾选所需模型并点「保存到 dsh 设置」，
+> 再重启一次 dsh，模型就会出现在它的选择器里。
 
 三个"不需要"：
 
@@ -112,10 +141,43 @@ node tools\doctor.mjs       :: 命令行自检，输出缺失项与修法
 
 ---
 
-## 作为 dsh 插件使用（推荐）
+## 接入你的客户端
+
+桥同时讲**两套协议**，填哪个地址取决于客户端讲哪套：
+
+| 协议 | Base URL | API Key |
+|---|---|---|
+| OpenAI 兼容 | `http://127.0.0.1:8790/v1` | `wb-local-bridge`（或你设的 `WORKBUDDY_LOCAL_TOKEN`） |
+| Anthropic Messages | `http://127.0.0.1:8790`（**不带 `/v1`**） | 同上 |
+
+控制台的「客户端接入」页签里有每个客户端的完整配置片段，点一下即可复制。
+
+**兼容性分三档，如实标注、不夸大：**
+
+| 客户端 | 协议 | 状态 |
+|---|---|---|
+| opencode | OpenAI | ✅ 已实测 —— 用其底层 AI SDK（`@ai-sdk/openai-compatible`）跑通生成 / 工具调用 / 流式 |
+| Claude Code | Anthropic | ✅ 已实测 —— 流式事件序列、`tool_use`、多轮 `tool_result` 往返均正确 |
+| Cursor / Trae | OpenAI | ⚪ 协议兼容，未在客户端内实测（Agent 模式依赖的工具调用桥侧可用） |
+| Cherry Studio / NextChat / LobeChat / ChatBox / Open WebUI | OpenAI | ⚪ 协议兼容，未在客户端内实测 |
+
+> 「协议兼容」= 这些客户端只用 `/v1/models` 与 `/v1/chat/completions` 两个端点，
+> 桥侧已验证；但**没有真的装一遍跑通**，所以不写成「支持」。
+
+**Claude Code 的模型名会被映射。** 它发的是 `claude-sonnet-4-…`，上游没有这些 id，
+桥会映射到真实模型（默认 `glm-5.3`）。想指定就用 `WORKBUDDY_ANTHROPIC_MODEL=<上游真实模型 id>`。
+
+**已知限制：知识库 / RAG 用不了。** 上游只提供对话模型，没有任何 embedding 模型，
+`POST /v1/embeddings` 会明确返回 **501**。需要 RAG 的客户端请另配一个 embedding
+提供方——桥不做「假的向量」，那会让知识库看起来建成了、实际全是噪声。
+
+---
+
+## 作为 DeepSeek Harness 插件使用
 
 本仓库同时提供 **DeepSeek Harness 原生插件**（[`dsh-plugin/`](dsh-plugin/README.md)）。
-**两者是一套，不是二选一**：
+**插件和「桥 + 网页控制台」是一套东西的两个前端，不是二选一** ——
+用不用 dsh 都能用这个项目，只是装了插件多一层原生集成：
 
 > **插件当引擎，控制台的全部功能搬进 dsh 设置页 —— 两个前端、一个后端。**
 > 插件在 dsh 里注册原生模型路由、把**桥和控制台都管起来**（已在跑就复用，没跑就拉起）；
@@ -165,38 +227,6 @@ dsh plugin --profile desktop add <本仓库路径>/dsh-plugin
 所有图表都是自己画的**零依赖内联 SVG**（没有引入任何图表库）。
 
 控制台的所有接口见 [`dashboard/README.md`](dashboard/README.md#api)。
-
----
-
-## 接入其它客户端
-
-桥同时讲**两套协议**，填哪个地址取决于客户端讲哪套：
-
-| 协议 | Base URL | API Key |
-|---|---|---|
-| OpenAI 兼容 | `http://127.0.0.1:8790/v1` | `wb-local-bridge`（或你设的 `WORKBUDDY_LOCAL_TOKEN`） |
-| Anthropic Messages | `http://127.0.0.1:8790`（**不带 `/v1`**） | 同上 |
-
-控制台的「客户端接入」页签里有每个客户端的完整配置片段，点一下即可复制。
-
-**兼容性分三档，如实标注、不夸大：**
-
-| 客户端 | 协议 | 状态 |
-|---|---|---|
-| opencode | OpenAI | ✅ 已实测 —— 用其底层 AI SDK（`@ai-sdk/openai-compatible`）跑通生成 / 工具调用 / 流式 |
-| Claude Code | Anthropic | ✅ 已实测 —— 流式事件序列、`tool_use`、多轮 `tool_result` 往返均正确 |
-| Cursor / Trae | OpenAI | ⚪ 协议兼容，未在客户端内实测（Agent 模式依赖的工具调用桥侧可用） |
-| Cherry Studio / NextChat / LobeChat / ChatBox / Open WebUI | OpenAI | ⚪ 协议兼容，未在客户端内实测 |
-
-> 「协议兼容」= 这些客户端只用 `/v1/models` 与 `/v1/chat/completions` 两个端点，
-> 桥侧已验证；但**没有真的装一遍跑通**，所以不写成「支持」。
-
-**Claude Code 的模型名会被映射。** 它发的是 `claude-sonnet-4-…`，上游没有这些 id，
-桥会映射到真实模型（默认 `glm-5.3`）。想指定就用 `WORKBUDDY_ANTHROPIC_MODEL=<上游真实模型 id>`。
-
-**已知限制：知识库 / RAG 用不了。** 上游只提供对话模型，没有任何 embedding 模型，
-`POST /v1/embeddings` 会明确返回 **501**。需要 RAG 的客户端请另配一个 embedding
-提供方——桥不做「假的向量」，那会让知识库看起来建成了、实际全是噪声。
 
 ---
 
