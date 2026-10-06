@@ -1678,12 +1678,13 @@ pre.log {
 }
 
 /*
- * 可折叠的代码块。
+ * 可折叠的代码块的**标题行开关**。
  *
- * 长配置（opencode.json 随上游目录增长，30 个模型时约 1500px）默认折叠，
- * 但**复制按钮始终可见可用** —— 它的用途是整段复制走，不是逐行阅读。
+ * 折叠本身由第 17.2 节的 `grid-template-rows` 伸缩负责（这样才有过渡）。
+ * 这里曾经有一条 `.codeblock.collapsed pre { display: none }` —— 它把 `pre`
+ * 直接移出布局，grid 伸缩**完全失效**（实测高度从 830px 瞬跳到 0，中间值 0 个）。
+ * 已删除：折叠只靠 grid 轨道高度，不再动 display。
  */
-.codeblock.collapsed pre { display: none; }
 
 .codeblock-toggle {
   font: inherit;
@@ -1862,5 +1863,128 @@ pre.log {
   .codeblock pre {
     white-space: pre-wrap;
     overflow-wrap: anywhere;
+  }
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+ * 17. 过渡动效补充 (Motion: Pane Slide / Block Expand / Chip Feedback)
+ *
+ * 这一节补的是**新交互缺的动效**，不是另起一套语言 —— 曲线、时长、方向语义
+ * 都沿用第 5 节已有的约定（`--ease`、0.16s / 0.22s）。
+ *
+ * ## 方向语义（刻意区分的两条轴）
+ *
+ *   横向平移 → **平级切换**：页签、客户端选择器。告诉用户"你在几个并列选项间移动"
+ *   纵向平移 → **层级展开**：折叠块、引导条。告诉用户"这里有东西长出来了"
+ *
+ * 两条轴混用的话，同样的位移会被读成两种不同的含义，动效就不再是信息而是噪音。
+ * ══════════════════════════════════════════════════════════════════════ */
+
+/* ── 17.1 客户端面板切换：横向平移 + 淡入 ──────────────────────────────
+ * 「先选后展开」每次都是整块重建，不加过渡就是硬切 —— 用户会怀疑"是不是没点中"。
+ * 横向位移给的是"换了一个选项"的反馈。 */
+.clientpane {
+  animation: paneSlideIn 0.22s var(--ease);
+}
+
+@keyframes paneSlideIn {
+  from { opacity: 0; transform: translateX(8px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+
+/* ── 17.2 配置块伸缩（展开 / 折叠）─────────────────────────────────────
+ * 用 `grid-template-rows: 0fr ↔ 1fr` 对**内容自适应高度**做平滑伸缩。
+ * 为什么不用 height：`auto` 不可插值；为什么不用 max-height：得猜上限，
+ * 猜小了截断、猜大了节奏失真（前 80% 的时长都花在走那段空白上）。
+ *
+ * 代价：这是**唯一会触发布局**的动画。但它只作用在单个代码块上、
+ * 且用户是主动触发的，不构成滚动卡顿的来源（滚动时它不动）。 */
+.codeblock-body {
+  display: grid;
+  grid-template-rows: 1fr;
+  transition: grid-template-rows 0.24s var(--ease);
+}
+
+.codeblock.collapsed .codeblock-body {
+  grid-template-rows: 0fr;
+}
+
+/*
+ * 收缩时必须能裁掉内容，否则文字会溢出到折叠后的高度之外。
+ *
+ * 用 `auto hidden`（x=auto / y=hidden）而不是 `hidden`：纵向裁剪是收缩的前提，
+ * 但**横向必须留住滚动** —— 宽屏下配置片段有长行，切掉就看不全了。
+ * `min-height: 0` 是 grid 轨道能缩到内容高度以下的前提，缺了它整段不收缩。
+ */
+.codeblock-body > pre {
+  overflow: auto hidden;
+  min-height: 0;
+  /* 内边距也要一起收：只收轨道高度的话，折叠后仍会留 24px 空白
+     （12px 上下内边距），看起来像"没折干净" */
+  transition: padding 0.24s var(--ease);
+}
+
+.codeblock.collapsed .codeblock-body > pre {
+  padding-top: 0;
+  padding-bottom: 0;
+}
+
+/* ── 17.3 模型芯片：勾选的微反馈 ───────────────────────────────────────
+ * 勾选是**原地变化**（芯片位置不动），所以用缩放而不是位移 ——
+ * 位移会让相邻芯片看起来在重排，而实际上并没有。 */
+.modelpick-chip:active {
+  transform: scale(0.94);
+}
+
+.modelpick-chip.on {
+  animation: chipPop 0.18s var(--ease);
+}
+
+@keyframes chipPop {
+  0% { transform: scale(1); }
+  45% { transform: scale(1.06); }
+  100% { transform: scale(1); }
+}
+
+/* ── 17.4 「下一步」引导条：纵向平移淡入 ───────────────────────────────
+ * 它是从操作条下方"长出来"的，纵向位移才符合它的空间关系。
+ * `[hidden]` 时 display:none 由基础样式负责，这里只管出现。 */
+#nextStepBar:not([hidden]) {
+  animation: slideDown 0.22s var(--ease);
+}
+
+/* ── 17.5 客户端选择器：同属"平级切换"，与面板保持同一套反馈 ──────────── */
+.clientpicker button.clientchip:active {
+  transform: scale(0.96);
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+ * 18. 动效降级 (prefers-reduced-motion)
+ *
+ * 系统里开了「减少动态效果」就**把全部动画与过渡压成瞬间**。
+ *
+ * 为什么必须有：动效对本项目是锦上添花，但对前庭功能敏感的用户，位移与缩放
+ * 会引起真实的不适（眩晕、恶心）。操作系统提供了这个开关，尊重它是基本要求。
+ * **它必须排在所有动效之后** —— 靠后面的规则覆盖前面，顺序错了就失效。
+ *
+ * 注意只关「动」不关「变」：状态变化照常发生，只是瞬间到位。所以是把时长压到
+ * 0.01ms 而不是 `animation: none` / `transition: none` —— 后者会让依赖
+ * `animationend` / `transitionend` 的逻辑收不到事件，反而制造新 bug。
+ * ══════════════════════════════════════════════════════════════════════ */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-delay: 0ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    transition-delay: 0ms !important;
+    scroll-behavior: auto !important;
+  }
+
+  /* 呼吸光晕是纯装饰、不承载任何状态信息（状态由颜色本身表达），直接停掉 */
+  .badge .dot {
+    animation: none !important;
   }
 }

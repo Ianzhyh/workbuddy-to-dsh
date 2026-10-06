@@ -3564,15 +3564,30 @@ function clientCodeBlock(label, text, { collapsed = false } = {}) {
   head.append(toggle, copyButton(' ' + label, text));
   const pre = clientEl('pre');
   pre.textContent = text;
-  wrap.append(head, pre);
-  if (collapsed) {
-    toggle.onclick = () => {
-      // classList.toggle 返回「切换后是否含该类」；返回 false = 现在已展开
-      const open = wrap.classList.toggle('collapsed') === false;
-      toggle.setAttribute('aria-expanded', String(open));
-      toggle.title = open ? '收起' : '展开查看';
-    };
-  }
+  /*
+   * 代码块要包一层 body 才能做**伸缩动画**。
+   *
+   * 为什么不能直接给 `pre` 加过渡：`height: auto` 不可插值，而 `max-height`
+   * 得猜一个上限（猜小了截断、猜大了动画节奏失真）。`grid-template-rows: 0fr → 1fr`
+   * 是唯一能对「内容自适应高度」做平滑伸缩的纯 CSS 做法，但它要求父元素是 grid
+   * 容器 —— 所以多这一层。
+   */
+  const body = clientEl('div', 'codeblock-body');
+  body.append(pre);
+  wrap.append(head, body);
+  /*
+   * 开关**始终可用**，不只在默认折叠时。
+   *
+   * 默认展开是刻意的（让用户复制看不到的东西是自相矛盾的），但长配置块应该允许
+   * 用户主动收起 —— 只在 `collapsed: true` 时挂 onclick 会让默认展开的那些块
+   * 有一个点了没反应的按钮，等于死控件。
+   */
+  toggle.onclick = () => {
+    // classList.toggle 返回「切换后是否含该类」；返回 false = 现在已展开
+    const open = wrap.classList.toggle('collapsed') === false;
+    toggle.setAttribute('aria-expanded', String(open));
+    toggle.title = open ? '收起' : '展开查看';
+  };
   return wrap;
 }
 
@@ -3929,9 +3944,25 @@ function switchTab(name) {
   document.querySelectorAll('.nav-tab').forEach((t) => {
     t.classList.toggle('active', t.dataset.tab === name);
   });
+  const shown = [];
   document.querySelectorAll('[data-section]').forEach((sec) => {
-    sec.style.display = (name === 'all' || sec.dataset.section === name) ? '' : 'none';
+    const show = name === 'all' || sec.dataset.section === name;
+    sec.style.display = show ? '' : 'none';
+    if (show) { sec.style.animation = 'none'; shown.push(sec); }
   });
+  if (!shown.length) return;
+  /*
+   * 重放进场动画。
+   *
+   * `[data-section]` 上的 `sectionFadeIn` 只在**元素插入文档时**跑一次，而这些面板
+   * 从头到尾都在 DOM 里（切换只改 `display`）—— 不重放的话，用户只在首屏加载时见过
+   * 一次动画，之后每次切页签都是突变（实测确认过）。
+   *
+   * 读一次 `offsetWidth` 强制回流，动画才会重新开始。**一次就够**：批量把
+   * animation 置空、回流一次、再统一恢复，比每个面板各读一次省 8 次布局计算。
+   */
+  void document.body.offsetWidth;
+  for (const sec of shown) sec.style.animation = '';
 }
 
 function initNavTabs() {

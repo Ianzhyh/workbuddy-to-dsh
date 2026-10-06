@@ -220,7 +220,7 @@ line('B. 交互流程');
 
 const fb = await q(cdp, `(() => {
   const box = document.getElementById('clientsBox');
-  const all = [...box.querySelectorAll('.codeblock-head button')];
+  const all = [...box.querySelectorAll('.codeblock-head button.copybtn')];
   const target = all[all.length - 1];
   target.scrollIntoView({ block: 'center' });
   return { scrolled: Math.round(window.scrollY), targetTop: Math.round(target.getBoundingClientRect().top) };
@@ -230,14 +230,14 @@ await sleep(200);
 // 点长面板**最底部**那个复制按钮：顶部提示条此时完全够不着
 await q(cdp, `(() => {
   const box = document.getElementById('clientsBox');
-  const all = [...box.querySelectorAll('.codeblock-head button')];
+  const all = [...box.querySelectorAll('.codeblock-head button.copybtn')];
   all[all.length - 1].click();
 })()`);
 await sleep(150);
 
 const fbResult = await q(cdp, `(() => {
   const box = document.getElementById('clientsBox');
-  const all = [...box.querySelectorAll('.codeblock-head button')];
+  const all = [...box.querySelectorAll('.codeblock-head button.copybtn')];
   const btn = all[all.length - 1];
   const br = btn.getBoundingClientRect();
   const live = document.getElementById('clientsLive');
@@ -258,7 +258,7 @@ console.log(`  顶部提示条 top=${fbResult.topBarTop}px → ${fbResult.topBar
 await sleep(1800);
 const restored = await q(cdp, `(() => {
   const box = document.getElementById('clientsBox');
-  const all = [...box.querySelectorAll('.codeblock-head button')];
+  const all = [...box.querySelectorAll('.codeblock-head button.copybtn')];
   return (all[all.length - 1].textContent || '').trim();
 })()`);
 console.log(`  1.8 秒后按钮文本恢复为 "${restored}" ${restored === '复制' ? '✅' : '❌'}`);

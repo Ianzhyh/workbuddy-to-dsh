@@ -378,15 +378,75 @@ else fail('RAG 卡片说明不完整');
 // ── 6. 复制按钮接线 ─────────────────────────────────────────────────────
 // 代码块只在具体客户端的页签里（opencode / Claude Code），先切过去
 await selectClient('opencode');
-const copyBtns = await q(cdp, `document.querySelectorAll('#clientsBox .codeblock-head button').length`);
-if (copyBtns >= 2) pass(`代码块复制按钮 ${copyBtns} 个`); else fail('复制按钮缺失');
+// 只数复制按钮：head 里现在还有折叠开关，用不带 .copybtn 的选择器会把它算进来
+const copyBtns = await q(cdp, `document.querySelectorAll('#clientsBox .codeblock-head button.copybtn').length`);
+if (copyBtns >= 1) pass(`代码块复制按钮 ${copyBtns} 个`); else fail('复制按钮缺失');
 
 // 复制按钮必须真的能跑通（点击后不抛错）
 const clickOk = await q(cdp, `(() => {
-  const b = document.querySelector('#clientsBox .codeblock-head button');
+  const b = document.querySelector('#clientsBox .codeblock-head button.copybtn');
   try { b.click(); return true; } catch (e) { return 'ERR: ' + e.message; }
 })()`);
 eq(clickOk, true, '点击复制按钮不抛错');
+
+// ── 6a. 代码块折叠开关：必须始终可用 ────────────────────────────────────
+// 曾经只在 `collapsed: true` 时挂 onclick —— 默认展开后那些块就成了死控件。
+// 默认展开是对的（看不到内容却要人复制自相矛盾），但**开关本身不能失灵**。
+//
+// 每次都**重新查询元素**再操作：面板是可重建的（选客户端 / 目录刷新都会
+// `renderClients()`），缓存下来的 DOM 引用随时可能变成游离节点，
+// 对着游离节点 click() 什么都不会发生 —— 那会表现成"开关失灵"，其实是测试写错了。
+const toggleTrace = await q(cdp, `(async () => {
+  const find = () => {
+    const block = document.querySelector('#clientsBox .codeblock');
+    return block && {
+      block,
+      body: block.querySelector('.codeblock-body'),
+      toggle: block.querySelector('.codeblock-toggle'),
+    };
+  };
+  const h = (el) => Math.round(el.getBoundingClientRect().height);
+  const trace = [];
+  let cur = find();
+  const diag = (c) => {
+    const cs = getComputedStyle(c.body);
+    const pre = c.body.querySelector('pre');
+    return {
+      rows: cs.gridTemplateRows, disp: cs.display,
+      preMin: pre ? getComputedStyle(pre).minHeight : '(无 pre)',
+      preOv: pre ? getComputedStyle(pre).overflow : '',
+      pane: (document.querySelector('#clientsBox .clientpicker button.active') || {}).textContent || '?',
+      n: document.querySelectorAll('#clientsBox .codeblock').length,
+    };
+  };
+  trace.push({ step: '初始', cls: cur.block.className, h: h(cur.body), aria: cur.toggle.getAttribute('aria-expanded'), ...diag(cur) });
+  cur.toggle.click();
+  trace.push({ step: '点击后(同步)', cls: cur.block.className, h: h(cur.body), aria: cur.toggle.getAttribute('aria-expanded') });
+  await new Promise((r) => setTimeout(r, 500));
+  cur = find();
+  trace.push({ step: '等待后', cls: cur.block.className, h: h(cur.body), aria: cur.toggle.getAttribute('aria-expanded'), ...diag(cur) });
+  const collapsed = { cls: cur.block.className, h: h(cur.body), aria: cur.toggle.getAttribute('aria-expanded') };
+  cur.toggle.click();
+  await new Promise((r) => setTimeout(r, 500));
+  cur = find();
+  return { trace, collapsed, restored: { cls: cur.block.className, h: h(cur.body), aria: cur.toggle.getAttribute('aria-expanded') } };
+})()`);
+
+for (const t of toggleTrace.trace) {
+  console.log(`    · ${t.step.padEnd(12)} ${(t.cls || '').padEnd(20)} 高度=${String(t.h).padStart(4)}px  aria-expanded=${t.aria}  grid-rows=${t.rows}`);
+}
+if (toggleTrace.collapsed.cls.includes('collapsed') && toggleTrace.collapsed.h < 40) {
+  pass(`折叠开关可用（收起到 ${toggleTrace.collapsed.h}px）`);
+} else {
+  fail(`折叠开关点了没反应（class=${toggleTrace.collapsed.cls}，高度 ${toggleTrace.collapsed.h}px）`);
+}
+if (!toggleTrace.restored.cls.includes('collapsed') && toggleTrace.restored.h > 100) {
+  pass(`再次点击恢复展开（${toggleTrace.restored.h}px）`);
+} else {
+  fail(`展开没恢复（class=${toggleTrace.restored.cls}，高度 ${toggleTrace.restored.h}px）`);
+}
+eq(toggleTrace.collapsed.aria, 'false', '折叠后 aria-expanded=false');
+eq(toggleTrace.restored.aria, 'true', '展开后 aria-expanded=true');
 
 // ── 6b. 可访问性：可访问名、播报区、命中区 ──────────────────────────────
 const a11y = await q(cdp, `(() => {
