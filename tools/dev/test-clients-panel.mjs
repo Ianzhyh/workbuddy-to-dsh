@@ -193,6 +193,9 @@ if (pick && pick.blockVisible) pass('配置块默认**展开可见**（看不到
 else fail('配置块默认不可见 —— 用户看不到自己要复制的东西');
 if (pick && pick.chips.some((c) => c.id === 'kimi-k3-9')) pass('目录里精选集之外的模型也出现在选择器里');
 else fail('选择器只列了精选集，用户加不了别的模型');
+// 芯片总数必须等于**完整目录**的长度，而不是精选集 —— 这条盯的是
+// 「目录后到、选择器不重渲染」那个 bug（曾表现为 30 个模型只显示 4 个）
+eq(pick.chips.length, CATALOG.length + 1, `选择器列出完整目录（${CATALOG.length + 1} 个），而非精选集`);
 if (pick && pick.blockText.includes('kimi-k3-9') === false) pass('未勾选的模型不在配置里');
 else fail('未勾选的模型却出现在配置里');
 

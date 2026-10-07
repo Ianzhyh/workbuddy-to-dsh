@@ -1800,11 +1800,12 @@ async function claimDailyCheckin(auth) {
 
 // ── 每日自动签到（R11.2）────────────────────────────────────────────────
 // 内存态：桥重启后重新判定（上游幂等兜底，重复签也只是「已签到」）。
-// 触发点在 /v1/chat/completions 开头，**fire-and-forget**：先转发请求、
-// 后台补签，绝不阻塞或拖慢这次调用。
+// 触发点有两个：/v1/chat/completions 开头（fire-and-forget，绝不阻塞这次调用）
+// 与**桥自己的定时器**（见 startAutoCheckinTimer 的说明）。
 const AUTO_CHECKIN_COOLDOWN_MS = Number(process.env.WORKBUDDY_CHECKIN_COOLDOWN_MS || 3600000); // 失败后冷却 1 小时再试
 const AUTO_CHECKIN_MAX_PER_DAY = 3;       // 当天最多试 3 次，避免对上游打无效请求
 let autoCheckinDay = '';                  // 「今天已尝试」的本地日期
+let autoCheckinDoneDay = '';              // 「今天已签成功」的本地日期 —— 当天不再重试
 let autoCheckinTries = 0;
 let autoCheckinLastAt = 0;
 let autoCheckinInflight = null;
@@ -1823,6 +1824,9 @@ function maybeAutoCheckin() {
     autoCheckinTries = 0;
     autoCheckinLastAt = 0;
   }
+  // 今天已经签成功了就别再打上游 —— 没有这条的话，定时器每小时都会问一次
+  // 「签了没」，而答案永远是「签了」。
+  if (autoCheckinDoneDay === today) return;
   if (autoCheckinTries >= AUTO_CHECKIN_MAX_PER_DAY) return;
   if (autoCheckinLastAt && Date.now() - autoCheckinLastAt < AUTO_CHECKIN_COOLDOWN_MS) return;
   if (autoCheckinInflight) return;
@@ -1838,6 +1842,8 @@ function maybeAutoCheckin() {
         result: claim.already ? 'already' : 'ok',
         credit: typeof claim.credit === 'number' ? claim.credit : 0,
       };
+      // 「已签到」也算今天不用再管了
+      autoCheckinDoneDay = localDay(Date.now());
       log('auto checkin', autoCheckinState.result, autoCheckinState.credit);
     } catch (e) {
       const msg = shortError(e);
@@ -1848,12 +1854,43 @@ function maybeAutoCheckin() {
         result: noActivity ? 'no-activity' : 'error',
         error: msg,
       };
+      // 没有签到活动的地方永远不会「成功」，再试也是白试 —— 当天收工
+      if (noActivity) autoCheckinDoneDay = localDay(Date.now());
       log('auto checkin', autoCheckinState.result, msg);
     } finally {
       autoCheckinInflight = null;
     }
   })();
 }
+
+/**
+ * 桥自己的每日签到定时器。
+ *
+ * **为什么必须有这个**：签到原先只挂在 `/v1/chat/completions` 开头 ——
+ * 也就是说「有人调模型」才顺带签一次。但**桥才是常驻后台的那个进程**，
+ * 而用户完全可能一整天不调模型（刚装好还没接客户端、周末没写代码、
+ * 只用网页版而没走这个桥……）。
+ *
+ * 实测就撞上了：桥从 13:03 一直跑着，10-07 一整天**没有一条模型请求**，
+ * 于是**一次签到都没发生**，用户晚上打开控制台才发现还得手动签。
+ *
+ * 控制台侧的 hourly 定时覆盖不了这种情况 —— 它要求控制台开着，而控制台
+ * 恰恰是用户平时会关掉的那个（关掉后桥会留下，这是刻意的）。
+ * 所以「按天自动」这件事必须由常驻的那一方负责。
+ *
+ * 间隔取 1 小时与失败冷却同频：`maybeAutoCheckin` 自己会挡掉重复调用
+ * （当天成功过、超次数、冷却中都会直接返回），这里不需要再判。
+ */
+function startAutoCheckinTimer() {
+  if (!AUTO_CHECKIN_ENABLED) return;
+  // 启动后先等一会儿再试：上游连接预热与目录抓取都在开头，别挤在一起。
+  // 可调是为了让测试不必真等 20 秒（生产环境没有理由改它）。
+  const kickMs = Number(process.env.WORKBUDDY_CHECKIN_KICK_MS || 20000);
+  const kick = () => maybeAutoCheckin();
+  setTimeout(kick, kickMs).unref?.();
+  setInterval(kick, AUTO_CHECKIN_COOLDOWN_MS).unref?.();
+}
+
 
 /**
  * 只读查询积分余额（按套餐聚合）。
@@ -2568,6 +2605,12 @@ server.listen(PORT, HOST, () => {
     req.on('timeout', () => req.destroy());
     req.end();
   } catch { /* 登录文件读不出来等：真正请求时自会报错 */ }
+
+  // ── 每日自动签到的定时器 ─────────────────────────────────────────────
+  // 必须由**常驻的那一方**负责：桥会在后台一直活着，控制台不会。
+  // 详见 startAutoCheckinTimer 的注释（实测：桥跑了一整天、零模型请求，
+  // 结果一次签到都没发生）。
+  startAutoCheckinTimer();
 });
 
 for (const sig of ['SIGINT', 'SIGTERM']) {
