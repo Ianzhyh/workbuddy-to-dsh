@@ -603,14 +603,14 @@ test('readProjectEnv 解析 .env，且只在 config 未显式指定时生效', (
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-test('ConsoleSupervisor：靠首页标题识别控制台，认不出就报 foreign', async () => {
-  const { ConsoleSupervisor, CONSOLE_TITLE } = await import('../lib/console.mjs');
+test('ConsoleSupervisor：靠首页结构标记识别控制台，认不出就报 foreign', async () => {
+  const { ConsoleSupervisor, CONSOLE_MARKER } = await import('../lib/console.mjs');
   const { createServer } = await import('node:http');
 
-  // 1) 真控制台（首页标题匹配）
+  // 1) 真控制台（首页带我们的结构标记）
   const real = createServer((req, res) => {
     res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
-    res.end(`<!doctype html><html><head><title>${CONSOLE_TITLE}</title></head><body>ok</body></html>`);
+    res.end(`<!doctype html><html><body><nav ${CONSOLE_MARKER}></nav>ok</body></html>`);
   });
   await new Promise((r) => real.listen(0, '127.0.0.1', r));
   const realPort = real.address().port;

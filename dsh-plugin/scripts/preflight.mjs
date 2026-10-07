@@ -19,7 +19,7 @@ import { fileURLToPath } from 'node:url';
 
 // 直接复用插件自己的解析逻辑，保证"自检结论"和"插件实际行为"一致
 import { detectProjectRoot, readProjectEnv } from '../lib/index.js';
-import { CONSOLE_TITLE } from '../lib/console.mjs';
+import { CONSOLE_MARKER } from '../lib/console.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const PLUGIN_DIR = dirname(HERE);
@@ -132,8 +132,8 @@ const probeConsole = async (port) => {
   try {
     const res = await fetch(`http://127.0.0.1:${port}/`, { signal: AbortSignal.timeout(2500) });
     const html = await res.text().catch(() => '');
-    if (html.includes(CONSOLE_TITLE)) return { state: 'ours', note: '首页标题匹配' };
-    return { state: 'other', note: `HTTP ${res.status}（响应里没有控制台标题）` };
+    if (html.includes(CONSOLE_MARKER)) return { state: 'ours', note: '首页结构标记匹配' };
+    return { state: 'other', note: `HTTP ${res.status}（响应里没有控制台的结构标记）` };
   } catch {
     return { state: 'free', note: '' };
   }

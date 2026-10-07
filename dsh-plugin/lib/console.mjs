@@ -16,8 +16,19 @@ import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, openSync, closeSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 
-/** 控制台首页标题：用来确认端口上是我们自己的服务。 */
-export const CONSOLE_TITLE = 'WorkBuddy 中转控制台';
+/**
+ * 用来确认端口上**是我们自己的控制台**的标记。
+ *
+ * 原先用的是首页 `<title>`（`'WorkBuddy 中转控制台'`）—— 项目改定位成
+ * 「WorkBuddy 本地 API 桥」后标题跟着改了，于是**插件再也认不出自己的控制台**：
+ * 探活返回 `foreign`，进而拒绝复用、报「换个 DASHBOARD_PORT」。
+ *
+ * **品牌名会变，结构标记不会** —— 改用导航栏的 id。
+ *
+ * ⚠️ 它必须落在**首页首个数据块**内：下面的 `probe` 只读第一个 chunk 就断开
+ * （首页 146KB，全读没必要）。`id="navTabs"` 在第 45 行，远早于正文，满足前提。
+ */
+export const CONSOLE_MARKER = 'id="navTabs"';
 /** 控制台脚本相对项目根的位置。 */
 export const CONSOLE_SCRIPT_REL = join('dashboard', 'server.mjs');
 /** 控制台日志相对项目根的位置。 */
@@ -91,7 +102,7 @@ export class ConsoleSupervisor {
         clearTimeout(timer);
         signal?.removeEventListener('abort', onAbort);
       }
-      result = text.includes(CONSOLE_TITLE)
+      result = text.includes(CONSOLE_MARKER)
         ? { state: 'running', error: '' }
         : { state: 'foreign', error: `端口 ${this.port} 上有 HTTP 服务，但不是 WorkBuddy 控制台（换个 DASHBOARD_PORT）` };
     } catch (error) {

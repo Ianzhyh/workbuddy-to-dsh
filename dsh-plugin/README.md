@@ -254,7 +254,7 @@ npm run release:check      # = vendor:check + 单测 + 独立分发演练（发�
 - **不会和插件抢着拉桥**：插件拉起的控制台实例带 `DASHBOARD_AUTO_START_BRIDGE=0`
   （桥归插件管），避免两个进程同时探测→同时 spawn 打出 `EADDRINUSE`。
   想让控制台照旧自己拉桥，就在环境里显式设成 `1`。
-- **控制台靠首页标题识别**（`<title>WorkBuddy 中转控制台</title>`），不是"端口能连上就算数"：
+- **控制台靠首页的结构标记识别**（`id="navTabs"`），不是"端口能连上就算数"：
   端口被别的服务占着时会报 `foreign` 并拒绝动手，不会误连一个陌生 HTTP 服务。
   探测结果有 20 秒缓存（面板每 10 秒问一次状态，没必要每次都拉首页）。
 
@@ -299,7 +299,7 @@ node dsh-plugin/tests/panel-render.mjs --offline   # 只用内置样例数据
 | 纯逻辑测试 | `node --test dsh-plugin/tests/` **30 项全绿**（流协议、工具调用、错误/取消、wire 转换与净化、日志尾部读取、**方法/权限矩阵**、旧路由手术、装配、路由鉴权、.env 优先级、控制台识别与复用、console-api 白名单透传） |
 | 安装 | `plugin_manager install_bundle` 成功，profile 依赖为 `link:E:/workbuddy-to-dsh/dsh-plugin`（源码改动直接可见） |
 | 桥复用 | 复用已在运行的桥（pid 31840，已运行 12h+），未重复拉起 |
-| 控制台复用 | 控制台已在 8792 运行（首页标题匹配）→ 插件判定 `running` 并复用，不再拉起第二个 |
+| 控制台复用 | 控制台已在 8792 运行（首页结构标记匹配）→ 插件判定 `running` 并复用，不再拉起第二个 |
 | 原生路由 | `route.registered=true provider=workbuddy`，目录 30 个模型 |
 | **真实模型调用** | 以 `provider: workbuddy` + `model: deepseek-v4.1-flash` 跑通一次真实 agent 轮次，返回「桥已接通。」；桥日志同时出现该请求 |
 | 工具 | 5 个工具注册进当前会话并返回真实数据（状态/模型/用量/签到/桥） |

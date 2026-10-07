@@ -3,7 +3,7 @@
  *   1. 插件的 projectRoot 解析到自带的 vendor/
  *   2. vendor 里的桥脚本**真的能启动**（用一份假登录文件 —— 于是 /health 会回 503，
  *      顺带验证插件把"桥活着但凭据读不出"认成 degraded 而不是 foreign）
- *   3. vendor 里的控制台脚本能启动，首页标题匹配
+ *   3. vendor 里的控制台脚本能启动，返回的是控制台自己的页面（按结构标记判断）
  *   4. 自检脚本 preflight 在独立目录里能跑出正确结论
  *
  *   node dsh-plugin/scripts/verify-standalone.mjs
@@ -131,7 +131,16 @@ try {
     env: { ...process.env, DASHBOARD_PORT: String(CONSOLE_PORT), DASHBOARD_AUTO_START_BRIDGE: '0', DASHBOARD_OPEN_BROWSER: '0', WORKBUDDY_AUTH_FILE: join(vendorDir, 'fake-auth.info') },
   });
   const page = await waitFor(`http://127.0.0.1:${CONSOLE_PORT}/`, 25000);
-  check(page !== null && /WorkBuddy 中转控制台/.test(page), '自带 vendor 的控制台能启动且首页标题匹配', `端口 ${CONSOLE_PORT}`);
+  /*
+   * 断言用**结构标记**，不要写死标题。
+   *
+   * 原先这里硬编码 `/WorkBuddy 中转控制台/` —— 项目改定位成「WorkBuddy 本地 API 桥」
+   * 之后控制台标题跟着改，这条立刻断掉（CI 红）。而它真正要验的只是
+   * 「vendor 里的静态资源能正常服务出来、拿到的是控制台自己的页面」。
+   * **品牌名会变，结构标记不会** —— 用 `id="navTabs"` 更稳。
+   */
+  const served = page !== null && /id="navTabs"/.test(page) && /WorkBuddy/.test(page);
+  check(served, '自带 vendor 的控制台能启动且页面结构完整', `端口 ${CONSOLE_PORT}`);
 
   // ── 5. 自检脚本在沙箱里可用
   const preflight = await new Promise((resolve) => {
