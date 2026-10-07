@@ -7,6 +7,7 @@
  * 检查**没有横向溢出** —— 新增的列、提示条、详情行、图表都是重点。
  */
 import { startStaticServer, openPage, waitFor, q, sleep } from './ui-harness.mjs';
+import { baseRoutes } from './fixtures.mjs';
 
 const PORT = 8775;
 const WIDTHS = [1440, 1100, 820, 420];
@@ -20,6 +21,7 @@ const CATALOG = ['deepseek-v4.1-flash', 'glm-5.3', 'kimi-k3', 'hy3'].map((id) =>
   id, name: id, context_window: 1000000, max_output_tokens: 128000, credits: 0.11, supports_images: true,
 }));
 const USAGE = {
+  ok: true,
   windowDays: 7,
   total: { calls: 42, promptTokens: 186000, completionTokens: 42000, ms: 38000, credit: 1.24, creditCalls: 38, failed: 3 },
   models: [
@@ -45,31 +47,11 @@ const REQUESTS = Array.from({ length: 30 }, (_, i) => ({
 }));
 
 const FIX = { requests: REQUESTS };
-const routes = {
-  '/api/models': { body: { models: CATALOG } },
-  '/api/overview': {
-    body: {
-      bridge: { running: true, ok: true, host: '127.0.0.1', port: 8790, endpoint: 'http://127.0.0.1:8790/v1', pid: 1, startedAt: new Date(now - 1000).toISOString(), uptimeMs: 5400000, catalogSize: 4, catalogAt: new Date(now - 60000).toISOString(), upstreamShape: { droppedNonChat: ['nes-gf'] } },
-      credentials: { active: { account: 'example-account', userId: 'example-user-id', domain: 'www.codebuddy.cn', remainingMs: 44 * 86400000, expiresAt: now + 44 * 86400000 }, error: '' },
-      quota: { total: 118, packages: [{ name: '每日签到', remain: 18, size: 20 }] },
-      dsh: { routeLive: true, routeSource: 'cordis.patch.yml', hasBridgeKey: true, bundlesOk: true, bundles: [], registeredModels: ['deepseek-v4.1-flash', 'glm-5.3'] },
-      console: { version: '1.0.0', node: 'v22.22.2' },
-    },
-  },
-  '/api/probe-results': {
-    body: {
-      updatedAt: now - 180000,
-      results: { 'deepseek-v4.1-flash': { ok: true, ms: 1180, at: now - 200000 }, 'glm-5.3': { ok: false, ms: 2400, at: now - 190000, error: 'HTTP 400' } },
-      lastRun: { scope: 'checked', count: 2 },
-    },
-  },
-  '/api/diagnose': { body: { items: [{ id: 'exe', label: 'WorkBuddy 客户端', status: 'ok', detail: 'ok', hint: '' }] } },
-  '/api/usage': { body: { usage: USAGE } },
-  '/api/requests': { body: () => ({ requests: window.__FIX.requests }) },
-  '/api/accounts': { body: { accounts: [{ name: 'a.info', account: 'example-account', active: true, usable: true, remainingMs: 44 * 86400000, domain: 'www.codebuddy.cn' }] } },
-  '/api/checkin': { body: { status: { active: true, todayCheckedIn: false, streakDays: 5, dailyCredit: 18 }, checkin: { auto: true, lastAt: now - 60000, lastResult: 'error', lastError: 'upstream boom', lastSource: 'hourly' } } },
-  '/api/bridge/log': { body: { lines: ['2026-10-04 09:00:00 ERROR upstream 502', '2026-10-04 09:00:01 normal heartbeat line'] } },
-};
+const routes = baseRoutes({
+  catalog: CATALOG,
+  usage: USAGE,
+  requests: REQUESTS,
+});
 
 const server = await startStaticServer(PORT);
 const INJECT = `window.__FIX = ${JSON.stringify(FIX)};`;

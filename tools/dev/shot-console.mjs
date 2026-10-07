@@ -64,7 +64,9 @@ try {
   await q(cdp, `(() => { const s = document.querySelector('#trendMetric'); if (s) { s.value = 'credit'; s.dispatchEvent(new Event('change')); } return true; })()`);
   // 点一次用量表行，把「已筛选」联动状态也拍进去
   await q(cdp, `(() => { const tr = document.querySelector('#usageBox tr.pickrow'); if (tr) tr.click(); return true; })()`);
-  await sleep(800);
+  await sleep(400);
+  await q(cdp, 'window.scrollTo(0, 0)');
+  await sleep(400);
   const res = await cdp.send('Page.captureScreenshot', { format: 'png', captureBeyondViewport: true });
   writeFileSync(OUT, Buffer.from(res.result.data, 'base64'));
   console.log('已生成：' + OUT);

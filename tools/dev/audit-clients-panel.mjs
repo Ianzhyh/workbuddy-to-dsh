@@ -9,49 +9,17 @@
  * 不启真控制台、不消耗上游额度：静态服务 + 无头 Chromium，`/api/*` 全打桩。
  */
 import { startStaticServer, openPage, waitFor, q, sleep } from './ui-harness.mjs';
+import { baseRoutes, clientsFixture } from './fixtures.mjs';
 
 const PORT = 8786;
 const URL_ = `http://127.0.0.1:${PORT}/`;
 
-const CLIENTS = {
-  running: true,
-  host: '127.0.0.1',
-  port: 8790,
-  baseUrlOpenAI: 'http://127.0.0.1:8790/v1',
-  baseUrlAnthropic: 'http://127.0.0.1:8790',
-  token: 'wb-local-bridge',
-  anthropicModel: 'glm-5.3',
-  anthropicFastModel: 'glm-5.3-flash',
-  models: ['glm-5.3', 'deepseek-v4.1-flash', 'deepseek-v4-pro'],
-  modelDetails: [
-    { id: 'glm-5.3', name: 'GLM-5.3', context: 1000000, maxOutput: 64000, supportsReasoning: true, supportsImages: true },
-    { id: 'deepseek-v4.1-flash', name: 'DeepSeek-V4.1-Flash', context: 1000000, maxOutput: 128000, supportsReasoning: true, supportsImages: true },
-    { id: 'deepseek-v4-pro', name: 'DeepSeek-V4-Pro', context: 1000000, maxOutput: 128000, supportsReasoning: true, supportsImages: true },
-  ],
-};
+const CLIENTS = clientsFixture();
 
 const FIX = { bridge: { running: true, ok: true, host: '127.0.0.1', port: 8790, endpoint: 'http://127.0.0.1:8790/v1', pid: 1, startedAt: new Date().toISOString(), uptimeMs: 1000, catalogSize: 3, catalogAt: new Date().toISOString(), error: null } };
 
-const routes = {
-  '/api/clients': { body: CLIENTS },
-  '/api/models': { body: { models: [] } },
-  '/api/overview': {
-    body: () => ({
-      bridge: window.__FIX.bridge,
-      credentials: { active: { account: '330000000000', userId: '330000000000', remainingMs: 40 * 86400000, expiresAt: Date.now() + 40 * 86400000 }, error: '' },
-      quota: { total: 10, packages: [] },
-      dsh: { routeLive: true, hasBridgeKey: true, bundlesOk: true, bundles: [], registeredModels: [] },
-      console: { version: '1.0.0', node: 'v22' },
-    }),
-  },
-  '/api/probe-results': { body: { updatedAt: null, results: {}, lastRun: null } },
-  '/api/diagnose': { body: { items: [] } },
-  '/api/usage': { body: { usage: null } },
-  '/api/requests': { body: { requests: [] } },
-  '/api/accounts': { body: { accounts: [] } },
-  '/api/checkin': { body: { status: { active: true, todayCheckedIn: true, todayCredit: 0, streakDays: 0 } } },
-  '/api/bridge/log': { body: { lines: [] } },
-};
+const routes = baseRoutes();
+routes['/api/clients'] = { body: CLIENTS };
 
 /** 在页面里注入的测量工具：对比度、有效背景、可聚焦性。 */
 const MEASURE_HELPERS = `
@@ -121,7 +89,7 @@ process.on('exit', cleanup);
 const line = (s) => console.log('\n' + '═'.repeat(64) + '\n' + s + '\n' + '═'.repeat(64));
 
 await q(cdp, `document.querySelector('.nav-tab[data-tab="clients"]').click()`);
-await waitFor(cdp, `document.querySelectorAll('#clientsBox .clientcard').length >= 4`, 8000, '面板渲染');
+await waitFor(cdp, `document.querySelectorAll('#clientsBox .clientpicker button').length >= 4`, 8000, '面板渲染');
 
 // ── A. 可访问性 ─────────────────────────────────────────────────────────
 line('A. 可访问性');

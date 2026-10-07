@@ -14,55 +14,57 @@
 <body>
 <div class="wrap">
 
-  <header>
-    <div class="brand-group">
-      <div class="brand-icon">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/>
-        </svg>
+  <div class="top-bar-sticky" id="topBarSticky">
+    <header>
+      <div class="brand-group">
+        <div class="brand-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/>
+          </svg>
+        </div>
+        <div class="brand-text">
+          <h1>WorkBuddy 中转控制台 <span class="brand-badge">Local Bridge</span></h1>
+          <p class="sub">把 WorkBuddy 桌面端已登录的模型，经本地桥暴露为 OpenAI 兼容接口，供 DeepSeek Harness 调用。</p>
+        </div>
       </div>
-      <div class="brand-text">
-        <h1>WorkBuddy 中转控制台 <span class="brand-badge">Local Bridge</span></h1>
-        <p class="sub">把 WorkBuddy 桌面端已登录的模型，经本地桥暴露为 OpenAI 兼容接口，供 DeepSeek Harness 调用。</p>
+      <div class="head-right">
+        <span class="stamp" id="overviewStamp"></span>
+        <span class="badge" id="badge"><span class="dot"></span><span id="badgeText">检测中</span></span>
+        <button type="button" id="themeToggle" class="icon-btn" title="切换深色/浅色主题">
+          <svg id="themeIconSun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="display:none;width:15px;height:15px"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
+          <svg id="themeIconMoon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:15px;height:15px"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+        </button>
+        <button id="refreshBtn">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:14px;height:14px"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+          刷新
+        </button>
       </div>
-    </div>
-    <div class="head-right">
-      <span class="stamp" id="overviewStamp"></span>
-      <span class="badge" id="badge"><span class="dot"></span><span id="badgeText">检测中</span></span>
-      <button type="button" id="themeToggle" class="icon-btn" title="切换深色/浅色主题">
-        <svg id="themeIconSun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="display:none;width:15px;height:15px"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
-        <svg id="themeIconMoon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:15px;height:15px"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
-      </button>
-      <button id="refreshBtn">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:14px;height:14px"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
-        刷新
-      </button>
-    </div>
-  </header>
+    </header>
 
-  <!-- 视图导航切换 -->
-  <nav class="nav-tabs" id="navTabs">
-    <button type="button" class="nav-tab active" data-tab="all">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/></svg>
-      全部面板
-    </button>
-    <button type="button" class="nav-tab" data-tab="overview">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
-      概览与用量
-    </button>
-    <button type="button" class="nav-tab" data-tab="models">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m12 3-1.912 5.813a2 2 0 0 1-1.275 1.275L3 12l5.813 1.912a2 2 0 0 1 1.275 1.275L12 21l1.912-5.813a2 2 0 0 1 1.275-1.275L21 12l-5.813-1.912a2 2 0 0 1-1.275-1.275L12 3Z"/></svg>
-      可用模型
-    </button>
-    <button type="button" class="nav-tab" data-tab="playground">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
-      对话测试与诊断
-    </button>
-    <button type="button" class="nav-tab" data-tab="clients">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="4" width="20" height="13" rx="2"/><path d="M8 21h8M12 17v4"/></svg>
-      客户端接入
-    </button>
-  </nav>
+    <!-- 视图导航切换 -->
+    <nav class="nav-tabs" id="navTabs">
+      <button type="button" class="nav-tab active" data-tab="all">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/></svg>
+        全部面板
+      </button>
+      <button type="button" class="nav-tab" data-tab="overview">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+        概览与用量
+      </button>
+      <button type="button" class="nav-tab" data-tab="models">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m12 3-1.912 5.813a2 2 0 0 1-1.275 1.275L3 12l5.813 1.912a2 2 0 0 1 1.275 1.275L12 21l1.912-5.813a2 2 0 0 1 1.275-1.275L21 12l-5.813-1.912a2 2 0 0 1-1.275-1.275L12 3Z"/></svg>
+        可用模型
+      </button>
+      <button type="button" class="nav-tab" data-tab="playground">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+        对话测试与诊断
+      </button>
+      <button type="button" class="nav-tab" data-tab="clients">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="4" width="20" height="13" rx="2"/><path d="M8 21h8M12 17v4"/></svg>
+        客户端接入
+      </button>
+    </nav>
+  </div>
 
   <div id="alertBar" hidden></div>
 
@@ -111,7 +113,7 @@
   </section>
 
   <section class="panel" data-section="overview">
-    <h2>用量统计 <span class="hint" style="display:inline">最近 <select id="usageDays" style="padding:2px 6px;font-size:12px"><option>1</option><option selected>7</option><option>30</option></select> 天 · 只记元数据，不含对话内容</span>
+    <h2>用量统计 <span class="hint" style="display:inline">最近 <select id="usageDays" title="统计天数"><option>1</option><option selected>7</option><option>30</option></select> 天 · 只记元数据，不含对话内容</span>
       <span class="spacer"></span>
       <select id="trendMetric" title="趋势图指标"><option value="calls" selected>调用次数</option><option value="tokens">tokens</option><option value="credit">积分</option></select>
       <select id="trendGran" title="趋势图粒度"><option value="day" selected>按天</option><option value="hour">最近 24 小时</option></select>
@@ -202,6 +204,14 @@
       <pre class="log" id="logOut"></pre>
     </details>
   </section>
+
+  <!-- 一键回顶部悬浮栏 -->
+  <button type="button" id="backToTop" class="back-to-top" title="返回页面顶部" aria-label="返回页面顶部">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M18 15l-6-6-6 6"/>
+    </svg>
+    <span class="back-to-top-text">回顶部</span>
+  </button>
 
 </div>
 
@@ -3708,29 +3718,68 @@ function clientModelPicker(d) {
 
   const wrap = clientEl('div', 'modelpick');
   const head = clientEl('div', 'modelpick-head');
+  const countSpan = clientEl('span', 'modelpick-count', '已选 ' + chosen.size + ' / ' + list.length);
   head.append(clientEl('b', null, '要包含哪些模型？'));
-  head.append(clientEl('span', 'modelpick-count', '已选 ' + chosen.size + ' / ' + list.length));
+  head.append(countSpan);
+
+  const chips = clientEl('div', 'modelpick-chips');
+
+  const updateSelection = () => {
+    countSpan.textContent = '已选 ' + chosen.size + ' / ' + list.length;
+    chips.querySelectorAll('.modelpick-chip').forEach((btn) => {
+      const id = btn.dataset.modelId;
+      const on = chosen.has(id);
+      btn.classList.toggle('on', on);
+      btn.classList.toggle('off', !on);
+      btn.textContent = (on ? '✓ ' : '') + id;
+      btn.setAttribute('aria-pressed', String(on));
+      btn.title = id + (on ? '（点击移除）' : '（点击加入）');
+      void btn.offsetWidth;
+    });
+    // 原地更新配置代码块，绝不摧毁 DOM 或重跑 clientpane 动画闪烁
+    const codePre = document.querySelector('#clientsBox .codeblock-body pre');
+    if (codePre) {
+      codePre.textContent = opencodeConfigText(d);
+    }
+    const formGuide = document.querySelector('#clientsBox .formguide');
+    if (formGuide) {
+      formGuide.replaceWith(formGuideBox(d));
+    }
+  };
+
   const allBtn = clientEl('button', 'mini', '全选');
   allBtn.type = 'button';
-  allBtn.onclick = () => { for (const m of list) chosen.add(m.id); renderClients(); };
+  allBtn.onclick = () => {
+    for (const m of list) chosen.add(m.id);
+    updateSelection();
+  };
   const noneBtn = clientEl('button', 'mini', '清空');
   noneBtn.type = 'button';
-  noneBtn.onclick = () => { chosen.clear(); renderClients(); };
+  noneBtn.onclick = () => {
+    chosen.clear();
+    updateSelection();
+  };
   head.append(allBtn, noneBtn);
   wrap.append(head);
   wrap.append(clientEl('p', 'modelpick-note',
     '上游所有可用模型都能加，不限桥默认精选的那几个。勾选后下面的配置片段立刻按你的选择重算。'));
 
-  const chips = clientEl('div', 'modelpick-chips');
   for (const m of list) {
     const on = chosen.has(m.id);
     const b = clientEl('button', 'modelpick-chip' + (on ? ' on' : ''), (on ? '✓ ' : '') + m.id);
     b.type = 'button';
+    b.dataset.modelId = m.id;
     b.setAttribute('aria-pressed', String(on));
     b.title = (m.name || m.id) + (on ? '（点击移除）' : '（点击加入）');
     b.onclick = () => {
-      if (on) chosen.delete(m.id); else chosen.add(m.id);
-      renderClients();
+      const nowOn = !chosen.has(m.id);
+      if (nowOn) chosen.add(m.id);
+      else chosen.delete(m.id);
+      updateSelection();
+      b.animate(
+        [{ transform: 'scale(1)' }, { transform: 'scale(1.06)' }, { transform: 'scale(1)' }],
+        { duration: 180, easing: 'cubic-bezier(0.16, 1, 0.3, 1)' }
+      );
     };
     chips.append(b);
   }
@@ -3940,7 +3989,15 @@ function clientsCheatSheet(d) {
  * 抽成独立函数（而不是只在 initNavTabs 里内联）是因为「下一步」引导条也要跳页签 ——
  * 复制一份选中态与显隐逻辑迟早会分叉。
  */
+const TAB_ORDER = ['all', 'overview', 'models', 'playground', 'clients'];
+let currentTabIndex = 0;
+
 function switchTab(name) {
+  const newIndex = TAB_ORDER.indexOf(name);
+  const isRight = newIndex >= currentTabIndex;
+  currentTabIndex = Math.max(0, newIndex);
+  const slideClass = isRight ? 'slide-right' : 'slide-left';
+
   document.querySelectorAll('.nav-tab').forEach((t) => {
     t.classList.toggle('active', t.dataset.tab === name);
   });
@@ -3948,21 +4005,24 @@ function switchTab(name) {
   document.querySelectorAll('[data-section]').forEach((sec) => {
     const show = name === 'all' || sec.dataset.section === name;
     sec.style.display = show ? '' : 'none';
-    if (show) { sec.style.animation = 'none'; shown.push(sec); }
+    if (show) {
+      sec.classList.remove('slide-left', 'slide-right');
+      sec.style.animation = 'none';
+      shown.push(sec);
+    }
   });
   if (!shown.length) return;
   /*
-   * 重放进场动画。
+   * 重放进场平移动画。
    *
-   * `[data-section]` 上的 `sectionFadeIn` 只在**元素插入文档时**跑一次，而这些面板
-   * 从头到尾都在 DOM 里（切换只改 `display`）—— 不重放的话，用户只在首屏加载时见过
-   * 一次动画，之后每次切页签都是突变（实测确认过）。
-   *
-   * 读一次 `offsetWidth` 强制回流，动画才会重新开始。**一次就够**：批量把
-   * animation 置空、回流一次、再统一恢复，比每个面板各读一次省 8 次布局计算。
+   * 批量把 animation 置空、回流一次、按点击方向加上 slide-right / slide-left，
+   * 赋予顶部 bar 丝滑的横向切页平移体感。
    */
   void document.body.offsetWidth;
-  for (const sec of shown) sec.style.animation = '';
+  for (const sec of shown) {
+    sec.classList.add(slideClass);
+    sec.style.animation = '';
+  }
 }
 
 function initNavTabs() {
@@ -3983,12 +4043,52 @@ function initQuickPrompts() {
   });
 }
 
+function initBackToTop() {
+  const btn = $('backToTop');
+  const stickyBar = $('topBarSticky');
+  if (!btn && !stickyBar) return;
+  let ticking = false;
+
+  let isScrolled = false;
+  const update = () => {
+    const y = window.scrollY || document.documentElement.scrollTop || 0;
+    // 迟滞防抖区间：向下滚动超过 28px 激活紧凑毛玻璃吸顶态，向上回滚至 6px 以内恢复全量展开态
+    if (!isScrolled && y > 28) {
+      isScrolled = true;
+      if (stickyBar) stickyBar.classList.add('is-scrolled');
+    } else if (isScrolled && y <= 6) {
+      isScrolled = false;
+      if (stickyBar) stickyBar.classList.remove('is-scrolled');
+    }
+    if (btn) {
+      btn.classList.toggle('show', y > 240);
+    }
+    ticking = false;
+  };
+
+  window.addEventListener('scroll', () => {
+    if (!ticking) {
+      requestAnimationFrame(update);
+      ticking = true;
+    }
+  }, { passive: true });
+
+  if (btn) {
+    btn.onclick = () => {
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    };
+  }
+
+  update();
+}
+
 // 先把历史体检结果取回来，再渲染模型表——否则第一次渲染全是「未测」，
 // 过一会儿又被落盘的结果刷掉，看起来像闪了一下
 initAlerts(); // 读回失败水位线 / 提醒静默标记（只含时间戳与日期）
 initTheme();
 initNavTabs();
 initQuickPrompts();
+initBackToTop();
 (async () => {
   await loadProbeResults();
   await loadOverview();

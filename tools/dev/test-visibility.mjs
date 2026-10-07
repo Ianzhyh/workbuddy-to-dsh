@@ -24,6 +24,7 @@ import { fileURLToPath } from 'node:url';
 import { createServer } from 'node:http';
 
 import { openPage, sleep } from './ui-harness.mjs';
+import { baseRoutes } from './fixtures.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const PUBLIC = join(HERE, '..', '..', 'dashboard', 'public');
@@ -37,18 +38,7 @@ const MIME = {
   '.svg': 'image/svg+xml',
 };
 
-/** 页面会打的 `/api/*`。给最小可用的空壳，让首帧渲染跑完而不报错。 */
-const routes = {
-  '/api/overview': { body: { bridge: { running: false }, console: { version: '1' }, credentials: {}, quota: {}, dsh: {} } },
-  '/api/models': { body: { models: [] } },
-  '/api/usage': { body: { usage: { total: {}, models: [], days: [] } } },
-  '/api/requests': { body: { requests: [] } },
-  '/api/accounts': { body: { accounts: [] } },
-  '/api/probe-results': { body: { updatedAt: null, results: {}, lastRun: null } },
-  '/api/checkin': { body: { ok: true, status: {} } },
-  '/api/diagnose': { body: { items: [], summary: {} } },
-  '/api/bridge/log': { body: { lines: [] } },
-};
+const routes = baseRoutes();
 
 /** 把页面切成"隐藏/可见"，并让 `document.hidden` 真的跟着变。
  *
