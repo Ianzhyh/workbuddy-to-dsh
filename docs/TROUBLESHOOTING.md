@@ -42,7 +42,7 @@ node %USERPROFILE%\DeepSeek-Harness\runtime\node_modules\@deepseek-ai\dsh\lib\bi
 | 报错 | 原因 | 处理 |
 |---|---|---|
 | `login file has no accessToken` | 登录文件缺失或未登录 | 在 WorkBuddy 桌面端登录后重试 |
-| `key fetch failed` | 取不到 AtRest 密钥 | 确认 WorkBuddy 已安装；设 `WORKBUDDY_APP_EXECUTABLE` |
+| `key fetch failed` | 取不到 AtRest 密钥 | 客户端换目录重装后**无需配置**（自动探测：默认位置 → 扫描常见目录 → 进程路径 / 注册表记录兜底；看启动日志 `client exe` 一行）；该报错现在只在客户端确实没装时出现 |
 | `key fetch failed (exit 3)` | 原生绑定调用失败 | 客户端版本不匹配；尝试重新登录客户端 |
 | `EADDRINUSE` | 端口被占 | 先点「停止桥服务」，或改 `WORKBUDDY_PORT`。控制台会如实告诉你结果：桥已在运行时点「启动桥服务」显示「桥已在运行（PID N）」；新进程确实起不来时显示「新进程启动失败，仍在复用旧进程（PID N）」，并在悬停提示里给出 `EADDRINUSE` 原文 |
 

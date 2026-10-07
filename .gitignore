@@ -71,3 +71,6 @@ docs/_review/
 
 # 插件面板的模型显示偏好（用户本机数据，同 .state.json 一类）
 .model-prefs.json
+
+# 本项目运行期间的本地工作记忆（含本机路径等信息，属使用者个人数据）
+.workbuddy/

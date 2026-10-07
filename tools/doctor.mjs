@@ -44,7 +44,7 @@ console.log(`${paint('配置根', C.dim)}      ${config.paths.root}`);
 console.log(`${paint('桥', C.dim)}          ${config.bridge.url}/v1`);
 console.log(`${paint('控制台', C.dim)}      ${config.dashboard.url}`);
 console.log(`${paint('登录文件', C.dim)}    ${config.workbuddy.authFile}`);
-console.log(`${paint('WorkBuddy', C.dim)}   ${config.workbuddy.exe}`);
+console.log(`${paint('WorkBuddy', C.dim)}   ${config.workbuddy.exe || '（未自动定位，见下方诊断）'}`);
 console.log(`${paint('dsh 运行时', C.dim)}  ${config.dsh.runtime}`
   + (config.dsh.desktopVersion ? `  (DSH ${config.dsh.desktopVersion})` : ''));
 console.log('');

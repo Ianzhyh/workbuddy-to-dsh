@@ -10,6 +10,7 @@ import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { findWorkBuddyExe } from './lib/find-workbuddy.mjs';
 
 /** 项目根目录。 */
 export const ROOT = resolve(dirname(fileURLToPath(import.meta.url)));
@@ -41,20 +42,16 @@ const env = process.env;
 
 // ── 路径解析 ────────────────────────────────────────────────────────────
 
-const WORKBUDDY_EXE_CANDIDATES = [
-  env.WORKBUDDY_APP_EXECUTABLE,
-  'E:\\App\\WorkBuddy\\WorkBuddy.exe',
-  env.LOCALAPPDATA && join(env.LOCALAPPDATA, 'Programs', 'WorkBuddy', 'WorkBuddy.exe'),
-  env.ProgramFiles && join(env.ProgramFiles, 'WorkBuddy', 'WorkBuddy.exe'),
-  env['ProgramFiles(x86)'] && join(env['ProgramFiles(x86)'], 'WorkBuddy', 'WorkBuddy.exe'),
-  '/Applications/WorkBuddy.app/Contents/MacOS/WorkBuddy',
-  '/Applications/WorkBuddy AI.app/Contents/MacOS/WorkBuddy',
-  '/opt/WorkBuddy/workbuddy',
-].filter(Boolean);
-
-/** WorkBuddy 桌面客户端可执行文件（不存在时返回首个候选，供报错使用）。 */
+/**
+ * WorkBuddy 桌面客户端可执行文件。
+ *
+ * 探测 = 显式覆盖 → 默认安装位置 → 磁盘浅扫描（见 lib/find-workbuddy.mjs）。
+ * 客户端重装到新目录后无需任何配置：静态列表落空时由扫描兜底。
+ * 全部落空返回 ''（而不是返回一个不存在的路径）—— 这样它注入给桥时是空值，
+ * 桥会用自己的同款探测重新定位，而不是盲目信任一个失效路径。
+ */
 export function resolveWorkBuddyExe() {
-  return WORKBUDDY_EXE_CANDIDATES.find((p) => existsSync(p)) || WORKBUDDY_EXE_CANDIDATES[0];
+  return findWorkBuddyExe();
 }
 
 /**
@@ -225,7 +222,9 @@ export function bridgeEnv(overrides = {}) {
     WORKBUDDY_ANTHROPIC_MODEL: config.bridge.anthropicModel,
     WORKBUDDY_ANTHROPIC_FAST_MODEL: config.bridge.anthropicFastModel,
     WORKBUDDY_AUTH_FILE: overrides.authFile || config.workbuddy.authFile,
-    WORKBUDDY_APP_EXECUTABLE: config.workbuddy.exe,
+    // 探测不到时不注入空值 —— 桥会用自己的同款探测重新定位，而不是把
+    // 一个空串当成"显式指定的路径"。
+    ...(config.workbuddy.exe ? { WORKBUDDY_APP_EXECUTABLE: config.workbuddy.exe } : {}),
     WORKBUDDY_LOG: env.WORKBUDDY_LOG || '1',
     // 默认开；只有显式 false 才关
     WORKBUDDY_AUTO_CHECKIN: overrides.autoCheckin === false ? '0' : '1',

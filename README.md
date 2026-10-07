@@ -367,7 +367,7 @@ docs/                      架构、配置、排错、安全
 | 模型没出现在 dsh 里 | 桥没启动 / 路由未生效 / profile bundle 缺失 |
 | `settings.yaml` 不见了 | **正常**——DSH Desktop 0.2.0 已把它导入 profile 的 patch 层并归档为 `.imported` |
 | `401 Authorization Required` | 令牌失效（重新登录）或凭据未解开 |
-| `key fetch failed` | WorkBuddy 未安装或路径变了 |
+| `key fetch failed` | 客户端未找到或取不到密钥——自动探测覆盖 默认位置 / 磁盘扫描 / 进程与注册表，换目录重装后无需配置；看启动日志的 `client exe` 一行确认实际定位结果 |
 | `envelope belongs to key ...` | 登录文件由另一个 build 写入（如国际版客户端），或装了多套客户端 |
 | `spawnSync ... EBUSY` | 同步子进程调用没设置 `stdio: ['ignore','pipe','pipe']` |
 | 选了错的账号 | 登录目录里有多个 `.info`，需显式指定 `WORKBUDDY_AUTH_FILE` |

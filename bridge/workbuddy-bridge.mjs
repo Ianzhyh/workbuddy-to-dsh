@@ -149,20 +149,259 @@ const log = (...a) => { if (LOG) console.error(`[${new Date().toISOString()}]`, 
 // the derived key for the process lifetime.
 const ATREST_AAD_DOMAIN = Buffer.from('WB-AAD\0', 'ascii');
 let atRestKeyCache;
+let atRestUsedExe = ''; // 最近一次成功取到密钥的客户端 exe（供启动日志/诊断显示）
+let wantedKeyId = ''; // 登录文件里信封的 keyId —— 由 readStoredAuth 每次读取时刷新
 let memoryAuth = null; // refreshed in-process; the desktop file is never rewritten
 
+// ── Locate the WorkBuddy desktop executable ──────────────────────────────
+// 客户端可以装到任意目录（E:\App\WorkBuddy、E:\App\WorkbuddyInternational、
+// C:\Program Files\Tencent\WorkBuddy…），exe 名也随版本不同（WorkBuddy.exe /
+// WorkBuddyAI.exe / CodeBuddy.exe）。只写死几个路径在"换目录重装"后必然失效
+// —— 现象正是 `key fetch failed: spawnSync … ENOENT`。
+//
+// 探测顺序：显式覆盖 → 默认位置 → 磁盘浅扫描 → 系统信号兜底（进程路径 +
+// 注册表安装记录，见下方）。与 lib/find-workbuddy.mjs 是同一套算法（桥刻意
+// 保持自包含单文件、不 import 本项目模块；改动时两边需同步）。
+const WB_EXE_NAME_RE = /^(?:workbuddy(?:\s*ai)?|codebuddy(?:\s*ai)?)\.exe$/i;
+const WB_DIR_KEYWORD_RE = /workbuddy|codebuddy/i;
+const WB_DESCEND_RE = /^(?:app|apps|application|applications|program|programs|program files(?:\s*\(x86\))?|software|soft|tools?|tencent|portable|green|dev|develop|development|应用|软件)$/i;
+const WB_SCAN_MAX_DIRS = 400;
+const WB_SCAN_MIN_INTERVAL_MS = 3000;
+const WB_MISS_RETRY_MS = 5000;
+
+let wbExeCache = '';
+let wbScanCache = null;
+let wbScanAt = 0;
+let wbMissAt = 0;
+
+function wbListDirs(dir, budget) {
+  if (budget.dirs <= 0) return [];
+  budget.dirs -= 1;
+  try {
+    return readdirSync(dir, { withFileTypes: true })
+      .filter((e) => e.isDirectory())
+      .map((e) => e.name);
+  } catch {
+    return [];
+  }
+}
+
+/** Direct child of `dir` that looks like the client binary (full path or ''). */
+function wbExeInDir(dir) {
+  try {
+    const hit = readdirSync(dir, { withFileTypes: true })
+      .find((e) => !e.isDirectory() && WB_EXE_NAME_RE.test(e.name));
+    return hit ? join(dir, hit.name) : '';
+  } catch {
+    return '';
+  }
+}
+
+/** 磁盘浅扫描：盘根 → {App | Program Files | Tencent | …} → {含 workbuddy 的目录} → exe。 */
+function wbScan() {
+  if (process.platform !== 'win32') return [];
+  const found = [];
+  const seen = new Set();
+  const budget = { dirs: WB_SCAN_MAX_DIRS };
+  const push = (p) => { if (p && !seen.has(p)) { seen.add(p); found.push(p); } };
+
+  for (let c = 67; c <= 90; c += 1) { // C: … Z:
+    const drive = `${String.fromCharCode(c)}:\\`;
+    if (!existsSync(drive)) continue;
+    for (const name1 of wbListDirs(drive, budget)) {
+      const p1 = join(drive, name1);
+      if (WB_DIR_KEYWORD_RE.test(name1)) {
+        // E:\App\WorkbuddyInternational\WorkBuddy.exe
+        push(wbExeInDir(p1));
+        for (const name2 of wbListDirs(p1, budget)) push(wbExeInDir(join(p1, name2)));
+      } else if (WB_DESCEND_RE.test(name1)) {
+        for (const name2 of wbListDirs(p1, budget)) {
+          const p2 = join(p1, name2);
+          if (WB_DIR_KEYWORD_RE.test(name2)) {
+            push(wbExeInDir(p2));
+            for (const name3 of wbListDirs(p2, budget)) push(wbExeInDir(join(p2, name3)));
+          } else if (WB_DESCEND_RE.test(name2)) {
+            // C:\Program Files\Tencent\WorkBuddy\WorkBuddy.exe
+            for (const name3 of wbListDirs(p2, budget)) {
+              if (WB_DIR_KEYWORD_RE.test(name3)) push(wbExeInDir(join(p2, name3)));
+            }
+          }
+        }
+      }
+    }
+  }
+  return found;
+}
+
+/**
+ * All executable candidates, most-trusted first.
+ *
+ * 静态候选在前；扫描兜底（带缓存与失败防抖 —— "客户端正在重装"的窗口期内
+ * 不会每次调用都全盘扫一遍）。返回**数组**而不是单个路径：机器上可能并存
+ * 多个 build，由 atRestKey() 按登录文件的 keyId 挑选。
+ */
+function workBuddyExeCandidates() {
+  if (wbExeCache && existsSync(wbExeCache)) return [wbExeCache];
+
+  const out = [];
+  if (process.env.WORKBUDDY_APP_EXECUTABLE) out.push(process.env.WORKBUDDY_APP_EXECUTABLE);
+  if (process.platform === 'win32') {
+    const names = ['WorkBuddy.exe', 'WorkBuddyAI.exe', 'CodeBuddy.exe'];
+    for (const root of [
+      process.env.LOCALAPPDATA && join(process.env.LOCALAPPDATA, 'Programs'),
+      process.env.ProgramFiles,
+      process.env['ProgramFiles(x86)'],
+    ].filter(Boolean)) {
+      for (const dir of ['WorkBuddy', 'WorkBuddy AI', 'WorkBuddyAI', 'CodeBuddy']) {
+        for (const name of names) out.push(join(root, dir, name));
+      }
+    }
+    out.push('E:\\App\\WorkBuddy\\WorkBuddy.exe');
+    out.push('E:\\App\\WorkBuddy\\WorkBuddyAI.exe');
+    out.push('D:\\App\\WorkBuddy\\WorkBuddy.exe');
+  } else if (process.platform === 'darwin') {
+    out.push('/Applications/WorkBuddy.app/Contents/MacOS/WorkBuddy');
+    out.push('/Applications/WorkBuddy AI.app/Contents/MacOS/WorkBuddy');
+  } else {
+    out.push('/opt/WorkBuddy/workbuddy');
+  }
+
+  if (!wbScanCache && Date.now() - wbScanAt >= WB_SCAN_MIN_INTERVAL_MS) {
+    wbScanAt = Date.now();
+    const hits = wbScan();
+    if (hits.length) wbScanCache = hits;
+  }
+  if (wbScanCache) {
+    for (const p of wbScanCache) {
+      if (!out.includes(p)) out.push(p); // 静态与扫描可能重叠，去重
+    }
+  }
+  return out;
+}
+
+// ── 系统信号兜底（Windows）：进程镜像路径 + 注册表安装记录 ───────────────
+// 静态候选与目录扫描本质上都在"猜路径"；客户端装进 `D:\随机名字\` 就会全部
+// 落空。而下面两类信号是**客户端自己留下的、与安装位置无关**：
+//   ① 运行中进程的镜像路径（客户端在用时即安装位置，最准）；
+//   ② 注册表卸载记录 / 深链协议（workbuddy://…）/ App Paths —— 官方安装器
+//      必写（否则"应用和功能"里看不到它），装到任何目录都有。
+// PowerShell 冷启动数秒，故只在前面全部落空时执行，且带缓存与失败防抖。
+// 与 lib/find-workbuddy.mjs 同款（桥保持自包含单文件；改动时两边需同步）。
+const WB_SYS_PROBE_MIN_INTERVAL_MS = 120000;
+let wbSysHits = null;
+let wbSysProbeAt = 0;
+
+function wbPowershellPath() {
+  const full = join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+  return existsSync(full) ? full : 'powershell';
+}
+
+/** 一次调用收集全部信号，base64 输出（免受编码/引号影响）。 */
+const WB_SYS_PROBE_SCRIPT = String.raw`
+$ErrorActionPreference = 'SilentlyContinue'
+$out = @{ procs = @(); reg = @() }
+Get-Process | Where-Object { $_.Name -match '^(WorkBuddy|CodeBuddy)' } | ForEach-Object {
+  if ($_.Path) { $out.procs += $_.Path }
+}
+$roots = @(
+  'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall',
+  'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall',
+  'HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall'
+)
+foreach ($r in $roots) {
+  Get-ChildItem $r | ForEach-Object {
+    $p = Get-ItemProperty $_.PSPath
+    if ("$($p.DisplayName)" -match 'WorkBuddy|CodeBuddy') {
+      $out.reg += @{ icon = "$($p.DisplayIcon)"; uninst = "$($p.UninstallString)" }
+    }
+  }
+}
+foreach ($proto in @('workbuddy', 'workbuddyai', 'codebuddy')) {
+  foreach ($hive in @('HKCU:\Software\Classes', 'HKLM:\Software\Classes')) {
+    $cmd = (Get-ItemProperty "$hive\$proto\shell\open\command").'(default)'
+    if ($cmd) { $out.reg += @{ cmd = "$cmd" } }
+  }
+}
+foreach ($hive in @('HKCU:\Software\Microsoft\Windows\CurrentVersion\App Paths', 'HKLM:\Software\Microsoft\Windows\CurrentVersion\App Paths')) {
+  Get-ChildItem $hive | Where-Object { $_.PSChildName -match 'WorkBuddy|CodeBuddy' } | ForEach-Object {
+    $d = (Get-ItemProperty $_.PSPath).'(default)'
+    if ($d) { $out.reg += @{ cmd = "$d" } }
+  }
+}
+[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes(($out | ConvertTo-Json -Depth 5 -Compress)))
+`;
+
+/** 从信号里提取客户端 exe：exe 名直接认；卸载器/图标路径取所在目录再找本体。 */
+function wbExtractExePaths(signal) {
+  const out = [];
+  const push = (p) => {
+    const v = String(p || '').trim();
+    if (v && !out.includes(v)) out.push(v);
+  };
+  const baseOf = (p) => String(p || '').split(/[\\/]/).pop() || '';
+  for (const p of signal?.procs || []) {
+    if (WB_EXE_NAME_RE.test(baseOf(p))) push(p);
+  }
+  for (const rec of signal?.reg || []) {
+    // 三个字段都要尝试（而非短路取值）：icon 可能指向无关程序甚至系统图标，
+    // 此时 uninst（卸载器路径）是唯一线索。
+    for (const raw of [rec.icon, rec.uninst, rec.cmd]) {
+      const m = /([A-Za-z]:\\[^"]*?\.exe)/i.exec(String(raw || ''));
+      if (!m) continue;
+      const exe = m[1];
+      if (WB_EXE_NAME_RE.test(baseOf(exe))) {
+        push(exe);
+        continue;
+      }
+      const hit = wbExeInDir(dirname(exe)); // 卸载器与客户端同目录
+      if (hit) push(hit);
+    }
+  }
+  return out;
+}
+
+/** 系统信号兜底（Windows）。成功缓存；失败 2 分钟内不重试；任何异常静默返回 []。 */
+function wbProbeSystemSignals() {
+  if (wbSysHits) return wbSysHits;
+  if (process.platform !== 'win32') return [];
+  if (Date.now() - wbSysProbeAt < WB_SYS_PROBE_MIN_INTERVAL_MS) return [];
+  wbSysProbeAt = Date.now();
+
+  let signal;
+  try {
+    const res = spawnSync(wbPowershellPath(), ['-NoProfile', '-NonInteractive', '-Command', WB_SYS_PROBE_SCRIPT], {
+      encoding: 'utf8',
+      timeout: 20000,
+      windowsHide: true,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      maxBuffer: 1048576,
+    });
+    if (res.error || res.status !== 0 || !res.stdout) return [];
+    signal = JSON.parse(Buffer.from(String(res.stdout).replace(/\s+/g, ''), 'base64').toString('utf8'));
+  } catch {
+    return [];
+  }
+  const hits = wbExtractExePaths(signal).filter((p) => existsSync(p));
+  if (hits.length) wbSysHits = hits;
+  return hits;
+}
+
+/**
+ * 首个存在的客户端 exe；全部落空返回 ''。成功结果缓存，缓存失效自动重探。
+ * 先便宜的（静态 + 扫描），全落空才动 PowerShell 兜底。
+ */
 function resolveWorkBuddyExe() {
-  if (process.env.WORKBUDDY_APP_EXECUTABLE) return process.env.WORKBUDDY_APP_EXECUTABLE;
-  const candidates = [
-    'E:\\App\\WorkBuddy\\WorkBuddy.exe',
-    process.env.LOCALAPPDATA && join(process.env.LOCALAPPDATA, 'Programs', 'WorkBuddy', 'WorkBuddy.exe'),
-    process.env.ProgramFiles && join(process.env.ProgramFiles, 'WorkBuddy', 'WorkBuddy.exe'),
-    process.env['ProgramFiles(x86)'] && join(process.env['ProgramFiles(x86)'], 'WorkBuddy', 'WorkBuddy.exe'),
-    '/Applications/WorkBuddy.app/Contents/MacOS/WorkBuddy',
-    '/Applications/WorkBuddy AI.app/Contents/MacOS/WorkBuddy',
-    '/opt/WorkBuddy/workbuddy',
-  ].filter(Boolean);
-  return candidates.find((p) => existsSync(p)) || candidates[0];
+  if (wbExeCache && existsSync(wbExeCache)) return wbExeCache;
+  wbExeCache = '';
+  if (Date.now() - wbMissAt < WB_MISS_RETRY_MS) return '';
+  let hit = workBuddyExeCandidates().find((p) => existsSync(p));
+  if (!hit) hit = wbProbeSystemSignals().find((p) => existsSync(p));
+  if (hit) {
+    wbExeCache = hit;
+    return hit;
+  }
+  wbMissAt = Date.now();
+  return '';
 }
 
 /** Length-prefixed UTF-8 string: uint32 big-endian length then the bytes. */
@@ -190,34 +429,94 @@ function atRestFieldAad(keyId, suite) {
   ]);
 }
 
-/** The 32-byte field key, derived from the app's own key payload. */
-function atRestKey() {
-  if (!atRestKeyCache) {
-    const script =
-      "try{process.stdout.write(process._linkedBinding('electron_browser_workbuddy_storage').loggerGet())}"
-      + 'catch(e){process.exitCode=3;process.stderr.write(String((e&&e.message)||e))}';
-    const res = spawnSync(resolveWorkBuddyExe(), ['-e', script], {
-      env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
-      // stdin MUST be ignored: the Electron binary fails with EBUSY when a
-      // pipe is opened for it, so only stdout/stderr may be piped.
-      stdio: ['ignore', 'pipe', 'pipe'],
-      timeout: 20000,
-      windowsHide: true,
-      maxBuffer: 1048576,
-      encoding: 'utf8',
-    });
-    if (res.error) throw new Error(`key fetch failed: ${res.error.message}`);
-    if (res.status !== 0) {
-      throw new Error(`key fetch failed (exit ${res.status}): ${String(res.stderr || '').trim()}`);
-    }
+/** keyId of a derived field key — same truncation the envelopes use. */
+function atRestKeyId(key) {
+  return createHash('sha256').update(key).digest('hex').slice(0, 16);
+}
+
+/** Envelope keyId carried by an encrypted field ('' for plaintext / malformed). */
+function fieldKeyIdOf(value) {
+  if (!isEncryptedField(value)) return '';
+  try {
+    return JSON.parse(Buffer.from(value.envelope, 'base64').toString('utf8')).keyId || '';
+  } catch {
+    return '';
+  }
+}
+
+/** 从某个 exe 取一次密钥载荷；失败返回 { error }。 */
+function fetchKeyPayloadFrom(exe) {
+  const script =
+    "try{process.stdout.write(process._linkedBinding('electron_browser_workbuddy_storage').loggerGet())}"
+    + 'catch(e){process.exitCode=3;process.stderr.write(String((e&&e.message)||e))}';
+  const res = spawnSync(exe, ['-e', script], {
+    env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
+    // stdin MUST be ignored: the Electron binary fails with EBUSY when a
+    // pipe is opened for it, so only stdout/stderr may be piped.
+    stdio: ['ignore', 'pipe', 'pipe'],
+    timeout: 20000,
+    windowsHide: true,
+    maxBuffer: 1048576,
+    encoding: 'utf8',
+  });
+  if (res.error) return { error: res.error.message };
+  if (res.status !== 0) {
+    return { error: `exit ${res.status}: ${String(res.stderr || '').trim()}` };
+  }
+  try {
     const secret = JSON.parse(res.stdout).atRestSecretKey;
     if (typeof secret !== 'string' || secret === '') {
-      throw new Error('at-rest key payload carries no atRestSecretKey');
+      return { error: 'payload carries no atRestSecretKey' };
+    }
+    return { secret };
+  } catch (err) {
+    return { error: `unparsable payload: ${String((err && err.message) || err)}` };
+  }
+}
+
+/**
+ * The 32-byte field key, derived from the app's own key payload.
+ *
+ * 机器上可能并存多个 WorkBuddy build（如国内版 WorkBuddyAI.exe 与国际版
+ * WorkBuddy.exe）——它们的 atRestSecretKey 不同，只有"写登录文件的那个"能
+ * 解开信封。所以按登录文件里信封的 keyId 逐个候选试，命中即用；一个都不
+ * 匹配时退回第一个能取到密钥的，让 openAuthField 给出准确的 keyId 报错。
+ */
+function atRestKey() {
+  if (atRestKeyCache) return atRestKeyCache;
+  let candidates = workBuddyExeCandidates().filter((p) => existsSync(p));
+  // 廉价层全 miss 才动 PowerShell 兜底（系统信号：进程 + 注册表）
+  if (candidates.length === 0) candidates = wbProbeSystemSignals().filter((p) => existsSync(p));
+  if (candidates.length === 0) {
+    throw new Error(
+      'key fetch failed: WorkBuddy 客户端可执行文件未找到'
+      + '（已探测默认安装位置并扫描常见目录）。'
+      + '若客户端装在非常规目录，请在 .env 设置 WORKBUDDY_APP_EXECUTABLE 指向其 WorkBuddy.exe',
+    );
+  }
+  const failures = [];
+  let fallback;
+  for (const exe of candidates) {
+    const { secret, error } = fetchKeyPayloadFrom(exe);
+    if (!secret) {
+      failures.push(`${exe} -> ${error}`);
+      continue;
     }
     // The app hashes the base64 STRING, not its decoded bytes.
-    atRestKeyCache = createHash('sha256').update(secret, 'utf8').digest();
+    const key = createHash('sha256').update(secret, 'utf8').digest();
+    if (!wantedKeyId || atRestKeyId(key) === wantedKeyId) {
+      atRestKeyCache = key;
+      atRestUsedExe = exe;
+      return key;
+    }
+    if (!fallback) fallback = { key, exe }; // 可能不是写登录文件的那个 build：先留着
   }
-  return atRestKeyCache;
+  if (fallback) {
+    atRestKeyCache = fallback.key;
+    atRestUsedExe = fallback.exe;
+    return fallback.key;
+  }
+  throw new Error(`key fetch failed from all ${candidates.length} candidate(s): ${failures.join(' | ')}`);
 }
 
 /** Whether a value is the app's encrypted-field wrapper. */
@@ -272,6 +571,12 @@ function readStoredAuth() {
   const raw = JSON.parse(readFileSync(AUTH_PATH, 'utf8'));
   const auth = raw.auth || {};
   if (!auth.accessToken) throw new Error('login file has no accessToken; sign in to the WorkBuddy desktop app first');
+  // 密钥选择以本文件为基准：机器上多客户端并存时，优先用"写这份登录文件的
+  // build"。文件被另一个 build 重写过 → 已缓存的密钥失效，重新挑。
+  wantedKeyId = fieldKeyIdOf(auth.accessToken) || fieldKeyIdOf(auth.refreshToken) || '';
+  if (wantedKeyId && atRestKeyCache && atRestKeyId(atRestKeyCache) !== wantedKeyId) {
+    atRestKeyCache = undefined;
+  }
   const access = openAuthField(auth.accessToken, 'accessToken');
   const refresh = openAuthField(auth.refreshToken, 'refreshToken');
   const claims = decodeJwt(access);
@@ -2571,6 +2876,7 @@ if (process.argv.includes('--check')) {
   } catch (e) {
     lines.push(`auth            [FAIL] ${e.message}`);
   }
+  lines.push(`client exe      ${atRestUsedExe || resolveWorkBuddyExe() || '未找到（设置 WORKBUDDY_APP_EXECUTABLE 指向 WorkBuddy.exe）'}`);
   lines.push(`models          ${FEATURED.map((m) => m.id).join(', ')}`);
   console.log(lines.join('\n'));
   process.exit(authOk || API_KEY ? 0 : 1);
@@ -2582,6 +2888,7 @@ server.listen(PORT, HOST, () => {
   console.log(`workbuddy-bridge listening on http://${HOST}:${PORT}/v1`);
   console.log(`auth       : ${API_KEY ? 'API key (CODEBUDDY_API_KEY)' : `desktop session ${who}`}`);
   console.log(`auth file  : ${AUTH_PATH}`);
+  console.log(`client exe : ${atRestUsedExe || resolveWorkBuddyExe() || '未找到（设置 WORKBUDDY_APP_EXECUTABLE 指向 WorkBuddy.exe）'}`);
   console.log(`models     : ${FEATURED.map((m) => m.id).join(', ')}  (all models: /v1/models?all=1)`);
   console.log(`keep-alive : ${KEEPALIVE_MS > 0 ? `${Math.round(KEEPALIVE_MS / 1000)}s idle pool` : 'off'}`);
 

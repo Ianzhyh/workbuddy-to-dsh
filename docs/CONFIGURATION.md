@@ -46,15 +46,28 @@ copy .env.example .env
 | `WORKBUDDY_AUTH_FILE` | 自动定位 | 登录文件绝对路径。**多账号时务必显式指定** |
 | `WORKBUDDY_AUTH_DIR` | 平台默认 | 登录文件所在目录，仅在目录被移动时需要 |
 
-**可执行文件探测顺序**：
+**可执行文件探测顺序**（客户端重装到任意目录后都会自动重新定位，无需配置）：
 
-1. `WORKBUDDY_APP_EXECUTABLE`
-2. `E:\App\WorkBuddy\WorkBuddy.exe`
-3. `%LOCALAPPDATA%\Programs\WorkBuddy\WorkBuddy.exe`
-4. `%ProgramFiles%\WorkBuddy\WorkBuddy.exe`
-5. `%ProgramFiles(x86)%\WorkBuddy\WorkBuddy.exe`
-6. macOS：`/Applications/WorkBuddy.app/Contents/MacOS/WorkBuddy`
-7. Linux：`/opt/WorkBuddy/workbuddy`
+1. `WORKBUDDY_APP_EXECUTABLE`（显式覆盖，最高优先）
+2. 默认安装位置：`%LOCALAPPDATA%\Programs`、`%ProgramFiles%`、`%ProgramFiles(x86)%` 下的
+   `WorkBuddy` / `WorkBuddy AI` / `WorkBuddyAI` / `CodeBuddy` 目录（exe 名兼容
+   `WorkBuddy.exe` / `WorkBuddyAI.exe` / `CodeBuddy.exe`），以及 `E:\App\WorkBuddy\` 等历史自定义位置
+3. 磁盘浅扫描：每个盘符下常见父目录（`App` / `Program Files` / `Tencent` / `Software` / `Tools` 等）
+   中名字含 `workbuddy` / `codebuddy` 的目录（深度最多 3 层）——覆盖
+   `E:\App\WorkbuddyInternational\`、`C:\Program Files\Tencent\WorkBuddy\` 这类自定义安装
+4. **系统信号兜底**（仅当前三层全部落空时执行，PowerShell 冷启动数秒）：
+   - 运行中进程的镜像路径（客户端在用时即安装位置）；
+   - 注册表安装记录：卸载项（`DisplayIcon` / `UninstallString`）、深链协议
+     （`workbuddy://…`）、App Paths —— 官方安装器必写，**装到任何目录都有**。
+5. macOS：`/Applications/WorkBuddy.app/Contents/MacOS/WorkBuddy`；Linux：`/opt/WorkBuddy/workbuddy`
+
+前两层零成本；扫描只在前面落空时执行一次（带目录预算与缓存）；系统信号兜底最贵
+（且失败后 2 分钟内不重试）。exe 被卸载或移动后会自动重探（重探有 5 秒防抖，避免在
+"客户端正在重装"的窗口期内反复扫描）。桥的启动日志里 `client exe` 一行显示实际
+使用的可执行文件。
+
+> 机器上同时装着多个客户端（如国内版 + 国际版）时，以**登录文件里信封的 keyId**
+> 为准挑选能解开它的那个 build —— 而不是盲取第一个找到的 exe。
 
 **登录文件定位规则**：先找 `<auth 目录>/workbuddy-desktop.info`；不存在则取目录下第一个
 `.info`。auth 目录按平台为：

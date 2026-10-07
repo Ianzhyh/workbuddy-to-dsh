@@ -13,6 +13,8 @@
  */
 import { execFile } from 'node:child_process';
 import { createDecipheriv, createHash } from 'node:crypto';
+import { existsSync } from 'node:fs';
+import { probeSystemSignalsExe, workBuddyExeCandidates } from './find-workbuddy.mjs';
 
 const FRAMING_CODE = { file: 1, field: 2, record: 3, stream: 4 };
 const STANDARD_FORMAT_ID = { file: 'WBEF1', field: 'WBEV1', record: 'WBER1', stream: 'WBES1' };
@@ -106,23 +108,29 @@ export function openEncryptedField(field, key) {
 }
 
 /**
- * 进程级缓存。
+ * 进程级缓存（按 exe 分别缓存）。
  *
  * 取密钥要**启动一个 Electron 进程**（约 340ms），而控制台每 20 秒轮询一次
  * 状态、每次还要查两遍（凭据 + 账号列表）——不缓存等于每 20 秒拉起
  * 2 个 WorkBuddy.exe。密钥来自客户端构建，进程存活期间不会变，缓存没有副作用。
+ *
+ * 之所以按 exe 分开缓存：机器上可能并存多个 build（国内版 / 国际版），
+ * 选密钥时要逐个候选试（见 fetchKeyFor）——只缓存"第一个"会让后续候选
+ * 直接拿到别的 exe 的载荷，永远试不出正确的那把钥。
  */
-let keyPayloadCache = null;
+const keyPayloadCache = new Map();
 
 /** Ask the installed desktop app for its key payload over its own binary. */
 export function fetchKeyPayload(executable) {
-  if (keyPayloadCache) return keyPayloadCache;
+  const slot = String(executable || '');
+  const cached = keyPayloadCache.get(slot);
+  if (cached) return cached;
 
   const script =
     "try{process.stdout.write(process._linkedBinding('electron_browser_workbuddy_storage').loggerGet())}" +
     'catch(e){process.exitCode=3;process.stderr.write(String((e&&e.message)||e))}';
 
-  keyPayloadCache = new Promise((resolve, reject) => {
+  const pending = new Promise((resolve, reject) => {
     execFile(
       executable,
       ['-e', script],
@@ -134,7 +142,7 @@ export function fetchKeyPayload(executable) {
       },
       (error, stdout, stderr) => {
         if (error) {
-          keyPayloadCache = null; // 失败不缓存，下次仍可重试
+          keyPayloadCache.delete(slot); // 失败不缓存，下次仍可重试
           reject(new Error(`key fetch failed: ${stderr || error.message}`));
           return;
         }
@@ -143,34 +151,60 @@ export function fetchKeyPayload(executable) {
     );
   });
 
-  return keyPayloadCache;
+  keyPayloadCache.set(slot, pending);
+  return pending;
+}
+
+/**
+ * 依次尝试候选可执行文件，返回**与目标 keyId 匹配**的那个密钥。
+ *
+ * 机器上可能并存多个 WorkBuddy build（不同安装目录 / 国内版国际版），它们的
+ * atRestSecretKey 未必相同——"第一个存在的 exe"未必是写登录文件的那个
+ * （症状：`envelope belongs to key …`）。按信封 keyId 挑可以消除这种不确定性；
+ * 一个都不匹配时退回第一个成功的，让上层的 keyId 校验如实报错。
+ *
+ * @param {string[]} candidates 候选 exe 路径（调用方已过滤存在的）
+ * @param {string} [targetKeyId] 登录文件信封里的 keyId（'' = 无基准，取第一个成功的）
+ * @returns {Promise<{ exe: string, key: Buffer, payloadJson: string }>}
+ */
+export async function fetchKeyFor(candidates, targetKeyId = '') {
+  let fallback = null;
+  let lastError = null;
+  for (const exe of candidates) {
+    try {
+      const payloadJson = await fetchKeyPayload(exe);
+      const key = deriveAtRestKey(payloadJson);
+      if (!targetKeyId || deriveAtRestKeyId(key) === targetKeyId) {
+        return { exe, key, payloadJson };
+      }
+      if (!fallback) fallback = { exe, key, payloadJson };
+    } catch (err) {
+      lastError = err; // 这个 exe 取不到密钥：换下一个候选
+    }
+  }
+  if (fallback) return fallback;
+  throw lastError || new Error('未找到可用的 WorkBuddy 可执行文件');
 }
 
 /** 清空密钥缓存（客户端换版本、重新登录后需要重新取）。 */
 export function resetKeyPayloadCache() {
-  keyPayloadCache = null;
+  keyPayloadCache.clear();
 }
 
 /**
  * Locate the WorkBuddy desktop executable.
  * Overridable with WORKBUDDY_APP_EXECUTABLE.
+ *
+ * 候选 = 静态常用位置 + 磁盘浅扫描（+ 全 miss 时的系统信号兜底）。
+ * 只列静态路径在"客户端换目录重装"后会全部落空（然后桥取密钥报
+ * `spawnSync … ENOENT`），所以扫描与系统信号兜底是必须的。
+ * 探测算法与缓存见 find-workbuddy.mjs（桥侧 resolveWorkBuddyExe 为同款内联）。
  */
 export function defaultExecutableCandidates() {
-  const explicit = process.env.WORKBUDDY_APP_EXECUTABLE;
-  const out = [];
-  if (explicit) out.push(explicit);
-  if (process.platform === 'win32') {
-    for (const root of [process.env.LOCALAPPDATA, process.env.PROGRAMFILES, process.env['PROGRAMFILES(X86)']]) {
-      if (root) out.push(`${root}\\Programs\\WorkBuddy\\WorkBuddy.exe`);
-    }
-    out.push('E:\\App\\WorkBuddy\\WorkBuddy.exe');
-  } else if (process.platform === 'darwin') {
-    out.push('/Applications/WorkBuddy.app/Contents/MacOS/WorkBuddy');
-    out.push('/Applications/WorkBuddy AI.app/Contents/MacOS/WorkBuddy');
-  } else {
-    out.push('/opt/WorkBuddy/workbuddy');
-  }
-  return out;
+  const base = workBuddyExeCandidates();
+  // 廉价层全 miss 才动 PowerShell 兜底（冷启动数秒，勿在常规路径触发）
+  if (base.some((p) => existsSync(p))) return base;
+  return [...base, ...probeSystemSignalsExe()];
 }
 
 export { envelopeKeyId };
