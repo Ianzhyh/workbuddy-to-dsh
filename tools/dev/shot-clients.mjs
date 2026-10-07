@@ -14,8 +14,25 @@ const PORT = 8787;
 const URL_ = `http://127.0.0.1:${PORT}/`;
 const OUTDIR = join(process.cwd(), 'docs');
 
+/**
+ * 目录给足 30 个，而**精选集仍是 4 个** —— 与线上一致（`/api/clients` 只回精选，
+ * 选择器列完整目录）。截图里会显示「已选 4 / 30」。
+ *
+ * 用默认夹具的话两边都是 4 个，会显示成「已选 4 / 4」—— 恰好是用户报过的那个
+ * bug（选择器只列精选集）的样子，放进 README 会让人误以为还没修。
+ */
+const CATALOG_30 = Array.from({ length: 30 }, (_, i) => ({
+  id: i < 4
+    ? ['deepseek-v4.1-flash', 'glm-5.3', 'glm-5.3-flash', 'kimi-k3-1'][i]
+    : `model-${String(i + 1).padStart(2, '0')}`,
+  name: i < 4 ? ['DeepSeek-V4.1-Flash', 'GLM-5.3', 'GLM-5.3-Flash', 'Kimi-K3.1'][i] : `Model ${i + 1}`,
+  context_window: 128000 + i * 1000,
+  max_output_tokens: 8192 + i * 100,
+  credits: 0.1 + i * 0.01,
+}));
+
 // 桩数据来自共享夹具（tools/dev/fixtures.mjs）—— 形状由 ui-harness 自动校验
-const routes = baseRoutes();
+const routes = baseRoutes({ catalog: CATALOG_30 });
 
 const INJECT = '';
 

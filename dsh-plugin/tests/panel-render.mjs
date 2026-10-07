@@ -6,10 +6,19 @@
  * 这个脚本用**真实抓取的数据**（跑不通时退回内置样例）在无头浏览器里渲染，
  * 于是「面板会不会崩 / 注册进哪个槽 / 数据对不对」这类问题不必重启应用就能验。
  *
- *   node dsh-plugin/tests/panel-render.mjs            # 抓真实数据 + 截图
- *   node dsh-plugin/tests/panel-render.mjs --offline  # 只用内置样例数据
+ *   node dsh-plugin/tests/panel-render.mjs           # 内置样例数据（默认，安全）
+ *   node dsh-plugin/tests/panel-render.mjs --live    # 抓运行中的真实数据
  *
- * 产物：docs/plugin-panel.png（截图）
+ * 产物：`docs/plugin-panel*.png`（离线）或 `docs/_review/plugin-panel*.png`（--live）
+ *
+ * ## ⚠️ 默认必须是离线，且 --live 绝不写进 docs/
+ *
+ * 这些截图**会被提交进仓库**。`--live` 抓的是运行中的真实数据，里面有登录账号
+ * （形如 `1df8ca6b-…` 的 UUID）、真实用量、真实路径 —— 曾经因为默认是 live，
+ * 把用户的账号 UUID 直接写进了 `docs/plugin-panel.png` 并推到了 GitHub。
+ *
+ * 所以：默认离线；要真实数据得显式 `--live`，而且产物只落到 `.gitignore` 掉的
+ * `docs/_review/`，人工确认用、不会被提交。
  */
 import { createServer } from 'node:http';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
@@ -22,10 +31,17 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(HERE, '..', '..');
 const PLUGIN = join(HERE, '..');
 const VENDOR = join(ROOT, '.tmp-research', 'vendor');
-const OUT = join(ROOT, 'docs', 'plugin-panel.png');
+// 默认离线。真实数据必须显式要 —— 见文件头的说明（默认 live 曾把账号 UUID 写进仓库）
+const offline = !process.argv.includes('--live');
+
+/**
+ * 产物目录：离线数据进 `docs/`（会被提交），真实数据进 `docs/_review/`（已 gitignore）。
+ * 这样 `--live` 无论怎么跑都不可能把真实账号写进仓库。
+ */
+const OUT_DIR = offline ? join(ROOT, 'docs') : join(ROOT, 'docs', '_review');
+const OUT = join(OUT_DIR, 'plugin-panel.png');
 const PORT = 8795;
 const LIVE = 'http://127.0.0.1:19387';
-const offline = process.argv.includes('--offline');
 
 const now = Date.now();
 
@@ -39,12 +55,16 @@ const FIXTURES = {
         ok: true, pid: 31840, startedAt: new Date(now - 45_600_000).toISOString(), uptimeMs: 45_600_000,
         // 样例值要与真实响应同形：账号是掩码后的 id，端点是真实上游地址。
         // 早先这里写 'example.invalid'，截出来的图会像未完成的占位稿。
-        auth: { userId: 'wb-8f2c1a4e', endpoint: 'https://copilot.tencent.com/v2/chat/completions', expiresAt: new Date(now + 44 * 86_400_000).toISOString(), expired: false },
+        // endpoint 只到源站，**不带**接口路径 —— 桥的 /health 就是这么上报的
+        // （曾经误写成 `.../v2/chat/completions`，于是 README 截图里显示的"上游端点"
+        //  是个接口路径，与真实面板对不上）
+        auth: { userId: 'wb-8f2c1a4e', endpoint: 'https://copilot.tencent.com', expiresAt: new Date(now + 44 * 86_400_000).toISOString(), expired: false },
         catalogSize: 30, catalogAt: new Date(now - 300_000).toISOString(),
       },
       error: '',
     },
-    config: { provider: 'workbuddy', configuredProvider: 'workbuddy', displayName: 'WorkBuddy', bridgeUrl: 'http://127.0.0.1:8790', consoleUrl: 'http://127.0.0.1:8792', projectRoot: 'E:\\workbuddy-to-dsh', autoStart: true, consoleAutoStart: true, logPath: 'bridge\\bridge.log' },
+    // 路径同样用中性值：这些截图会进仓库，真实目录不该出现在里面
+    config: { provider: 'workbuddy', configuredProvider: 'workbuddy', displayName: 'WorkBuddy', bridgeUrl: 'http://127.0.0.1:8790', consoleUrl: 'http://127.0.0.1:8792', projectRoot: 'D:\\workbuddy-to-dsh', autoStart: true, consoleAutoStart: true, logPath: 'bridge\\bridge.log' },
     /** 控制台状态：这一页的主入口。 */
     console: { state: 'running', url: 'http://127.0.0.1:8792', error: '', managed: false, autoStart: true },
     route: { registered: true, provider: 'workbuddy', error: '', fallback: false },
@@ -530,7 +550,7 @@ try {
   const svgCount = await page.cdp.evaluate("document.querySelectorAll('.wb-root svg').length");
   if (!svgCount) problems.push('用量页没有渲染趋势图（内联 SVG）');
   let shot = await page.cdp.send('Page.captureScreenshot', { format: 'png', captureBeyondViewport: true });
-  writeFileSync(join(ROOT, 'docs', 'plugin-panel-usage.png'), Buffer.from(shot.result.data, 'base64'));
+  writeFileSync(join(OUT_DIR, 'plugin-panel-usage.png'), Buffer.from(shot.result.data, 'base64'));
   await page.cdp.evaluate(`(() => { const b=[...document.querySelectorAll('.wb-tab')].find(x=>x.textContent==='模型'); b && b.click(); })()`);
   await sleep(500);
   const modelRows = await page.cdp.evaluate("document.querySelectorAll('.wb-table tbody tr').length");
@@ -538,7 +558,7 @@ try {
   await page.cdp.evaluate(`(() => { const b=[...document.querySelectorAll('.wb-tab')].find(x=>x.textContent==='诊断'); b && b.click(); })()`);
   await sleep(500);
   shot = await page.cdp.send('Page.captureScreenshot', { format: 'png', captureBeyondViewport: true });
-  writeFileSync(join(ROOT, 'docs', 'plugin-panel-diagnose.png'), Buffer.from(shot.result.data, 'base64'));
+  writeFileSync(join(OUT_DIR, 'plugin-panel-diagnose.png'), Buffer.from(shot.result.data, 'base64'));
   await page.cdp.evaluate(`(() => { const b=[...document.querySelectorAll('.wb-tab')].find(x=>x.textContent==='对话测试'); b && b.click(); })()`);
   await sleep(500);
   const taWidth = await page.cdp.evaluate(`(() => { const t=document.querySelector('.wb-textarea'); const card=t ? t.closest('.wb-card') : null; return { tw: t ? t.offsetWidth : 0, cw: card ? card.clientWidth : 0 }; })()`);
@@ -604,7 +624,7 @@ try {
     console.log(`对话模型下拉：${chatSelect.count} 个选项，选择 ${chatSelect.target} 生效并保持`);
   }
   shot = await page.cdp.send('Page.captureScreenshot', { format: 'png', captureBeyondViewport: true });
-  writeFileSync(join(ROOT, 'docs', 'plugin-panel-chat.png'), Buffer.from(shot.result.data, 'base64'));
+  writeFileSync(join(OUT_DIR, 'plugin-panel-chat.png'), Buffer.from(shot.result.data, 'base64'));
 
   // 交互：概览页「启动控制台」必须真的发出带面板头的 POST
   await page.cdp.evaluate(`(() => { const b=[...document.querySelectorAll('.wb-tab')].find(x=>x.textContent==='概览'); b && b.click(); })()`);
@@ -715,7 +735,7 @@ try {
   await page.cdp.evaluate(`(() => { const b=[...document.querySelectorAll('.wb-tab')].find(x=>x.textContent==='账号'); b && b.click(); })()`);
   await sleep(700);
   shot = await page.cdp.send('Page.captureScreenshot', { format: 'png', captureBeyondViewport: true });
-  writeFileSync(join(ROOT, 'docs', 'plugin-panel-accounts.png'), Buffer.from(shot.result.data, 'base64'));
+  writeFileSync(join(OUT_DIR, 'plugin-panel-accounts.png'), Buffer.from(shot.result.data, 'base64'));
 
   // 模型页的可用性筛选（全部 / 只看不可用 / 只看未测）
   await page.cdp.evaluate(`(() => { const b=[...document.querySelectorAll('.wb-tab')].find(x=>x.textContent==='模型'); b && b.click(); })()`);
@@ -797,7 +817,7 @@ try {
       console.log(`模型详情：点 ${detailTarget.id} → 紧跟其下展开（${inline.width}px 宽${inline.isLast ? '，位于表尾' : ''}）`);
       // 留一张"详情紧跟行"的证据图
       const detailShot = await page.cdp.send('Page.captureScreenshot', { format: 'png', captureBeyondViewport: true });
-      writeFileSync(join(ROOT, 'docs', 'plugin-panel-models-detail.png'), Buffer.from(detailShot.result.data, 'base64'));
+      writeFileSync(join(OUT_DIR, 'plugin-panel-models-detail.png'), Buffer.from(detailShot.result.data, 'base64'));
     }
     // 样式：上游促销徽章要渲染成带色小标记，且 tags 里不许再出现 badge: 原始规格
     const badgeState = await page.cdp.evaluate(`(() => {
@@ -841,7 +861,31 @@ try {
   // 主截图落在概览页：积分卡（头条指标）+ 待办提醒 + 状态 + 操作
   await page.cdp.evaluate(`(() => { const b=[...document.querySelectorAll('.wb-tab')].find(x=>x.textContent==='概览'); b && b.click(); })()`);
   await sleep(600);
-  shot = await page.cdp.send('Page.captureScreenshot', { format: 'png', captureBeyondViewport: true });
+  /*
+   * **按内容高度裁剪**，不要整页拍。
+   *
+   * 外壳有 `#frame{min-height:100vh}` —— 容器被撑到视口高（1400px），而概览
+   * 内容只有 ~750px。`captureBeyondViewport` 于是拍出 885×1484 的图，
+   * **下半张全空白**；放进 README 像没渲染完。
+   *
+   * **不能直接量 `#frame` 的高度** —— 它本身就是被 `min-height:100vh` 撑出来的
+   * （实测 1400 + 上下内边距 84 = 1484），拿它当裁剪框等于没裁。
+   * 要量的是**内容底边**：`#root` 的 bottom 减容器 top，再加回容器下内边距。
+   */
+  const frameBox = await page.cdp.evaluate(`(() => {
+    const f = document.getElementById('frame');
+    const root = document.getElementById('root');
+    const fr = f.getBoundingClientRect();
+    const rr = root.getBoundingClientRect();
+    const padBottom = parseFloat(getComputedStyle(f).paddingBottom) || 0;
+    return { w: Math.ceil(fr.width), h: Math.ceil(rr.bottom - fr.top + padBottom) };
+  })()`);
+  shot = await page.cdp.send('Page.captureScreenshot', {
+    format: 'png',
+    captureBeyondViewport: true,
+    clip: { x: 0, y: 0, width: frameBox.w, height: frameBox.h, scale: 1 },
+  });
+  console.log(`主截图裁剪到内容高度：${frameBox.w}×${frameBox.h}`);
   mkdirSync(dirname(OUT), { recursive: true });
   writeFileSync(OUT, Buffer.from(shot.result.data, 'base64'));
   console.log(`截图：${OUT}（${(Buffer.from(shot.result.data, 'base64').length / 1024).toFixed(0)} KB）`);
@@ -955,7 +999,7 @@ async function verifyNarrow() {
       console.log(`窄列账号列表：${accountsFit.rows} 个账号，卡片内无溢出，无需横向滚动`);
     }
     const shot = await page3.cdp.send('Page.captureScreenshot', { format: 'png', captureBeyondViewport: true });
-    writeFileSync(join(ROOT, 'docs', 'plugin-panel-narrow-accounts.png'), Buffer.from(shot.result.data, 'base64'));
+    writeFileSync(join(OUT_DIR, 'plugin-panel-narrow-accounts.png'), Buffer.from(shot.result.data, 'base64'));
   } catch (error) {
     problems.push(`场景 3 失败：${error.message}`);
   } finally {
@@ -1106,7 +1150,7 @@ async function verifyDegradedBridge() {
     if (!/积分还是上一个账号的/.test(text)) problems.push('积分归属不一致时没有显示警告（换号 bug 的可见化缺失）');
     if (!/正在自动重读/.test(text)) problems.push('归属警告没有说明系统正在自动恢复');
     const shot = await page4.cdp.send('Page.captureScreenshot', { format: 'png', captureBeyondViewport: true });
-    writeFileSync(join(ROOT, 'docs', 'plugin-panel-degraded.png'), Buffer.from(shot.result.data, 'base64'));
+    writeFileSync(join(OUT_DIR, 'plugin-panel-degraded.png'), Buffer.from(shot.result.data, 'base64'));
   } catch (error) {
     problems.push(`场景 4 失败：${error.message}`);
   } finally {

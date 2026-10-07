@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>WorkBuddy 中转控制台</title>
+<title>WorkBuddy 本地 API 桥 · 控制台</title>
 <link rel="stylesheet" href="/style.css">
 <style>
   /* 旋转加载动画 */
@@ -23,8 +23,8 @@
           </svg>
         </div>
         <div class="brand-text">
-          <h1>WorkBuddy 中转控制台 <span class="brand-badge">Local Bridge</span></h1>
-          <p class="sub">把 WorkBuddy 桌面端已登录的模型，经本地桥暴露为 OpenAI 兼容接口，供 DeepSeek Harness 调用。</p>
+          <h1>WorkBuddy 本地 API 桥 <span class="brand-badge">控制台</span></h1>
+          <p class="sub">把 WorkBuddy 桌面端已登录的模型，经本地桥暴露为 OpenAI / Anthropic 兼容接口，供任意 AI 客户端调用。</p>
         </div>
       </div>
       <div class="head-right">
@@ -564,7 +564,7 @@ function advanceFailWatermark() {
   }
 }
 
-const TITLE_SUFFIX = ' · WorkBuddy 中转控制台';
+const TITLE_SUFFIX = ' · WorkBuddy 本地 API 桥';
 
 /**
  * 标签页标题随状态变化（R3.1）。
@@ -2888,7 +2888,7 @@ function buildDiagReport() {
   const dsh = (o && o.dsh) || {};
   const L = [];
 
-  L.push('# WorkBuddy 中转控制台 · 诊断报告');
+  L.push('# WorkBuddy 本地 API 桥 · 控制台诊断报告');
   L.push('');
   L.push('- 时间：' + new Date().toLocaleString('zh-CN', { hour12: false }));
   L.push('- 控制台 v' + (c.version || '?') + ' · Node ' + (c.node || '?'));

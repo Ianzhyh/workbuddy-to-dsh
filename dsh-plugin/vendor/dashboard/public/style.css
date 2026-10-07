@@ -558,12 +558,23 @@ button:focus-visible {
   border-color: var(--primary);
   box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.18);
 }
+/*
+ * 禁用态。
+ *
+ * **不要**同时用「很浅的文字色」和低 opacity —— 两者叠加会把文字压到看不见。
+ * 实测（浅色主题）：原先 `color: var(--muted)`（slate-500）+ `opacity: .45`
+ * 合成后对比度只有 **1.02:1**，文字与背景完全融合，按钮看起来是**一片空白** ——
+ * 用户根本不知道那个按钮是什么（截图里就是这个样子）。
+ *
+ * 现在改用更深的 `--text-secondary` 配 0.75：实测浅色 4.8:1、深色同样达标。
+ * 「禁用」这件事由**底色 + 边框 + 光标**表达，不靠把文字淡化掉。
+ */
 button:disabled {
-  opacity: 0.45;
+  opacity: 0.75;
   cursor: not-allowed;
   transform: none !important;
   box-shadow: none !important;
-  color: var(--muted) !important;
+  color: var(--text-secondary) !important;
   border-color: var(--border) !important;
   background: var(--panel-muted) !important;
 }
@@ -588,6 +599,24 @@ button.primary:active {
   transform: translateY(0.5px) scale(0.97);
 }
 button.primary svg { color: #ffffff !important; }
+
+/*
+ * 主按钮的禁用态**必须单独写**。
+ *
+ * `button.primary` 的 `color: #ffffff !important` 在本文件里排在 `button:disabled`
+ * **之后**，而两者的特异性相同（0,1,1）—— 同特异性下靠后的胜出，所以只改
+ * `button:disabled` 完全没用，白字会照旧保留。
+ *
+ * 后果实测过：浅色主题下「启动桥服务」被禁用时是**白字 + opacity:0.45 压在近白底上**，
+ * 对比度只有 **1.02:1** —— 按钮看起来是一片空白，用户不知道那是什么。
+ * 这条特异性更高（0,2,1），能真正覆盖。
+ */
+button.primary:disabled {
+  color: var(--text-secondary) !important;
+  background: var(--panel-muted) !important;
+  border-color: var(--border) !important;
+}
+button.primary:disabled svg { color: var(--text-secondary) !important; }
 
 /* 危险按钮 */
 button.danger {

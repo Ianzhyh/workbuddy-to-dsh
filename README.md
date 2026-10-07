@@ -10,6 +10,13 @@
 
 > **一句话**：WorkBuddy 的模型额度 → 本地 API → 你惯用的任意 AI 客户端。
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/console-hero-dark.png">
+  <img src="docs/console-hero-light.png" width="100%"
+       alt="WorkBuddy 本地 API 桥的控制台：顶部是桥状态徽章与启停按钮，中间 8 张状态卡显示账号、令牌剩余、凭据加密方式、上游端点、桥进程、可用模型、积分余额、dsh 就绪度，下面是账号列表">
+</picture>
+
+
 **关键词**（便于检索，按关心的问题分组）：
 
 | 你在找什么 | 相关词 |
@@ -143,6 +150,12 @@ node tools\doctor.mjs       :: 命令行自检，输出缺失项与修法
 
 ## 接入你的客户端
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/clients-panel-dark.png">
+  <img src="docs/clients-panel-light.png" width="100%"
+       alt="控制台的「客户端接入」面板：顶部是两套协议的 Base URL 与本地令牌，下面是客户端选择器（opencode / Claude Code / 图形表单 / 其它客户端），选中后展开该客户端的完整配置片段，每段都有独立复制按钮">
+</picture>
+
 桥同时讲**两套协议**，填哪个地址取决于客户端讲哪套：
 
 | 协议 | Base URL | API Key |
@@ -174,6 +187,9 @@ node tools\doctor.mjs       :: 命令行自检，输出缺失项与修法
 ---
 
 ## 作为 DeepSeek Harness 插件使用
+
+<img src="docs/plugin-panel.png" width="100%"
+     alt="装进 DeepSeek Harness 后的设置页：左侧是 dsh 自己的设置导航，右侧 WorkBuddy 一栏有概览 / 账号 / 用量 / 请求 / 签到 / 诊断 / 模型 / 对话测试 / 日志 九个标签页，概览页显示积分余额、需要你动手的事项、桥状态与操作按钮">
 
 本仓库同时提供 **DeepSeek Harness 原生插件**（[`dsh-plugin/`](dsh-plugin/README.md)）。
 **插件和「桥 + 网页控制台」是一套东西的两个前端，不是二选一** ——
