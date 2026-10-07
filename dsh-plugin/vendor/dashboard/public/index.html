@@ -1105,7 +1105,7 @@ async function loadCheckin() {  const box = $('checkinBox');
 
   // 已签到时标注是**自动**还是**手动**签的（R11.4 第一分支）
   const byAuto = done && c && (c.lastResult === 'ok' || c.lastResult === 'already')
-    ? ' · ' + (c.lastSource === 'manual' ? '手动' : '自动')
+    ? ' · ' + (c.lastSource === 'manual' ? '手动' : '自动')   // 已签到时只分自动/手动，不必细分
       + '（' + new Date(c.lastAt).toLocaleTimeString('zh-CN', { hour12: false, hour: '2-digit', minute: '2-digit' }) + '）'
     : '';
   // 自动签到失败要**红字说出来**，不静默（R11.4 第二分支）
@@ -1139,13 +1139,26 @@ async function loadCheckin() {  const box = $('checkinBox');
  * 自动签到开关那一行（R11.1）。说明必须写清**两条触发路径**与
  * 「桥侧需重启桥生效」——不写的话用户会以为开关立刻对桥生效。
  */
+/**
+ * 签到来源 → 文案。
+ *
+ * `'auto'` = **桥侧自动**（桥的定时器，或有人调模型时顺带补签）—— 签到由桥独占，
+ * 所以现在自动来源只有这一个。`'hourly'` / `'startup'` 是旧版本控制台自己定时时
+ * 写过的值，历史 `.state.json` 里还可能出现，保留兼容不删。
+ */
+const CHECKIN_SOURCE_LABEL = {
+  manual: '手动',
+  auto: '自动（桥的定时器）',
+  hourly: '自动（每小时检查）',
+  startup: '自动（启动时）',
+};
+
 function renderCheckinAutoRow() {
   const autoOn = lastCheckinLocal ? lastCheckinLocal.auto !== false : true;
   const c = lastCheckinLocal;
   let attempt = '还没有自动尝试记录。';
   if (c && c.lastAt) {
-    const src = c.lastSource === 'manual' ? '手动'
-      : (c.lastSource === 'hourly' ? '自动（每小时检查）' : '自动（启动时）');
+    const src = CHECKIN_SOURCE_LABEL[c.lastSource] || '自动';
     const result = {
       ok: '成功', already: '上游已签到（按成功处理）', 'no-activity': '当前账号没有签到活动', error: '失败',
     }[c.lastResult] || (c.lastResult || '未知');

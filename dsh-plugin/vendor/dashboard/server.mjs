@@ -488,10 +488,9 @@ function clearProbeResults() {
 //
 // 开关是**程序可写的运行时偏好**，与 authFile 同类，存在 .state.json。
 
-/** 控制台进程级的关闭开关（测试用；日常由 .state.json 的 checkin.auto 控制）。 */
-const AUTO_CHECKIN_ENABLED = process.env.WORKBUDDY_AUTO_CHECKIN !== '0';
-const CHECKIN_COOLDOWN_MS = 3600000; // 距上次尝试 ≥1 小时才再试（与桥侧同节奏）
-const CHECKIN_SOURCES = new Set(['startup', 'hourly', 'manual']);
+// 'auto' = 桥侧自动（定时器或顺带补签）；'manual' = 面板上点的手动签到。
+// 旧版本写过 'startup' / 'hourly'，读取时仍要能认（历史 .state.json），但不新写。
+const CHECKIN_SOURCES = new Set(['auto', 'startup', 'hourly', 'manual']);
 
 /** 归一化签到运行时状态；非法值一律回落默认，绝不原样落盘。 */
 function readCheckinState() {
@@ -513,72 +512,41 @@ function writeCheckinState(patch) {
   return next;
 }
 
-/** 直接打桥的签到接口（控制台侧不自己读凭据，一律经桥）。 */
-async function bridgeCheckin(method, timeoutMs) {
-  const res = await fetch(`${config.bridge.url}/v1/checkin`, {
-    method,
-    headers: { Authorization: `Bearer ${config.bridge.token}` },
-    signal: AbortSignal.timeout(timeoutMs),
-  });
-  return { res, body: await res.json().catch(() => null) };
-}
-
 /**
- * 控制台侧的自动签到检查。**先问「签了没」再决定要不要打上游**——
- * 不做这一步，每小时都会对上游打一次无意义的签到请求。
+ * 把桥上报的自动签到结果合并进控制台的状态视图。
  *
- * 桥没起来时**本轮直接跳过、不记失败**：那不是「签到失败」，是「没法签」。
+ * ## 为什么控制台不再自己定时签到
+ *
+ * 原先控制台有一条 hourly tick：先 GET 签到状态、再决定要不要 POST。
+ * 但**每日签到已经由桥独占**（桥才是常驻的那一方），那条 tick 完全重复 ——
+ * 而且它每轮都要打一次上游 GET，**一天 24 次纯浪费**，签完之后也照打不误。
+ *
+ * 现在只剩两条触发路径，都是「直接签、不预检」：
+ *   ① 桥自己的定时器（常驻，覆盖「不开控制台也不调模型」）
+ *   ② 有人调模型时顺带补签
+ * 两者的 POST 都是幂等的：上游「已签到」按成功处理，重复调用不会出问题。
+ * 而且各自都有「当天签成功就不再试」的闸门，签完就停。
+ *
+ * ## 但面板仍要显示「上次尝试 · 自动（HH:MM）」
+ *
+ * 这份数据原先只有控制台那条 tick 在写。现在改从桥的 `/health.autoCheckin`
+ * （`{at, result, credit}`）投影出来 —— 桥本来就在上报，不必再问一次。
+ *
+ * 取**较新的那个**：用户手动签过之后，`.state.json` 里的 'manual' 记录比桥的更近，
+ * 这时不该被桥的旧记录盖掉。
  */
-async function autoCheckinTick(source) {
-  if (!AUTO_CHECKIN_ENABLED) return;
-  const st = readCheckinState();
-  if (!st.auto) return;
-  if (st.lastAt && Date.now() - st.lastAt < CHECKIN_COOLDOWN_MS) return;
-
-  let status = null;
-  try {
-    const { body } = await bridgeCheckin('GET', 8000);
-    status = body && body.status;
-  } catch {
-    return; // 桥不可达：跳过，不写失败
-  }
-  if (!status) return;
-
-  if (!status.active) {
-    // 国际版没有积分系统：如实记成 no-activity，**不算失败**
-    writeCheckinState({ lastAt: Date.now(), lastResult: 'no-activity', lastError: null, lastSource: source });
-    return;
-  }
-  if (status.todayCheckedIn) {
-    writeCheckinState({ lastAt: Date.now(), lastResult: 'already', lastError: null, lastSource: source });
-    return;
-  }
-
-  try {
-    const { res, body } = await bridgeCheckin('POST', 15000);
-    if (body && body.ok) {
-      writeCheckinState({
-        lastAt: Date.now(),
-        lastResult: body.already ? 'already' : 'ok',
-        lastError: null,
-        lastSource: source,
-      });
-    } else {
-      writeCheckinState({
-        lastAt: Date.now(),
-        lastResult: 'error',
-        lastError: String((body && body.error) || `HTTP ${res.status}`).slice(0, 200),
-        lastSource: source,
-      });
-    }
-  } catch (err) {
-    writeCheckinState({
-      lastAt: Date.now(),
-      lastResult: 'error',
-      lastError: String(err.message || err).slice(0, 200),
-      lastSource: source,
-    });
-  }
+function checkinViewWithBridge(bridgeAuto) {
+  const local = readCheckinState();
+  const at = bridgeAuto && bridgeAuto.at ? Date.parse(bridgeAuto.at) : NaN;
+  if (!Number.isFinite(at) || (local.lastAt && local.lastAt >= at)) return local;
+  return {
+    ...local,
+    lastAt: at,
+    lastResult: typeof bridgeAuto.result === 'string' ? bridgeAuto.result.slice(0, 40) : local.lastResult,
+    lastError: typeof bridgeAuto.error === 'string' ? bridgeAuto.error.slice(0, 200) : null,
+    // 'auto' = 桥的定时器/顺带补签；'manual' 由 /api/checkin 的 POST 分支写入
+    lastSource: 'auto',
+  };
 }
 
 /** 归一化路径用于比对（Windows 上同一路径可能以 / 或 \ 出现）。 */
@@ -862,8 +830,8 @@ const server = createServer(async (req, res) => {
           /**
            * 桥侧的**自动签到**内存态：`{ at, result, credit? }`，桥重启后清空。
            *
-           * 为什么必须透出来：自动签到有两条后台路径（有人调模型时桥补签、控制台
-           * 启动时与每小时各一次），它们发生时**没有任何东西通知页面**。页面若不
+           * 为什么必须透出来：自动签到有两条后台路径（桥的定时器、有人调模型时
+           * 顺带补签），它们发生时**没有任何东西通知页面**。页面若不
            * 刷新，就会一直显示「今日尚未签到」—— 而积分其实早已到账。实测证据：
            * 桥日志记录 `auto checkin ok 100`，同一时刻页面仍显示「今日尚未签到」。
            * 这属于"结论在说谎"，比不显示更糟。
@@ -1159,8 +1127,15 @@ const server = createServer(async (req, res) => {
             writeCheckinState({ lastResult: 'no-activity', lastError: null });
           }
         }
-        // 把本地运行时状态一起带上，页面据此显示开关与「上次自动尝试」
-        sendJson(res, upstream.ok ? 200 : upstream.status, { ...body, checkin: readCheckinState() });
+        // 把本地运行时状态一起带上，页面据此显示开关与「上次自动尝试」。
+        // 「上次自动尝试」的**真实来源是桥**（签到由桥独占），所以要把桥上报的
+        // autoCheckin 合并进来 —— 否则面板永远显示不出桥做过的事。
+        // 这是本地 /health 调用（不打上游），代价可忽略。
+        const health = await bridgeHealth(2000);
+        sendJson(res, upstream.ok ? 200 : upstream.status, {
+          ...body,
+          checkin: checkinViewWithBridge(health.body?.autoCheckin),
+        });
       } catch (err) {
         sendJson(res, 502, { ok: false, error: String(err.message || err), checkin: readCheckinState() });
       }
@@ -1259,12 +1234,9 @@ function startConsoleServer() {
     // 地址以实际监听结果为准（.env 里的 DASHBOARD_PORT 已生效），不再由脚本猜端口
     if (config.dashboard.openBrowser) openBrowser(config.dashboard.url);
 
-    // 每日自动签到：启动时检查一次，之后每小时一次（R11.3）。
-    // 覆盖「开着控制台但没人调模型」的情况；有人调模型时桥侧也会补签。
-    if (AUTO_CHECKIN_ENABLED && readCheckinState().auto) {
-      setTimeout(() => { autoCheckinTick('startup').catch(() => { /* 静默：失败已落盘 */ }); }, 3000);
-    }
-    setInterval(() => { autoCheckinTick('hourly').catch(() => { /* 同上 */ }); }, CHECKIN_COOLDOWN_MS);
+    // 每日自动签到**不在这里做**：它由桥独占（桥是常驻的那一方）。
+    // 控制台原先那条 hourly tick 每轮都要打一次上游 GET，一天 24 次纯浪费，
+    // 且与桥的定时器完全重复 —— 详见 checkinViewWithBridge 的说明。
 
     if (!config.dashboard.autoStartBridge) {
       console.log(`桥地址            ->  ${config.bridge.url}/v1（未自动启动）`);
