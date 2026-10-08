@@ -84,7 +84,11 @@ const server = await startStaticServer(PORT);
 const routes = baseRoutes({
   dshReady: false, // 让「桥已就绪。下一步：…」提示条渲染出来
   catalog: CATALOG.map((m, i) => (
-    i === 1 ? { ...m, badge: '限时免费' } : i === 2 ? { ...m, badge: '夜间免费' } : m
+    i === 1 ? { ...m, badge: '限时免费' }
+      : i === 2 ? { ...m, badge: '夜间免费' }
+        // 这两个是用户实拍才发现的（上游换促销词就会多一个，集合不封闭）
+        : i === 3 ? { ...m, badge: '错峰使用' }
+          : i === 4 ? { ...m, badge: '限时折扣' } : m
   )),
 });
 const { cdp, close } = await openPage(PAGE, routes, {

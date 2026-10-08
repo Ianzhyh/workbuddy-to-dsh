@@ -306,17 +306,22 @@ function translateText(text) {
    */
   const folded = s.replace(/\s+/g, ' ').trim();
   if (folded !== s && Object.prototype.hasOwnProperty.call(I18N_EN, folded)) return I18N_EN[folded];
-  if (i18nDepth >= 3) return s;
+  if (i18nDepth >= 3) return applyTerms(s);
   i18nDepth += 1;
   try {
     for (const target of (folded === s ? [s] : [s, folded])) {
       for (const rule of I18N_RULES_EN) {
         const m = target.match(rule[0]);
         if (!m) continue;
-        return typeof rule[1] === 'function' ? rule[1].apply(null, m) : target.replace(rule[0], rule[1]);
+        const out = typeof rule[1] === 'function' ? rule[1].apply(null, m) : target.replace(rule[0], rule[1]);
+        /*
+         * 规则产物里还可能残留**专有名词**（积分卡那条整串里嵌着权益包名），
+         * 所以再过一遍子串替换 —— 这是最后一道。
+         */
+        return applyTerms(out);
       }
     }
-    return s;
+    return applyTerms(s);
   } finally {
     i18nDepth -= 1;
   }
@@ -1055,9 +1060,6 @@ const I18N_EN = {
   '上次体检': 'Last probe',
   // 上游的促销标签（模型对象的 badge 字段）：中文业务文案，会原样显示在表格与详情里。
   // 它没有封闭集合，上游加了新促销词就得往这里补一条。
-  '限时免费': 'Limited-time free',
-  '夜间免费': 'Free at night',
-      '夜间折扣': 'Night discount',
   '本轮': 'This run',
   '· 可用': ' · ok',
   '· 当前': ' · current',
@@ -1406,6 +1408,41 @@ const I18N_EN = {
 
   '已过期': 'Expired',
 };
+
+/**
+ * 上游**专有名词**的对照表：权益包名、促销标签。
+ *
+ * 它们本属数据（上游账单系统 / 促销系统给的），但**用户直接看得到**，
+ * 而且命名有规律、集合不封闭 —— 上游加一个新促销词或新套餐就得补一条。
+ *
+ * 为什么不并进 `I18N_EN`：这些词会出现在**拼接串中间**。控制台的积分卡是
+ * `名称 余额/总量 · 名称 余额/总量 等 N 个套餐` 这样一整条文本节点，
+ * 整串查表与整串规则都够不着，只能做**子串替换**（见 applyTerms）。
+ */
+const I18N_TERMS_EN = {
+  // 权益包名（`CodeBuddy` + 个人版 / 个人体验版 + 权益包类型）
+  'CodeBuddy个人版拉新权益包': 'CodeBuddy Personal Referral Pack',
+  'CodeBuddy个人版国内运营裂变包': 'CodeBuddy Personal Domestic Viral Pack',
+  'CodeBuddy个人体验版': 'CodeBuddy Personal Trial',
+  // 兜底：上游换一个新套餐类型时，至少把「个人版 / 个人体验版」这半截换掉
+  '个人体验版': ' Personal Trial',
+  '个人版': ' Personal',
+  // 促销标签（模型对象的 badge / tags 里的 `badge:标签:#色`）
+  '限时免费': 'Limited-time free',
+  '限时折扣': 'Limited-time discount',
+  '夜间免费': 'Free at night',
+  '夜间折扣': 'Night discount',
+  '错峰使用': 'Off-peak use',
+};
+
+/** 把已知专有名词按**子串**替换掉（整串查表 / 规则之后的最后一道）。 */
+function applyTerms(s) {
+  let out = s;
+  for (const [zh, en] of Object.entries(I18N_TERMS_EN)) {
+    if (out.indexOf(zh) !== -1) out = out.split(zh).join(en);
+  }
+  return out;
+}
 /* ---------------------------------------------------------------------------
  * 动态串规则：**拼出来**的文案（计数、时长、状态组合）没法进词条表，
  * 用「正则 → 替换」兜住。数组顺序即优先级，**具体规则必须排在通用规则前面**。
@@ -1599,6 +1636,8 @@ const I18N_RULES_EN = [
   [/^最近 60 秒内有 (\d+) 条请求，会打断正在进行的调用。$/,
     '$1 request(s) in the last 60 seconds; restarting will interrupt in-flight calls.'],
   [/^最近请求里有 (\d+) 条新的失败。$/, (m, n) => n + (n === '1' ? ' new failure' : ' new failures') + ' in Recent requests.'],
+  /* 积分卡的套餐摘要：`名称 余额/总量 · 名称 余额/总量 等 N 个套餐`（权益包名靠 applyTerms 兜） */
+  [/^(.*) 等 (\d+) 个套餐$/, (m, head, n) => head + ' · ' + n + ' plans total'],
   /*
    * 令牌临期提醒。这条是源码侧扫描（tools/dev/check-i18n-coverage.mjs）查出来的 ——
    * 它平时只在「令牌不到 7 天」时才渲染，DOM 扫描那套验收碰不到。

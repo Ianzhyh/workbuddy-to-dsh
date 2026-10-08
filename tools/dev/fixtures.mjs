@@ -112,7 +112,16 @@ export function quotaFixture({ total = 715 } = {}) {
   return {
     ok: true,
     total,
-    packages: [{ name: '每日签到', remain: 18, size: 20 }],
+    /*
+     * **给 3 个包**：控制台积分卡只在「包数 > 2」时才拼「等 N 个套餐」，
+     * 只给一个包这条分支永远不渲染 —— i18n 验收也就扫不到它。
+     * 包名用真实的上游名称（它们在 I18N_TERMS_EN 里是**故意**翻的）。
+     */
+    packages: [
+      { name: 'CodeBuddy个人体验版', remain: 18, size: 20 },
+      { name: 'CodeBuddy个人版拉新权益包', remain: 100, size: 100 },
+      { name: 'CodeBuddy个人版国内运营裂变包', remain: 100, size: 100 },
+    ],
     productCode: 'wb',
   };
 }

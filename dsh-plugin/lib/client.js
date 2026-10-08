@@ -658,9 +658,6 @@ body.dark .wb-root,
        * 与控制台词条表里那两条保持一致 —— 未知徽章不翻（那是数据，
        * 上游随时会加新的，宁可原样显示）。
        */
-      '限时免费': 'Limited-time free',
-      '夜间免费': 'Free at night',
-      '夜间折扣': 'Night discount',
       '未测': 'Not tested',
       '测': 'Test',
       '测…': 'Testing…',
@@ -743,6 +740,43 @@ body.dark .wb-root,
       '体检完成：': 'Probe finished: ',
     };
 
+    /**
+     * 上游**专有名词**的对照表：权益包名、促销标签。
+     *
+     * 它们本属数据（上游账单系统 / 促销系统给的），但**用户直接看得到**，
+     * 而且命名有规律、集合不封闭 —— 上游加一个新促销词或新套餐就得补一条。
+     *
+     * 为什么不并进 `I18N_EN`：这些词会出现在**拼接串中间**
+     * （`CodeBuddy个人版拉新权益包 568 / 1000` 这类，甚至更长的汇总串），
+     * 整串查表与整串规则都够不着，只能做**子串替换**（见 applyTerms）。
+     */
+    const I18N_TERMS_EN = {
+      // 权益包名（`CodeBuddy` + 个人版 / 个人体验版 + 权益包类型）
+      'CodeBuddy个人版拉新权益包': 'CodeBuddy Personal Referral Pack',
+      'CodeBuddy个人版国内运营裂变包': 'CodeBuddy Personal Domestic Viral Pack',
+      'CodeBuddy个人体验版': 'CodeBuddy Personal Trial',
+      // 兜底：上游换一个新套餐类型时，至少把「个人版 / 个人体验版」这半截换掉
+      '个人体验版': ' Personal Trial',
+      '个人版': ' Personal',
+      // 促销标签（模型对象的 badge / tags 里的 `badge:标签:#色`）
+      '限时免费': 'Limited-time free',
+      '限时折扣': 'Limited-time discount',
+      '夜间免费': 'Free at night',
+      '夜间折扣': 'Night discount',
+      '错峰使用': 'Off-peak use',
+    };
+
+    /** 把已知专有名词按**子串**替换掉（整串查表 / 规则之后的最后一道）。 */
+    function applyTerms(s) {
+      let out = s;
+      const keys = Object.keys(I18N_TERMS_EN);
+      for (let i = 0; i < keys.length; i += 1) {
+        const zh = keys[i];
+        if (out.indexOf(zh) !== -1) out = out.split(zh).join(I18N_TERMS_EN[zh]);
+      }
+      return out;
+    }
+
     /*
      * 拼接串的规则表。**顺序即优先级**：最具体的放最前面。
      * 通用规则（如 `^(.+) 次$`）一旦排在前面，会把更长的整串抢走，
@@ -810,6 +844,9 @@ body.dark .wb-root,
       [/^建议：(.+)$/, (m, h) => 'Suggestion: ' + translateText(h)],
       /* 概览：权益包计数 + 归属账号 */
       [/^归属账号 (.+)（与桥一致）$/, 'Owner account $1 (matches the bridge)'],
+      /* 权益包的计费周期行：`月度 · 到期 2026-10-31 23:59:59`（两段 join 出来的） */
+      [/^月度 · 到期 (.+)$/, 'Monthly · expires $1'],
+      [/^到期 (.+)$/, 'expires $1'],
 
       /*
        * ── 下面这几条都是「桩没走到的分支」，靠 `tools/dev/check-i18n-coverage.mjs`
@@ -947,16 +984,18 @@ body.dark .wb-root,
       if (text == null || LANG === 'zh') return text;
       const s = String(text);
       if (Object.prototype.hasOwnProperty.call(I18N_EN, s)) return I18N_EN[s];
-      if (i18nDepth >= 3) return s;
+      if (i18nDepth >= 3) return applyTerms(s);
       i18nDepth += 1;
       try {
         for (let i = 0; i < I18N_RULES_EN.length; i += 1) {
           const rule = I18N_RULES_EN[i];
           const m = s.match(rule[0]);
           if (!m) continue;
-          return typeof rule[1] === 'function' ? rule[1].apply(null, m) : s.replace(rule[0], rule[1]);
+          const out = typeof rule[1] === 'function' ? rule[1].apply(null, m) : s.replace(rule[0], rule[1]);
+          // 规则产物里还可能残留**专有名词**（权益包名会嵌在拼接串中间），再过一道
+          return applyTerms(out);
         }
-        return s;
+        return applyTerms(s);
       } finally {
         i18nDepth -= 1;
       }

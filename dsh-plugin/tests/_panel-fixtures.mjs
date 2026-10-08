@@ -56,7 +56,19 @@ export const FIXTURES = {
     catalogAt: new Date(now - 300_000).toISOString(),
     catalogError: '',
     legacy: { found: false, files: [], cleaned: null },
-    quota: { ok: true, total: 1427, packages: [{ name: 'CodeBuddy个人体验版', remain: 426, size: 500 }] },
+    /*
+     * 权益包：**必须带 monthly / expiresAt** —— 不带就渲染不出
+     * 「月度 · 到期 2026-10-31 23:59:59」那一行（那是两段 join 出来的拼接串，
+     * 需要单独的规则），i18n 验收也就扫不到它。用户实拍才发现漏了。
+     * 包名也是**我们故意翻译的**（见 panel-i18n.mjs 的 KEEP_ZH）。
+     */
+    quota: {
+      ok: true, total: 1427,
+      packages: [
+        { name: 'CodeBuddy个人体验版', remain: 426, size: 500, monthly: true, expiresAt: '2026-10-31 23:59:59' },
+        { name: 'CodeBuddy个人版拉新权益包', remain: 100, size: 100 },
+      ],
+    },
     quotaError: '',
     checkin: { status: { todayCheckedIn: true, todayCredit: 18, streakDays: 6 }, auto: { auto: true } },
     dsh: { home: 'C:\\Users\\demo\\.dsh', profileDir: 'C:\\Users\\demo\\.dsh\\profiles\\desktop' },
@@ -349,7 +361,7 @@ export function buildRoutes(data) {
     '/workbuddy/console': { ok: true, action: 'start', url: 'http://127.0.0.1:8792', result: { ok: true, reused: true } },
     '/workbuddy/migrate': { ok: true, found: false, files: [], changed: false },
     // 积分刷新（POST）的桩：返回一份"刷新后"的形状
-    '/workbuddy/quota': { ok: true, quota: { ok: true, total: 1427, packages: [{ name: 'CodeBuddy个人体验版', remain: 426, size: 500 }] }, quotaError: '', at: new Date().toISOString(), refreshed: true },
+    '/workbuddy/quota': { ok: true, quota: FIXTURES.status.quota, quotaError: '', at: new Date().toISOString(), refreshed: true },
     // 控制台域功能（插件透传）。这些**不依赖**实时抓取，始终用内置样例，
     // 形状与控制台一致。
     '/workbuddy/console-api/overview': FIXTURES.consoleOverview,
