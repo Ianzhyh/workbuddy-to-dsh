@@ -458,7 +458,10 @@ test('分发形态：只有插件文件夹（自带 vendor）时也能定位到�
     try {
       const mod = await import(pathToFileURL(join(pluginDir, 'lib', 'index.js')).href);
       const detected = mod.detectProjectRoot();
-      assert.equal(detected, join(pluginDir, 'vendor'), '没有仓库时必须回落到插件自带的 vendor/');
+      // macOS 的 tmpdir 在 /var/folders → ESM loader 会把模块路径 realpath 成
+      // /private/var/folders —— 两侧都 realpath 归一后再比，断言语义不变
+      const { realpathSync } = await import('node:fs');
+      assert.equal(realpathSync(detected), realpathSync(join(pluginDir, 'vendor')), '没有仓库时必须回落到插件自带的 vendor/');
       // 候选顺序：仓库位置排在 vendor 前面（本机开发优先用仓库）
       const kinds = mod.projectRootCandidates('').map((c) => c.kind);
       assert.ok(kinds.indexOf('repo') < kinds.indexOf('vendor'), '仓库检出目录必须优先于 vendor');
@@ -486,7 +489,9 @@ test('分发形态：仓库在旁边时优先用仓库（不会被 vendor 快照
     delete process.env.WORKBUDDY_ROOT;
     try {
       const mod = await import(pathToFileURL(join(pluginDir, 'lib', 'index.js')).href);
-      assert.equal(mod.detectProjectRoot(), sandbox, '仓库检出目录优先于 vendor 快照');
+      // 同上：macOS tmpdir 的 /var → /private/var 符号链接，realpath 归一后再比
+      const { realpathSync } = await import('node:fs');
+      assert.equal(realpathSync(mod.detectProjectRoot()), realpathSync(sandbox), '仓库检出目录优先于 vendor 快照');
     } finally {
       if (prevRoot !== undefined) process.env.WORKBUDDY_ROOT = prevRoot;
     }

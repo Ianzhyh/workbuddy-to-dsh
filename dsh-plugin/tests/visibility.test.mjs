@@ -108,14 +108,17 @@ function makeSandbox({ doc = null, win = undefined } = {}) {
 }
 
 test('可见性门控：源码必须先判 document 是否存在（硬要求）', () => {
-  assert.match(source, /typeof document\s*!==\s*'undefined'/,
-    'client.js 里没有 `typeof document !== \'undefined\'` —— 非浏览器环境（SSR）会直接抛死');
+  // 行尾无关：Windows 工作区是 CRLF，直接按字节匹配会让切片与断言随平台漂移
+  const norm = source.replace(/\r\n/g, '\n');
+  assert.match(norm, /typeof document\s*(?:===|!==)\s*'undefined'/,
+    'client.js 里没有 document 存在性守卫 —— 非浏览器环境（SSR）会直接抛死');
 
   // 这道门必须在 watchPageVisibility 里，而不是别处
-  const start = source.indexOf('function watchPageVisibility');
+  const start = norm.indexOf('function watchPageVisibility');
   assert.ok(start > 0, 'client.js 里找不到 watchPageVisibility');
-  const body = source.slice(start, source.indexOf('\n    }\n', start));
-  assert.match(body, /typeof document\s*!==\s*'undefined'/,
+  const body = norm.slice(start, norm.indexOf('\n    }\n', start));
+  // 守卫写法 `=== 'undefined' || !document` 与 `!== 'undefined'` 语义等价，都算数
+  assert.match(body, /typeof document\s*(?:===|!==)\s*'undefined'/,
     'watchPageVisibility 自身没有做 document 存在性判断');
   assert.match(body, /return undefined/, 'document 不存在时要能"什么都没装"（返回 undefined）');
 });
