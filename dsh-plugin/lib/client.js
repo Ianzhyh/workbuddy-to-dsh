@@ -414,6 +414,8 @@ body.dark .wb-root,
       '数据控制台': 'Data console',
       '检出目录': 'Checkout dir',
       '需要你动手': 'Needs your attention',
+      '处理': 'Handle',
+      '插件还没就绪（HTTP 404），正在自动重试…': 'The plugin is not ready yet (HTTP 404); retrying automatically…',
       '没有待办事项。': 'Nothing to do.',
       '(未识别)': '(unrecognized)',
       '(未知)': '(unknown)',
@@ -809,6 +811,27 @@ body.dark .wb-root,
       /* 概览：权益包计数 + 归属账号 */
       [/^归属账号 (.+)（与桥一致）$/, 'Owner account $1 (matches the bridge)'],
 
+      /*
+       * ── 下面这几条都是「桩没走到的分支」，靠 `tools/dev/check-i18n-coverage.mjs`
+       *    从源码侧扫出来的（渲染扫描扫不到它们，因为那些分支没被触发）──
+       */
+      /* 「可用模型」那一行只有数字没有推荐模型时（`6 个`） */
+      [/^(\d+) 个$/, '$1 models'],
+      /* 图表 x 轴的小时刻度：`10时` */
+      [/^(\d+)时$/, '$1h'],
+      /* SVG 柱状图的悬停提示（原生 <title>）：模型名 + 三行明细，整串一条 */
+      [/^(.+)\n调用: (.+) 次\ntokens: (.+)\n积分: (.+)$/,
+        (m, model, calls, tokens, credit) =>
+          model + '\ncalls: ' + calls + '\ntokens: ' + tokens + '\ncredit: ' + credit],
+      /* 疑似卡死的进行中请求 —— 只有超过阈值才出现 */
+      [/^ · 疑似卡死（超过 (.+)）—— 桥不会主动打断，请检查客户端与上游$/,
+        (m, d) => ' · possibly stuck (over ' + translateText(d)
+          + ') — the bridge never interrupts; check the client and the upstream'],
+      /* 体检结论：`可用 · 1180ms · 实测扣分 0.02`（两段拼成一条） */
+      [/^(.+) · 实测扣分 (.+)$/, (m, head, credit) => translateText(head) + ' · measured credit ' + credit],
+      /* 对话每轮元数据末尾的 ` · 扣分 0.004`（前面还有耗时 / tokens，整串一条） */
+      [/^(.+) · 扣分 (.+)$/, (m, head, credit) => translateText(head) + ' · credit ' + credit],
+
       // ── 图表 / 明细里的动态串 ──
       // 捕获组里的内容**自己也是文案**（如 `各模型占比 (调用次数)`），必须再翻一次
       [/^各模型占比 \((.+)\)$/, (m, metric) => 'Model share (' + translateText(metric) + ')'],
@@ -839,7 +862,13 @@ body.dark .wb-root,
       [/^([\s\S]*)\n（点击复制完整详情）$/, '$1\n(click to copy full details)'],
 
       // ── 状态行 ──
-      [/^· (.+) · 已运行$/, (m, mode) => ' · ' + translateText(mode) + ' · running'],
+      /*
+       * 进行中请求那一行：源码是 `` ` · ${流式|非流式} · 已运行 ` `` ——
+       * **前后各有一个空格**（后面紧跟一个 <b> 显示秒数）。所以规则要容忍前导空格，
+       * 不能写成 `^· ` —— 那样整条匹配不上，前面留在中文（源码侧扫描查出来的）。
+       */
+      [/^( ?)· (.+) · 已运行( ?)$/,
+        (m, lead, mode, trail) => lead + '· ' + translateText(mode) + ' · running' + trail],
       [/^失败 HTTP (\d+)( · code .+)?$/, (m, code, rest) => 'Failed HTTP ' + code + (rest || '')],
       [/^失败$/, 'Failed'],
       [/^HTTP (\d+)：(.+)$/, 'HTTP $1: $2'],
@@ -880,20 +909,31 @@ body.dark .wb-root,
       [/^（更新于 (.+)）$/, '(updated $1)'],
 
       /*
-       * ── 最后兜底：最通用的单位规则 ────────────────────────────────────
-       *
-       * **必须排在最后**。`^(.+) 次$` 里的 `.+` 是贪婪的，排在前面会把
-       * 「共 2 个活跃模型 · 合计 33 次」这类整串抢走，翻出来是
-       * 「共 2 个活跃模型 · 合计 33 calls」这种半英半中 ——
-       * 控制台那边就是这么踩的（见 tools/dev/test-i18n.mjs 的注释）。
-       */
-      [/^(.+) 次$/, '$1 calls'],
-      [/^(.+) 积分$/, '$1 credit'],
       /*
-       * `^(.+)：(.+)$` 也放到最后：它同样贪婪，排在前面会把
-       * 「登录目录：C:\…」这类整串切成两半（前半留在中文）。
+       * 图表里的「值 + 单位（+ 百分比）」组合 —— 单位是嵌在**模板串内部**的，
+       * 不会单独过一次翻译，所以整串要有规则。
+       * 例：`0.62 积分 (56.4%)`（柱状图右侧标签）、`10时 · 1 次`（折线图悬停标签）。
+       */
+      [/^(.+) (次|积分) \((\d+(?:\.\d+)?)%\)$/,
+        (m, head, unit, pct) => head + ' ' + (unit === '次' ? 'calls' : 'credit') + ' (' + pct + '%)'],
+      [/^(.+) · (.+) (次|积分)$/,
+        (m, head, val, unit) => translateText(head) + ' · ' + val + ' ' + (unit === '次' ? 'calls' : 'credit')],
+
+      /*
+       * ── 最后兜底：最通用的两条 ────────────────────────────────────────
+       *
+       * 顺序是**专属规则 → 冒号规则 → 通用单位规则**，三条都不能换位：
+       *
+       * - `^(.+) 次$` 的 `.+` 贪婪，排前面会把「共 2 个活跃模型 · 合计 33 次」
+       *   这类整串抢走 → 半英半中（控制台那边踩过）；
+       * - `^(.+)：(.+)$` 也贪婪，排太前面会把「登录目录：C:\…」切成两半；
+       *   但排在**单位规则之后**又会被 `^(.+) 次$` 抢先 —— 实测
+       *   `10时：1 次` 会变成 `10时：1 calls`（只翻尾巴）。
+       *   所以它必须夹在「专属规则」与「通用单位规则」**中间**。
        */
       [/^(.+)：(.+)$/, (m, a, b) => translateText(a) + ': ' + translateText(b)],
+      [/^(.+) 次$/, '$1 calls'],
+      [/^(.+) 积分$/, '$1 credit'],
     ];
 
     let i18nDepth = 0;

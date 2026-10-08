@@ -294,13 +294,27 @@ function translateText(text) {
   if (text == null || LANG === 'zh') return text;
   const s = String(text);
   if (Object.prototype.hasOwnProperty.call(I18N_EN, s)) return I18N_EN[s];
+  /*
+   * **折叠空白后再试一次。**
+   *
+   * DOM 文本节点在 `i18nTranslateNode` 里已经折叠过空白，但 **`t()` 没有** ——
+   * 而 `t()` 正是给原生 confirm / alert 与代码里主动拼接用的。
+   * 于是「规则按折叠后的文本写、调用点传的是带 `\n\n` 的原文」就对不上：
+   * 实测「写入 dsh 设置」那个二次确认弹窗**整段还是中文**。
+   *
+   * 折叠后命中时返回的是**规则产物**（它自己带 `\n\n`），换行结构不会丢。
+   */
+  const folded = s.replace(/\s+/g, ' ').trim();
+  if (folded !== s && Object.prototype.hasOwnProperty.call(I18N_EN, folded)) return I18N_EN[folded];
   if (i18nDepth >= 3) return s;
   i18nDepth += 1;
   try {
-    for (const rule of I18N_RULES_EN) {
-      const m = s.match(rule[0]);
-      if (!m) continue;
-      return typeof rule[1] === 'function' ? rule[1].apply(null, m) : s.replace(rule[0], rule[1]);
+    for (const target of (folded === s ? [s] : [s, folded])) {
+      for (const rule of I18N_RULES_EN) {
+        const m = target.match(rule[0]);
+        if (!m) continue;
+        return typeof rule[1] === 'function' ? rule[1].apply(null, m) : target.replace(rule[0], rule[1]);
+      }
     }
     return s;
   } finally {
@@ -1366,6 +1380,30 @@ const I18N_EN = {
   '上游 30 个模型全是对话类，没有任何 embedding 模型，所以 /v1/embeddings 会明确返回 501。这里不做「假的向量」——那会让知识库看起来建成了、实际全是噪声，要等检索结果离谱时才发现。需要 RAG 的客户端请单独配一个 embedding 服务。':
     'All 30 upstream models are chat models; there is no embedding model, so /v1/embeddings deliberately returns 501. We do not fake vectors here — that would make a knowledge base look built while being pure noise, and you would only notice when retrieval went badly wrong. Clients that need RAG should point at a separate embedding service.',
 
+  // ---- 确认弹窗 / toast / 异常态 ----
+  // 原生 confirm 不在 DOM 里，i18n 的 DOM 翻译遍够不着它，只能靠调用点上的 t()；
+  // 而 t() 查的就是这张表 —— 表里没有就等于弹窗还是中文。
+  // 这些分支平时走不到（要停在体检中途、要桥异常…），所以 DOM 扫描那套验收
+  // 一直没发现；是 tools/dev/check-i18n-coverage.mjs 从源码侧扫出来的。
+  '最近 60 秒没有请求。': 'No requests in the last 60 seconds.',
+  '无法确认最近 60 秒是否有请求（读取明细失败）。':
+    'Could not confirm whether there were requests in the last 60 seconds (failed to read the log).',
+  '体检进行中，停止桥会中断本轮体检。': 'A probe is running — stopping the bridge will interrupt it.',
+  '⚠ 控制台异常': '⚠ Console error',
+  '⚠ 桥未运行': '⚠ Bridge not running',
+  '⚠ 桥有响应但异常': '⚠ Bridge responds but is unhealthy',
+  '控制台还没取到桥的状态。': 'The console has not obtained the bridge status yet.',
+  '桥有响应但状态异常：': 'Bridge responds but its status is unhealthy: ',
+  '桥未运行，模型调用会失败。': 'The bridge is not running — model calls will fail.',
+  '上游不可用': 'upstream unavailable',
+  '桥未运行，暂无可复制的地址': 'The bridge is not running — nothing to copy',
+  '本地回环令牌，不是上游凭据': 'loopback token, not an upstream credential',
+  '当前筛选下没有可导出的明细': 'No rows match the current filter',
+  '已导出模型清单 CSV（含体检结论与实测成本）':
+    'Exported the model list CSV (with probe results and measured cost)',
+  '暂无可导出的用量数据': 'No usage data to export',
+  '- 未取到有效凭据': '- no valid credentials',
+
   '已过期': 'Expired',
 };
 /* ---------------------------------------------------------------------------
@@ -1560,7 +1598,13 @@ const I18N_RULES_EN = [
     'No $2 records among the last $1 — try raising the row count to 200.'],
   [/^最近 60 秒内有 (\d+) 条请求，会打断正在进行的调用。$/,
     '$1 request(s) in the last 60 seconds; restarting will interrupt in-flight calls.'],
-  [/^最近请求里有 (\d+) 条新的失败。$/, '$1 new failures in Recent requests.'],
+  [/^最近请求里有 (\d+) 条新的失败。$/, (m, n) => n + (n === '1' ? ' new failure' : ' new failures') + ' in Recent requests.'],
+  /*
+   * 令牌临期提醒。这条是源码侧扫描（tools/dev/check-i18n-coverage.mjs）查出来的 ——
+   * 它平时只在「令牌不到 7 天」时才渲染，DOM 扫描那套验收碰不到。
+   */
+  [/^令牌将于 (.+) 天后到期；桌面端在线时会自行续期，若届时返回 401 请在桌面端重新登录。$/,
+    'The token expires in $1 days; the desktop app renews it while online — if you get a 401 by then, sign in again in the desktop app.'],
   [/^「(.+)」已不在最近明细里，已恢复「全部模型」$/, '“$1” is no longer in the recent details; restored to All models'],
   [/^疑似卡死（超过 (.+)）—— 桥不会主动打断，请检查客户端与上游$/,
     (m, dur) => 'Possibly stuck (over ' + translateText(dur) + ') — the bridge never interrupts; check the client and the upstream'],

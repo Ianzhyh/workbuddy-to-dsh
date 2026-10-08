@@ -333,6 +333,16 @@ export function buildRoutes(data) {
       payload: {
         ok: true,
         requests: [syntheticFailure, ...((data.requests && Array.isArray(data.requests.requests)) ? data.requests.requests : [])],
+        /*
+         * 进行中请求必须给一条 **runningMs 超过 activeAlertMs** 的 ——
+         * 「 · 流式 · 已运行 」与「 · 疑似卡死（超过 …）—— …」这两行的文案是拼接串，
+         * 桩里没有就永远不渲染，也就永远不被 i18n 验收扫到
+         * （静态扫描 tools/dev/check-i18n-coverage.mjs 查出来的）。
+         */
+        active: [
+          { id: 'req-live-1', model: 'deepseek-v4.1-flash', stream: true, startedAt: now - 400_000, runningMs: 400_000 },
+        ],
+        activeAlertMs: 300_000,
       },
     },
     '/workbuddy/bridge': { ok: true, action: 'restart', result: { ok: true, health: { pid: 4242 } } },

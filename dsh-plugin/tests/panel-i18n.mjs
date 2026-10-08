@@ -286,6 +286,40 @@ async function runPass(variant, port, cdpPort) {
         await q(`(() => { const t = document.querySelectorAll('#root .wb-dropdown-trigger')[${k}]; if (t) t.click(); })()`);
         await sleep(160);
       }
+
+      /*
+       * 分段控件（Segmented）的每个选项也点一遍：切换会**换掉整块内容** ——
+       * 图表的「时间趋势 / 各模型对比」、用量粒度、模型页的筛选…
+       * 只扫默认那一支，等于其它分支的文案永远不进检查
+       * （`· 多模态`、柱状图 tooltip 都是这么漏的）。
+       */
+      const segCount = await q(`document.querySelectorAll('#root .wb-segmented-item').length`);
+      for (let k = 0; k < segCount; k += 1) {
+        const clicked = await q(`(() => {
+          const it = document.querySelectorAll('#root .wb-segmented-item')[${k}];
+          if (!it || it.classList.contains('on')) return false;
+          it.click(); return true;
+        })()`);
+        if (!clicked) continue;
+        await sleep(340);
+        const szh = await q(COLLECT_ZH);
+        if (szh.length) { leftovers.push([`${name} › 分段 ${k + 1}`, szh]); fail(`「${name}」第 ${k + 1} 个分段选项切换后仍有 ${szh.length} 条中文`); }
+      }
+
+      /*
+       * 模型页还有一整组「详情抽屉」文案（DetailItem），只有展开才渲染。
+       * 展开第一行即可覆盖那一整块。
+       */
+      const openedDetail = await q(`(() => {
+        const b = [...document.querySelectorAll('#root .wb-btn')].find((x) => /^(详情|Details)$/.test(x.textContent.trim()));
+        if (!b) return false;
+        b.click(); return true;
+      })()`);
+      if (openedDetail) {
+        await sleep(420);
+        const dzh = await q(COLLECT_ZH);
+        if (dzh.length) { leftovers.push([`${name} › 详情抽屉`, dzh]); fail(`「${name}」展开详情抽屉后仍有 ${dzh.length} 条中文`); }
+      }
     }
     if (thin.length) fail(`这些标签页内容过少，可能是没渲染（0 残留不可信）：${thin.join(', ')}`);
     else pass('9 个标签页内容都足够厚（防「没渲染 = 0 残留」的假绿）');
