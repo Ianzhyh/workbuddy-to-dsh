@@ -154,16 +154,7 @@
         "type": "string"
       },
       "$.bridge.autoCheckin": {
-        "type": "object"
-      },
-      "$.bridge.autoCheckin.at": {
-        "type": "string"
-      },
-      "$.bridge.autoCheckin.result": {
-        "type": "string"
-      },
-      "$.bridge.autoCheckin.credit": {
-        "type": "number"
+        "type": "null"
       },
       "$.bridge.autoCheckinEnabled": {
         "type": "boolean"
@@ -532,6 +523,9 @@
       "$.bridge.body.authFile": {
         "type": "string"
       },
+      "$.bridge.body.clientExe": {
+        "type": "string"
+      },
       "$.bridge.body.models": {
         "type": "array"
       },
@@ -650,20 +644,29 @@
       "$.bridge.body.upstreamShape.droppedNonChat[]": {
         "type": "string"
       },
+      "$.bridge.body.process": {
+        "type": "object"
+      },
+      "$.bridge.body.process.requests": {
+        "type": "number"
+      },
+      "$.bridge.body.process.errors": {
+        "type": "number"
+      },
+      "$.bridge.body.process.byStatus": {
+        "type": "object"
+      },
+      "$.bridge.body.process.byStatus.200": {
+        "type": "number"
+      },
+      "$.bridge.body.process.rateLimited": {
+        "type": "number"
+      },
       "$.bridge.body.autoCheckinEnabled": {
         "type": "boolean"
       },
       "$.bridge.body.autoCheckin": {
-        "type": "object"
-      },
-      "$.bridge.body.autoCheckin.at": {
-        "type": "string"
-      },
-      "$.bridge.body.autoCheckin.result": {
-        "type": "string"
-      },
-      "$.bridge.body.autoCheckin.credit": {
-        "type": "number"
+        "type": "null"
       },
       "$.credentials": {
         "type": "object"
@@ -959,12 +962,18 @@
         "optional": true
       },
       "$.requests[].code": {
-        "type": "mixed",
+        "type": "number",
         "optional": true
       },
       "$.requests[].error": {
         "type": "string",
         "optional": true
+      },
+      "$.active": {
+        "type": "array"
+      },
+      "$.activeAlertMs": {
+        "type": "number"
       }
     },
     "/api/accounts": {

@@ -161,6 +161,28 @@ export const config = {
      */
     anthropicModel: env.WORKBUDDY_ANTHROPIC_MODEL || 'glm-5.3',
     anthropicFastModel: env.WORKBUDDY_ANTHROPIC_FAST_MODEL || 'glm-5.3-flash',
+    /**
+     * 本地限流（保护账号配额）。**默认全关**（0），关着时行为与没有本机制
+     * 完全一致。RPM=每分钟上限、MIN_INTERVAL=两条最小间隔、MODE=queue|reject。
+     */
+    rateLimitRpm: Math.max(0, Number(env.WORKBUDDY_RATE_LIMIT_RPM || 0)) || 0,
+    rateLimitMinIntervalMs: Math.max(0, Number(env.WORKBUDDY_RATE_LIMIT_MIN_INTERVAL_MS || 0)) || 0,
+    rateLimitMode: env.WORKBUDDY_RATE_LIMIT_MODE === 'reject' ? 'reject' : 'queue',
+    /**
+     * 进行中请求超过该毫秒数即判「疑似卡死」（控制台标黄提醒）。
+     * 只影响显示高亮，**不干预请求** —— 桥没有任何默认超时。
+     */
+    activeAlertMs: Math.max(1000, Number(env.WORKBUDDY_ACTIVE_ALERT_MS || 300_000)) || 300_000,
+    /**
+     * 出站客户端身份（UA / X-IDE-* / X-Product-Version 的取值）。
+     *
+     * 上游按这些指纹校验调用来源；官方客户端升级后旧指纹可能被拒（「上游
+     * 版本漂移」）。默认值与当前实测可用的官方版本一致，需要时在 .env
+     * 覆盖这三个即可，改完重启桥生效。
+     */
+    appVersion: env.WORKBUDDY_APP_VERSION || '4.9.29177644',
+    ideVersion: env.WORKBUDDY_IDE_VERSION || '1.119.0',
+    ideName: env.WORKBUDDY_IDE_NAME || 'VSCode',
   },
   dashboard: {
     host: '127.0.0.1',
@@ -219,6 +241,13 @@ export function bridgeEnv(overrides = {}) {
     WORKBUDDY_LOCAL_TOKEN: config.bridge.token,
     WORKBUDDY_ANTHROPIC_MODEL: config.bridge.anthropicModel,
     WORKBUDDY_ANTHROPIC_FAST_MODEL: config.bridge.anthropicFastModel,
+    WORKBUDDY_APP_VERSION: config.bridge.appVersion,
+    WORKBUDDY_IDE_VERSION: config.bridge.ideVersion,
+    WORKBUDDY_IDE_NAME: config.bridge.ideName,
+    WORKBUDDY_RATE_LIMIT_RPM: String(config.bridge.rateLimitRpm),
+    WORKBUDDY_RATE_LIMIT_MIN_INTERVAL_MS: String(config.bridge.rateLimitMinIntervalMs),
+    WORKBUDDY_RATE_LIMIT_MODE: config.bridge.rateLimitMode,
+    WORKBUDDY_ACTIVE_ALERT_MS: String(config.bridge.activeAlertMs),
     WORKBUDDY_AUTH_FILE: overrides.authFile || config.workbuddy.authFile,
     // 探测不到时不注入空值 —— 桥会用自己的同款探测重新定位，而不是把
     // 一个空串当成"显式指定的路径"。

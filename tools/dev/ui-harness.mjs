@@ -102,14 +102,50 @@ function connect(url) {
   return { ready, send, on, evaluate, close: () => ws.close() };
 }
 
+let shapeCache = null;
+/**
+ * 按接口形状表（api-shape.json）生成"最小合法桩"：结构齐全、值全部是类型默认值。
+ *
+ * 验收脚本里凡是**值不重要、但字段名必须对**的接口，用它当底再按需覆盖 ——
+ * 这是「桩数据不再骗人」纪律的低成本落地：形状永远跟随形状表，不靠手抄。
+ * 重取形状：`node tools/dev/api-shape.mjs capture`。
+ *
+ * @param {string} path 例如 '/api/checkin'
+ * @returns {object} 结构齐全的桩对象（空值）
+ */
+export function shapeStub(path) {
+  if (!shapeCache) {
+    try {
+      shapeCache = JSON.parse(readFileSync(join(root, 'tools', 'dev', 'api-shape.json'), 'utf8')).routes || {};
+    } catch {
+      shapeCache = {};
+    }
+  }
+  const shape = shapeCache[path];
+  if (!shape) return {};
+  const defVal = (t) => (t === 'object' ? {} : t === 'array' ? [] : t === 'string' ? '' : t === 'number' ? 0 : t === 'boolean' ? false : null);
+  const out = {};
+  for (const [key, meta] of Object.entries(shape)) {
+    if (key === '$') continue;
+    const segs = key.slice(2).split('.'); // "status.streakDays" → ['status','streakDays']
+    if (segs.some((s) => s.endsWith('[]'))) continue; // 数组元素键：数组本身已是空 []
+    let cur = out;
+    for (let i = 0; i < segs.length - 1; i += 1) {
+      if (typeof cur[segs[i]] !== 'object' || cur[segs[i]] === null) cur[segs[i]] = {};
+      cur = cur[segs[i]];
+    }
+    cur[segs[segs.length - 1]] = defVal(meta.type);
+  }
+  return out;
+}
+
 /**
  * 把路由表序列化成**注入用的 JS 字面量**。
  *
  * 不能用 JSON.stringify：`body` 允许是函数（按查询串分流时必需），而
  * JSON.stringify 会把函数直接丢掉，页面拿到的是一个没有 body 的空路由。
  */
-function serializeRoutes(routes) {
-  const parts = [];
+function serializeRoutes(routes) {  const parts = [];
   for (const [path, r] of Object.entries(routes)) {
     const body = typeof r.body === 'function'
       ? `(${r.body.toString()})`

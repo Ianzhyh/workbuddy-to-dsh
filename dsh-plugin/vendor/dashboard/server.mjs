@@ -1026,7 +1026,10 @@ const server = createServer(async (req, res) => {
 
     if (route === '/api/requests') {
       const limit = Math.min(Math.max(Number(url.searchParams.get('limit')) || 50, 1), 200);
-      sendJson(res, 200, { requests: await bridgeRequests(limit) });
+      // 形状：{ requests, active, activeAlertMs }（桥不可用时 requests=null、
+      // active 为空数组 —— 前端按同一形状渲染，不必分叉）。
+      const data = await bridgeRequests(limit);
+      sendJson(res, 200, data || { requests: null, active: [], activeAlertMs: null });
       return;
     }
 

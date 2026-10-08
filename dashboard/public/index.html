@@ -459,6 +459,10 @@ let lastModelsError = '';
 let lastModelsStaleMs = null;
 /** 最近一次「最近请求」的明细，供前端筛选/统计复用。 */
 let lastRequests = [];
+/** 进行中的请求（桥 /v1/requests 的 active[]）——正在跑、还没落账。只显示，不干预。 */
+let lastActive = [];
+/** 超过该毫秒数标「疑似卡死」（来自桥，默认 5 分钟；桥不设任何默认超时）。 */
+let activeAlertMs = null;
 /**
  * 「最近请求」的模型筛选 —— **唯一真源**。用量表的模型行点击与
  * `#reqModelFilter` 下拉都写它，任一处改另一处立刻同步。空串 = 不筛。
@@ -1552,10 +1556,13 @@ async function loadRequests() {
   const list = d && d.requests;
   if (!list) {
     lastRequests = [];
+    lastActive = [];
     $('reqBox').innerHTML = '<div class="empty">桥未运行，暂无数据。</div>';
     return;
   }
   lastRequests = list;
+  lastActive = Array.isArray(d.active) ? d.active : [];
+  activeAlertMs = typeof d.activeAlertMs === 'number' ? d.activeAlertMs : null;
   // 明细变了：刷新下拉选项并保住当前选中值（选中值消失时回落「全部模型」）
   syncReqModelFilterUI();
   renderRequests();
@@ -1656,16 +1663,69 @@ function requestScopeText() {
     + (($('reqFailOnly') && $('reqFailOnly').checked) ? ' · 仅失败' : '');
 }
 
+/**
+ * 运行时长（秒级）：`12 秒` / `4 分 32 秒` / `1 小时 02 分`。
+ */
+function fmtRunMs(ms) {
+  const s = Math.max(0, Math.round(ms / 1000));
+  if (s < 60) return s + ' 秒';
+  const m = Math.floor(s / 60);
+  if (m < 60) return m + ' 分 ' + String(s % 60).padStart(2, '0') + ' 秒';
+  return Math.floor(m / 60) + ' 小时 ' + String(m % 60).padStart(2, '0') + ' 分';
+}
+
+let activeTicker = null;
+/** 「已运行」秒级刷新：只在有进行中条目时运行，空了自动停（页面隐藏时跳过）。 */
+function ensureActiveTicker() {
+  if (activeTicker) return;
+  activeTicker = setInterval(() => {
+    if (document.hidden) return; // 不可见时跳过——恢复可见后下一跳自动续上
+    const els = document.querySelectorAll('.reqactive .runfor[data-since]');
+    if (!els.length) { clearInterval(activeTicker); activeTicker = null; return; }
+    for (const el of els) el.textContent = fmtRunMs(Date.now() - Number(el.dataset.since));
+  }, 1000);
+}
+
+/**
+ * 「进行中」区块 —— 正在跑、还没落账的请求（卡死可见性）。
+ *
+ * 桥只**报告**不干预（没有任何默认超时，长回答可以持续很久）；这里显示
+ * 已运行时长，超过 activeAlertMs（默认 5 分钟）标黄提醒「疑似卡死」——
+ * 用户据此区分「模型在想」与「真的挂了」，而不是干等。
+ */
+function renderActiveBlock() {
+  if (!lastActive.length) return '';
+  ensureActiveTicker();
+  const alertMs = typeof activeAlertMs === 'number' ? activeAlertMs : 300000;
+  const rows = lastActive.map((a) => {
+    const since = Number(a.startedAt) || Date.now();
+    const ms = typeof a.runningMs === 'number' ? a.runningMs : (Date.now() - since);
+    const hot = ms >= alertMs;
+    return '<div class="reqactive' + (hot ? ' hot' : '') + '">'
+      + '<span class="dots" aria-hidden="true">\u25cf</span>'
+      + escapeAttr(a.model || '(未知模型)')
+      + ' \u00b7 ' + (a.stream ? '流式' : '非流式')
+      + ' \u00b7 已运行 <b class="runfor" data-since="' + since + '">' + fmtRunMs(ms) + '</b>'
+      + (hot
+        ? '<span class="hot">疑似卡死（超过 ' + fmtRunMs(alertMs) + '）—— 桥不会主动打断，请检查客户端与上游</span>'
+        : '')
+      + '</div>';
+  }).join('');
+  return '<div class="activebox" title="进行中的请求：桥不设默认超时，长回答可能持续很久；超过阈值标黄仅为提醒">'
+    + rows + '</div>';
+}
+
 /** 渲染请求明细（「仅看失败」只影响显示，不重新请求——数据已在内存）。 */
 function renderRequests() {
   const box = $('reqBox');
   const list = lastRequests;
+  const activeHtml = renderActiveBlock();
   // 重绘前记住滚动位置：排障时要盯住某一屏，每 20 秒被弹回顶部没法看
   const prevWrap = $('reqTableWrap');
   const prevScroll = prevWrap ? prevWrap.scrollTop : 0;
 
   if (!list.length) {
-    box.innerHTML = '<div class="empty">还没有请求记录。</div>';
+    box.innerHTML = activeHtml || '<div class="empty">还没有请求记录。</div>';
     return;
   }
 
@@ -1695,11 +1755,11 @@ function renderRequests() {
     // 明细里压根没有这个模型（不是被「仅看失败」挡住的）→ 告诉用户怎么把它找出来，
     // 不能只是空白一片，让人以为联动坏了
     if (reqModelFilter && !list.some((r) => r.model === reqModelFilter)) {
-      box.innerHTML = notice + '<div class="empty">最近 ' + list.length + ' 条里没有 '
+      box.innerHTML = activeHtml + notice + '<div class="empty">最近 ' + list.length + ' 条里没有 '
         + escapeAttr(reqModelFilter) + ' 的记录，可把条数调大到 200。</div>';
       return;
     }
-    box.innerHTML = notice + '<div class="empty">当前筛选下没有记录。</div>';
+    box.innerHTML = activeHtml + notice + '<div class="empty">当前筛选下没有记录。</div>';
     return;
   }
 
@@ -1727,7 +1787,7 @@ function renderRequests() {
       '</tr>';
   }).join('');
 
-  box.innerHTML = notice +
+  box.innerHTML = activeHtml + notice +
     '<div class="tablewrap" id="reqTableWrap" style="max-height:320px"><table><thead><tr>' +
     '<th>时间</th><th>模型</th><th>方式</th><th class="num">耗时</th><th class="num">输入/输出</th><th class="num">积分</th><th>结果</th>' +
     '</tr></thead><tbody>' + rows + '</tbody></table></div>';

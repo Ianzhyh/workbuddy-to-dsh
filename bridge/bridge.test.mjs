@@ -123,6 +123,53 @@ async function startBridge(env = {}, opts = {}) {
   throw new Error(`桥未在 20 秒内就绪：\n${output}`);
 }
 
+// ── 打桩上游：验证「桥实际发了什么出去」─────────────────────────────────
+/**
+ * 记录收到的每个请求（headers/body），回最小 SSE。
+ *
+ * 配合 `CODEBUDDY_ENDPOINT` 把桥的出站流量全部导向这里 —— 审计模板改写、
+ * 出站身份指纹、限流计数之类的断言都靠它（不触真上游、不耗额度）。
+ *
+ * @param {string[]} [models] `/v2/enterprises/personal/models` 返回的模型 id
+ */
+async function startStubUpstream(models = ['stub-model']) {
+  const seen = [];
+  const srv = createServer((req, res) => {
+    const path = new URL(req.url, 'http://127.0.0.1').pathname;
+    if (path === '/v2/enterprises/personal/models') {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      return res.end(JSON.stringify({
+        code: 0,
+        data: { models: models.map((id) => ({ id, maxInputTokens: 128000, maxOutputTokens: 4096 })) },
+      }));
+    }
+    if (path === '/v3/config') {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      return res.end(JSON.stringify({ code: 0, data: { models: [] } }));
+    }
+    if (path === '/v2/chat/completions') {
+      let body = '';
+      req.on('data', (c) => { body += c; });
+      req.on('end', () => {
+        seen.push({ headers: req.headers, body });
+        res.writeHead(200, { 'content-type': 'text/event-stream' });
+        res.write('data: {"choices":[{"delta":{"content":"ok"}}]}\n\n');
+        res.write('data: {"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":1,"total_tokens":4}}\n\n');
+        res.end('data: [DONE]\n\n');
+      });
+      return;
+    }
+    res.writeHead(404, { 'content-type': 'application/json' });
+    res.end('{}');
+  });
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+  return {
+    base: `http://127.0.0.1:${srv.address().port}`,
+    seen,
+    close: () => new Promise((r) => srv.close(r)),
+  };
+}
+
 const auth = { authorization: `Bearer ${TOKEN}` };
 
 test('桥：端点契约 —— 鉴权、身份、模型目录形状', { timeout: 90_000 }, async () => {
@@ -919,6 +966,334 @@ test('桥：keep-alive 连接被复用，且复用连接被掐断时自动换新
   } finally {
     await bridge.stop();
     try { upstream.close(); } catch { /* 忽略 */ }
+    rmSync(bridge.dir, { recursive: true, force: true });
+  }
+});
+
+test('桥：出站 system 已做审计模板最小改写（黑名单原文不得出现在上游看到的请求里）', { timeout: 90_000 }, async () => {
+  // 背景（2026-10-08 实测）：带 Claude Code 原文模板的请求被上游**逐字拉黑**
+  // —— 400 `Illegal API invocation from an unapproved channel`；按报告
+  // §8.7 #44 最小改写（CLI→CLI tool、Main branch→Default branch）后放行。
+  // 本用例把「出站不含黑名单原文」钉死为回归（打桩上游直接审视桥发了什么）。
+  const stub = await startStubUpstream(['audit-model']);
+  const bridge = await startBridge({ CODEBUDDY_ENDPOINT: stub.base }, { auth: READABLE_FAKE_AUTH });
+  try {
+    await fetch(bridge.baseUrl + '/v1/models?all=1'); // 预热目录，让预校验认识 audit-model
+
+    const res = await fetch(bridge.baseUrl + '/v1/messages', {
+      method: 'POST',
+      headers: { ...auth, 'content-type': 'application/json' },
+      body: JSON.stringify({
+        model: 'audit-model',
+        max_tokens: 16,
+        system: [
+          { type: 'text', text: "You are Claude Code, Anthropic's official CLI for Claude." },
+          { type: 'text', text: 'Main branch (you will usually use this for PRs)' },
+        ],
+        messages: [{ role: 'user', content: 'ping' }],
+      }),
+      signal: AbortSignal.timeout(15000),
+    });
+    assert.equal(res.status, 200);
+    await res.text();
+
+    assert.equal(stub.seen.length, 1, '桥应向上游发出恰好一条聊天请求');
+    const outbound = JSON.parse(stub.seen[0].body);
+    const sysText = outbound.messages
+      .filter((m) => m.role === 'system')
+      .map((m) => (typeof m.content === 'string' ? m.content : JSON.stringify(m.content)))
+      .join('\n');
+    assert.ok(!sysText.includes("Anthropic's official CLI for Claude."),
+      '出站 system 不得含黑名单原文（…official CLI for Claude.）');
+    assert.ok(!sysText.includes('Main branch (you will usually use this for PRs)'),
+      '出站 system 不得含黑名单原文（Main branch …）');
+    assert.ok(sysText.includes("Anthropic's official CLI tool for Claude."),
+      '应含最小改写后的形态（CLI tool）');
+    assert.ok(sysText.includes('Default branch (you will usually use this for PRs)'),
+      '应含最小改写后的形态（Default branch）');
+  } finally {
+    await bridge.stop();
+    try { await stub.close(); } catch { /* 忽略 */ }
+    rmSync(bridge.dir, { recursive: true, force: true });
+  }
+});
+
+test('桥：出站身份指纹可用 env 覆盖（上游版本漂移时的逃生门）', { timeout: 90_000 }, async () => {
+  // 上游按 UA / X-IDE-* / X-Product-Version 校验调用来源；官方客户端升级后
+  // 旧指纹可能整体被拒。三个值必须能用 .env（→ bridgeEnv → 桥）覆盖，
+  // 否则用户只能改源码 —— 这是报告 §8.6 风险 1 的最低成本逃生门。
+  const stub = await startStubUpstream(['id-model']);
+  const bridge = await startBridge(
+    {
+      CODEBUDDY_ENDPOINT: stub.base,
+      WORKBUDDY_APP_VERSION: '9.9.9-test',
+      WORKBUDDY_IDE_NAME: 'TestIDE',
+      // IDE_VERSION 故意不覆盖 → 应保持默认
+    },
+    { auth: READABLE_FAKE_AUTH },
+  );
+  try {
+    await fetch(bridge.baseUrl + '/v1/models?all=1'); // 预热目录，让预校验认识 id-model
+    const res = await fetch(bridge.baseUrl + '/v1/chat/completions', {
+      method: 'POST',
+      headers: { ...auth, 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'id-model', messages: [{ role: 'user', content: 'hi' }] }),
+      signal: AbortSignal.timeout(15000),
+    });
+    assert.equal(res.status, 200);
+    await res.text();
+
+    assert.equal(stub.seen.length, 1);
+    const h = stub.seen[0].headers;
+    assert.equal(h['user-agent'], 'TestIDE/1.119.0 CodeBuddy/9.9.9-test',
+      'UA 应由 env 覆盖的 IDE 名/版本与 App 版本拼出，未覆盖项保持默认');
+    assert.equal(h['x-ide-name'], 'TestIDE');
+    assert.equal(h['x-ide-version'], '1.119.0', '未设置的 IDE_VERSION 应保持默认值');
+    assert.equal(h['x-product-version'], '9.9.9-test');
+  } finally {
+    await bridge.stop();
+    try { await stub.close(); } catch { /* 忽略 */ }
+    rmSync(bridge.dir, { recursive: true, force: true });
+  }
+});
+
+test('桥：本地限流 reject 模式 —— 上限 N 时上游恰好收到 N 条，第 N+1 条 429 + Retry-After', { timeout: 90_000 }, async () => {
+  const stub = await startStubUpstream(['rl-model']);
+  const bridge = await startBridge(
+    {
+      CODEBUDDY_ENDPOINT: stub.base,
+      WORKBUDDY_RATE_LIMIT_RPM: '2',
+      WORKBUDDY_RATE_LIMIT_MODE: 'reject',
+    },
+    { auth: READABLE_FAKE_AUTH },
+  );
+  const chat = () => fetch(bridge.baseUrl + '/v1/chat/completions', {
+    method: 'POST',
+    headers: { ...auth, 'content-type': 'application/json' },
+    body: JSON.stringify({ model: 'rl-model', messages: [{ role: 'user', content: 'hi' }] }),
+    signal: AbortSignal.timeout(15000),
+  });
+  try {
+    await fetch(bridge.baseUrl + '/v1/models?all=1'); // 预热目录（不打 chat，不消耗许可）
+
+    const r1 = await chat();
+    const r2 = await chat();
+    const r3 = await chat();
+    await r1.text(); await r2.text(); await r3.text();
+
+    assert.equal(r1.status, 200);
+    assert.equal(r2.status, 200);
+    assert.equal(r3.status, 429, '第 3 条必须被限流拒绝');
+    assert.ok(Number(r3.headers.get('retry-after')) >= 1, 'Retry-After 头必须存在且 ≥1 秒');
+    assert.equal(stub.seen.length, 2, '上游恰好收到 2 条 —— 被限流的请求不得打上游');
+
+    // 账本归因：被限流的请求要留下 rate_limited 痕迹（控制台据此可见）
+    await new Promise((r) => setTimeout(r, 100)); // 等账本落盘
+    const ledger = readFileSync(join(bridge.dir, 'usage.jsonl'), 'utf8');
+    assert.match(ledger, /rate_limited/, '账本必须记录限流归因');
+  } finally {
+    await bridge.stop();
+    try { await stub.close(); } catch { /* 忽略 */ }
+    rmSync(bridge.dir, { recursive: true, force: true });
+  }
+});
+
+test('桥：本地限流 queue 模式 —— 并发请求按最小间隔排队放行，不拒绝', { timeout: 90_000 }, async () => {
+  const stub = await startStubUpstream(['rl2-model']);
+  const bridge = await startBridge(
+    {
+      CODEBUDDY_ENDPOINT: stub.base,
+      WORKBUDDY_RATE_LIMIT_MIN_INTERVAL_MS: '400',
+      WORKBUDDY_RATE_LIMIT_MODE: 'queue',
+    },
+    { auth: READABLE_FAKE_AUTH },
+  );
+  const chat = () => fetch(bridge.baseUrl + '/v1/chat/completions', {
+    method: 'POST',
+    headers: { ...auth, 'content-type': 'application/json' },
+    body: JSON.stringify({ model: 'rl2-model', messages: [{ role: 'user', content: 'hi' }] }),
+    signal: AbortSignal.timeout(20000),
+  });
+  try {
+    await fetch(bridge.baseUrl + '/v1/models?all=1');
+
+    const t0 = Date.now();
+    const rs = await Promise.all([chat(), chat(), chat()]); // 并发：必须被串行化排队
+    const elapsed = Date.now() - t0;
+    for (const r of rs) {
+      assert.equal(r.status, 200, 'queue 模式不得拒绝');
+      await r.text();
+    }
+    assert.equal(stub.seen.length, 3, '三条最终都要发往上游');
+    // 第 1 条立即、第 2 条等 ~400ms、第 3 条等 ~800ms —— 明显长于"无排队"的几十毫秒
+    assert.ok(elapsed >= 700, `并发三条在 400ms 最小间隔下应排队 ≥700ms（实测 ${elapsed}ms）`);
+  } finally {
+    await bridge.stop();
+    try { await stub.close(); } catch { /* 忽略 */ }
+    rmSync(bridge.dir, { recursive: true, force: true });
+  }
+});
+
+test('桥：开销头与进程计数 —— 响应带 X-WorkBuddy-Overhead-Ms，/health 报 process 段', { timeout: 90_000 }, async () => {
+  const stub = await startStubUpstream(['ov-model']);
+  const bridge = await startBridge({ CODEBUDDY_ENDPOINT: stub.base }, { auth: READABLE_FAKE_AUTH });
+  try {
+    await fetch(bridge.baseUrl + '/v1/models?all=1');
+
+    const res = await fetch(bridge.baseUrl + '/v1/chat/completions', {
+      method: 'POST',
+      headers: { ...auth, 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'ov-model', messages: [{ role: 'user', content: 'hi' }] }),
+      signal: AbortSignal.timeout(15000),
+    });
+    assert.equal(res.status, 200);
+    const raw = res.headers.get('x-workbuddy-overhead-ms');
+    const overhead = Number(raw);
+    assert.ok(raw !== null && Number.isFinite(overhead) && overhead >= 0,
+      `对话响应必须带 ≥0 的开销头（实测 ${raw}）`);
+    await res.text();
+
+    // /health 的进程计数：真实请求入账、探活不入账
+    const health = await fetch(bridge.baseUrl + '/health', { headers: auth, signal: AbortSignal.timeout(10000) }).then((r) => r.json());
+    assert.equal(health.ok, true);
+    assert.ok(health.process && typeof health.process.requests === 'number', '/health 必须带 process 段');
+    assert.ok(health.process.requests >= 2, `进程计数应 ≥2（models 预热 + chat），实测 ${health.process.requests}`);
+    assert.ok((health.process.byStatus['200'] || 0) >= 2, '状态码分布应含 200');
+  } finally {
+    await bridge.stop();
+    try { await stub.close(); } catch { /* 忽略 */ }
+    rmSync(bridge.dir, { recursive: true, force: true });
+  }
+});
+
+test('桥：在途请求可见 —— 成功 / 失败 / 客户端断开三条路径都正确登记与释放', { timeout: 120_000 }, async () => {
+  // stub 上游可以"挂起"（等测试放行才响应），用来制造稳定的"进行中"观察窗口。
+  let releaseHold = null;
+  let holdGate = new Promise((r) => { releaseHold = r; });
+  let mode = 'ok';
+  const upstream = createServer((req, res) => {
+    const path = new URL(req.url, 'http://127.0.0.1').pathname;
+    if (path === '/v2/enterprises/personal/models') {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      return res.end(JSON.stringify({ code: 0, data: { models: [{ id: 'act-model', maxInputTokens: 128000, maxOutputTokens: 4096 }] } }));
+    }
+    if (path === '/v3/config') {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      return res.end(JSON.stringify({ code: 0, data: { models: [] } }));
+    }
+    if (path === '/v2/chat/completions') {
+      req.resume();
+      (async () => {
+        await holdGate; // 「挂起」：模拟长回答 / 卡死中的上游
+        if (mode === 'fail') {
+          res.writeHead(500, { 'content-type': 'application/json' });
+          return res.end(JSON.stringify({ code: 50000, msg: 'boom' }));
+        }
+        res.writeHead(200, { 'content-type': 'text/event-stream' });
+        res.write('data: {"choices":[{"delta":{"content":"ok"}}]}\n\n');
+        res.write('data: {"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":1,"total_tokens":4}}\n\n');
+        res.end('data: [DONE]\n\n');
+      })();
+      return;
+    }
+    res.writeHead(404, { 'content-type': 'application/json' });
+    res.end('{}');
+  });
+  await new Promise((r) => upstream.listen(0, '127.0.0.1', r));
+  const bridge = await startBridge(
+    { CODEBUDDY_ENDPOINT: `http://127.0.0.1:${upstream.address().port}` },
+    { auth: READABLE_FAKE_AUTH },
+  );
+
+  const reqs = () => fetch(bridge.baseUrl + '/v1/requests', { headers: auth, signal: AbortSignal.timeout(5000) }).then((r) => r.json());
+  const waitFor = async (pred, label) => {
+    const deadline = Date.now() + 8000;
+    while (Date.now() < deadline) {
+      const d = await reqs();
+      if (pred(d)) return d;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    throw new Error(`等待超时：${label}`);
+  };
+  const resetGate = () => { holdGate = new Promise((r) => { releaseHold = r; }); };
+  const chat = (signal) => fetch(bridge.baseUrl + '/v1/chat/completions', {
+    method: 'POST',
+    headers: { ...auth, 'content-type': 'application/json' },
+    body: JSON.stringify({ model: 'act-model', messages: [{ role: 'user', content: 'hi' }] }),
+    signal,
+  });
+
+  try {
+    await fetch(bridge.baseUrl + '/v1/models?all=1'); // 预热目录
+
+    // ① 成功路径：登记 → 放行 → 释放
+    mode = 'ok'; resetGate();
+    const p1 = chat(AbortSignal.timeout(30000));
+    const seen = await waitFor((d) => d.active.length === 1, '出现进行中条目');
+    assert.equal(seen.active[0].model, 'act-model');
+    assert.ok(seen.active[0].id, '进行中条目必须带 id');
+    assert.ok(typeof seen.active[0].runningMs === 'number' && seen.active[0].runningMs >= 0,
+      'runningMs 必须存在（UI 的「已运行」时长靠它）');
+    assert.ok(typeof seen.activeAlertMs === 'number' && seen.activeAlertMs > 0,
+      'activeAlertMs 必须随响应带回（阈值由桥单点定义）');
+    releaseHold();
+    const r1 = await p1; await r1.text();
+    assert.equal(r1.status, 200);
+    await waitFor((d) => d.active.length === 0, '成功后被释放');
+
+    // ② 失败路径：上游 500 → 同样释放
+    mode = 'fail'; resetGate();
+    const p2 = chat(AbortSignal.timeout(30000));
+    await waitFor((d) => d.active.length === 1, '失败场景出现进行中条目');
+    releaseHold();
+    const r2 = await p2; await r2.text();
+    assert.equal(r2.status, 500);
+    await waitFor((d) => d.active.length === 0, '失败后被释放');
+
+    // ③ 客户端断开：abort → 同样释放（注册表不得泄漏）
+    mode = 'ok'; resetGate();
+    const ac = new AbortController();
+    const p3 = chat(ac.signal).catch(() => null);
+    await waitFor((d) => d.active.length === 1, '断开场景出现进行中条目');
+    ac.abort();
+    await p3;
+    await waitFor((d) => d.active.length === 0, '客户端断开后被释放');
+  } finally {
+    try { releaseHold(); } catch { /* 忽略 */ }
+    await bridge.stop();
+    try { upstream.close(); } catch { /* 忽略 */ }
+    rmSync(bridge.dir, { recursive: true, force: true });
+  }
+});
+
+test('桥：count_tokens —— 规范同形、纯本地估算（不打上游）、中文按字计', { timeout: 90_000 }, async () => {
+  const stub = await startStubUpstream(['ct-model']);
+  const bridge = await startBridge({ CODEBUDDY_ENDPOINT: stub.base }, { auth: READABLE_FAKE_AUTH });
+  const countTokens = (payload) => fetch(bridge.baseUrl + '/v1/messages/count_tokens', {
+    method: 'POST',
+    headers: { ...auth, 'content-type': 'application/json' },
+    body: JSON.stringify(payload),
+    signal: AbortSignal.timeout(10000),
+  });
+  try {
+    // 中文：每字 ≥ 1 token（旧的"字节/4"会把中文算少一半以上）
+    const cn = await countTokens({ model: 'ct-model', messages: [{ role: 'user', content: '你好世界'.repeat(25) }] });
+    assert.equal(cn.status, 200);
+    const cnBody = await cn.json();
+    assert.ok(typeof cnBody.input_tokens === 'number' && cnBody.input_tokens >= 100,
+      `中文 100 字应估算 ≥100 token（实测 ${cnBody.input_tokens}）`);
+
+    // ASCII：≈ 4 字符/token（400 字符的 system ≈ 100）
+    const en = await countTokens({ model: 'ct-model', system: 'a'.repeat(400), messages: [{ role: 'user', content: 'hi' }] });
+    const enBody = await en.json();
+    assert.ok(enBody.input_tokens >= 100 && enBody.input_tokens <= 120,
+      `400 个 ASCII 字符应估算 ≈100–120（实测 ${enBody.input_tokens}）`);
+
+    // 纯本地：这个端点一条请求都不该打到上游
+    assert.equal(stub.seen.length, 0, 'count_tokens 不得触达上游（没有 tokenizer 可打）');
+  } finally {
+    await bridge.stop();
+    try { await stub.close(); } catch { /* 忽略 */ }
     rmSync(bridge.dir, { recursive: true, force: true });
   }
 });

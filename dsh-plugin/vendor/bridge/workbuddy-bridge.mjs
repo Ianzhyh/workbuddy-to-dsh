@@ -32,9 +32,14 @@ import { createDecipheriv, createHash, randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 
 // ── Static constants (values match the desktop app / official extension) ──
-const APP_VERSION = '4.9.29177644';
-const IDE_VERSION = '1.119.0';
-const IDE_NAME = 'VSCode';
+/**
+ * 出站客户端身份。上游按 User-Agent / X-IDE-* / X-Product-Version 校验调用
+ * 来源，官方客户端升级后旧指纹可能被拒（报告 §8.6 风险 1 的「上游版本漂移」）。
+ * 因此三个值都可用环境变量覆盖（.env 由 config.mjs 统一注入），改完重启桥即生效。
+ */
+const APP_VERSION = process.env.WORKBUDDY_APP_VERSION || '4.9.29177644';
+const IDE_VERSION = process.env.WORKBUDDY_IDE_VERSION || '1.119.0';
+const IDE_NAME = process.env.WORKBUDDY_IDE_NAME || 'VSCode';
 const CHAT_PATH = '/v2/chat/completions';
 const CONFIG_PATH = '/v3/config';
 const REFRESH_SKEW_MS = 5 * 60 * 1000;
@@ -44,7 +49,8 @@ const UPSTREAM_TIMEOUT_MS = Number(process.env.WORKBUDDY_TIMEOUT_MS || 0); // 0 
 
 // ── Upstream keep-alive connection pool ────────────────────────────────────
 // 为什么要自己管连接：Node 全局 fetch（undici）的空闲连接只保留 ~4 秒。写代码
-// 的间隙一过，下一次请求就要重付一遍 DNS + TLS 握手（实测 ~150ms，温连接 ~82ms）。
+// 的间隙一过，下一次请求就要重付一遍 DNS + TLS 握手（实测 ~150ms，温连接 ~82ms；
+// 复现：node tools/dev/bench-overhead.mjs）。
 // 用 http/https 的 keep-alive Agent：空闲连接保留 5 分钟，跨请求复用同一条
 // TLS 会话，「首 token 延迟」稳定砍掉一大截。测试桩走纯 HTTP，所以两套都要。
 const KEEPALIVE_MS = Number(process.env.WORKBUDDY_KEEPALIVE_MS || 300_000); // 5 min, 0 = off
@@ -678,7 +684,50 @@ function persistRefreshed() {
  * 3. 首条消息必须是 system —— 上游会以 `400 code 11128 first message is not
  *    system prompt` 拒绝纯 user 开头的请求，而不少客户端（含自带的
  *    「对话测试」和只发单轮的 CLI）并不发 system。
+ * 4. Claude Code 的固定 system 模板被上游**逐字拉黑**（2026-10-08 实测）：
+ *    带原文 → `400 Illegal API invocation from an unapproved channel`；
+ *    按报告 §8.7 #44 做最小改写（CLI→CLI tool、Main branch→Default branch）
+ *    后 → 200。上游用它识别「经代理转发的 Claude Code」，因此改写放在出站层
+ *    统一做（两条协议路径共用 —— OpenAI 路径带同样句子的请求一样会被拒）。
+ *    承认这是 cat-and-mouse：只做**已被实测证明有效**的最小改写，不发明更多。
  */
+const AUDIT_TEMPLATE_REWRITES = [
+  ["You are Claude Code, Anthropic's official CLI for Claude.",
+    "You are Claude Code, Anthropic's official CLI tool for Claude."],
+  ['Main branch (you will usually use this for PRs)',
+    'Default branch (you will usually use this for PRs)'],
+];
+
+/** system 文本的最小改写；无命中时返回原值（引用不变，便于命中计数）。 */
+function rewriteAuditTemplate(text) {
+  if (typeof text !== 'string' || text === '') return text;
+  let out = text;
+  for (const [from, to] of AUDIT_TEMPLATE_REWRITES) {
+    if (out.includes(from)) out = out.split(from).join(to);
+  }
+  return out;
+}
+
+/** content 可能是 string 或 parts 数组（Anthropic 的 [{type:'text',text}]）。 */
+function rewriteAuditContent(content) {
+  if (typeof content === 'string') return rewriteAuditTemplate(content);
+  if (Array.isArray(content)) {
+    let changed = false;
+    const nextParts = content.map((part) => {
+      if (part && typeof part === 'object' && typeof part.text === 'string') {
+        const t = rewriteAuditTemplate(part.text);
+        if (t !== part.text) {
+          changed = true;
+          return { ...part, text: t };
+        }
+      }
+      return part;
+    });
+    return changed ? nextParts : content;
+  }
+  return content;
+}
+
 function normalizePayload(payload) {
   let next = payload;
 
@@ -717,17 +766,30 @@ function normalizePayload(payload) {
     return m;
   });
 
+  // ── 内容审核模板的最小改写（对全部 system 消息；命中才动）───────────────
+  let auditFixed = 0;
+  const sanitized = fixed.map((m) => {
+    if (!m || (m.role !== 'system' && m.role !== 'System')) return m;
+    const nextContent = rewriteAuditContent(m.content);
+    if (nextContent !== m.content) {
+      auditFixed++;
+      return { ...m, content: nextContent };
+    }
+    return m;
+  });
+
   let prepended = 0;
-  const first = fixed[0];
+  const first = sanitized[0];
   if (!first || (first.role !== 'system' && first.role !== 'System')) {
-    fixed.unshift({ role: 'system', content: 'You are a helpful assistant.' });
+    sanitized.unshift({ role: 'system', content: 'You are a helpful assistant.' });
     prepended = 1;
   }
 
   if (rewritten) log(`normalize: rewrote ${rewritten} developer message(s) -> system`);
+  if (auditFixed) log(`normalize: rewrote ${auditFixed} audit-template system message(s)`);
   if (prepended) log('normalize: prepended a system message (upstream requires one first)');
-  if (!rewritten && !prepended) return next;
-  return { ...next, messages: fixed };
+  if (!rewritten && !prepended && !auditFixed) return next;
+  return { ...next, messages: sanitized };
 }
 
 // ── Request header construction ──────────────────────────────────────────
@@ -850,7 +912,110 @@ function shimResponse(res) {
  * 发送并处理「复用的空闲连接已被服务端掐断」：ECONNRESET / socket hang up
  * 发生在**复用** socket 且还没收到任何响应字节时，换新连接重试一次。
  */
+// ── Local rate limiting (opt-in) ─────────────────────────────────────────
+/**
+ * 本地限流 —— 「保护账号配额」的唯一机制：单个失控的客户端（脚本 bug、
+ * 死循环重试）能把账号打爆，而在此之前代码里零实现、文档里只有一句提醒。
+ *
+ * 两个独立旋钮、**默认全关**（0），关着时行为与没有本机制完全一致：
+ *   WORKBUDDY_RATE_LIMIT_RPM               每分钟最多向上游发多少条
+ *   WORKBUDDY_RATE_LIMIT_MIN_INTERVAL_MS   两条之间的最小间隔
+ *
+ * 超限行为（WORKBUDDY_RATE_LIMIT_MODE）：
+ *   queue （默认）—— 排队等待，轮到再发（对齐 copilot-api 的 --wait 语义）；
+ *   reject        —— 立刻 429 + Retry-After，适合会自行退避重试的客户端。
+ *
+ * 实现：许可分配走一条 promise 链**串行化** —— 并发请求按到达顺序排队，不惊群；
+ * 等待循环对客户端断开敏感（abort 即退出队列，不占位）。闸门在读凭据 / 打上游
+ * **之前**：被限流的请求不产生任何上游副作用。
+ */
+const RATE_LIMIT_RPM = Math.max(0, Math.floor(Number(process.env.WORKBUDDY_RATE_LIMIT_RPM || 0)) || 0);
+const RATE_LIMIT_MIN_INTERVAL_MS = Math.max(0, Math.floor(Number(process.env.WORKBUDDY_RATE_LIMIT_MIN_INTERVAL_MS || 0)) || 0);
+const RATE_LIMIT_MODE = process.env.WORKBUDDY_RATE_LIMIT_MODE === 'reject' ? 'reject' : 'queue';
+
+const rateState = {
+  /** 最近 60 秒内已放行的时刻（RPM 滑动窗口）。 */
+  recent: [],
+  /** 上一次放行时刻（最小间隔用）。 */
+  lastStart: 0,
+  /** 许可分配的串行链（并发排队）。 */
+  tail: Promise.resolve(),
+  /** 触发计数：账本与控制台可见「被限流了多少次」。 */
+  limited: 0,
+};
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** 现在能不能放行？不能则返回还需等待的毫秒数。 */
+function rateWaitMs(now) {
+  let wait = 0;
+  if (RATE_LIMIT_RPM > 0) {
+    const cutoff = now - 60_000;
+    while (rateState.recent.length && rateState.recent[0] <= cutoff) rateState.recent.shift();
+    if (rateState.recent.length >= RATE_LIMIT_RPM) {
+      wait = Math.max(wait, rateState.recent[0] + 60_000 - now + 1);
+    }
+  }
+  if (RATE_LIMIT_MIN_INTERVAL_MS > 0 && rateState.lastStart > 0) {
+    wait = Math.max(wait, rateState.lastStart + RATE_LIMIT_MIN_INTERVAL_MS - now + 1);
+  }
+  return wait;
+}
+
+/**
+ * 取一张「发往上游」的许可。
+ * queue 模式等到许可返回；reject 模式超限抛 code=RATE_LIMITED（带 retryAfterMs）。
+ * @returns {Promise<{ waitedMs: number, limited: boolean }>}
+ */
+async function acquireRateSlot(clientSignal) {
+  if (RATE_LIMIT_RPM <= 0 && RATE_LIMIT_MIN_INTERVAL_MS <= 0) return { waitedMs: 0, limited: false };
+  const enter = Date.now();
+  const prev = rateState.tail;
+  let release;
+  rateState.tail = new Promise((resolve) => { release = resolve; });
+  await prev;
+  let limited = false;
+  try {
+    for (;;) {
+      const now = Date.now();
+      const wait = rateWaitMs(now);
+      if (wait <= 0) {
+        rateState.recent.push(now);
+        rateState.lastStart = now;
+        return { waitedMs: now - enter, limited };
+      }
+      if (!limited) {
+        limited = true;
+        rateState.limited += 1;
+        log(`rate limit engaged (mode=${RATE_LIMIT_MODE}): waiting ${wait}ms`);
+      }
+      if (RATE_LIMIT_MODE === 'reject') {
+        const err = new Error(`local rate limit exceeded; retry in ${Math.ceil(wait / 1000)}s`);
+        err.code = 'RATE_LIMITED';
+        err.retryAfterMs = wait;
+        throw err;
+      }
+      if (clientSignal?.aborted) {
+        const err = new Error('client aborted while waiting for a rate-limit slot');
+        err.code = 'RATE_LIMIT_ABORTED';
+        throw err;
+      }
+      await sleep(Math.min(wait, 500));
+    }
+  } finally {
+    release();
+  }
+}
+
 async function callUpstream(bodyString, model, conversationId, clientSignal) {
+  // 限流闸门（opt-in；默认关）。放在最前：超限的请求连凭据都不读、更不打上游。
+  await acquireRateSlot(clientSignal);
+  // 上游开始前的时刻戳（供端点计算 `X-WorkBuddy-Overhead-Ms`：
+  // overhead = 上游请求发出前，桥自身做的前置处理耗时 —— 鉴权、读凭据、
+  // payload 归一化、Anthropic→OpenAI 翻译。**不含限流排队**（那是我们主动
+  // 让请求等的）也**不含上游等待**（那是上游的耗时）—— 口径精确、可复现。
+  const upEnter = Date.now();
+
   // API-key mode needs no login file; supply a minimal endpoint/domain instead
   let auth = API_KEY
     ? { endpoint: EXPLICIT_ENDPOINT || 'https://copilot.tencent.com', domain: (EXPLICIT_ENDPOINT || '').includes('codebuddy.ai') ? 'www.codebuddy.ai' : 'www.codebuddy.cn', access: '', refresh: '', expiresAt: 0 }
@@ -898,14 +1063,14 @@ async function callUpstream(bodyString, model, conversationId, clientSignal) {
     const text = await res.text();
     let code;
     try { code = JSON.parse(text)?.code; } catch {}
-    if (code !== 11133) return { res, bodyText: text };
-    if (clientSignal?.aborted) return { res, bodyText: text };
+    if (code !== 11133) return { res, bodyText: text, upstreamStartedAt: upEnter };
+    if (clientSignal?.aborted) return { res, bodyText: text, upstreamStartedAt: upEnter };
     log(`transient 400 (11133), retry ${i + 1}`);
     await new Promise((r) => setTimeout(r, TRANSIENT_400_DELAYS[i]));
-    if (clientSignal?.aborted) return { res, bodyText: text };
+    if (clientSignal?.aborted) return { res, bodyText: text, upstreamStartedAt: upEnter };
     res = await attemptWithStaleRetry(auth);
   }
-  return { res, bodyText: null };
+  return { res, bodyText: null, upstreamStartedAt: upEnter };
 }
 
 // ── SSE parsing and aggregation (non-streaming clients only) ─────────────
@@ -1027,6 +1192,54 @@ function safeJsonParse(s) {
     // Anthropic 要求 tool_use.input 必须是对象
     return v && typeof v === 'object' ? v : {};
   } catch { return {}; }
+}
+
+/**
+ * 零依赖的 token 估算（如实标注"估算"）。
+ *
+ * 上游没有任何 tokenizer 端点；这里用经验公式：ASCII ≈ 4 字符/token，
+ * 非 ASCII（CJK 等）≈ 1 token/字 —— 比原来的"字节数 / 4"准得多（UTF-8 中文
+ * 是 3 字节/字，按字节估会把中文算少一半以上）。Claude Code 用它显示上下文
+ * 占用，**量级正确**即可。
+ */
+function estimateTokens(text) {
+  const s = String(text ?? '');
+  let ascii = 0;
+  let wide = 0;
+  for (const ch of s) {
+    if (ch.codePointAt(0) > 0x7f) wide += 1;
+    else ascii += 1;
+  }
+  return Math.ceil(ascii / 4) + wide;
+}
+
+/**
+ * 估算一条 /v1/messages 请求的输入 token：system + messages + tools 的文本面。
+ * 供 `POST /v1/messages/count_tokens` 与流式首帧的 input_tokens 兜底使用。
+ */
+function estimateRequestTokens(body) {
+  let total = estimateTokens(anthropicSystemText(body?.system));
+  const messages = Array.isArray(body?.messages) ? body.messages : [];
+  for (const m of messages) {
+    total += 4; // 每条消息的角色与分隔开销（Anthropic 实测约 3–5）
+    const c = m?.content;
+    if (typeof c === 'string') {
+      total += estimateTokens(c);
+    } else if (Array.isArray(c)) {
+      for (const part of c) {
+        if (!part || typeof part !== 'object') continue;
+        if (typeof part.text === 'string') total += estimateTokens(part.text);
+        if (typeof part.content === 'string') total += estimateTokens(part.content); // tool_result
+        else if (part.content && typeof part.content === 'object') total += estimateTokens(JSON.stringify(part.content));
+        if (part.input && typeof part.input === 'object') total += estimateTokens(JSON.stringify(part.input)); // tool_use
+      }
+    }
+  }
+  const tools = Array.isArray(body?.tools) ? body.tools : [];
+  for (const t of tools) {
+    total += estimateTokens(t?.name) + estimateTokens(t?.description) + estimateTokens(JSON.stringify(t?.input_schema || {}));
+  }
+  return Math.max(1, total);
 }
 
 /** Anthropic 的 `system` 可以是字符串，也可以是 `[{type:'text',text}]`。 */
@@ -2344,9 +2557,9 @@ const SECURITY_HEADERS = {
   'Content-Security-Policy': "frame-ancestors 'none'",
 };
 
-const json = (res, status, obj) => {
+const json = (res, status, obj, extraHeaders = {}) => {
   const body = JSON.stringify(obj);
-  res.writeHead(status, { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body), ...SECURITY_HEADERS });
+  res.writeHead(status, { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body), ...extraHeaders, ...SECURITY_HEADERS });
   res.end(body);
 };
 
@@ -2385,8 +2598,72 @@ function hasLocalToken(req) {
   return typeof key === 'string' && key === LOCAL_TOKEN;
 }
 
+// ── 响应观测：进程级计数 + 开销头（横切两件事，只包一次）──────────────────
+/**
+ * 进程级计数（供 /health 的 `process` 段）：
+ *   requests —— 真实客户端请求数（**排除 /health 探活**，否则会被控制台
+ *               每 20 秒的轮询灌水，"本进程处理了多少请求"就没意义了）；
+ *   errors / byStatus —— 4xx/5xx 数与状态码分布，排障时一眼看清失败类形。
+ */
+const procStats = { requests: 0, errors: 0, byStatus: {} };
+
+/**
+ * 包装 `res.writeHead`，统一做两件事：
+ *   ① 计数（真实请求的状态码分布，健康探活不计）；
+ *   ② 注入 `X-WorkBuddy-Overhead-Ms` —— 端点把「桥自身处理耗时」写到
+ *      `res.__overheadMs`（= 总耗时 − 上游往返），这里统一发出。
+ * 这样各响应点不必各自拼头；没设置该字段的响应（/health、/v1/models 等
+ * 本地应答）自然不带 —— 头只出现在"性能主张相关"的对话路径上。
+ */
+function observeResponse(req, res) {
+  if (req.url?.startsWith('/health')) return; // 探活不计数、不加头
+  const origWriteHead = res.writeHead.bind(res);
+  res.writeHead = (...args) => {
+    const statusCode = args[0];
+    if (typeof statusCode === 'number') {
+      procStats.requests += 1;
+      procStats.byStatus[statusCode] = (procStats.byStatus[statusCode] || 0) + 1;
+      if (statusCode >= 400) procStats.errors += 1;
+    }
+    // 只在 (status, headers对象) 形态时注入；其余形态（数组头/statusMessage）原样放行
+    if (
+      res.__overheadMs !== undefined
+      && args.length === 2
+      && args[1] && typeof args[1] === 'object' && !Array.isArray(args[1])
+    ) {
+      args[1] = { 'X-WorkBuddy-Overhead-Ms': String(res.__overheadMs), ...args[1] };
+    }
+    return origWriteHead(...args);
+  };
+}
+
+// ── 在途请求注册表（卡死可见性）──────────────────────────────────────────
+/**
+ * 进行中的对话请求（id / 开始时刻 / 模型 / 流式标记）。
+ *
+ * 目的：长回答静默几十秒时，用户能区分「模型在想」与「真的卡死了」——
+ * 控制台「最近请求」显示进行中条目与已运行时长，超阈值标黄提醒。
+ *
+ * **红线：不加任何默认超时** —— 长回答需要无限等待（见 README 注意事项），
+ * 本注册表只负责**显示**，绝不主动打断请求。
+ *
+ * 释放：统一挂 `res.once('close')`（响应完成或连接中断都会触发），
+ * 成功 / 失败 / 客户端断开三条路径一个挂点全覆盖 —— 不会泄漏。
+ */
+const inflight = new Map();
+let inflightSeq = 0;
+/** 运行超过该毫秒数即判「疑似卡死」——只影响显示高亮，不干预请求。 */
+const ACTIVE_ALERT_MS = Math.max(1000, Number(process.env.WORKBUDDY_ACTIVE_ALERT_MS || 300_000));
+
+function trackInflight(req, res, model, stream) {
+  const id = `req_${(++inflightSeq).toString(36)}-${Date.now().toString(36)}`;
+  inflight.set(id, { id, startedAt: Date.now(), model: String(model || ''), stream: !!stream });
+  res.once('close', () => { inflight.delete(id); });
+}
+
 const server = createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host}`);
+  observeResponse(req, res);
   try {
     if (!originAllowed(req)) {
       return json(res, 403, { error: { message: 'workbuddy-bridge: cross-origin request rejected (this bridge serves local clients only)' } });
@@ -2420,6 +2697,13 @@ const server = createServer(async (req, res) => {
         catalogAt: catalogCache.at ? new Date(catalogCache.at).toISOString() : null,
         catalogRefreshing: !!catalogRefreshing,
         upstreamShape: catalogCache.shape || null,
+        // 进程级计数：真实请求数（不含 /health 探活）/ 失败数 / 状态码分布 / 限流触发数
+        process: {
+          requests: procStats.requests,
+          errors: procStats.errors,
+          byStatus: procStats.byStatus,
+          rateLimited: rateState.limited,
+        },
         // 自动签到的内存态：桥重启后清空、重新判定（上游幂等兜底）
         autoCheckinEnabled: AUTO_CHECKIN_ENABLED,
         autoCheckin: autoCheckinState,
@@ -2512,7 +2796,9 @@ const server = createServer(async (req, res) => {
 
     if (url.pathname === '/v1/requests') {
       const limit = Math.min(Math.max(Number(url.searchParams.get('limit')) || 50, 1), 500);
-      return json(res, 200, { ok: true, requests: recentRequests(limit) });
+      // 进行中的请求（卡死可见性）：只报告，不干预 —— 本桥没有任何默认超时。
+      const active = [...inflight.values()].map((r) => ({ ...r, runningMs: Date.now() - r.startedAt }));
+      return json(res, 200, { ok: true, requests: recentRequests(limit), active, activeAlertMs: ACTIVE_ALERT_MS });
     }
 
     if (url.pathname === '/v1/checkin') {
@@ -2645,6 +2931,7 @@ const server = createServer(async (req, res) => {
       }
       log(`→ ${model} stream=${wantStream} msgs=${payload.messages?.length ?? 0} tools=${payload.tools?.length ?? 0}`);
       const startedAt = Date.now();
+      trackInflight(req, res, model, wantStream);
 
       // the backend is streaming-only: always stream upstream, aggregate for non-streaming clients
       const upstream = normalizePayload({ ...payload, stream: true, stream_options: { include_usage: true } });
@@ -2658,7 +2945,7 @@ const server = createServer(async (req, res) => {
       // 从这一刻起的任何异常都要落账：否则「登录文件坏了 / 取密钥失败」这类故障
       // 在控制台上完全不可见（只有原始日志里有），用户只能看到一个 500。
       try {
-        const { res: up, bodyText } = await callUpstream(JSON.stringify(upstream), model, conversationId, ac.signal);
+        const { res: up, bodyText, upstreamStartedAt } = await callUpstream(JSON.stringify(upstream), model, conversationId, ac.signal);
         if (!up.ok) {
           const text = bodyText ?? await up.text().catch(() => '');
           let parsed; try { parsed = JSON.parse(text); } catch {}
@@ -2676,6 +2963,7 @@ const server = createServer(async (req, res) => {
         }
 
         if (wantStream) {
+          res.__overheadMs = Math.max(0, upstreamStartedAt - startedAt);
           res.writeHead(200, {
             'Content-Type': 'text/event-stream; charset=utf-8',
             'Cache-Control': 'no-cache, no-transform',
@@ -2738,9 +3026,19 @@ const server = createServer(async (req, res) => {
         }
 
         const aggregated = await aggregateStream(up);
+        res.__overheadMs = Math.max(0, upstreamStartedAt - startedAt);
         recordRequest({ model, stream: false, ok: true, ms: Date.now() - startedAt, ...usageOf(aggregated.usage) });
         return json(res, 200, aggregated);
       } catch (e) {
+        if (e?.code === 'RATE_LIMITED') {
+          const retryAfter = Math.max(1, Math.ceil((e.retryAfterMs || 1000) / 1000));
+          recordRequest({ model, stream: wantStream, ms: Date.now() - startedAt, ok: false, status: 429, code: null, error: `rate_limited (retry in ${retryAfter}s)` });
+          return json(res, 429, { error: { type: 'rate_limit_error', message: e.message } }, { 'Retry-After': String(retryAfter) });
+        }
+        if (e?.code === 'RATE_LIMIT_ABORTED') {
+          // 客户端在队列里等待时断开：没打到上游、也没发出任何响应，不记账
+          return;
+        }
         recordRequest({
           model,
           stream: wantStream,
@@ -2752,6 +3050,28 @@ const server = createServer(async (req, res) => {
         });
         throw e; // 交给外层统一回 500
       }
+    }
+
+    // ── Anthropic count_tokens（Claude Code 用它显示上下文占用）───────────
+    // 纯本地**估算**（上游没有 tokenizer 端点，口径见 estimateTokens 注释）；
+    // 不打上游、不记账 —— 这个端点随输入变化频繁调用，转上游纯属烧额度。
+    if (url.pathname === '/v1/messages/count_tokens' && req.method === 'POST') {
+      let raw;
+      try {
+        raw = await readBody(req);
+      } catch (e) {
+        if (e.code === 'BODY_TOO_LARGE') {
+          return json(res, 413, {
+            type: 'error',
+            error: { type: 'request_too_large', message: `request body too large (limit ${MAX_BODY_BYTES} bytes)` },
+          });
+        }
+        throw e;
+      }
+      let body;
+      try { body = JSON.parse(raw); }
+      catch { return json(res, 400, { type: 'error', error: { type: 'invalid_request_error', message: 'invalid JSON body' } }); }
+      return json(res, 200, { input_tokens: estimateRequestTokens(body) });
     }
 
     // ── Anthropic Messages API（Claude Code 等）────────────────────────────
@@ -2791,6 +3111,7 @@ const server = createServer(async (req, res) => {
       log(`→ [anthropic] ${body.model || '(no model)'} => ${model} stream=${wantStream} msgs=${messages.length} tools=${tools?.length ?? 0}`);
 
       const startedAt = Date.now();
+      trackInflight(req, res, model, wantStream);
       const ac = new AbortController();
       req.on('aborted', () => ac.abort());
       res.on('close', () => { if (!res.writableEnded) ac.abort(); });
@@ -2826,7 +3147,8 @@ const server = createServer(async (req, res) => {
         }
 
         if (wantStream) {
-          const r = await relayAnthropicStream(up, res, model, Math.max(1, Math.round(raw.length / 4)));
+          res.__overheadMs = Math.max(0, upstreamStartedAt - startedAt);
+          const r = await relayAnthropicStream(up, res, model, estimateRequestTokens(body));
           if (r.streamError && !ac.signal.aborted) {
             recordRequest({ model, stream: true, ms: Date.now() - startedAt, ok: false, status: 0, code: null, error: r.streamError.message });
           } else {
@@ -2836,9 +3158,18 @@ const server = createServer(async (req, res) => {
         }
 
         const aggregated = await aggregateStream(up);
+        res.__overheadMs = Math.max(0, upstreamStartedAt - startedAt);
         recordRequest({ model, stream: false, ok: true, ms: Date.now() - startedAt, ...usageOf(aggregated.usage) });
         return json(res, 200, openAIToAnthropicMessage(aggregated, model));
       } catch (e) {
+        if (e?.code === 'RATE_LIMITED') {
+          const retryAfter = Math.max(1, Math.ceil((e.retryAfterMs || 1000) / 1000));
+          recordRequest({ model, stream: wantStream, ms: Date.now() - startedAt, ok: false, status: 429, code: null, error: `rate_limited (retry in ${retryAfter}s)` });
+          return json(res, 429, { type: 'error', error: { type: 'rate_limit_error', message: e.message } }, { 'Retry-After': String(retryAfter) });
+        }
+        if (e?.code === 'RATE_LIMIT_ABORTED') {
+          return; // 客户端等待时断开：无上游副作用，不记账
+        }
         recordRequest({ model, stream: wantStream, ms: Date.now() - startedAt, ok: false, status: 0, code: null, error: e.message });
         throw e;
       }

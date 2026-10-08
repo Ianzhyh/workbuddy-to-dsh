@@ -2304,3 +2304,51 @@ pre.log {
     animation: none !important;
   }
 }
+
+/* ── 「进行中」请求条（卡死可见性，2026-10-08）────────────────────────
+   正在跑、还没落账的请求；超过 activeAlertMs 标黄提醒。只显示，不干预。 */
+.activebox {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0 0 10px;
+}
+.reqactive {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+  font-size: 12px;
+  color: var(--muted);
+}
+.reqactive .dots {
+  color: var(--accent);
+  font-size: 10px;
+  animation: reqpulse 1.2s ease-in-out infinite;
+}
+.reqactive b.runfor {
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+.reqactive.hot {
+  border-color: var(--warn-border);
+  background: var(--warn-soft);
+}
+.reqactive.hot .dots {
+  color: var(--warn);
+}
+.reqactive .hot {
+  color: var(--warn);
+  margin-left: auto;
+}
+@keyframes reqpulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.25; }
+}
+/* 同上：呼吸点纯装饰，动态偏好为 reduced 时停掉 */
+@media (prefers-reduced-motion: reduce) {
+  .reqactive .dots { animation: none; }
+}

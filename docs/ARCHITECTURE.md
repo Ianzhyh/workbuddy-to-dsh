@@ -587,4 +587,30 @@ config.mjs                    ← 唯一配置真源
 `node_modules` 去凑版本。因此选择了自建桥 + 原生 `llm-pi-ai` 路由这条不依赖 dsh 版本的路径。
 
 如果你的 dsh 版本满足该插件的 `engines` 要求，直接用插件会更省事——它额外提供多账号
-轮换与限流自动降级。
+轮换与限流自动降级。（桥自身现在也带一套 **opt-in 的本地限流**，见 `.env.example`
+的 `WORKBUDDY_RATE_LIMIT_*`——那是"保护单个账号不被失控客户端打爆"的闸门，
+与多账号轮换是两码事。）
+
+---
+
+## 六、性能主张与复现方式
+
+代码注释里记着几组实测数字（keep-alive 免去的 DNS+TLS 握手 ~150ms、温连接
+~82ms……）。它们都能当场复现 —— 不用信任何人，跑一遍就知道：
+
+```cmd
+:: ① 桥自身处理开销（响应头）。口径：上游请求发出之前的桥前置处理
+::    （鉴权 / 读凭据 / payload 归一化 / 协议翻译），不含限流排队与上游等待。
+curl -s -D - -o NUL -X POST http://127.0.0.1:8790/v1/chat/completions ^
+  -H "Authorization: Bearer wb-local-bridge" -H "Content-Type: application/json" ^
+  -d "{\"model\":\"deepseek-v4.1-flash\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"max_tokens\":8}" | findstr /i overhead
+
+:: ② 连续 N 条最短请求：总耗时分布 + 桥开销中位数
+node tools\dev\bench-overhead.mjs 5
+
+:: ③ 进程级计数与状态码分布（真实请求入账，/health 探活不入账）
+curl -s http://127.0.0.1:8790/health -H "Authorization: Bearer wb-local-bridge"
+```
+
+> 数字依赖网络环境与上游负载，**只用于同机前后对比**，不作为跨机器基准。
+> ② 会消耗极少量账号积分（每条输出 `max_tokens=8`）。

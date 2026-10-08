@@ -76,7 +76,7 @@ refreshToken : envelope keyId=9127dea1b44020a7 -> DECRYPTED len=698 jws-like=tru
 |---|---|---|
 | `11101` | `Non-stream chat request is currently not supported` | 上游只接受流式。桥已自动转换；若仍出现，说明请求绕过了桥 |
 | `11101` | `cannot unmarshal object into Go struct field Request.tool_choice of type string` | 客户端发了 **OpenAI 对象形式**的 `tool_choice`（`{"type":"function",...}`），而上游的 Go 结构体只收字符串。桥已在 `normalizePayload` 里归一化，正常不会出现；若出现，说明请求绕过了桥 |
-| `11128` | `Illegal API invocation from an unapproved channel` | 请求结构或调用方身份不被认可。常见于 `system` 提示词被放在 `developer` 角色，或 User-Agent 不匹配 |
+| `11128` | `Illegal API invocation from an unapproved channel` | 请求结构或调用方身份不被认可。常见于 `system` 提示词被放在 `developer` 角色、User-Agent 不匹配，或 **Claude Code 的固定 system 模板被逐字拉黑**（2026-10-08 实测：带原文 `…official CLI for Claude.` 即被拒、按最小改写后放行 —— 桥已内置出站改写 `CLI`→`CLI tool`、`Main branch`→`Default branch`，正常不会再出现）。若再现：用 `node tools/dev/probe-audit-template.mjs` 复核（脚本内附三态判定与处置），改写表在桥内 `AUDIT_TEMPLATE_REWRITES` |
 | `11133` | 网关包装的瞬时上游故障 | 桥会退避重试；频繁出现请稍后再试 |
 
 > **`tool_choice` 为什么必须归一化**：OpenAI 规范允许两种写法 —— 字符串
@@ -85,6 +85,22 @@ refreshToken : envelope keyId=9127dea1b44020a7 -> DECRYPTED len=698 jws-like=tru
 > Cursor / Trae / opencode 这类基于 AI SDK 的 Agent 客户端会发对象形式。
 > 桥的处理是：`{type:'function'}` → `required`（语义最接近），认不出来的对象丢弃
 > 而不是原样转发（留着必然 400，丢掉最多退化成 `auto`）。
+
+### 上游版本漂移（身份指纹整体被拒）
+
+**症状**：凭据完全正常，但**所有**请求突然 `401` 或 400 code `11128`（含 Claude Code 全量失败）。
+
+**原因**：上游按 `User-Agent` / `X-IDE-*` / `X-Product-Version` 校验调用来源；官方客户端升级后，旧指纹可能被整体拒绝。
+
+**处置**：在 `.env` 里把身份切到当前官方客户端版本（默认值 = 本仓库实测可用版本），重启桥生效：
+
+```ini
+WORKBUDDY_APP_VERSION=4.9.29177644
+WORKBUDDY_IDE_VERSION=1.119.0
+WORKBUDDY_IDE_NAME=VSCode
+```
+
+判定是否是版本漂移：控制台「对话测试」发一条最短消息 —— 若同样被拒，且 `verify-atrest` 显示凭据一切正常，即命中本症状。
 
 ### 模型名含中文 / 特殊字符 → 500 且报 `Invalid character in header content`
 
