@@ -195,7 +195,7 @@
     <div class="chat-controls">
       <input type="text" id="modelSearch" placeholder="搜索模型…" style="max-width:150px">
       <select id="modelSel"></select>
-      <input type="text" id="promptInput" placeholder="例如：用一句话介绍你自己" value="用一句话介绍你自己">
+      <input type="text" id="promptInput" placeholder="例如：用一句话介绍你自己" value="用一句话介绍你自己" data-i18n-value>
       <button class="primary" id="sendBtn">发送</button>
       <button id="chatStopBtn" hidden>停止</button>
       <button id="chatClearBtn" title="清空对话历史与输出（不影响模型选择与搜索词）">清空对话</button>
@@ -275,6 +275,13 @@ const I18N_LANGS = ['zh', 'en'];
 const I18N_SKIP_TAGS = new Set(['SCRIPT', 'STYLE', 'TEXTAREA']);
 /** 参与翻译的属性（`value` 刻意不在列：它承载用户输入，翻它会把用户打的字冲掉）。 */
 const I18N_ATTRS = ['title', 'placeholder', 'aria-label', 'alt', 'data-prompt'];
+/**
+ * 例外：有些输入框的 `value` 是**预填的界面文案**（如对话测试的默认提示词），
+ * 那就得翻。靠显式标记区分，而不是猜 —— 没标记的 value 一律不碰。
+ */
+const I18N_VALUE_FLAG = 'data-i18n-value';
+/** 逐元素处理属性的选择器（含 value 标记：它翻的不是属性，而是 `el.value`）。 */
+const I18N_ATTR_SELECTOR = '[title],[placeholder],[aria-label],[alt],[data-prompt],[data-i18n-value]';
 
 let LANG = 'zh';
 let i18nObserver = null;
@@ -341,6 +348,25 @@ function i18nTranslateAttrs(el) {
   }
 }
 
+/**
+ * 被 `data-i18n-value` 标记的输入框：翻它预填的默认文案。
+ *
+ * 只在「当前值仍是我们上次写进去的那个」时才改 —— 用户编辑过就绝不覆盖。
+ * 这条判断是必需的：`value` 和属性不同，用户随时会改它，而属性不会。
+ */
+function i18nTranslateValue(el) {
+  if (!el.hasAttribute(I18N_VALUE_FLAG)) return;
+  const store = el.__i18nAttr || (el.__i18nAttr = {});
+  if (store.__valueSrc === undefined) {
+    store.__valueSrc = el.value;      // 首次：记下原始文案
+    store.__valueOut = el.value;
+  }
+  if (el.value !== store.__valueOut) return; // 用户已经改过，别动它
+  const out = translateText(store.__valueSrc);
+  store.__valueOut = out;
+  if (out !== el.value) el.value = out;
+}
+
 function i18nCollectNodes(root, out) {
   if (!root) return out;
   if (root.nodeType === Node.TEXT_NODE) { out.push(root); return out; }
@@ -365,12 +391,12 @@ function i18nTranslateSubtree(root) {
   for (const node of nodes) i18nTranslateNode(node);
   if (root && root.nodeType === Node.ELEMENT_NODE) {
     i18nTranslateAttrs(root);
-    for (const el of root.querySelectorAll('[title],[placeholder],[aria-label],[alt],[data-prompt]')) {
+    i18nTranslateValue(root);
+  }
+  if (root && root.querySelectorAll) {
+    for (const el of root.querySelectorAll(I18N_ATTR_SELECTOR)) {
       i18nTranslateAttrs(el);
-    }
-  } else if (root && root.querySelectorAll) {
-    for (const el of root.querySelectorAll('[title],[placeholder],[aria-label],[alt],[data-prompt]')) {
-      i18nTranslateAttrs(el);
+      i18nTranslateValue(el);
     }
   }
 }
@@ -701,7 +727,8 @@ const I18N_EN = {
 
   // ---- 可用模型面板 ----
   '以下模型由桥从 WorkBuddy 上游实时取回。体检范围可只测「勾选的 / 已注册的」； 「全选 / 加选免费」只跳过':
-    'The models below are fetched live by the bridge from the WorkBuddy upstream. The probe scope can cover only 「checked / registered」; 「Select all / add free」only skips',
+    'The models below are fetched live by the bridge from the WorkBuddy upstream.'
+      + ' The probe scope can cover only [checked / registered]; [Select all / add free] only skips',
   '已知不可用': 'known-unavailable',
   '的模型，': ' models, ',
   '未测的不会被跳过': 'untested ones are never skipped',
@@ -719,6 +746,10 @@ const I18N_EN = {
   '个模型可正常调用': ' models respond normally',
   '已清除体检结果': 'Probe results cleared',
   '上次体检': 'Last probe',
+  // 上游的促销标签（模型对象的 badge 字段）：中文业务文案，会原样显示在表格与详情里。
+  // 它没有封闭集合，上游加了新促销词就得往这里补一条。
+  '限时免费': 'Limited-time free',
+  '夜间免费': 'Free at night',
   '本轮': 'This run',
   '· 可用': ' · ok',
   '· 当前': ' · current',
@@ -952,9 +983,9 @@ const I18N_EN = {
   '清空日志': 'Clear log',
   '（暂无日志）': '(no log entries)',
   '（当前过滤条件下没有匹配的行）': '(no rows match the current filter)',
-  '桥已就绪。下一步：': 'The bridge is ready. Next:',
+  '桥已就绪。下一步：': 'The bridge is ready. Next: ',
   '把 Base URL 与令牌填进你的客户端（Claude Code / opencode / Cursor …）；':
-    'Fill the Base URL and token into your client (Claude Code / opencode / Cursor …);',
+    'Fill the Base URL and token into your client (Claude Code / opencode / Cursor …); ',
   '若用 DeepSeek Harness，则去「可用模型」勾选后保存。': 'for DeepSeek Harness, check models under Available models and save.',
   '去接客户端': 'Set up a client',
   '桥已启动': 'Bridge started',
@@ -1146,6 +1177,12 @@ const I18N_RULES_EN = [
   [/^全部（(\d+)）$/, 'All ($1)'],
   [/^测试可用性（(\d+) 个）$/, 'Test availability ($1)'],
 
+  // 体检结果标签（renderProbe）与详情里的结论行
+  [/^可用 (\d+)ms · 扣 ([\d.]+)$/, 'ok · $1ms · $2 credit'],
+  [/^可用 (\d+)ms$/, 'ok · $1ms'],
+  [/^可用（(.+)）$/, 'Available ($1)'],
+  [/^不可用（(.+)）$/, 'Unavailable ($1)'],
+
   // 模型面板的按钮计数与批量提示
   [/^保存到 dsh 设置（(\d+) 个）$/, 'Save to dsh settings ($1)'],
   [/^同步可用模型到 dsh（(\d+) 个）$/, 'Sync available models to dsh ($1)'],
@@ -1166,6 +1203,48 @@ const I18N_RULES_EN = [
   [/^显示 (\d+) \/ (\d+)$/, 'Showing $1 / $2'],
   [/^已选 (\d+) 个$/, '$1 selected'],
 
+  /*
+   * ── 下面这组必须排在通用规则之前 ─────────────────────────────────────
+   *
+   * 规则表是**顺序匹配、命中即返回**，所以「谁更具体谁在前」是硬约束。
+   * 这里放的几条都是被通用规则抢先匹配过的受害者，实测症状：
+   *
+   *   「最近 3 天调用次数图，合计 24 次」
+   *     → 被 ^(.+) 次$ 吃掉 → 「最近 3 天调用次数图，合计 24 calls」（半英半中）
+   *   「，合计 24 次」
+   *     → 同上；拆段翻译时它也要排在通用规则前面
+   */
+  // 趋势图的无障碍标签（renderTrendChart 里的 aria）：「最近 N 天」+ 指标名 + 「图」+ 尾段。
+  // 整串在词条表里查不到，只能拆成「前缀 / 指标名 / 尾段」各自翻。
+  [/^最近 (\d+) (天|小时)(调用次数|tokens|积分)图(.*)$/,
+    (m, n, unit, metric, tail) => 'Last ' + n + ' ' + (unit === '天' ? 'days' : 'hours')
+      + (metric === '调用次数' ? ' calls' : metric === '积分' ? ' credit' : ' tokens')
+      + ' chart' + translateText(tail)],
+  [/^，合计 (.+)，其中 (\d+) 次调用未回报扣分$/, ', total $1, of which $2 calls reported no credit'],
+  [/^，合计 (.+) 次$/, ', $1 total'],
+  [/^，输入 (.+) \/ 输出 (.+)$/, ', input $1 / output $2'],
+
+  // 「实测成本」列的 title（完整口径说明）。整串是拼出来的，必须整条规则兜住。
+  [/^最近 (\d+) 天：扣分 (.+) ÷ (.+) tokens × 1000（(.+) 次回报了扣分）$/,
+    'Last $1 days: credit $2 ÷ $3 tokens × 1000 ($4 calls reported credit)'],
+  [/^最近 (\d+) 天没有该模型的成功调用$/, 'No successful calls to this model in the last $1 days'],
+  [/^最近 (\d+) 天该模型 (\d+) 次成功调用，但上游一次都没回报扣分$/,
+    'Last $1 days: $2 successful calls to this model, but the upstream reported no credit at all'],
+  [/^最近 (\d+) 天该模型没有可计入的 token，无法折算$/,
+    'Last $1 days: no countable tokens for this model — cannot derive a rate'],
+  [/^还没有用量数据（桥未运行或没有调用）$/, 'No usage data yet (bridge not running, or no calls)'],
+
+  // 复制按钮的 aria-label / title 是「动词 + 空格 + 字段名」拼出来的
+  // （copyButton / copyChip 收到的是 ' ' + label）。字段名本身可能是中文
+  // （API Key / 令牌），所以标签还要再翻一次。
+  [/^复制失败：(.+)，请手动选择复制$/, (m, rest) => 'Copy failed: ' + translateText(rest) + ' — select and copy manually'],
+  [/^点击复制 (.+)$/, (m, rest) => 'Click to copy ' + translateText(rest)],
+  [/^复制 (.+)$/, (m, rest) => 'Copy ' + translateText(rest)],
+  [/^已复制 (.+)$/, (m, rest) => 'Copied ' + translateText(rest)],
+  // 模型选择器的徽章 title：GLM-5.3（点击移除）
+  [/^(.+)（点击移除）$/, (m, rest) => rest + ' (click to remove)'],
+  [/^(.+)（点击加入）$/, (m, rest) => rest + ' (click to add)'],
+
   // 用量面板
   [/^已导出请求明细（(\d+) 条）$/, 'Exported request details ($1 rows)'],
   [/^已导出用量 CSV（最近 (\d+) 天）$/, 'Exported usage CSV (last $1 days)'],
@@ -1175,7 +1254,10 @@ const I18N_RULES_EN = [
   [/^(\d+) 次）$/, '$1 calls)'],
   [/^(.+) 次$/, '$1 calls'],
   [/^本轮 (\d+) 个$/, 'This run: $1'],
-  [/^上次体检 (.+)$/, 'Last probe $1'],
+  // 「上次体检 2 天前 · 可用 1 / 1」是拼出来的整串：捕获组里每一段还要各自再翻一遍
+  [/^上次体检 (.+)$/, (m, rest) =>
+    'Last probe ' + rest.split(' · ').map((s) => translateText(s)).join(' · ')],
+  [/^可用 (\d+) \/ (\d+)$/, '$1 / $2 ok'],
 
   // 最近请求
   [/^最近 (\d+) 条里有 (\d+) 条失败（([\d.]+)%）；最多：(.+)。鼠标悬停结果标签可看上游返回的错误原文。$/,
@@ -1243,7 +1325,17 @@ const I18N_RULES_EN = [
   [/^(.+) \/ 千 token（(\d+) 次）$/, '$1 / 1k tokens ($2 calls)'],
   [/^(.+)（(\d+) 次）$/, (m, a, n) => a + ' (' + n + (n === '1' ? ' call' : ' calls') + ')'],
   [/^已选 (\d+) \/ (\d+)$/, '$1 / $2 selected'],
+  // 标题里的「测得时间　（2 天前）」——内层相对时间也要翻
+  [/^测得时间\s*（(.+)）$/, (m, ago) => 'probed (' + translateText(ago) + ')'],
   [/^测得时间(.+)$/, 'probed $1'],
+  /*
+   * 体检**失败**项的 title 是「上游错误原文 + （N 天前）」拼出来的：
+   * 前段是上游返回的原文（一个字都不能动），后段是相对时间（要翻）。
+   * 放在「测得时间」那条之后 —— 那条更具体，必须先匹配。
+   * 非贪婪 + \s*：拼接处可能是普通空格，也可能是全角空格（U+3000）。
+   */
+  [/^([\s\S]*?)\s*（((\d+) (?:秒|分钟|小时|天)前)）$/,
+    (m, head, ago) => head + ' (' + translateText(ago) + ')'],
   [/^今日已签到 · (.+)$/, (m, rest) => 'Checked in today · ' + translateText(rest)],
   [/^自动（(.+)）$/, 'auto ($1)'],
   [/^连续 (\d+) 天$/, 'Streak $1 days'],
@@ -1274,11 +1366,6 @@ const I18N_RULES_EN = [
   [/^(.+)：输出 (.+)$/, '$1: output $2'],
   [/^(.+)：积分 (.+)$/, '$1: credit $2'],
   [/^(.+)：累计 (.+)$/, '$1: cumulative $2'],
-  [/^最近 (\d+) 天调用次数图，合计 (\d+) 次$/, 'Last $1 days, calls chart, $2 total'],
-  [/^最近 (\d+) 天tokens图，输入 (.+) \/ 输出 (.+)$/, 'Last $1 days, tokens chart, input $2 / output $3'],
-  [/^最近 (\d+) 天积分图，合计 (.+?)(，其中 (\d+) 次调用未回报扣分)?$/,
-    (m, days, sum, _all, unrep) => 'Last ' + days + ' days, credit chart, total ' + sum
-      + (unrep ? ', of which ' + unrep + ' calls reported no credit' : '')],
 
   // 最近请求的失败摘要（被 <b> 拆成多段，逐段翻）
   [/^最近 (\d+) 条里有$/, 'Of the last $1,'],
@@ -5125,10 +5212,10 @@ function renderNextStep() {
   bar.append(clientEl('span', 'nextstep-icon', '→'));
   const text = clientEl('span', 'nextstep-text');
   text.append(clientEl('b', null, '桥已就绪。下一步：'));
-  text.append(document.createTextNode(
-    '把 Base URL 与令牌填进你的客户端（Claude Code / opencode / Cursor …）；'
-    + '若用 DeepSeek Harness，则去「可用模型」勾选后保存。',
-  ));
+  // 两段**分开** append：它们各自在词条表里有条目。合成一个文本节点的话，
+  // 翻译遍拿到的是整串（查不到词条），结果是半句英文半句中文。
+  text.append(document.createTextNode('把 Base URL 与令牌填进你的客户端（Claude Code / opencode / Cursor …）；'));
+  text.append(document.createTextNode('若用 DeepSeek Harness，则去「可用模型」勾选后保存。'));
   const go = clientEl('button', 'mini', '去接客户端');
   go.type = 'button';
   go.onclick = () => switchTab('clients');

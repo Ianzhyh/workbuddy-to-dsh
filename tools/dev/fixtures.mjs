@@ -218,8 +218,50 @@ export function clientsFixture({ running = true } = {}) {
   };
 }
 
-export function probeResultsFixture() {
-  return { updatedAt: null, results: {}, lastRun: null };
+/**
+ * 模型体检结果（`/api/probe-results`）。
+ *
+ * **默认按目录（catalog）生成一组非空结果，而不是空对象。** 空对象会让整块 UI
+ * 根本不渲染 —— 表头时间线（`上次体检 X 前 · 本轮 K 个 · 可用 M / N`）、每行的
+ * 体检结果标签、详情弹层里的「体检结论」全都是空字符串或「未测」。
+ *
+ * 历史教训：i18n 验收就是被这个坑骗过去的。桩是空的 → 那几处渲染不出来 →
+ * 扫描扫到 0 个中文 → 断言"通过"，而真实界面上它们明明白白是中文
+ * （用户截图打脸）。**桩数据太"干净"会让断言变成假绿**，这比桩写错更危险，
+ * 因为写错会被形状校验拦下，太干净不会。
+ *
+ * 按 catalog 生成（而不是写死几个 id）是为了**自洽**：写死的话，截图脚本换个
+ * 目录就会出现「表里 4 个模型，体检结论却是另外几个 id」的错位。
+ *
+ * @param {object} [opts]
+ * @param {Array}  [opts.catalog]   模型目录；结果按它的 id 逐个生成
+ * @param {number} [opts.updatedAt] 上次体检时间，默认 `NOW - 2 天`
+ *   （页面用 `fmtAgo` 相对**真实当前时间**渲染，界面上会读作「N 天前」——
+ *   断言只关心它有没有被英文化，不依赖具体数字）
+ * @param {object} [opts.results]   整体覆盖结果
+ * @param {object} [opts.lastRun]   `{ count }`；**不传**给默认值，传 `null` 表示不要这段
+ */
+export function probeResultsFixture({
+  catalog = CATALOG,
+  updatedAt = NOW - 2 * 86400000,
+  results = null,
+  lastRun,
+} = {}) {
+  const ids = (catalog || []).map((m) => m.id);
+  const at = updatedAt;
+  const credits = [0, 0.02, 0.01, 0.03];
+  const built = {};
+  ids.forEach((id, i) => {
+    // 最后一个故意失败：让「不可用」标签与「上游错误原文 + 时间」的 title 有样本
+    built[id] = i === ids.length - 1
+      ? { ok: false, ms: 2400, at, error: 'HTTP 503: upstream busy' }
+      : { ok: true, ms: 880 + i * 335, at, credit: credits[i % credits.length] };
+  });
+  return {
+    updatedAt,
+    results: results || built,
+    lastRun: lastRun === undefined ? { count: ids.length, at } : lastRun,
+  };
 }
 
 /**
@@ -230,7 +272,7 @@ export function probeResultsFixture() {
  * 汇总（字段是 `model`/`calls`/`promptTokens`…）。早先把同一个 `models` 选项
  * 串给了两边，直接触发形状校验失败 —— 参数名必须能区分开。
  */
-export function baseRoutes({ catalog = CATALOG, usage, ...rest } = {}) {
+export function baseRoutes({ catalog = CATALOG, usage, probeResults, ...rest } = {}) {
   return {
     '/api/overview': { body: overviewFixture(rest) },
     '/api/models': { body: { models: catalog } },
@@ -240,7 +282,7 @@ export function baseRoutes({ catalog = CATALOG, usage, ...rest } = {}) {
     '/api/requests': { body: requestsFixture(rest) },
     '/api/accounts': { body: accountsFixture(rest) },
     '/api/checkin': { body: checkinFixture(rest) },
-    '/api/probe-results': { body: probeResultsFixture() },
+    '/api/probe-results': { body: probeResultsFixture({ catalog, ...(probeResults || {}) }) },
     '/api/bridge/log': { body: { lines: [] } },
   };
 }

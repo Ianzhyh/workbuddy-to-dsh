@@ -14,7 +14,7 @@
  * 不启真控制台、不消耗上游额度：只起静态服务 + 无头 Chromium，把 /api/* 全打桩。
  */
 import { startStaticServer, openPage, waitFor, q, sleep } from './ui-harness.mjs';
-import { baseRoutes } from './fixtures.mjs';
+import { baseRoutes, CATALOG } from './fixtures.mjs';
 
 const PORT = 8791;
 const PAGE = `http://127.0.0.1:${PORT}/`;
@@ -39,6 +39,28 @@ const COLLECT_ZH = `(() => {
     const t = n.data.replace(/\\s+/g, ' ').trim();
     if (t) out.push(p2(n) + ' | ' + t);
   }
+  // **属性里的文案**（title 提示 / placeholder …）用户也看得见（悬停就能看到），
+  // 而 TreeWalker 只看文本节点 —— 这是一条能整片漏掉的通道。
+  // 体检结果的「测得时间（2 天前）」、成本列的完整口径说明都在 title 里。
+  for (const el of document.querySelectorAll('[title],[placeholder],[aria-label],[alt],[data-prompt]')) {
+    if (el.closest('[data-i18n-skip]')) continue;
+    for (const a of ['title', 'placeholder', 'aria-label', 'alt', 'data-prompt']) {
+      const v = el.getAttribute(a);
+      if (v && /[\\u4e00-\\u9fff]/.test(v)) {
+        out.push('@' + a + (el.id ? '#' + el.id : '') + ' | ' + v.replace(/\\s+/g, ' ').trim());
+      }
+    }
+  }
+  // 标了「可翻」的预填 value 也要扫 —— 它不是文本节点，光走 TreeWalker 会漏掉。
+  // 但**用户自己改过的输入框不算界面文案**：本脚本会往 promptInput 里打字来验
+  // 「对话正文不被翻译」，那段中文是测试的输入，不是产品残留。
+  // 判据用页面自己的记账（__i18nAttr.__valueOut）：值仍等于它写进去的那个 → 界面文案。
+  for (const el of document.querySelectorAll('[data-i18n-value]')) {
+    const st = el.__i18nAttr;
+    if (st && st.__valueOut !== undefined && el.value !== st.__valueOut) continue;
+    const v = String(el.value || '').trim();
+    if (/[\\u4e00-\\u9fff]/.test(v)) out.push('value' + (el.id ? '#' + el.id : '') + ' | ' + v);
+  }
   function p2(node) {
     const p = node.parentElement;
     return p.tagName.toLowerCase() + (p.id ? '#' + p.id : '') + (p.className ? '.' + String(p.className).split(' ')[0] : '');
@@ -49,7 +71,22 @@ const COLLECT_ZH = `(() => {
 const text = (cdp, sel) => q(cdp, `(document.querySelector(${JSON.stringify(sel)})||{}).textContent || ''`);
 
 const server = await startStaticServer(PORT);
-const routes = baseRoutes();
+/*
+ * 桩数据要**故意「脏」**。
+ *
+ * `baseRoutes()` 的默认值里：dsh 已就绪 → 「桥已就绪」提示条被隐藏；模型没有
+ * 促销标签；体检结果是空的 → 表头时间线与每行的结果标签整块不渲染。
+ * 而这几处恰恰是历史上漏翻的地方 —— 桩太干净，扫描扫到 0 个中文，
+ * 断言就变成"假绿"，直到用户拿真实界面截图打脸。
+ *
+ * 所以这里显式把三个分支都打开，让它们进入扫描范围。
+ */
+const routes = baseRoutes({
+  dshReady: false, // 让「桥已就绪。下一步：…」提示条渲染出来
+  catalog: CATALOG.map((m, i) => (
+    i === 1 ? { ...m, badge: '限时免费' } : i === 2 ? { ...m, badge: '夜间免费' } : m
+  )),
+});
 const { cdp, close } = await openPage(PAGE, routes, {
   width: 1440,
   height: 1000,
@@ -118,6 +155,38 @@ try {
   const stamp = await text(cdp, '#overviewStamp');
   if (/^Updated \d{2}:\d{2}:\d{2}$/.test(stamp.trim())) pass('规则层生效（时间戳）：' + stamp.trim());
   else fail('时间戳未英文化：' + stamp);
+
+  // ── 2b. 四处「拼出来的 / 来自数据的」文案（历史上都漏过） ──────────────
+  // (a) 概览页提示条：`<b>` + 两个文本节点拼成，最容易只翻前半句
+  const nextStep = await q(cdp, `(document.getElementById('nextStepBar')||{}).textContent || ''`);
+  if (!nextStep.trim()) fail('桥就绪提示条没渲染，扫描没覆盖到');
+  else if (!/[\u4e00-\u9fff]/.test(nextStep)) pass('提示条已英文化：' + nextStep.trim().slice(0, 56) + '…');
+  else fail('提示条仍是中文：' + nextStep.trim());
+
+  // (b) 上游促销标签（中文业务文案，直接来自数据）
+  const promo = await q(cdp, `[...document.querySelectorAll('#modelTable .tag.promo')].map((e) => e.textContent).join(' | ')`);
+  if (promo && !/[\u4e00-\u9fff]/.test(promo)) pass('促销标签已英文化：' + promo);
+  else fail('促销标签没渲染或仍是中文：' + promo);
+
+  // (c) 体检结果标签：`可用 1551ms · 扣 0` / `不可用`
+  const probeTags = await q(cdp, `[...document.querySelectorAll('#modelTable td[data-probe] .tag')].map((e) => e.textContent).join(' | ')`);
+  if (probeTags && !/[\u4e00-\u9fff]/.test(probeTags)) pass('体检结果标签已英文化：' + probeTags);
+  else fail('体检结果标签没渲染或仍是中文：' + probeTags);
+
+  // (d) 表头时间线：`上次体检 2 天前 · 可用 2 / 3`（三段拼成，捕获组要各自再翻）
+  const probeStamp = await text(cdp, '#probeStamp');
+  if (!probeStamp.trim()) fail('体检时间线没渲染，扫描没覆盖到');
+  else if (!/[\u4e00-\u9fff]/.test(probeStamp)) pass('体检时间线已英文化：' + probeStamp.trim());
+  else fail('体检时间线仍是中文：' + probeStamp);
+
+  // (e) 「实测成本」列：`0.0028 / 千 token（7 次）` —— 用户截图里点名的那一处。
+  //     规则 `^(.+) \/ 千 token（(\d+) 次）$` 必须**排在通用规则之前**才轮得到
+  //     （整串以「次」结尾，会被 `^(.+) 次$` 抢走）。这条断言就是钉住那个顺序。
+  const costCells = await q(cdp, `[...document.querySelectorAll('#modelTable td')]
+    .map((e) => e.textContent.trim()).filter((t) => /token/i.test(t)).join(' | ')`);
+  if (/1k tokens/.test(costCells) && !/[\u4e00-\u9fff]/.test(costCells)) {
+    pass('实测成本列已英文化：' + costCells.slice(0, 90));
+  } else fail('实测成本列没英文化：' + costCells);
 
   // ── 3. 数据区不被翻译 ──────────────────────────────────────────────────
   await q(cdp, `(() => { document.getElementById('promptInput').value = '你好世界'; document.getElementById('sendBtn').click(); })()`);

@@ -153,9 +153,20 @@ function parentOf(path) {
   return i <= 0 ? '$' : bare.slice(0, i);
 }
 
-/** 该路径是否属于一个「以 id 为键」的动态映射。 */
+/** 该路径是否落在某个「以 id 为键」的动态映射**子树**里。 */
 function inDynamicMap(path) {
-  return DYNAMIC_MAP_PARENTS.has(parentOf(path));
+  // 必须一路往上找到根，不能只看直接父层。
+  // 反例（真实踩到）：`/api/probe-results` 的 `results` 是动态映射，而捕获那次
+  // 恰好只测到 `hy3` 一个模型 —— 于是 `$.results.hy3` 在形状表里**存在**，
+  // 而 `$.results.hy3.error`（只有失败项才有）不存在。只看直接父层时
+  // `$.results.hy3.error` 会被判成「字段名写错」，其实它完全合法。
+  // 动态映射内部的键集**不可枚举**，整棵子树都必须豁免。
+  let p = parentOf(path);
+  while (p !== '$') {
+    if (DYNAMIC_MAP_PARENTS.has(p)) return true;
+    p = parentOf(p);
+  }
+  return false;
 }
 
 export function validateBody(route, body, shape = loadShape()) {
