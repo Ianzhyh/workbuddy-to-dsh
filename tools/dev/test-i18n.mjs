@@ -265,6 +265,38 @@ try {
   if (leftovers === 0) pass('展开后的界面无残留中文');
   else fail(`展开后仍有 ${leftovers} 个中文文本节点（见上）`);
 
+  /*
+   * ── 4d. 逐个打开下拉菜单再扫 ────────────────────────────────────────────
+   *
+   * `.dd-item` 是**每次打开时重建**的（见 initDropdowns 的注释），
+   * 不打开就不在 DOM 里 —— 只扫默认状态等于把菜单里的文案漏掉。
+   * 插件面板那边就是靠这一遍才抓到 `· 多模态` 的。
+   */
+  let menuScanned = 0;
+  const ddCount = await q(cdp, `document.querySelectorAll('.dd').length`);
+  for (let i = 0; i < ddCount; i += 1) {
+    const opened = await q(cdp, `(() => {
+      const t = document.querySelectorAll('.dd')[${i}].querySelector('.dd-trigger');
+      if (!t) return false;
+      t.click(); return true;
+    })()`);
+    if (!opened) continue;
+    await sleep(200);
+    const menuZh = await q(cdp, COLLECT_ZH);
+    const items = await q(cdp, `document.querySelectorAll('.dd-menu .dd-item').length`);
+    if (items > 0) menuScanned += 1;
+    if (menuZh.length) {
+      fail(`第 ${i + 1} 个下拉打开后仍有 ${menuZh.length} 个中文文本节点 → ${menuZh.slice(0, 3).join(' / ')}`);
+    }
+    await q(cdp, `(() => {
+      const t = document.querySelectorAll('.dd')[${i}].querySelector('.dd-trigger');
+      if (t) t.click();
+    })()`);
+    await sleep(140);
+  }
+  if (menuScanned > 0) pass(`打开了 ${menuScanned} 个下拉菜单并扫描（${ddCount} 个下拉控件）`);
+  else fail('没有打开任何下拉菜单，菜单里的文案没被扫描到');
+
   // ── 5. 切回中文精确还原 ────────────────────────────────────────────────
   await q(cdp, `document.getElementById('langToggle').click()`);
   await sleep(500);

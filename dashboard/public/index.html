@@ -1405,6 +1405,8 @@ const I18N_EN = {
     'Exported the model list CSV (with probe results and measured cost)',
   '暂无可导出的用量数据': 'No usage data to export',
   '- 未取到有效凭据': '- no valid credentials',
+  '没有可导出的模型': 'No models to export',
+  '—（上游未回报）': '— (not reported upstream)',
 
   '已过期': 'Expired',
 };
@@ -1676,7 +1678,9 @@ const I18N_RULES_EN = [
   [/^本轮发送 (\d+) 条消息 · 约 (\d+) 字符$/,
     'Sent $1 messages this turn · about $2 characters'],
   [/^输入 (.+) \/ 输出 (.+) tokens · 扣分 (.+) · (.+)$/,
-    'Input $1 / output $2 tokens · credit $3 · $4'],
+    // `$3` 可能是数字，也可能是「—（上游未回报）」这个占位串 —— 必须再翻一层，
+    // 否则整行只翻了前后、中间那段留在中文（源码侧扫描查出来的）
+    (m, a, b, c, d) => 'Input ' + a + ' / output ' + b + ' tokens · credit ' + translateText(c) + ' · ' + d],
   [/^用时 (.+)$/, 'Took $1'],
   [/^已手动停止 · 用时 (.+)$/, 'Stopped manually · took $1'],
   [/^（无内容返回）用时 (.+)$/, '(no content returned) took $1'],

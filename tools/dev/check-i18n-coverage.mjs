@@ -54,6 +54,20 @@ function sliceBlock(startMarker) {
 
 const tableSrc = sliceBlock('const I18N_EN = {');
 const rulesSrc = sliceBlock('const I18N_RULES_EN = [');
+/*
+ * 专有名词表（权益包名 / 促销标签）。**必须一起加载并复刻 `applyTerms`** ——
+ * 否则检查器会把「名词表里的条目本身」报成漏翻（它们是 key，整串查表当然查不到），
+ * 而实际上运行时会走子串替换翻掉。
+ */
+const termsSrc = sliceBlock('const I18N_TERMS_EN = {');
+const I18N_TERMS_EN = new Function(`return (${termsSrc})`)();
+function applyTerms(s) {
+  let out = s;
+  for (const [zh, en] of Object.entries(I18N_TERMS_EN)) {
+    if (out.indexOf(zh) !== -1) out = out.split(zh).join(en);
+  }
+  return out;
+}
 
 // translateText 在规则里会被调用；有些规则还会直接查表（`I18N_EN[verb] || verb`），
 // 所以两个都要传进去 —— 控制台那份就用了 `I18N_EN`（插件那份没有）。
@@ -74,17 +88,18 @@ translateText = (text) => {
    */
   const folded = s.replace(/\s+/g, ' ').trim();
   if (folded !== s && Object.prototype.hasOwnProperty.call(I18N_EN, folded)) return I18N_EN[folded];
-  if (i18nDepth >= 3) return s;
+  if (i18nDepth >= 3) return applyTerms(s);
   i18nDepth += 1;
   try {
     for (const target of (folded === s ? [s] : [s, folded])) {
       for (const rule of I18N_RULES_EN) {
         const m = target.match(rule[0]);
         if (!m) continue;
-        return typeof rule[1] === 'function' ? rule[1].apply(null, m) : target.replace(rule[0], rule[1]);
+        const out = typeof rule[1] === 'function' ? rule[1].apply(null, m) : target.replace(rule[0], rule[1]);
+        return applyTerms(out);
       }
     }
-    return s;
+    return applyTerms(s);
   } finally { i18nDepth -= 1; }
 };
 
