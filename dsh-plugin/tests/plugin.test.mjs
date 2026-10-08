@@ -645,6 +645,70 @@ test('ConsoleSupervisor：靠首页结构标记识别控制台，认不出就报
   assert.equal((await sup.probe({ cached: false })).state, 'stopped');
 });
 
+test('probe() 有界读取：标记远在首个 chunk 之后也必须认出来（先红后绿，§7 P0-2）', async () => {
+  const { ConsoleSupervisor, CONSOLE_MARKER } = await import('../lib/console.mjs');
+  const { createServer } = await import('node:http');
+
+  /**
+   * 110KB 填充 + 标记放在最后，整页一次写出。
+   *
+   * 这正是原实现（只读"第一个 chunk"就判断）的失效场景 —— 报告 §6.0 实测
+   * 30/30 全部误判：首块读到的只是开头一部分，永远到不了标记。修复后应逐块
+   * 读到匹配或上限为止。
+   */
+  const pad = 'x'.repeat(110 * 1024);
+  const srv = createServer((req, res) => {
+    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+    res.end(`<!doctype html><html><body>${pad}<nav ${CONSOLE_MARKER}></nav></body></html>`);
+  });
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+  const port = srv.address().port;
+  try {
+    const sup = new ConsoleSupervisor({ projectRoot: 'x', port, cacheTtlMs: 0 });
+    const probe = await sup.probe({ cached: false });
+    assert.equal(probe.state, 'running', '标记不在首块内时不得误判 foreign');
+  } finally { await new Promise((r) => srv.close(r)); }
+});
+
+test('probe() 有界读取：超过上限也没有标记 → 判 foreign，不无限读', async () => {
+  const { ConsoleSupervisor, CONSOLE_READ_CAP } = await import('../lib/console.mjs');
+  const { createServer } = await import('node:http');
+
+  // 上限之外**远超一个 chunk** 才放标记：读取必须在上限处停下（而非读完整个 body）。
+  // 留 256KB 余量 —— 上限检查按 chunk 粒度，最后一个被读的块可能越过上限一点；
+  // 若标记贴着上限放，可能恰好被那块覆盖，用例就测不到"停在边界"的语义了。
+  const pad = 'x'.repeat(CONSOLE_READ_CAP + 256 * 1024);
+  const srv = createServer((req, res) => {
+    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+    res.end(`<!doctype html><html><body>${pad}<nav id="navTabs"></nav></body></html>`);
+  });
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+  const port = srv.address().port;
+  try {
+    const sup = new ConsoleSupervisor({ projectRoot: 'x', port, cacheTtlMs: 0 });
+    const probe = await sup.probe({ cached: false });
+    assert.equal(probe.state, 'foreign');
+  } finally { await new Promise((r) => srv.close(r)); }
+});
+
+test('交叉校验（§6.0 纪律）：真产物 index.html 的识别标记必须在 probe 读取上限之内', async () => {
+  const { CONSOLE_MARKER, CONSOLE_READ_CAP } = await import('../lib/console.mjs');
+  /**
+   * 本文件其余用例都是「用被测常量造夹具」——它们只能证明"代码读得到自己写的
+   * 常量"。这条不同：**直读 dashboard/public/index.html 真产物**。§6.0 的教训是
+   * 「凡读外部资源做判断的常量，必须有一条对真实产物的断言」——页面的标记改名 /
+   * 位置下移时，先红的就是这条，而不是等用户发现插件认不出控制台。
+   */
+  const htmlPath = join(PLUGIN_ROOT, '..', 'dashboard', 'public', 'index.html');
+  const html = readFileSync(htmlPath, 'utf8');
+  const at = html.indexOf(CONSOLE_MARKER);
+  assert.ok(at >= 0, `真产物缺少识别标记 ${CONSOLE_MARKER}（控制台会被 probe() 判成 foreign）`);
+  assert.ok(
+    at < CONSOLE_READ_CAP,
+    `识别标记位于第 ${at} 字节，超出 probe() 的读取上限 ${CONSOLE_READ_CAP}`,
+  );
+});
+
 test('快照与控制台路由：状态里带 console，写操作同样要面板头', async () => {
   const { createRouteTable } = await import('../lib/routes.mjs');
   const consoleSupervisor = {

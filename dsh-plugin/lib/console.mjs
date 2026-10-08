@@ -29,6 +29,15 @@ import { dirname, join } from 'node:path';
  * （首页 146KB，全读没必要）。`id="navTabs"` 在第 45 行，远早于正文，满足前提。
  */
 export const CONSOLE_MARKER = 'id="navTabs"';
+/**
+ * probe() 读取首页的字节上限。
+ *
+ * 识别标记必须落在这段范围内（当前 index.html 146KB，标记在第 45 行，
+ * 余量充足）。环回读取极廉价，给足上限；同时它是"有界"的保证 —— 不是
+ * 我们控制台的 HTTP 服务不会让探活无限拖页。单测会交叉校验真产物里的
+ * 标记在此上限之内（见 plugin.test.mjs 的交叉校验用例）。
+ */
+export const CONSOLE_READ_CAP = 512 * 1024;
 /** 控制台脚本相对项目根的位置。 */
 export const CONSOLE_SCRIPT_REL = join('dashboard', 'server.mjs');
 /** 控制台日志相对项目根的位置。 */
@@ -89,11 +98,26 @@ export class ConsoleSupervisor {
       let text = '';
       try {
         const res = await fetch(`${this.url}/`, { signal: ac.signal, headers: { accept: 'text/html' } });
-        // 首页 146KB，只看开头即可判断是不是我们的控制台 —— 读完首块就断开
+        /**
+         * **有界读取**：逐块读，命中标记即停、到上限也停。
+         *
+         * 原实现只读"第一个 chunk"就判断 —— 前提是标记落在首块内，未经任何
+         * 保证：标记位置下移、页面变大、走 gzip / 反向代理 / 流式渲染都会
+         * 立刻复发（报告 §6.0 实测「标记前 110KB 填充」30/30 全部误判）。
+         * 环回读取成本可忽略，读到匹配或 CONSOLE_READ_CAP 为止。
+         */
         const reader = res.body?.getReader();
         if (reader) {
-          const { value } = await reader.read();
-          text = new TextDecoder().decode(value || new Uint8Array());
+          const decoder = new TextDecoder();
+          let received = 0;
+          for (;;) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            received += value?.length || 0;
+            text += decoder.decode(value || new Uint8Array(), { stream: true });
+            if (text.includes(CONSOLE_MARKER)) break; // 命中即停，不读完整页
+            if (received >= CONSOLE_READ_CAP) break; // 上限内没有标记 = 不是我们
+          }
           await reader.cancel().catch(() => {});
         } else {
           text = await res.text();
