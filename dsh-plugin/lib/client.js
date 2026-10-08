@@ -426,6 +426,13 @@ body.dark .wb-root,
       if (hours < 48) return hours + ' 小时 ' + (minutes % 60) + ' 分';
       return Math.floor(hours / 24) + ' 天 ' + (hours % 24) + ' 小时';
     }
+    /** 秒级运行时长（进行中请求用）：`12 秒` / `4 分 32 秒`。fmtDuration 是分钟粒度，直接用会把秒抹掉。 */
+    function fmtRunSeconds(ms) {
+      const s = Math.max(0, Math.round((Number(ms) || 0) / 1000));
+      if (s < 60) return s + ' 秒';
+      const m = Math.floor(s / 60);
+      return m + ' 分 ' + String(s % 60).padStart(2, '0') + ' 秒';
+    }
     function parseDate(ts) {
       if (!ts) return null;
       if (ts instanceof Date) return isNaN(ts.getTime()) ? null : ts;
@@ -1502,6 +1509,41 @@ body.dark .wb-root,
     }
 
     // ─────────────────────────── 最近请求 ───────────────────────────
+    /**
+     * 「进行中」请求条（卡死可见性）：正在跑、还没落账的请求。
+     *
+     * 桥只**报告**不干预（没有任何默认超时，长回答可以持续很久）；超过
+     * alertMs（默认 5 分钟）标黄提醒「疑似卡死」—— 用户据此区分
+     * 「模型在想」与「真的挂了」，而不是干等。秒级刷新由组件自带的
+     * 1 秒 interval 负责（仅在有条目时运行）。
+     */
+    function ActiveRequests({ active, alertMs }) {
+      const [, tick] = useState(0);
+      useEffect(() => {
+        if (!active.length) return undefined;
+        const timer = setInterval(() => tick((n) => n + 1), 1000);
+        return () => clearInterval(timer);
+      }, [active.length]);
+      if (!active.length) return null;
+      const alert = typeof alertMs === 'number' ? alertMs : 300000;
+      const rows = active.map((a, i) => {
+        const since = Number(a.startedAt) || Date.now();
+        const ms = typeof a.runningMs === 'number' ? a.runningMs : (Date.now() - since);
+        const hot = ms >= alert;
+        return h('div', { key: a.id || i, style: { marginBottom: '4px' } },
+          h('b', null, a.model || '(未知模型)'),
+          ` · ${a.stream ? '流式' : '非流式'} · 已运行 `,
+          h('b', null, fmtRunSeconds(ms)),
+          hot
+            ? h('span', { style: { color: 'var(--dsw-alias-status-warning,#d97706)' } },
+                ` · 疑似卡死（超过 ${fmtRunSeconds(alert)}）—— 桥不会主动打断，请检查客户端与上游`)
+            : null);
+      });
+      return h('div', { className: 'wb-alert' },
+        h('div', { style: { fontWeight: 600, marginBottom: '4px' } }, `进行中（${active.length}）`),
+        rows);
+    }
+
     function RequestsPanel() {
       const [limit, setLimit] = useState(40);
       const [onlyFailed, setOnlyFailed] = useState(false);
@@ -1523,6 +1565,7 @@ body.dark .wb-root,
       const failLabel = (r) => `失败${r.status ? ' HTTP ' + r.status : ''}${r.code ? ' · code ' + r.code : ''}`;
       return h(Card, { title: '最近请求' },
         error ? h(Alert, { bad: true }, error) : null,
+        h(ActiveRequests, { active: data?.active || [], alertMs: data?.activeAlertMs }),
         h('div', { className: 'wb-actions split', style: { marginBottom: '12px' } },
           h('div', { className: 'wb-actions-group' },
             h(DropdownSelect, {
