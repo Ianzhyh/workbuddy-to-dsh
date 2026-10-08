@@ -24,6 +24,9 @@ jobs:
       - name: vendor 与仓库是否同步
         run: node dsh-plugin/scripts/vendor.mjs --check
 
+      - name: 安装 devDependencies（check:types / lint 需要）
+        run: npm ci
+
       - name: 类型检查（tsc --checkJs）
         run: npm run check:types
 
@@ -56,6 +59,9 @@ jobs:
 
       - name: vendor 与仓库是否同步
         run: node dsh-plugin/scripts/vendor.mjs --check
+
+      - name: 安装 devDependencies（check:types / lint 需要）
+        run: npm ci
 
       - name: 类型检查
         run: npm run check:types
