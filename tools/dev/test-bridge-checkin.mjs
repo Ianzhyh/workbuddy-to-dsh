@@ -8,6 +8,7 @@
  */
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
+import { createConnection } from 'node:net';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -111,8 +112,41 @@ const oneChat = () => fetch(`${BASE}/v1/chat/completions`, {
 }).then((r) => r.json());
 const ledgerLines = () => { try { return readFileSync(LEDGER, 'utf8').split('\n').filter(Boolean).length; } catch { return 0; } };
 
+/** 端口上还有人监听吗（TCP 连得上就算有人）。 */
+function portBusy() {
+  return new Promise((ok) => {
+    const s = createConnection({ host: '127.0.0.1', port: BRIDGE_PORT });
+    const done = (v) => { try { s.destroy(); } catch { /* 忽略 */ } ok(v); };
+    s.once('connect', () => done(true));
+    s.once('error', () => done(false));
+    setTimeout(() => done(false), 300);
+  });
+}
+
+/**
+ * 停掉当前桥实例，**并等它真的退出、端口真的空出来**。
+ *
+ * 为什么不能只 `kill()` + `sleep(300)`：Windows 上 SIGTERM 不保证立刻生效。
+ * 实测旧进程 300ms 后还在监听 → 新实例 `EADDRINUSE` 直接退出，而
+ * `waitReady()` 探到的是**旧桥** —— 后面的断言全部跑在旧实例的状态上
+ * （例如还带着上一段设的 1 小时签到冷却），于是报出「当天上限未生效：
+ * 签了 0 次」这种**看起来像产品 bug** 的假象。踩过一次，值得等这 3 秒。
+ */
+async function stopBridge() {
+  if (!bridge) return;
+  const dead = new Promise((ok) => bridge.once('exit', ok));
+  bridge.kill();
+  await Promise.race([dead, sleep(3000)]);
+  if (bridge.exitCode === null && bridge.signalCode === null) {
+    try { bridge.kill('SIGKILL'); } catch { /* 已退出 */ }
+    await Promise.race([dead, sleep(2000)]);
+  }
+  for (let i = 0; i < 40 && await portBusy(); i += 1) await sleep(100);
+  bridge = null;
+}
+
 async function restart(extraEnv = {}) {
-  if (bridge) { bridge.kill(); await sleep(300); }
+  await stopBridge();
   startBridge(extraEnv);
   if (!await waitReady()) { fail('桥实例未能就绪'); cleanup(); process.exit(1); }
 }
@@ -184,11 +218,19 @@ await new Promise((ok) => stub.listen(STUB_PORT, '127.0.0.1', ok));
 // 4. R11.2-3 当天最多 3 次（把冷却调到 0 才能在一次测试里观察到）
 {
   checkinMode = 'error';
-  await restart({ WORKBUDDY_CHECKIN_COOLDOWN_MS: '0' });
+  /*
+   * `WORKBUDDY_CHECKIN_COOLDOWN_MS` 同时是**定时器间隔**（见 startAutoCheckinTimer），
+   * 设成 0 就等于「启动即触发」。所以计数必须在 `restart()` **之前**清零 ——
+   * 否则启动那几次尝试会被记漏，断言看到的是 0 而不是 3（曾因此误判成产品 bug）。
+   *
+   * 断言也据此改成「自起桥起**总计**只打 3 次」：不管是定时器打的还是对话打的，
+   * 当天上限都该兜住 —— 这比只数对话触发的次数更贴近这条规则的本意。
+   */
   checkinHits = 0;
+  await restart({ WORKBUDDY_CHECKIN_COOLDOWN_MS: '0' });
   for (let i = 0; i < 6; i += 1) await oneChat();
   await sleep(800);
-  if (checkinHits === 3) pass('R11.2-3 冷却为 0 时，当天最多尝试 3 次（打了 6 次对话，只签 3 次）');
+  if (checkinHits === 3) pass('R11.2-3 冷却为 0 时，当天最多尝试 3 次（定时器 + 6 次对话，合计只签 3 次）');
   else fail(`R11.2-3 当天上限未生效：签了 ${checkinHits} 次（应为 3）`);
 }
 
