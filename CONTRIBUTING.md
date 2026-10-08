@@ -54,7 +54,11 @@ npm run test:ui i18n r9      :: 只跑名字含 i18n / r9 的
 ```cmd
 npm run check:i18n                                  :: 控制台
 npm run check:i18n dsh-plugin/lib/client.js          :: 插件面板
+node tools/dev/check-i18n-coverage.mjs --check "某串" :: 直接问「这一串翻不翻」
 ```
+
+`--check` 是排查时最常用的动作：名单里挑出可疑的一条，想知道它到底是真漏还是片段
+（片段永远不会单独渲染，拼起来才有规则）。
 
 「英文模式下扫可见中文 = 0」那套验收只能发现**已经渲染出来**的漏翻：没被桩数据走到、
 或者藏在错误分支里的文案它扫不到（本会话就连着踩了三轮：签到胶囊、`· 多模态`、整页诊断）。

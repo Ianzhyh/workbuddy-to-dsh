@@ -25,7 +25,26 @@ import { fileURLToPath } from 'node:url';
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(HERE, '..', '..');
 
-const file = process.argv[2] ? resolve(process.cwd(), process.argv[2]) : join(ROOT, 'dashboard', 'public', 'index.html');
+/*
+ * 参数：`[文件] [--check 串…] [--debug]`
+ *
+ * 位置参数与开关要分开解析 —— 否则 `--check` 后面那串会被当成文件名
+ * （实测：`ENOENT: open '…\--check'`）。
+ */
+const argv = process.argv.slice(2);
+const checkStrings = [];
+const positional = [];
+for (let i = 0; i < argv.length; i += 1) {
+  if (argv[i] === '--check') {
+    i += 1;
+    while (i < argv.length && !argv[i].startsWith('--')) { checkStrings.push(argv[i]); i += 1; }
+    i -= 1;
+    continue;
+  }
+  if (argv[i].startsWith('--')) continue;
+  positional.push(argv[i]);
+}
+const file = positional[0] ? resolve(process.cwd(), positional[0]) : join(ROOT, 'dashboard', 'public', 'index.html');
 const src = readFileSync(file, 'utf8');
 
 // ── 1. 切出词条表与规则表并求值 ────────────────────────────────────────
@@ -198,6 +217,19 @@ function translates(s) {
 }
 
 // ── 3. 逐条过翻译，列出翻不动的 ────────────────────────────────────────
+/*
+ * `--check <串>…`：直接问「这几串翻不翻」。
+ * 排查时最常用的动作 —— 名单里挑出可疑的一条，想知道它到底是真漏还是片段。
+ */
+if (checkStrings.length) {
+  for (const s of checkStrings) {
+    const out = translateText(s);
+    console.log(`${out === s ? '✗ 翻不动' : '✓ 能翻  '}  ${JSON.stringify(s)}`);
+    if (out !== s) console.log(`             → ${JSON.stringify(out)}`);
+  }
+  process.exit(0);
+}
+
 const untranslated = [];
 for (const [, meta] of hits) {
   // 用**未 trim 的原文**判：带前导空格的规则才验得到
