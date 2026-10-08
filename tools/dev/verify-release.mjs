@@ -33,6 +33,7 @@
  * - 不用 `tar` 命令：Windows 的 bsdtar 解这个包会 `Error is not recoverable`。
  */
 import { createHash } from 'node:crypto';
+import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -59,6 +60,30 @@ let failures = 0;
 const ok = (s) => console.log('✓ ' + s);
 const bad = (s) => { console.error('✗ ' + s); failures += 1; };
 
+/**
+ * 下载发布产物：先直连，失败再退回 `gh release download`。
+ *
+ * 为什么要兜底：这台机器上 GitHub 直连**时好时坏**（`UND_ERR_CONNECT_TIMEOUT`，
+ * 对 185.199.x.x 那组地址），而 `gh` 走的是另一条路、稳定可用
+ * （`gh release create` 每次都成）。只留直连的话，这个工具会因为网络而随机失败。
+ */
+async function download(directUrl, dest, { owner, repo, tag: tg, asset: name }) {
+  try {
+    const res = await fetch(directUrl, { redirect: 'follow', signal: AbortSignal.timeout(60_000) });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return Buffer.from(await res.arrayBuffer());
+  } catch (err) {
+    console.log(`· 直连失败（${err.message}），改用 gh release download…`);
+  }
+  const r = spawnSync('gh', ['release', 'download', tg, '--repo', `${owner}/${repo}`, '--pattern', name, '--dir', CACHE, '--clobber'], { stdio: ['ignore', 'pipe', 'pipe'] });
+  if (r.status !== 0) {
+    throw new Error(`直连与 gh 都失败：gh exit=${r.status} ${String(r.stderr || '').slice(0, 200)}`);
+  }
+  const viaGh = join(CACHE, name);
+  if (!existsSync(viaGh)) throw new Error(`gh 报告成功但没找到文件：${viaGh}`);
+  return readFileSync(viaGh);
+}
+
 console.log(`目标：${OWNER}/${REPO}  ${tag}  ${asset}\n`);
 
 // ── 1. 取发布产物（带本地缓存）──────────────────────────────────────────
@@ -69,9 +94,7 @@ if (!refresh && existsSync(cached)) {
   pub = readFileSync(cached);
   console.log(`（复用缓存 ${cached}）`);
 } else {
-  const res = await fetch(url, { redirect: 'follow', signal: AbortSignal.timeout(120_000) });
-  if (!res.ok) throw new Error(`下载失败：HTTP ${res.status} —— ${url}`);
-  pub = Buffer.from(await res.arrayBuffer());
+  pub = await download(url, cached, { owner: OWNER, repo: REPO, tag, asset });
   writeFileSync(cached, pub);
 }
 const sha = (b) => createHash('sha256').update(b).digest('hex');
