@@ -174,7 +174,10 @@ npm run release:check      # = vendor:check + 单测 + 独立分发演练（发�
 
 ## dsh 里的设置页（控制台的全部功能）
 
-**设置 → WorkBuddy**（`settings.section` 槽，注册 id `workbuddy`），9 个标签页：
+**设置 → WorkBuddy**（`settings.section` 槽，注册 id `workbuddy`），9 个标签页。
+右上角有 **`EN` / `中` 语言开关**（选择记进 localStorage，重开保持）：9 个标签页的
+界面文案全部双语，与控制台同一套词条思路；**上游数据**（模型描述、诊断明细、
+对话正文、日志行）保持原样不翻。
 
 | 标签页 | 内容 |
 |---|---|
@@ -283,10 +286,20 @@ node --test dsh-plugin/tests/          # 或：npm run test:plugin
 # 入口页渲染验证（无头浏览器 + **真实数据**，产出 docs/plugin-panel.png）
 node dsh-plugin/tests/panel-render.mjs # 或：npm run panel:shot
 node dsh-plugin/tests/panel-render.mjs --offline   # 只用内置样例数据
+
+# 面板 i18n 验收：切到英文后 9 个标签页可见中文必须为 0
+node dsh-plugin/tests/panel-i18n.mjs   # 或：npm run panel:i18n
+npm run panel:check                    # 上面两个一起跑
 ```
 
 `panel-render.mjs` 需要无头 Chrome/Edge（项目自带的 [`tools/dev/ui-harness.mjs`](../tools/dev/ui-harness.mjs)
 会去找），首次运行会把 React UMD 下到 `.tmp-research/vendor/` 供离线渲染使用。
+
+两个脚本的桩数据与渲染骨架在 `tests/_panel-fixtures.mjs`，**共用一份** ——
+各写一份必然漂移，而桩一漂移，两边验的就不是同一个东西了。
+`panel-i18n.mjs` 还会把桩数据里的中文换成 ASCII：这样扫到的任何中文都只可能来自
+界面文案，而不是上游返回的数据。它同时要求每个标签页的内容够厚
+（≥12 个文本节点），防止「没渲染 → 0 残留」的假绿。
 
 ---
 

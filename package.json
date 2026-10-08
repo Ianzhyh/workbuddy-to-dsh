@@ -55,7 +55,9 @@
     "check:types": "tsc --noEmit -p jsconfig.json",
     "lint": "eslint .",
     "release:check": "npm run vendor:check && npm run check:types && npm run lint && npm run test:lib && npm run test:plugin && npm run verify:standalone",
-    "test:ui": "node tools/dev/run-ui-tests.mjs"
+    "test:ui": "node tools/dev/run-ui-tests.mjs",
+    "panel:i18n": "node dsh-plugin/tests/panel-i18n.mjs",
+    "panel:check": "node dsh-plugin/tests/panel-render.mjs && node dsh-plugin/tests/panel-i18n.mjs"
   },
   "keywords": [
     "deepseek-harness",

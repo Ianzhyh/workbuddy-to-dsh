@@ -14,6 +14,48 @@
 
 ## [Unreleased]
 
+### Added
+
+- **dsh 插件面板中 / 英双语**：面板右上角新增语言开关（选择记进 localStorage，重开保持），
+  覆盖 9 个标签页的**全部界面文案**。实现与控制台同思路（中文原文当词条 key + 一次翻译遍），
+  但翻译遍落在**创建 React 元素那一层** —— 包住 `h` 之后，字符串子节点与
+  `title` / `placeholder` / `aria-label` 自动过一遍 `translateText`，
+  380+ 处渲染点一行都没动。数据（对话正文、日志行、上游原文、语言代码）用
+  `h(Raw, { text })` 包一层绕过翻译。
+  配套：`dsh-plugin/tests/panel-i18n.mjs`（断言「英文模式下 9 个标签页可见中文 = 0」，
+  并同时要求每页内容够厚，防「没渲染 = 0 残留」的假绿）、`docs/plugin-panel-en.png`。
+- **控制台自绘下拉**：原生 `<select>` 展开后的候选项列表由操作系统绘制（圆角改不了），
+  现在换成本地绘制浮层（`.dd-menu` 圆角 12px、条目 6px、向上弹翻转、键盘可达），
+  与插件面板里那份同构。原生 `<select>` 保留在常规流里（宽度仍由它决定、
+  `.value` / `change` / 盒模型照旧），所以自动化用例一条都没改。
+- **控制台自绘提示气泡**：替代浏览器自带的 `title` 提示框。浏览器没有禁用 `title`
+  提示的开关，做法是**悬停时把 `title` 摘下来存内存、离开时装回** ——
+  原生框永远不弹，而 `.title` 在任何非悬停时刻读到的都还是原值。
+  聚焦时不摘（原生框本来就不在聚焦时弹，而 `title` 是屏幕阅读器读的描述）。
+- `npm run panel:i18n` / `npm run panel:check`：面板 i18n 验收 / 面板全套检查。
+- `tools/dev/test-ui-kit.mjs`：控制台自绘控件（下拉 + 提示气泡）的回归用例。
+  钉住两件事：用户看到的是自绘那层，**且原生控件仍是真值来源**
+  （`.value` / `change` / 盒模型照旧）—— 后者尤其容易在后续改动里被顺手破坏，
+  而一旦破坏，所有自动化用例都会失效。
+- **`npm run test:ui`**：无头用例的统一入口（判据：是否 import `./ui-harness.mjs`），
+  失败时打印每个脚本的尾部输出。这次的教训就是「没有统一入口 → 没人跑 → 烂了也没人知道」。
+- `tools/dev/fixtures.mjs` 新增 `consoleFixture` / `quotaFixture` / `dshFixture` /
+  `checkinFailFixture`；`probeResultsFixture` 改为按 catalog 生成非空结果。
+- `api-shape.mjs` 支持按路由声明 `allowExtra: true`：放行**故意**多出来的键
+  （如用假令牌验「凭据绝不渲染」），但**缺失检查照旧**。
+- `docs/plugin-panel-en.png`：英文面板截图（README.en.md 用）。
+
+### Changed
+
+- **按钮圆角统一**：`button.mini`（24px 高却只有 4px）、`.infobtn` 与 `button.tag`
+  （都是 32px 高只有 4px）一律改成 8px；标签 `.tag` 用 6px（与按钮同比例、紧一档）。
+  `select` / `input` 的高度从 30 / 31px 对齐到 32px，与按钮同排不再参差。
+- `tools/dev/extract-ui-strings.mjs` 支持传文件路径（原先写死控制台），插件面板的
+  文案清单也用它抽。
+- `dsh-plugin/tests/panel-render.mjs` 的桩数据与渲染骨架抽到
+  `dsh-plugin/tests/_panel-fixtures.mjs`，与 `panel-i18n.mjs` 共用一份
+  （两份各写必然漂移，而桩一漂移，两边验的就不是同一个东西了）。
+
 ### Fixed
 
 - **11 个早期无头用例长期失效**（`tools/dev/test-r1..r11`）。它们在「接口形状固化」
@@ -21,21 +63,23 @@
   入口，所以没人发现。现已全部修复并通过。
 - `tools/dev/api-shape.mjs` 的 `inDynamicMap` 只看直接父层 → `$.results.hy3.error`
   这类二级键被误报成「字段名写错」。已改为一路往上找根，整棵子树豁免。
-
-### Added
-
-- **`npm run test:ui`**：无头用例的统一入口（判据：是否 import `./ui-harness.mjs`），
-  失败时打印每个脚本的尾部输出。这次的教训就是「没有统一入口 → 没人跑 → 烂了也没人知道」。
-- `tools/dev/fixtures.mjs` 新增 `consoleFixture` / `quotaFixture` / `dshFixture` /
-  `checkinFailFixture`；`probeResultsFixture` 改为按 catalog 生成非空结果。
-- `api-shape.mjs` 支持按路由声明 `allowExtra: true`：放行**故意**多出来的键
-  （如用假令牌验「凭据绝不渲染」），但**缺失检查照旧**。
+- `tools/dev/test-bridge-checkin.mjs` 两处脚手架问题：`restart()` 在 Windows 上
+  `kill()` 后只 sleep(300) 就起新实例（旧进程还在监听时新实例会 EADDRINUSE 退出，
+  而 `waitReady()` 探到的是**旧桥**，后续断言全跑在旧实例状态上）；
+  「当天上限」那一段把计数清零放在 `restart()` 之后，而
+  `WORKBUDDY_CHECKIN_COOLDOWN_MS` 同时是定时器间隔、设 0 等于启动即触发，
+  于是启动那几次被记漏。
 
 ### Docs
 
-- `CONTRIBUTING.md`：`test:ui` 门禁、桩数据的两条反直觉规则（桩不能太"干净"、
-  故意多余键怎么放行）、以及「验收全绿但产品有问题时先查运行时报错」。
-- `dashboard/README.md`：i18n 验收的扫描范围（文本节点 + 属性 + 预填 `value`）。
+- `CONTRIBUTING.md`：`test:ui` / `panel:check` 门禁、桩数据的两条反直觉规则
+  （桩不能太"干净"、故意多余键怎么放行）、面板 i18n 的 `data-wb-raw` 约定、
+  以及「验收全绿但产品有问题时先查运行时报错」。
+- `dashboard/README.md`：i18n 验收的扫描范围（文本节点 + 属性 + 预填 `value`）；
+  新增「自绘控件：下拉与提示气泡」一节（为什么原生控件必须仍是真值来源）。
+- `dsh-plugin/README.md`：语言开关与 `panel:i18n` / `panel:check`。
+- `README.md` / `README.en.md`：插件双语说明 + 英文面板截图。
+- `docs/ARCHITECTURE.md`：补「三类漏翻的真实成因」与「桩数据不能太干净」。
 
 ## [1.3.1] - 2026-10-08
 

@@ -55,7 +55,12 @@ native plugin**.
    - API key: `wb-local-bridge` (or your `WORKBUDDY_LOCAL_TOKEN`)
 
 DeepSeek Harness users: `dsh plugin add github:Ianzhyh/workbuddy-to-dsh`, then
-register models in the plugin's settings page.
+register models in the plugin's settings page. That page is **bilingual** —
+the `EN` / `中` toggle in its top-right corner switches all nine tabs
+(upstream data such as model descriptions and chat content is left as-is):
+
+<img src="docs/plugin-panel-en.png" width="100%"
+     alt="The plugin settings page in English: Overview / Account / Usage / Requests / Check-in / Diagnose / Model / Chat test / Log tabs, with the overview showing Credit balance, Needs your attention, Status and Actions">
 
 ## Highlights
 

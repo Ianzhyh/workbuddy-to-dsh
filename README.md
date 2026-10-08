@@ -240,6 +240,12 @@ Claude Code、opencode…），它会替你完成判定 → 安装 → 验证，
 用不用 dsh 都能用这个项目，只是装了插件多一层原生集成：
 
 > **插件当引擎，控制台的全部功能搬进 dsh 设置页 —— 两个前端、一个后端。**
+
+设置页右上角有 **`EN` / `中` 语言开关**，9 个标签页的界面文案全部双语
+（与控制台同一套词条思路；上游数据保持原样不翻）：
+
+<img src="docs/plugin-panel-en.png" width="100%"
+     alt="同一个设置页切到英文：Overview / Account / Usage / Requests / Check-in / Diagnose / Model / Chat test / Log 九个标签页，概览页显示 Credit balance、Needs your attention、Status 与 Actions">
 > 插件在 dsh 里注册原生模型路由、把**桥和控制台都管起来**（已在跑就复用，没跑就拉起）；
 > **设置 → WorkBuddy** 里有 9 个标签页：概览 / 账号 / 用量 / 请求 / 签到 / 诊断 / 模型 / 对话测试 / 日志，
 > 功能与控制台网页**完全等价**：读同一个桥、写同一份 `.state.json`（账号切换等写操作由

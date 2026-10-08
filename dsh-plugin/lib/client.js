@@ -24,8 +24,55 @@ window.__ModuleLoader__.load({
       React = globalThis.React;
       if (!React) throw new Error('dsh-plugin-workbuddy: react is not available in the client module table', { cause: error });
     }
-    const h = React.createElement;
+    const h0 = React.createElement;
     const { useState, useEffect, useCallback, useRef, useMemo } = React;
+
+    /*
+     * 带翻译的 createElement。
+     *
+     * 为什么包在**这一层**、而不是像控制台那样翻渲染结果：这里整棵 UI 是 React
+     * 元素树，直接改 DOM 会被下一次 render 冲掉。包住 `h` 之后，字符串子节点与
+     * title / placeholder / aria-label 会自动过一遍 translateText ——
+     * 全部组件、380+ 处渲染点一行都不用动，覆盖面还完整。
+     *
+     * **数据不能翻**（对话正文、日志行、上游错误原文）：用 `h(Raw, { text })`
+     * 包一层，它内部走 `h0`，绕过翻译。
+     */
+    function trChild(c) {
+      if (typeof c === 'string') return translateText(c);
+      if (Array.isArray(c)) return c.map(trChild);
+      return c;
+    }
+    function trProps(p) {
+      if (!p || typeof p !== 'object') return p;
+      let out = p;
+      for (let i = 0; i < I18N_PROPS.length; i += 1) {
+        const k = I18N_PROPS[i];
+        const v = p[k];
+        if (typeof v !== 'string') continue;
+        const tr = translateText(v);
+        if (tr !== v) {
+          if (out === p) out = Object.assign({}, p);
+          out[k] = tr;
+        }
+      }
+      return out;
+    }
+    function h(type, props) {
+      const kids = Array.prototype.slice.call(arguments, 2).map(trChild);
+      return h0.apply(null, [type, trProps(props)].concat(kids));
+    }
+
+    /**
+     * 原样渲染（不翻译）：给**数据**用 —— 对话正文、日志行、上游错误原文、
+     * 以及语言开关上那个语言代码。
+     *
+     * 带 `data-wb-raw` 标记，验收脚本（panel-i18n.test.mjs）据此跳过整棵子树：
+     * 否则「上游返回的中文」会被当成「漏翻的界面文案」报出来。
+     */
+    function Raw(props) {
+      return h0('span', { className: props.className, 'data-wb-raw': '' }, props.text);
+    }
 
     const PANEL_HEADERS = { 'x-workbuddy-panel': '1', 'content-type': 'application/json' };
     const CONSOLE_API = '/workbuddy/console-api';
@@ -59,6 +106,9 @@ body.dark .wb-root,
   color-scheme: dark;
 }
 .wb-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;flex-wrap:wrap}
+.wb-lang{appearance:none;flex:none;border:.5px solid var(--dsw-alias-border-l2,light-dark(#0000001f,#ffffff2e));background:var(--dsw-alias-bg-module-platform,light-dark(#ffffff,#202226));color:var(--dsw-alias-label-primary,light-dark(#0f1115,#f9fafb));border-radius:8px;padding:4px 9px;font:inherit;font-size:12px;font-weight:600;line-height:16px;min-width:34px;cursor:pointer;transition:all var(--wb-anim-fast)}
+.wb-lang:hover{background:var(--dsw-alias-interactive-bg-hover,light-dark(#2631480f,#ffffff14))}
+.wb-lang:focus-visible{outline:2px solid var(--dsw-alias-brand-primary,#6366f1);outline-offset:1px}
 .wb-title{margin:0;font-size:15px;font-weight:600;letter-spacing:-0.01em}
 .wb-sub{margin:4px 0 0;color:var(--dsw-alias-label-secondary,light-dark(#61666b,#cfd3d6));font-size:12px;overflow-wrap:anywhere;line-height:18px}
 .wb-tabs{position:relative;display:flex;gap:6px;flex-wrap:wrap;border-bottom:.5px solid var(--dsw-alias-border-l2,light-dark(#0000001a,#ffffff1f));padding-bottom:8px}
@@ -226,6 +276,569 @@ body.dark .wb-root,
 @keyframes wb-spin{to{transform:rotate(360deg)}}
 @media (prefers-reduced-motion: reduce){.wb-spinner{animation-duration:2s}}
 `;
+
+    // ─────────────────────────── i18n（中 / 英） ───────────────────────────
+    /*
+     * 与控制台同一套思路：**中文原文即词条 key** + 一次翻译遍。
+     *
+     * 差别在「翻译遍落在哪」：控制台是命令式拼 DOM，所以翻的是**渲染结果**；
+     * 这一页整棵 UI 是 React 元素树，翻 DOM 会被下一次 render 冲掉。
+     * 所以改成在**创建元素的那一层**翻 —— `h` 已经包好了（见文件上方）。
+     *
+     * 切语言 = 改 LANG + 让订阅者各自 setState 重渲染（文案在 render 里现算），
+     * 所以不需要「反向表」，也不存在还原不回去的问题。
+     *
+     * 加文案：找到对应分组，`'中文原文': 'English',` 一行即可。
+     * 拼接串（带数字 / 动态值的）走下面的 I18N_RULES_EN 正则表 ——
+     * **具体规则必须排在通用规则前面**（顺序匹配、命中即返回）。
+     */
+    const LANG_KEY = 'wb-plugin-lang';
+    const LANGS = ['zh', 'en'];
+    let LANG = 'zh';
+    try {
+      const saved = localStorage.getItem(LANG_KEY);
+      if (LANGS.indexOf(saved) >= 0) LANG = saved;
+    } catch (e) { /* 隐私模式：忽略 */ }
+
+    /** 语言状态：改它 → 通知所有订阅者重渲染。 */
+    const langSubs = new Set();
+    function setLang(next) {
+      if (LANGS.indexOf(next) < 0 || next === LANG) return;
+      LANG = next;
+      try { localStorage.setItem(LANG_KEY, next); } catch (e) { /* 忽略 */ }
+      langSubs.forEach((fn) => { try { fn(next); } catch (e) { /* 单个订阅者出错不影响别人 */ } });
+    }
+    /** 组件里用：返回当前语言，并在切换时自动重渲染。 */
+    function useLang() {
+      const [lang, set] = useState(LANG);
+      useEffect(() => {
+        langSubs.add(set);
+        return () => { langSubs.delete(set); };
+      }, []);
+      return lang;
+    }
+
+    /** 需要翻译的属性（悬停提示与读屏文案）。 */
+    const I18N_PROPS = ['title', 'placeholder', 'aria-label', 'alt'];
+
+    const I18N_EN = {
+      // ── 通用 ──
+      '刷新': 'Refresh',
+      '刷新中…': 'Refreshing…',
+      '刷新状态': 'Refresh status',
+      '复制': 'Copy',
+      '已复制 ✓': 'Copied ✓',
+      '点击复制': 'Click to copy',
+      '收起': 'Collapse',
+      '展开': 'Expand',
+      '详情': 'Details',
+      '查看详情': 'View details',
+      '收起详情': 'Collapse details',
+      '模型 ID': 'Model ID',
+      '状态': 'Status',
+      '操作': 'Actions',
+      '名称': 'Name',
+      '显示': 'Show',
+      '模型': 'Model',
+      '标签': 'Tags',
+      '确定': 'OK',
+      '取消': 'Cancel',
+      '默认': 'Default',
+      '低': 'Low',
+      '中': 'Medium',
+      '高': 'High',
+      '是': 'Yes',
+      '否': 'No',
+      '未知': 'unknown',
+      '已过期': 'expired',
+      '约': 'about ',
+      '正在加载…': 'Loading…',
+      '正在读取状态…': 'Reading status…',
+      '请选择': 'Select…',
+      '读取失败': 'Failed to read',
+      '正在检测控制台…': 'Detecting console…',
+      '启动控制台': 'Start console',
+      '重新诊断': 'Re-diagnose',
+      '再查一次': 'Check again',
+      '查看失败': 'View failures',
+      '去签到': 'Go to check-in',
+      '启动桥': 'Start bridge',
+      '重启桥': 'Restart bridge',
+      '停止桥': 'Stop bridge',
+      '清理旧路由': 'Clean up old routes',
+      '复制诊断报告': 'Copy diagnostic report',
+      '复制桥地址': 'Copy bridge URL',
+      '去诊断 →': 'Go to diagnose →',
+      '看用量': 'View usage',
+
+      // ── 宿主端旧构建（透传接口 404）──
+      '这一页的新代码已经加载，但 dsh 进程里的宿主端还是旧构建（透传接口不存在，HTTP 404）。':
+        'This page\'s new code is loaded, but the host side inside the dsh process is still an old build (the passthrough endpoint does not exist — HTTP 404).',
+      '宿主端改动要重启一次 DeepSeek Harness 才生效 —— 完全退出（托盘退出）再打开即可。':
+        'Host-side changes need one DeepSeek Harness restart to take effect — fully quit (from the tray) and reopen.',
+      '这项功能由控制台提供（它保证 .state.json 只有一个写者，两边才不会不同步）。':
+        'This feature is provided by the console (it keeps .state.json single-writer so the two sides stay in sync).',
+      '宿主端还是旧构建：已按缓存刷新（重启一次 dsh 后，「刷新积分」可直接重读上游）。':
+        'Host side is still an old build: refreshed from cache (after one dsh restart, Refresh credits can re-read the upstream directly).',
+      '宿主端还是旧构建：重启一次 dsh 后对话测试才可用（完全退出托盘再打开）。':
+        'Host side is still an old build: chat test becomes available after one dsh restart (fully quit from the tray and reopen).',
+      '宿主端还是旧构建（重启一次 dsh 后，自动签到开关与「上次尝试」才会出现）。':
+        'Host side is still an old build (the auto check-in switch and Last attempt appear after one dsh restart).',
+      '自动签到开关由控制台写 .state.json：宿主端还是旧构建，重启一次 dsh 后再改。':
+        'The auto check-in switch is written to .state.json by the console: host side is still an old build, change it after one dsh restart.',
+      '自动签到开关存在 .state.json，由控制台负责读写；控制台没跑时这项不可改（可先启动控制台）。签到本身由**桥**执行 —— 只要桥在跑，不开控制台也会自动签。':
+        'The auto check-in switch lives in .state.json and is read/written by the console; it cannot be changed while the console is not running (start the console first). The check-in itself is performed by the **bridge** — as long as the bridge runs, it will auto check in even without the console.',
+
+      // ── 概览 ──
+      '插件负责引擎（原生模型路由、桥与控制台的启停），这里提供控制台的全部数据与操作；':
+        'The plugin owns the engine (native model routing, starting/stopping the bridge and console); this page provides all of the console\'s data and actions;',
+      '两边共用同一个桥与同一份 .state.json，改哪边另一边的结果都一样。':
+        'both sides share the same bridge and the same .state.json — changing either gives the same result on the other.',
+      '桥运行中': 'Bridge running',
+      '桥凭据异常': 'Bridge credentials error',
+      '桥未运行': 'Bridge not running',
+      '控制台运行中': 'Console running',
+      '控制台未运行': 'Console not running',
+      '运行中': 'Running',
+      '未运行': 'Not running',
+      '凭据异常': 'Credentials error',
+      '令牌不符': 'Token mismatch',
+      '端口被占': 'Port in use',
+      '已运行': 'Running',
+      '本地桥': 'Local bridge',
+      '进程 / 地址': 'Process / address',
+      '登录账号': 'Signed-in account',
+      '上游端点': 'Upstream endpoint',
+      '可用模型': 'Available models',
+      'dsh 原生路由': 'dsh native route',
+      '数据控制台': 'Data console',
+      '检出目录': 'Checkout dir',
+      '需要你动手': 'Needs your attention',
+      '没有待办事项。': 'Nothing to do.',
+      '(未识别)': '(unrecognized)',
+      '(未知)': '(unknown)',
+      '(未读取)': '(not read)',
+      '(未识别账号)': '(unrecognized account)',
+      '(未知模型)': '(unknown model)',
+      '(未命名套餐)': '(unnamed package)',
+      '（兜底）': ' (fallback)',
+      '，推荐': ', recommended',
+      '桥在跑，但读不出登录凭据：': 'The bridge is running but cannot read the login credentials: ',
+      '未知原因': 'unknown reason',
+      '端口上的桥与本插件的本地令牌不一致': 'The bridge on this port has a different local token than this plugin',
+      '端口被别的服务占用了': 'The port is taken by another service',
+      '桥没有在运行 —— 模型调用会失败': 'The bridge is not running — model calls will fail',
+      '修法：打开 WorkBuddy 桌面端重新登录一次；不行再看 诊断 页的「登录文件 / 凭据解密」两项':
+        'Fix: open the WorkBuddy desktop app and sign in again; if that fails, check the two "login file / credential decryption" items on the Diagnose tab',
+      '登录令牌已过期（桥会在下次请求时尝试续期）': 'The login token has expired (the bridge will try to renew it on the next request)',
+      '令牌不到 7 天到期，建议重新登录 WorkBuddy 桌面端': 'Token expires in under 7 days — signing in to the WorkBuddy desktop app again is recommended',
+      '原生模型路由未注册：': 'Native model route not registered: ',
+      '检测到旧的 llm-pi-ai 路由，与插件撞名，建议清理': 'An old llm-pi-ai route was found; its name clashes with this plugin — cleaning it up is recommended',
+      '今日还没签到': 'Not checked in today yet',
+
+      // ── 诊断报告（复制到剪贴板）──
+      'WorkBuddy 中转诊断报告': 'WorkBuddy bridge diagnostic report',
+      '时间：': 'Time: ',
+      '桥：': 'Bridge: ',
+      '账号：': 'Account: ',
+      '令牌剩余': 'Token remaining',
+      '目录：': 'Catalog: ',
+      '个模型': ' models',
+      '路由：': 'Route: ',
+      '已注册 provider=': 'registered provider=',
+      '未注册': 'not registered',
+      '控制台：': 'Console: ',
+      '积分：': 'Credits: ',
+      '检出目录：': 'Checkout dir: ',
+
+      // ── 积分 ──
+      '积分余额': 'Credit balance',
+      '刷新积分': 'Refresh credits',
+      '读取失败：': 'Failed to read: ',
+      '刷新失败：': 'Refresh failed: ',
+      '已刷新（': 'Refreshed (',
+      '还没有读到套餐明细': 'No package details read yet',
+      '⚠ 积分还是上一个账号的（正在自动重读）—— 缓存': '⚠ Credits still belong to the previous account (re-reading automatically) — cache',
+      '… / 桥': '… / bridge',
+      '…（与桥一致）': '… (matches the bridge)',
+      '归属账号': 'Owner account',
+      '月度': 'Monthly',
+      '到期': 'Expires',
+      '积分': 'credit',
+
+      // ── 账号 ──
+      '正在读取登录账号…': 'Reading signed-in account…',
+      '已切换到': 'Switched to ',
+      '。桥已重启，两边同步。': '. The bridge restarted; both sides are in sync.',
+      '积分已更新。': 'Credits updated.',
+      '（积分正在后台刷新，稍后自动显示新账号的值。）': ' (credits are refreshing in the background; the new account\'s values will appear automatically.)',
+      '切换失败：': 'Switch failed: ',
+      'AtRest 密钥获取失败：': 'Failed to get the AtRest key: ',
+      '（无法逐个验证账号可用性）': ' (cannot verify each account\'s availability)',
+      '登录目录下存在多个账号快照时可在此切换。切换会自动重启桥、清空上一个账号的体检结论与余额缓存 —— 与控制器里点「切换」完全等价。':
+        'When the login directory holds several account snapshots you can switch here. Switching restarts the bridge and clears the previous account\'s probe results and credit cache — exactly equivalent to clicking Switch in the controller.',
+      '登录目录：': 'Login directory: ',
+      '使用中': 'In use',
+      '可用': 'Available',
+      '不可用': 'Unavailable',
+      '未验证': 'Unverified',
+      '切换中…': 'Switching…',
+      '切换': 'Switch',
+      '剩余': 'Remaining',
+      '· 凭据': ' · credential',
+      'AtRest 信封': 'AtRest envelope',
+      '明文': 'plaintext',
+      '不可用的账号及原因：': 'Unavailable accounts and why: ',
+      '未能解开凭据（可能是另一个 build 写入的）': 'Could not decrypt the credential (possibly written by another build)',
+      '账号': 'Account',
+
+      // ── 用量 ──
+      '用量统计': 'Usage',
+      '正在读取用量账本…': 'Reading the usage ledger…',
+      '确定清空本地用量账本？\n\n只删本机的统计记录（时间/模型/耗时/token/积分），不影响上游额度与对话内容。此操作不可撤销。':
+        'Clear the local usage ledger?\n\nThis only deletes this machine\'s statistics (time / model / duration / tokens / credit); it does not affect upstream quota or conversation content. This cannot be undone.',
+      '账本已清空。': 'Ledger cleared.',
+      '最近 24 小时': 'Last 24 hours',
+      '最近 7 天': 'Last 7 days',
+      '最近 30 天': 'Last 30 days',
+      '时间趋势': 'Trend over time',
+      '各模型对比': 'Compare models',
+      '导出 CSV': 'Export CSV',
+      '清空中…': 'Clearing…',
+      '清空账本': 'Clear ledger',
+      '调用': 'Calls',
+      '失败': 'Failed',
+      '输入 tokens': 'Input tokens',
+      '输出 tokens': 'Output tokens',
+      '平均耗时': 'Avg duration',
+      '只记元数据（时间 / 模型 / 耗时 / token / 积分），不含任何对话内容。':
+        'Metadata only (time / model / duration / tokens / credit) — no conversation content.',
+      '积分花在哪些模型上': 'Which models the credits went to',
+      '次数': 'Calls',
+      '占比': 'Share',
+      '最近的失败：': 'Recent failures: ',
+      '时间': 'Time',
+      '错误': 'Error',
+      '数据点不足，画不出趋势。': 'Not enough data points to draw a trend.',
+      '用量折线趋势图': 'Usage line chart',
+      '调用次数': 'Calls',
+      '消耗积分': 'Credit spent',
+      '当前时间段内暂无模型调用数据': 'No model calls in this period',
+      '各模型用量分布对比柱状图': 'Model usage comparison bar chart',
+
+      // ── 请求 ──
+      '最近请求': 'Recent requests',
+      '正在读取请求记录…': 'Reading request log…',
+      '暂停自动刷新': 'Pause auto-refresh',
+      '导出当前筛选 CSV': 'Export filtered CSV',
+      '流式': 'Streaming',
+      '非流式': 'Non-streaming',
+      '耗时': 'Duration',
+      '结果': 'Result',
+      '成功': 'OK',
+      '没有符合筛选条件的请求。': 'No requests match the filter.',
+      '还没有请求记录。': 'No requests recorded yet.',
+      '进行中': 'In progress',
+      '· 已运行': ' · running',
+      '· 疑似卡死（超过 ': ' · possibly stuck (over ',
+      '）—— 桥不会主动打断，请检查客户端与上游': ') — the bridge never interrupts; check the client and the upstream',
+      '\n（点击复制完整详情）': '\n(click to copy full details)',
+      '点击复制完整详情': 'Click to copy full details',
+
+      // ── 签到 ──
+      '每日签到': 'Daily check-in',
+      '正在读取签到状态…': 'Reading check-in status…',
+      '领取失败：': 'Claim failed: ',
+      '已尝试领取今日签到。': 'Attempted to claim today\'s check-in.',
+      '开启': 'On',
+      '关闭': 'Off',
+      '自动签到（桥侧要重启桥才生效，控制器同此行为）': 'Auto check-in (bridge side needs a bridge restart to take effect; the controller behaves the same)',
+      '设置失败：': 'Failed to save: ',
+      '今日': 'Today',
+      '已签到': 'Checked in',
+      '未签到': 'Not checked in',
+      '连续天数': 'Streak',
+      '活动': 'Activity',
+      '账号当前无签到活动': 'This account has no check-in activity',
+      '上次尝试': 'Last attempt',
+      '自动签到': 'Auto check-in',
+      '领取中…': 'Claiming…',
+      '立即领取': 'Claim now',
+
+      // ── 诊断 ──
+      '环境诊断': 'Environment diagnosis',
+      '环境诊断（诊断由控制台调用项目自带的 lib/diagnostics.mjs，与控制台页面同一套结论）':
+        'Environment diagnosis (the console runs the project\'s own lib/diagnostics.mjs, so this is the same verdict as the console page)',
+      'dsh 模型路由': 'dsh model route',
+      '原生 provider=': 'native provider=',
+      '（插件运行时注册，无需 settings.yaml）': ' (registered at plugin runtime; no settings.yaml needed)',
+      '建议（': 'Suggestions (',
+      '）：': '): ',
+
+      // ── 模型 ──
+      '正在读取模型目录…': 'Reading the model catalog…',
+      '模型体检': 'Model probe',
+      '没有需要体检的模型（"不可用"范围为空）。': 'No models to probe (the "unavailable" set is empty).',
+      '体检需要控制台在跑（宿主端旧构建时则需重启一次 dsh）—— 已中止，避免对不存在的接口逐个空跑。':
+        'Probing needs the console running (or one dsh restart on an old host build) — aborted to avoid firing at a non-existent endpoint one by one.',
+      '体检结果保存失败：': 'Failed to save probe results: ',
+      '确定清除全部体检结论？\n\n只删 .state.json 里的 probe 记录（下次要重新体检），不影响模型与路由。':
+        'Clear all probe results?\n\nThis only deletes the probe records in .state.json (you will need to probe again next time); models and routes are unaffected.',
+      '体检结论已清除。': 'Probe results cleared.',
+      '清除失败：': 'Clear failed: ',
+      '正在读取桥的模型目录…': 'Reading the bridge model catalog…',
+      '可用模型（': 'Available models (',
+      '搜索模型 / 名称…': 'Search model / name…',
+      '体检中': 'Probing',
+      '全部体检': 'Probe all',
+      '刷新目录': 'Refresh catalog',
+      '清除体检结论': 'Clear probe results',
+      '体检需要控制台在跑（结论只由它写，保证两边一致）。':
+        'Probing needs the console running (only it writes the results, so the two sides stay consistent).',
+      'dsh 选择器显示': 'Shown in the dsh picker',
+      '全选': 'Select all',
+      '全不选': 'Select none',
+      '按体检结论隐藏"不可用"的模型': 'Hide models that probed as unavailable',
+      '只留可用的': 'Available only',
+      '当前：全部显示（未做过筛选）': 'Currently: all shown (no filtering applied)',
+      '保存中…': 'Saving…',
+      '保存显示设置': 'Save display settings',
+      '已保存': 'Saved',
+      '恢复为全部显示（与从未筛选一致）': 'Restore to showing everything (same as never filtering)',
+      '恢复全部': 'Restore all',
+      '有未保存的勾选改动 —— 点「保存显示设置」后才会应用到 dsh 的模型选择器。':
+        'You have unsaved checkbox changes — they apply to the dsh model picker only after you click Save display settings.',
+      '勾选 = 出现在 dsh 的模型选择器里（保存后生效）': 'Checked = appears in the dsh model picker (takes effect after saving)',
+      '上下文 / 输出': 'Context / output',
+      '倍率': 'Rate',
+      '体检': 'Probe',
+      '已显示在 dsh 选择器': 'Shown in the dsh picker',
+      '已隐藏（保存后 dsh 选择器不再出现）': 'Hidden (will disappear from the dsh picker after saving)',
+      '支持图片输入（多模态）': 'Accepts image input (multimodal)',
+      '图片': 'Image',
+      '免费': 'Free',
+      '未测': 'Not tested',
+      '测': 'Test',
+      '测…': 'Testing…',
+      '模型列表来自桥的动态目录，**不需要勾选或保存**：选模型时 provider 选 “WorkBuddy” 就能看到全部。体检结论存在 .state.json 的 probe 字段，与控制器共用一份。':
+        'The model list comes from the bridge\'s live catalog — **no checking or saving needed**: pick "WorkBuddy" as the provider when choosing a model and you will see them all. Probe results live in the probe field of .state.json, shared with the controller.',
+      '实测扣分': 'Measured credit',
+      '厂商标识': 'Vendor code',
+      '上游返回的厂商代码（单字母），不是厂商名': 'The vendor code returned by the upstream (a single letter), not the vendor name',
+      '计费倍率': 'Billing rate',
+      '多模态': 'Multimodal',
+      '支持图片': 'Images supported',
+      '纯文本': 'Text only',
+      '活动：': 'Activity: ',
+      '体检错误：': 'Probe error: ',
+      '用这个模型对话 →': 'Chat with this model →',
+      '复制 ID': 'Copy ID',
+      '体检结论更新于': 'Probe results updated',
+      '模型体检：': 'Model probe: ',
+
+      // ── 对话 ──
+      '对话测试': 'Chat test',
+      '对话测试由控制台代发（它管着流式透传）。先启动控制台。':
+        'The chat test is sent through the console (it owns the streaming passthrough). Start the console first.',
+      '已中断': 'Interrupted',
+      '已停止': 'Stopped',
+      '会消耗你账号的额度（与控制器里的对话测试同一回事）。多轮对话带上下文，流式输出可随时停止。这里的模型与参数只作用于本页测试。':
+        'This consumes your account quota (the same as the chat test in the controller). Multi-turn chats keep context and streaming output can be stopped at any time. The model and parameters here affect only this page\'s test.',
+      '筛选模型…': 'Filter models…',
+      '· 多模态': ' · multimodal',
+      '单次回复的最大 token 数；留空 = 上游默认': 'Max tokens per reply; empty = upstream default',
+      '采样温度 0~2；留空 = 上游默认': 'Sampling temperature 0–2; empty = upstream default',
+      '思考强度': 'Reasoning effort',
+      '清空对话': 'Clear chat',
+      '停止': 'Stop',
+      '模型目录还没读到（桥没跑或目录为空）—— 稍后会自动重试。':
+        'The model catalog has not been read yet (bridge not running, or the catalog is empty) — it will retry automatically.',
+      '要让 agent 本身用某个模型，用 dsh 输入框旁的模型选择器（provider 选 WorkBuddy）；这里只影响本页的对话测试。':
+        'To make the agent itself use a model, use the model picker next to the dsh input box (pick WorkBuddy as the provider); this only affects this page\'s chat test.',
+      '还没有对话。': 'No conversation yet.',
+      '输入消息，Enter 发送（Shift+Enter 换行）': 'Type a message; Enter sends (Shift+Enter for a new line)',
+      '生成中…': 'Generating…',
+      '发送': 'Send',
+
+      // ── 日志 ──
+      '桥日志': 'Bridge log',
+      '正在读取桥日志…': 'Reading the bridge log…',
+      '确定清空桥日志？\n\n只截断本机的 bridge.log（追踪问题用的历史会丢），不影响桥的运行。':
+        'Clear the bridge log?\n\nThis only truncates this machine\'s bridge.log (the history used for troubleshooting is lost); the bridge keeps running.',
+      '日志已清空。': 'Log cleared.',
+      '过滤关键字…': 'Filter keyword…',
+      '只看错误': 'Errors only',
+      '只看本次启动': 'This boot only',
+      '100 行': '100 lines',
+      '200 行': '200 lines',
+      '500 行': '500 lines',
+      '复制当前视图': 'Copy current view',
+      '清空日志': 'Clear log',
+      '（没有匹配的日志行）': '(no matching log lines)',
+      '桥当前没在运行：日志里最后那几行通常就是它退出的原因。':
+        'The bridge is not running right now: the last few lines in the log are usually why it exited.',
+
+      // ── 标签页 ──
+      '概览': 'Overview',
+      '用量': 'Usage',
+      '请求': 'Requests',
+      '签到': 'Check-in',
+      '诊断': 'Diagnose',
+      '日志': 'Log',
+
+      // ── 动作结果 ──
+      '桥操作失败：': 'Bridge action failed: ',
+      '控制台启动失败：': 'Failed to start the console: ',
+      '控制台已就绪：': 'Console ready: ',
+      '旧路由已清理（带备份）': 'Old route cleaned up (with backup)',
+      '清理失败：': 'Cleanup failed: ',
+      '保存失败：': 'Save failed: ',
+      '清空失败：': 'Clear failed: ',
+      '导出失败：': 'Export failed: ',
+      '复制失败：': 'Copy failed: ',
+      '体检完成：': 'Probe finished: ',
+    };
+
+    /*
+     * 拼接串的规则表。**顺序即优先级**：最具体的放最前面。
+     * 通用规则（如 `^(.+) 次$`）一旦排在前面，会把更长的整串抢走，
+     * 结果是半英半中 —— 控制台那边踩过，这里照同样的纪律排。
+     */
+    const I18N_RULES_EN = [
+      // ── 时长 / 数量单位（fmtDuration / fmtRunSeconds / fmtMetricValue）──
+      [/^(\d+) 秒$/, '$1s'],
+      [/^(\d+) 分 (\d+) 秒$/, '$1m $2s'],
+      [/^(\d+) 分$/, '$1m'],
+      [/^(\d+) 小时 (\d+) 分$/, '$1h $2m'],
+      [/^(\d+) 天 (\d+) 小时$/, '$1d $2h'],
+      [/^(\d+) 小时$/, '$1h'],
+      [/^(\d+) 天$/, '$1d'],
+
+      // ── 计数（括号里带数字）──
+      [/^全部（(\d+)）$/, 'All ($1)'],
+      [/^全部模型（(\d+)）$/, 'All models ($1)'],
+      [/^仅看失败（(\d+)）$/, 'Failures only ($1)'],
+      [/^只看不可用（(\d+)）$/, 'Unavailable only ($1)'],
+      [/^只看未测（(\d+)）$/, 'Not tested only ($1)'],
+      [/^重测不可用的（(\d+)）$/, 'Re-probe unavailable ($1)'],
+      [/^进行中（(\d+)）$/, 'In progress ($1)'],
+      [/^体检中 (\d+)\/(\d+)$/, 'Probing $1/$2'],
+      [/^已勾选 (\d+) \/ (\d+)$/, '$1 / $2 selected'],
+      [/^共 (\d+) 个可选$/, '$1 available'],
+      [/^建议（(\d+)）$/, 'Suggestions ($1)'],
+
+      // ── 图表 / 明细里的动态串 ──
+      // 捕获组里的内容**自己也是文案**（如 `各模型占比 (调用次数)`），必须再翻一次
+      [/^各模型占比 \((.+)\)$/, (m, metric) => 'Model share (' + translateText(metric) + ')'],
+      [/^共 (\d+) 个活跃模型 · 合计 (.+)$/, (m, n, sum) => n + ' active models · ' + translateText(sum) + ' total'],
+      [/^(.+)：(.+) \((\d+(?:\.\d+)?)%\)$/, (m, a, b, pct) => translateText(a) + ': ' + translateText(b) + ' (' + pct + '%)'],
+      [/^(\d+) 种套餐(.*)$/, '$1 package(s)$2'],
+      [/^ · 更新于 (.+)$/, ' · updated $1'],
+
+      // ── 概览 / 账号 / 模型里的拼接串 ──
+      // 这几条都**必须排在下面的 `^(.+)：(.+)$` 之前** —— 否则「登录目录：C:\…」
+      // 会先被那条通用规则切成两半，前缀留在中文（踩过一次）。
+      [/^约 (.+)$/, (m, dur) => 'about ' + translateText(dur)],
+      [/^(\d+) 个，推荐 (.+)$/, '$1 models, recommended $2'],
+      [/^已注册 provider=(.+)$/, 'registered provider=$1'],
+      [/^原生 provider=(.+)（插件运行时注册，无需 settings.yaml）$/,
+        'native provider=$1 (registered at plugin runtime; no settings.yaml needed)'],
+      [/^登录目录：(.+)$/, 'Login directory: $1'],
+      [/^剩余 (.+) · 凭据 (.+)$/, (m, dur, kind) => 'Remaining ' + translateText(dur) + ' · credential ' + translateText(kind)],
+      [/^剩余 (.+)$/, (m, rest) => 'Remaining ' + translateText(rest)],
+      [/^可用模型（(\d+)）$/, 'Available models ($1)'],
+      [/^(\d+) 条$/, '$1 rows'],
+      // 「体检结论更新于 …（本轮…）」必须排在通用的「…（本轮…）」之前
+      [/^体检结论更新于 (.+)$/, (m, rest) => 'Probe results updated ' + translateText(rest)],
+      [/^(.+)（本轮 (\d+) 个，范围 (.+)）$/,
+        (m, head, n, scope) => translateText(head) + ' (' + n + (n === '1' ? ' model' : ' models') + ' this run, scope ' + scope + ')'],
+      [/^实测扣分 (.+)$/, 'Measured credit $1'],
+      [/^([\s\S]*)\n（点击复制完整详情）$/, '$1\n(click to copy full details)'],
+
+      // ── 状态行 ──
+      [/^· (.+) · 已运行$/, (m, mode) => ' · ' + translateText(mode) + ' · running'],
+      [/^失败 HTTP (\d+)( · code .+)?$/, (m, code, rest) => 'Failed HTTP ' + code + (rest || '')],
+      [/^失败$/, 'Failed'],
+      [/^HTTP (\d+)：(.+)$/, 'HTTP $1: $2'],
+      [/^最近请求里有 (\d+) 条失败$/, (m, n) => n + (n === '1' ? ' recent failure' : ' recent failures')],
+
+      // ── 体检 / 模型 ──
+      [/^可用 · (\d+)ms$/, 'ok · $1ms'],
+      [/^不可用 · (\d+)ms$/, 'unavailable · $1ms'],
+      [/^ · 实测扣分 (.+)$/, ' · measured credit $1'],
+      [/^（本轮 (\d+) 个，范围 (.+)）$/, ' ($1 models this run, scope $2)'],
+      [/^共 (\d+) 个模型，其中 (\d+) 个支持图片输入（名称旁标「图片」），$/,
+        '$1 models total, $2 accept image input (marked "Image" next to the name),'],
+      [/^(\d+) 个免费；体检过的 (\d+) 个。$/, '$1 free; $2 probed.'],
+      [/^(\d+) 项通过 \/ (\d+) 项警告 \/ (\d+) 项失败 —— 红色项不解决，模型就不会出现。$/,
+        '$1 passed / $2 warnings / $3 failed — until the red ones are fixed, models will not appear.'],
+      [/^已保存并即时生效：dsh 选择器现在显示 (\d+) 个模型。$/,
+        'Saved and applied immediately: the dsh picker now shows $1 models.'],
+      [/^已保存（(\d+) 个模型）。此 dsh 版本不支持即时刷新 —— 重启一次 dsh 后生效。$/,
+        'Saved ($1 models). This dsh version does not support live refresh — it takes effect after one dsh restart.'],
+      [/^已保存：未勾选任何模型 —— dsh 选择器将不显示 WorkBuddy 模型（重新勾选即可恢复）。$/,
+        'Saved: no models checked — the dsh picker will show no WorkBuddy models (check some again to restore).'],
+      [/^体检完成：(\d+)\/(\d+) 可用（结论已存进 \.state\.json，控制器里看到的是同一份）$/,
+        'Probe finished: $1/$2 available (results saved to .state.json; the controller sees the same copy)'],
+      [/^模型 (.+) 不在当前账号的目录里（可能刚切换过账号）—— 请重新选择。$/,
+        'Model $1 is not in the current account\'s catalog (you may have just switched accounts) — please pick again.'],
+      [/^已选模型 (.+) 不在当前账号的目录里（切换过账号？）—— 请重新选择。$/,
+        'The selected model $1 is not in the current account\'s catalog (switched accounts?) — please pick again.'],
+
+      // ── 对话 ──
+      [/^最近一轮：(\d+) ms · (.+) · tokens (.+) → (.+)$/,
+        'Last turn: $1 ms · $2 · tokens $3 → $4'],
+      [/^ · 扣分 (.+)$/, ' · credit $1'],
+
+      // ── 日志 ──
+      [/^显示 (\d+) \/ (\d+) 行(.*)$/, (m, shown, total, tail) => 'Showing ' + shown + ' / ' + total + ' lines' + translateText(tail)],
+      [/^ · (.+)$/, ' · $1'],
+      [/^（更新于 (.+)）$/, '(updated $1)'],
+
+      /*
+       * ── 最后兜底：最通用的单位规则 ────────────────────────────────────
+       *
+       * **必须排在最后**。`^(.+) 次$` 里的 `.+` 是贪婪的，排在前面会把
+       * 「共 2 个活跃模型 · 合计 33 次」这类整串抢走，翻出来是
+       * 「共 2 个活跃模型 · 合计 33 calls」这种半英半中 ——
+       * 控制台那边就是这么踩的（见 tools/dev/test-i18n.mjs 的注释）。
+       */
+      [/^(.+) 次$/, '$1 calls'],
+      [/^(.+) 积分$/, '$1 credit'],
+      /*
+       * `^(.+)：(.+)$` 也放到最后：它同样贪婪，排在前面会把
+       * 「登录目录：C:\…」这类整串切成两半（前半留在中文）。
+       */
+      [/^(.+)：(.+)$/, (m, a, b) => translateText(a) + ': ' + translateText(b)],
+    ];
+
+    let i18nDepth = 0;
+    /**
+     * 单条文案翻译：先查词条表，再走动态规则，都不中则**原样返回**。
+     *
+     * 「原样返回」是刻意的降级：宁可显示中文原文，也不要显示 key 或空白 ——
+     * 漏了词条能被验收脚本扫出来（它扫的就是「英文模式下还剩多少中文」）。
+     */
+    function translateText(text) {
+      if (text == null || LANG === 'zh') return text;
+      const s = String(text);
+      if (Object.prototype.hasOwnProperty.call(I18N_EN, s)) return I18N_EN[s];
+      if (i18nDepth >= 3) return s;
+      i18nDepth += 1;
+      try {
+        for (let i = 0; i < I18N_RULES_EN.length; i += 1) {
+          const rule = I18N_RULES_EN[i];
+          const m = s.match(rule[0]);
+          if (!m) continue;
+          return typeof rule[1] === 'function' ? rule[1].apply(null, m) : s.replace(rule[0], rule[1]);
+        }
+        return s;
+      } finally {
+        i18nDepth -= 1;
+      }
+    }
+    /** 代码里主动拼接的场景（与组件渲染走同一条路径，保证口径一致）。 */
+    const t = (s) => translateText(s);
 
     // ─────────────────────── 页面可见性门控 ───────────────────────
     /**
@@ -1397,7 +2010,7 @@ body.dark .wb-root,
         // 破坏性操作，二次确认（与控制台一致）；并且必须把结果说出来，
         // 不能点了没反应（旧实现就是发完请求不检查响应）。
         if (typeof window.confirm === 'function'
-          && !window.confirm('确定清空本地用量账本？\n\n只删本机的统计记录（时间/模型/耗时/token/积分），不影响上游额度与对话内容。此操作不可撤销。')) return;
+          && !window.confirm(t('确定清空本地用量账本？\n\n只删本机的统计记录（时间/模型/耗时/token/积分），不影响上游额度与对话内容。此操作不可撤销。'))) return;
         setClearing(true);
         setMessage('');
         const res = await postJson('/workbuddy/usage', undefined, 'DELETE');
@@ -1836,7 +2449,7 @@ body.dark .wb-root,
         reloadProbes();
       };
       const clearProbes = async () => {
-        if (typeof window.confirm === 'function' && !window.confirm('确定清除全部体检结论？\n\n只删 .state.json 里的 probe 记录（下次要重新体检），不影响模型与路由。')) return;
+        if (typeof window.confirm === 'function' && !window.confirm(t('确定清除全部体检结论？\n\n只删 .state.json 里的 probe 记录（下次要重新体检），不影响模型与路由。'))) return;
         const res = await postJson(CONSOLE_API + '/probe-results', undefined, 'DELETE');
         setMessage(res.data?.cleared || res.data?.ok ? '体检结论已清除。' : '清除失败：' + (res.data?.error || res.status));
         reloadProbes();
@@ -1866,8 +2479,9 @@ body.dark .wb-root,
           '模型列表来自桥的动态目录，**不需要勾选或保存**：选模型时 provider 选 “WorkBuddy” 就能看到全部。体检结论存在 .state.json 的 probe 字段，与控制器共用一份。'),
         models.length
           ? h('p', { className: 'wb-note' },
-            `共 ${models.length} 个模型，其中 ${models.filter((m) => m.images).length} 个支持图片输入（名称旁标「图片」），`
-            + `${models.filter((m) => m.free).length} 个免费；体检过的 ${models.filter((m) => resultOf(m.id)).length} 个。`)
+            // 两段**分开传**：它们各自在词条表里有条目，先拼成一串就查不到词条了
+            `共 ${models.length} 个模型，其中 ${models.filter((m) => m.images).length} 个支持图片输入（名称旁标「图片」），`,
+            `${models.filter((m) => m.free).length} 个免费；体检过的 ${models.filter((m) => resultOf(m.id)).length} 个。`)
           : null,
         h('div', { className: 'wb-actions split', style: { margin: '12px 0' } },
           h('div', { className: 'wb-actions-group' },
@@ -2205,7 +2819,7 @@ body.dark .wb-root,
       const clearLog = async () => {
         // 破坏性操作：先确认，再把结果说出来（旧实现点了没反应）
         if (typeof window.confirm === 'function'
-          && !window.confirm('确定清空桥日志？\n\n只截断本机的 bridge.log（追踪问题用的历史会丢），不影响桥的运行。')) return;
+          && !window.confirm(t('确定清空桥日志？\n\n只截断本机的 bridge.log（追踪问题用的历史会丢），不影响桥的运行。'))) return;
         setClearing(true);
         setMessage('');
         const res = await postJson('/workbuddy/log', undefined, 'DELETE');
@@ -2255,6 +2869,11 @@ body.dark .wb-root,
     ];
 
     function WorkBuddyPanel() {
+      /*
+       * 订阅语言：切换时这一个 setState 会让整棵面板重渲染，文案在 render 里现算。
+       * 只在根组件订阅就够 —— 子组件都是它的函数子节点，会跟着一起重渲染。
+       */
+      const lang = useLang();
       const [tab, setTab] = useState('overview');
       const [prevTab, setPrevTab] = useState('overview');
       const [busy, setBusy] = useState(false);
@@ -2359,14 +2978,29 @@ body.dark .wb-root,
         h('div', { className: 'wb-head' },
           h('div', null,
             h('h3', { className: 'wb-title' }, 'WorkBuddy'),
+            /*
+             * **两段分开传**，不要先拼成一个字符串：它们各自在词条表里有条目，
+             * 拼起来之后整串查不到词条，结果是半英半中（控制台的提示条踩过同一个坑）。
+             */
             h('p', { className: 'wb-sub' },
-              '插件负责引擎（原生模型路由、桥与控制台的启停），这里提供控制台的全部数据与操作；'
-              + '两边共用同一个桥与同一份 .state.json，改哪边另一边的结果都一样。')),
+              '插件负责引擎（原生模型路由、桥与控制台的启停），这里提供控制台的全部数据与操作；',
+              '两边共用同一个桥与同一份 .state.json，改哪边另一边的结果都一样。')),
           h('div', { className: 'wb-actions' },
             status?.bridge?.state === 'running' ? h(Pill, { tone: 'ok', text: '桥运行中' })
               : status?.bridge?.state === 'degraded' ? h(Pill, { tone: 'warn', text: '桥凭据异常' })
                 : h(Pill, { tone: 'bad', text: '桥未运行' }),
-            con.state === 'running' ? h(Pill, { tone: 'ok', text: '控制台运行中' }) : h(Pill, { tone: 'warn', text: '控制台未运行' }))),
+            con.state === 'running' ? h(Pill, { tone: 'ok', text: '控制台运行中' }) : h(Pill, { tone: 'warn', text: '控制台未运行' }),
+            // 语言开关：与控制台右上角那个同款（显示的是「可切到的那门语言」）。
+            // 标签用 Raw 渲染 —— 它是语言代码、不是文案，**不能**过翻译
+            // （词条表里有 `'中': 'Medium'`，那是「思考强度」的选项，
+            //  过一遍翻译会把按钮变成 "Medium"）。
+            h('button', {
+              type: 'button',
+              className: 'wb-lang',
+              onClick: () => setLang(lang === 'en' ? 'zh' : 'en'),
+              title: lang === 'en' ? 'Switch to Chinese' : 'Switch to English',
+              'aria-label': lang === 'en' ? 'Switch to Chinese' : 'Switch to English',
+            }, h(Raw, { text: lang === 'en' ? '中' : 'EN' })))),
         error ? h(Alert, { bad: true }, error) : null,
         toast ? h(Alert, null, toast) : null,
         h('div', { className: 'wb-tabs' + (indicatorStyle.opacity ? ' has-indicator' : ''), ref: tabsRef },
