@@ -6,6 +6,7 @@
  * 覆盖：保存后的生效时机提示、同步可用模型到 dsh（集合正确 / 取消不写 / 空集合禁用）。
  */
 import { startStaticServer, openPage, waitFor, q, sleep } from './ui-harness.mjs';
+import { accountsFixture, checkinFixture, diagnoseFixture, requestsFixture } from './fixtures.mjs';
 
 const PORT = 8784;
 const URL_ = `http://127.0.0.1:${PORT}/`;
@@ -49,11 +50,11 @@ const routes = {
     }),
   },
   '/api/probe-results': { body: { updatedAt: now - 60000, results: PROBE, lastRun: { scope: 'checked', count: 3 } } },
-  '/api/diagnose': { body: { items: [] } },
+  '/api/diagnose': { body: diagnoseFixture({ items: [] }) },
   '/api/usage': { body: { usage: null } },
-  '/api/requests': { body: { requests: [] } },
-  '/api/accounts': { body: { accounts: [] } },
-  '/api/checkin': { body: { status: { active: true, todayCheckedIn: true } } },
+  '/api/requests': { body: requestsFixture({ requests: [] }) },
+  '/api/accounts': { body: accountsFixture({ accounts: [] }) },
+  '/api/checkin': { body: checkinFixture() },
   '/api/bridge/log': { body: { lines: [] } },
   '/api/register': { body: { saved: true, count: 2, backup: true } },
 };

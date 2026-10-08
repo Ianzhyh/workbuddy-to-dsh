@@ -26,8 +26,43 @@ npm run release:check    :: 完整门禁（vendor:check + 单测 + 插件测试 
 3. **桩数据不许骗人**：给无头验收（`ui-harness.mjs`）喂的桩要过形状校验
    （`tools/dev/api-shape.json`，重取：`node tools/dev/api-shape.mjs capture`）；
    值不重要的接口直接用 `shapeStub('/api/...')` 生成。
+   共享夹具在 `tools/dev/fixtures.mjs` —— **优先用 `baseRoutes()` 而不是自己手写整组桩**。
 4. 桥侧测试**不触真上游**：用 `CODEBUDDY_ENDPOINT` 指向打桩上游
    （见 `bridge.test.mjs` 的 `startStubUpstream`）。
+
+### 跑无头 UI 用例：`npm run test:ui`
+
+```cmd
+npm run test:ui              :: 跑全部（判据：import ./ui-harness.mjs 的 test-*.mjs）
+npm run test:ui i18n r9      :: 只跑名字含 i18n / r9 的
+```
+
+需要**本机有 Chrome/Edge**（`CHROME_PATH` 可指定）；不启真控制台、不消耗上游额度。
+失败时会把每个脚本的尾部输出打出来，不用一个个手工复现。
+
+**为什么必须有这个入口**：这批脚本原先各跑各的、没有统一入口，于是"没人跑"
+就没人知道它们坏了 —— 实测发现 11 个早期脚本因为形状表变严，在 `openPage` 的
+桩校验处就抛错，**根本没跑到断言**，而且很久无人察觉。验收面悄悄烂掉一大块，
+比某个用例失败危险得多。**改完前端先跑它。**
+
+> 不 import `ui-harness.mjs` 的脚本（`test-bridge-*`、`test-console-ui`、
+> `test-probe-lastrun` 等）需要真的起桥或控制台，属于人工/集成走查，不在
+> `test:ui` 里跑（跑了会占端口、消耗上游额度）。
+
+### 桩数据的两条反直觉规则
+
+- **桩不能太"干净"**。空数组 / `null` 会让整块 UI 静默地不渲染，于是断言扫到
+  「0 个问题」而"通过" —— 这比桩写错更危险，因为**写错会被形状校验拦下，太干净不会**。
+  真实案例：体检结果桩为空 → 表头时间线不渲染 → i18n 漏翻检查假绿。
+  所以 `fixtures.mjs` 的 `probeResultsFixture` **默认按 catalog 生成非空结果**。
+- **故意塞真实接口没有的键**（如用假令牌验「凭据绝不渲染」）时，给那条路由加
+  `allowExtra: true` —— 只关掉「多余键」检查，**缺失检查照旧**。
+
+### 排查「验收全绿但产品有问题」
+
+先查**运行时报错**。控制台是"一次 DOM 翻译遍 + MutationObserver 增量翻"的结构，
+一个未定义函数就能让整条链路静默中断，表现是「成片中文」，而补词条永远补不好。
+`test-i18n.mjs` 里那条「无运行时报错」断言就是为这类故障准备的。
 
 ## 行为纪律
 
@@ -50,7 +85,8 @@ node dsh-plugin\scripts\vendor.mjs --check  :: CI 与门禁会自动校验
 
 ## 发版三步
 
-1. `npm run release:check` 全绿；
+1. `npm run release:check` 全绿；改了 `dashboard/` 或 `tools/dev/` 还要 `npm run test:ui` 全绿
+   （它不在 `release:check` 里：需要本机 Chrome，且要几分钟，不适合塞进 CI 矩阵）；
 2. 在 `CHANGELOG.md` 的 `[Unreleased]` 落本次变化，转成版本条目（Keep a Changelog），
    版本号写进 `package.json`；
 3. `git tag vX.Y.Z` 并推送。

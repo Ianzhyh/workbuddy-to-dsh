@@ -96,21 +96,52 @@ export function credentialsFixture({ active = true } = {}) {
   };
 }
 
+/** 控制台自述（`/api/overview` 的 `console`）。 */
+export function consoleFixture() {
+  return { version: '1.0.0', node: 'v22.22.2' };
+}
+
+/**
+ * 积分总览（`/api/overview` 的 `quota`）。
+ *
+ * `total === null` 表示**查不到**（页面走空态），这时真实接口回 `null` ——
+ * 与「查到 0 分」是两回事，别混。
+ */
+export function quotaFixture({ total = 715 } = {}) {
+  if (total === null) return null;
+  return {
+    ok: true,
+    total,
+    packages: [{ name: '每日签到', remain: 18, size: 20 }],
+    productCode: 'wb',
+  };
+}
+
+/**
+ * dsh 接入状态（`/api/overview` 的 `dsh`）。
+ *
+ * `ready: false` 是「还没接上」的完整形状 —— 不是「少了几个字段」。
+ * 这点很关键：字段缺失会让页面**静默地不渲染**某一块，而看起来一切正常。
+ */
+export function dshFixture({ ready = true } = {}) {
+  return ready ? {
+    settingsExists: true, settingsHasRoute: true, patchHasRoute: true,
+    routeLive: true, routeSource: 'settings.yaml', hasBridgeKey: true,
+    bundlesOk: true, bundles: ['a'], registeredModels: ['glm-5.3'],
+  } : {
+    settingsExists: false, settingsHasRoute: false, patchHasRoute: false,
+    routeLive: false, routeSource: null, hasBridgeKey: false,
+    bundlesOk: false, bundles: [], registeredModels: [],
+  };
+}
+
 export function overviewFixture({ bridgeRunning = true, active = true, quota = 715, dshReady = true } = {}) {
   return {
     bridge: bridgeFixture({ running: bridgeRunning }),
-    console: { version: '1.0.0', node: 'v22.22.2' },
+    console: consoleFixture(),
     credentials: credentialsFixture({ active }),
-    quota: quota === null ? null : { ok: true, total: quota, packages: [{ name: '每日签到', remain: 18, size: 20 }], productCode: 'wb' },
-    dsh: dshReady ? {
-      settingsExists: true, settingsHasRoute: true, patchHasRoute: true,
-      routeLive: true, routeSource: 'settings.yaml', hasBridgeKey: true,
-      bundlesOk: true, bundles: ['a'], registeredModels: ['glm-5.3'],
-    } : {
-      settingsExists: false, settingsHasRoute: false, patchHasRoute: false,
-      routeLive: false, routeSource: null, hasBridgeKey: false,
-      bundlesOk: false, bundles: [], registeredModels: [],
-    },
+    quota: quotaFixture({ total: quota }),
+    dsh: dshFixture({ ready: dshReady }),
   };
 }
 
@@ -200,6 +231,22 @@ export function checkinFixture({ active = true, todayCheckedIn = true } = {}) {
     },
     checkin: { auto: true, lastAt: NOW - 300000, lastResult: 'ok', lastError: null, lastSource: 'auto' },
   };
+}
+
+/**
+ * 签到状态**读取失败**时的真实形状。
+ *
+ * 真实接口失败时只回 `{ ok: false, error }`，**不带 `status`** —— 这一点很重要：
+ * 早先有测试把它写成 `{ status: null }`，于是页面走进「当前账号没有签到活动
+ * （国际版网关不含积分系统）」那条分支，看起来像**产品在无依据地下结论**，
+ * 其实只是桩没表达出「读取失败」。两个分支在页面上是两句话：
+ *   - 读取失败  → `读取失败：<error>`
+ *   - 无签到活动 → `当前账号没有签到活动（国际版网关不含积分系统）。`
+ *
+ * `ok: false` 同时让形状校验放行（失败态本来就没有成功载荷）。
+ */
+export function checkinFailFixture(error = '桥未运行') {
+  return { ok: false, error };
 }
 
 export function clientsFixture({ running = true } = {}) {

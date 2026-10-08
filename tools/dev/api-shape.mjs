@@ -125,6 +125,10 @@ const DYNAMIC_MAP_PARENTS = new Set([
 /**
  * 校验一份桩数据是否符合已记录的形状。返回 `{ missing, unknown }`。
  *
+ * `allowExtra` 用来放行**故意**多出来的键：典型场景是「往桩里塞一个真实接口
+ * 不会返回的假令牌，断言页面对它绝不渲染」这类安全用例 —— 那个键必须存在，
+ * 而形状表里当然没有它。此时只关掉「多余键」检查，**缺失检查照旧**。
+ *
  * ## 两条规则的取舍（都来自踩过的坑）
  *
  * **缺失检查只到深度 2，且不进数组元素。**
@@ -169,7 +173,7 @@ function inDynamicMap(path) {
   return false;
 }
 
-export function validateBody(route, body, shape = loadShape()) {
+export function validateBody(route, body, shape = loadShape(), allowExtra = false) {
   const real = shape && shape.routes && shape.routes[route];
   if (!real || real._error) return { missing: [], unknown: [] };
 
@@ -218,17 +222,23 @@ export function validateBody(route, body, shape = loadShape()) {
     unknown.push(path);
   }
 
-  return { missing, unknown };
+  // 桩里**故意**多出来的键（如用来验「凭据绝不渲染」的假令牌）：放行，但不放行缺失。
+  return { missing, unknown: allowExtra ? [] : unknown };
 }
 
-/** 校验整组路由；返回人类可读的问题列表。 */
+/**
+ * 校验整组路由；返回人类可读的问题列表。
+ *
+ * 路由可以带 `allowExtra: true` 声明「本用例会故意塞真实接口没有的键」，
+ * 只关掉该路由的「多余键」检查（缺失检查照旧）。见 `validateBody`。
+ */
 export function validateRoutes(routes, shape = loadShape()) {
   const problems = [];
   for (const [route, spec] of Object.entries(routes)) {
     const body = spec && spec.body;
     if (typeof body === 'function') continue; // 函数体在页面里执行，无法静态校验
     if (!body || typeof body !== 'object') continue;
-    const { missing, unknown } = validateBody(route, body, shape);
+    const { missing, unknown } = validateBody(route, body, shape, !!(spec && spec.allowExtra));
     if (missing.length || unknown.length) problems.push({ route, missing, unknown });
   }
   return problems;

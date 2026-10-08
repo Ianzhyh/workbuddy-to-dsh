@@ -8,6 +8,7 @@
  * 与未签到提醒的一致性。
  */
 import { startStaticServer, openPage, waitFor, q, sleep } from './ui-harness.mjs';
+import { accountsFixture, bridgeFixture, consoleFixture, credentialsFixture, diagnoseFixture, dshFixture, quotaFixture, requestsFixture } from './fixtures.mjs';
 
 const PORT = 8776;
 const URL_ = `http://127.0.0.1:${PORT}/`;
@@ -29,18 +30,18 @@ const routes = {
   '/api/models': { body: { models: CATALOG } },
   '/api/overview': {
     body: {
-      bridge: { running: true, ok: true, host: '127.0.0.1', port: 8790, endpoint: 'http://127.0.0.1:8790/v1', pid: 1, startedAt: new Date(now - 1000).toISOString(), uptimeMs: 1000, catalogSize: 1, catalogAt: new Date(now - 60000).toISOString() },
-      credentials: { active: { account: 'a', userId: 'a', remainingMs: 40 * 86400000, expiresAt: now + 40 * 86400000 }, error: '' },
-      quota: { total: 10, packages: [] },
-      dsh: { routeLive: true, hasBridgeKey: true, bundlesOk: true, bundles: [], registeredModels: [] },
-      console: { version: '1.0.0', node: 'v22' },
+      bridge: { ...bridgeFixture(), running: true, ok: true, host: '127.0.0.1', port: 8790, endpoint: 'http://127.0.0.1:8790/v1', pid: 1, startedAt: new Date(now - 1000).toISOString(), uptimeMs: 1000, catalogSize: 1, catalogAt: new Date(now - 60000).toISOString() },
+      credentials: { ...credentialsFixture(), active: { account: 'a', userId: 'a', remainingMs: 40 * 86400000, expiresAt: now + 40 * 86400000 }, error: '' },
+      quota: { ...quotaFixture(), total: 10, packages: [] },
+      dsh: { ...dshFixture(), routeLive: true, hasBridgeKey: true, bundlesOk: true, bundles: [], registeredModels: [] },
+      console: { ...consoleFixture(), version: '1.0.0', node: 'v22' },
     },
   },
   '/api/probe-results': { body: { updatedAt: null, results: {}, lastRun: null } },
-  '/api/diagnose': { body: { items: [] } },
+  '/api/diagnose': { body: diagnoseFixture({ items: [] }) },
   '/api/usage': { body: { usage: null } },
-  '/api/requests': { body: { requests: [] } },
-  '/api/accounts': { body: { accounts: [] } },
+  '/api/requests': { body: requestsFixture({ requests: [] }) },
+  '/api/accounts': { body: accountsFixture({ accounts: [] }) },
   '/api/checkin': {
     body: () => ({ ok: true, status: window.__FIX.status, checkin: window.__FIX.checkin }),
   },

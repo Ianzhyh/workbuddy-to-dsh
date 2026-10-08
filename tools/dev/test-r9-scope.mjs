@@ -6,6 +6,7 @@
  * 全程用 fetch 打桩喂已知数据，不碰真实桥、不消耗上游额度。
  */
 import { startStaticServer, openPage, waitFor, click, q, sleep } from './ui-harness.mjs';
+import { accountsFixture, bridgeFixture, checkinFixture, consoleFixture, credentialsFixture, diagnoseFixture, dshFixture, quotaFixture, requestsFixture } from './fixtures.mjs';
 
 const PORT = 8796;
 const URL_ = `http://127.0.0.1:${PORT}/`;
@@ -31,20 +32,20 @@ const routes = {
   '/api/models': { body: { models: CATALOG } },
   '/api/overview': {
     body: {
-      bridge: { running: true, ok: true, host: '127.0.0.1', port: 8790, endpoint: 'http://127.0.0.1:8790/v1', pid: 1234, startedAt: new Date(now - 3600000).toISOString(), uptimeMs: 3600000, catalogSize: 5, catalogAt: new Date(now - 120000).toISOString() },
-      credentials: { accountId: '330000000000', domain: 'www.codebuddy.cn', remainingMs: 44 * 86400000, atrestOk: true },
-      quota: { total: 120, packages: [] },
-      dsh: { settingsExists: true, settingsHasRoute: true, patchHasRoute: true, routeLive: true, routeSource: 'cordis.patch.yml', hasBridgeKey: true, bundlesOk: true, bundles: [], registeredModels: REGISTERED },
-      console: { version: '1.0.0', node: 'v22.22.2' },
+      bridge: { ...bridgeFixture(), running: true, ok: true, host: '127.0.0.1', port: 8790, endpoint: 'http://127.0.0.1:8790/v1', pid: 1234, startedAt: new Date(now - 3600000).toISOString(), uptimeMs: 3600000, catalogSize: 5, catalogAt: new Date(now - 120000).toISOString() },
+      credentials: credentialsFixture(),
+      quota: { ...quotaFixture(), total: 120, packages: [] },
+      dsh: { ...dshFixture(), settingsExists: true, settingsHasRoute: true, patchHasRoute: true, routeLive: true, routeSource: 'cordis.patch.yml', hasBridgeKey: true, bundlesOk: true, bundles: [], registeredModels: REGISTERED },
+      console: { ...consoleFixture(), version: '1.0.0', node: 'v22.22.2' },
     },
   },
   '/api/probe-results': { body: { updatedAt: now - 60000, results: PROBE_RESULTS, lastRun: { scope: 'checked', count: 3 } } },
   '/api/probe': { body: { ok: true, ms: 12, credit: 0 } },
-  '/api/diagnose': { body: { items: [] } },
-  '/api/usage': { body: { usage: { windowDays: 7, total: { calls: 0, promptTokens: 0, completionTokens: 0, credit: 0, creditCalls: 0, failed: 0 }, models: [], days: [], failures: [] } } },
-  '/api/requests': { body: { requests: [] } },
-  '/api/accounts': { body: { accounts: [{ path: 'a.info', active: true, accountId: '330000000000' }] } },
-  '/api/checkin': { body: { status: { active: true, todayCheckedIn: true, todayCredit: 10, streak: 3 } } },
+  '/api/diagnose': { body: diagnoseFixture({ items: [] }) },
+  '/api/usage': { body: { usage: { ok: true, windowDays: 7, total: { calls: 0, promptTokens: 0, completionTokens: 0, credit: 0, creditCalls: 0, failed: 0 }, models: [], days: [], failures: [] } } },
+  '/api/requests': { body: requestsFixture({ requests: [] }) },
+  '/api/accounts': { body: accountsFixture({ accounts: [{ path: 'a.info', active: true, account: '330000000000' }] }) },
+  '/api/checkin': { body: checkinFixture() },
   '/api/bridge/log': { body: { lines: [] } },
 };
 

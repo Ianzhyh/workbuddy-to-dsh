@@ -14,6 +14,29 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **11 个早期无头用例长期失效**（`tools/dev/test-r1..r11`）。它们在「接口形状固化」
+  那次改动之后就在 `openPage` 的桩校验处抛错，**根本没跑到断言** —— 而当时没有统一
+  入口，所以没人发现。现已全部修复并通过。
+- `tools/dev/api-shape.mjs` 的 `inDynamicMap` 只看直接父层 → `$.results.hy3.error`
+  这类二级键被误报成「字段名写错」。已改为一路往上找根，整棵子树豁免。
+
+### Added
+
+- **`npm run test:ui`**：无头用例的统一入口（判据：是否 import `./ui-harness.mjs`），
+  失败时打印每个脚本的尾部输出。这次的教训就是「没有统一入口 → 没人跑 → 烂了也没人知道」。
+- `tools/dev/fixtures.mjs` 新增 `consoleFixture` / `quotaFixture` / `dshFixture` /
+  `checkinFailFixture`；`probeResultsFixture` 改为按 catalog 生成非空结果。
+- `api-shape.mjs` 支持按路由声明 `allowExtra: true`：放行**故意**多出来的键
+  （如用假令牌验「凭据绝不渲染」），但**缺失检查照旧**。
+
+### Docs
+
+- `CONTRIBUTING.md`：`test:ui` 门禁、桩数据的两条反直觉规则（桩不能太"干净"、
+  故意多余键怎么放行）、以及「验收全绿但产品有问题时先查运行时报错」。
+- `dashboard/README.md`：i18n 验收的扫描范围（文本节点 + 属性 + 预填 `value`）。
+
 ## [1.3.1] - 2026-10-08
 
 1.3.0 的「中 / 英双语」在发布后被真实界面证伪：切到英文后**仍有成片中文**。

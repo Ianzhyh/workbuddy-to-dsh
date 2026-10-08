@@ -7,6 +7,7 @@
  * 模型 CSV 增列、日志关键字过滤。
  */
 import { startStaticServer, openPage, waitFor, q, sleep } from './ui-harness.mjs';
+import { accountsFixture, bridgeFixture, checkinFixture, consoleFixture, credentialsFixture, diagnoseFixture, dshFixture, quotaFixture, requestsFixture } from './fixtures.mjs';
 
 const PORT = 8787;
 const URL_ = `http://127.0.0.1:${PORT}/`;
@@ -23,6 +24,7 @@ const CATALOG = [
 ];
 
 const USAGE = {
+  ok: true,
   windowDays: 7,
   total: { calls: 3, promptTokens: 2000, completionTokens: 0, ms: 300, credit: 0.24, creditCalls: 3, failed: 0 },
   models: [{ model: 'alpha', calls: 3, promptTokens: 2000, completionTokens: 0, ms: 300, credit: 0.24, creditCalls: 3 }],
@@ -53,21 +55,24 @@ const SECRET = 'eyJhbGciOiJIUzI1NiJ9.SUPER_SECRET_TOKEN_VALUE';
 
 const routes = {
   '/api/models': { body: { models: CATALOG } },
+  // 本用例**故意**在 credentials 里塞了一个假令牌（见 SECRET），用来断言
+  // 「凭据绝不进诊断报告」。真实接口不会返回这个键，所以放行「多余键」检查。
   '/api/overview': {
+    allowExtra: true,
     body: {
-      bridge: {
+      bridge: { ...bridgeFixture(),
         running: true, ok: true, host: '127.0.0.1', port: 8790, endpoint: 'http://127.0.0.1:8790/v1',
         pid: 987654, startedAt: new Date(now - 5400000).toISOString(), uptimeMs: 5400000,
         catalogSize: 3, catalogAt: new Date(now - 120000).toISOString(),
-        upstreamShape: { paths: ['/v2/enterprises/personal/models', '/v3/config'], droppedNonChat: ['nes-gf', 'hunyuan-image'] },
+        upstreamShape: { ...bridgeFixture().upstreamShape, paths: ['/v2/enterprises/personal/models', '/v3/config'], droppedNonChat: ['nes-gf', 'hunyuan-image'] },
       },
-      credentials: {
+      credentials: { ...credentialsFixture(),
         active: { account: '330000000000', userId: '330000000000abcdef', domain: 'www.codebuddy.cn', remainingMs: 44 * 86400000, expiresAt: now + 44 * 86400000, accessToken: SECRET },
         error: '',
       },
-      quota: { total: 10, packages: [] },
-      dsh: { routeLive: true, hasBridgeKey: true, bundlesOk: true, bundles: [], registeredModels: ['alpha', 'gone-model'] },
-      console: { version: '1.0.0', node: 'v22.22.2' },
+      quota: { ...quotaFixture(), total: 10, packages: [] },
+      dsh: { ...dshFixture(), routeLive: true, hasBridgeKey: true, bundlesOk: true, bundles: [], registeredModels: ['alpha', 'gone-model'] },
+      console: { ...consoleFixture(), version: '1.0.0', node: 'v22.22.2' },
     },
   },
   '/api/probe-results': {
@@ -77,8 +82,11 @@ const routes = {
       lastRun: { scope: 'checked', count: 2 },
     },
   },
+  // 信封（summary / bridge / credentials / dsh）由共享夹具提供；
+  // 这里只覆盖 items —— 保留本用例自己的诊断条目。
   '/api/diagnose': {
     body: {
+      ...diagnoseFixture(),
       items: [
         { id: 'exe', label: 'WorkBuddy 客户端', status: 'ok', detail: 'E:\\App\\WorkBuddy\\WorkBuddy.exe', hint: '' },
         { id: 'atrest', label: 'AtRest 密钥', status: 'ok', detail: 'keyId=9127dea1b44020a7（与信封一致）', hint: '' },
@@ -89,9 +97,9 @@ const routes = {
     },
   },
   '/api/usage': { body: { usage: USAGE } },
-  '/api/requests': { body: { requests: REQUESTS } },
-  '/api/accounts': { body: { accounts: [] } },
-  '/api/checkin': { body: { status: { active: true, todayCheckedIn: true } } },
+  '/api/requests': { body: requestsFixture({ requests: REQUESTS }) },
+  '/api/accounts': { body: accountsFixture({ accounts: [] }) },
+  '/api/checkin': { body: checkinFixture() },
   '/api/bridge/log': { body: { lines: LOG_LINES } },
 };
 

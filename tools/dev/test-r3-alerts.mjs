@@ -7,6 +7,7 @@
  * 水位线持久化、跨天恢复、转义、提醒数与面板同源。
  */
 import { startStaticServer, openPage, waitFor, q, sleep } from './ui-harness.mjs';
+import { accountsFixture, diagnoseFixture } from './fixtures.mjs';
 
 const PORT = 8789;
 const URL_ = `http://127.0.0.1:${PORT}/`;
@@ -43,10 +44,10 @@ const routes = {
     }),
   },
   '/api/probe-results': { body: { updatedAt: null, results: {}, lastRun: null } },
-  '/api/diagnose': { body: { items: [] } },
+  '/api/diagnose': { body: diagnoseFixture({ items: [] }) },
   '/api/usage': { body: { usage: null } },
   '/api/requests': { body: () => ({ requests: window.__FIX.requests }) },
-  '/api/accounts': { body: { accounts: [] } },
+  '/api/accounts': { body: accountsFixture({ accounts: [] }) },
   '/api/checkin': { body: () => ({ status: window.__FIX.checkin }) },
   '/api/bridge/log': { body: { lines: [] } },
 };
@@ -101,8 +102,8 @@ try {
   // ── R3.1-1 基线标题 ─────────────────────────────────────────────────
   {
     const t = await title();
-    if (t === '桥运行中 · 4 模型 · WorkBuddy 中转控制台') pass(`R3.1-1 正常态标题：${t}`);
-    else fail(`R3.1-1 标题应为「桥运行中 · 4 模型 · WorkBuddy 中转控制台」，实际「${t}」`);
+    if (t === '桥运行中 · 4 模型 · WorkBuddy 本地 API 桥') pass(`R3.1-1 正常态标题：${t}`);
+    else fail(`R3.1-1 标题应为「桥运行中 · 4 模型 · WorkBuddy 本地 API 桥」，实际「${t}」`);
     if (await alertHidden()) pass('R3.2 一切正常时提示条隐藏');
     else fail(`R3.2 无异常时提示条不该出现：「${await alertText()}」`);
   }

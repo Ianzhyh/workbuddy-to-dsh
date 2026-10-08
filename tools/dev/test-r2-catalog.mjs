@@ -4,6 +4,7 @@
  *   node tools/dev/test-r2-catalog.mjs
  */
 import { startStaticServer, openPage, waitFor, click, q, sleep } from './ui-harness.mjs';
+import { accountsFixture, bridgeFixture, checkinFailFixture, consoleFixture, credentialsFixture, diagnoseFixture, dshFixture, quotaFixture, requestsFixture } from './fixtures.mjs';
 
 const PORT = 8793;
 const URL_ = `http://127.0.0.1:${PORT}/`;
@@ -25,19 +26,19 @@ const routes = {
   '/api/models': { body: { models: CATALOG } },
   '/api/overview': {
     body: {
-      bridge: { running: true, ok: true, host: '127.0.0.1', port: 8790, endpoint: 'http://127.0.0.1:8790/v1', pid: 1, startedAt: new Date(now - 1000).toISOString(), uptimeMs: 1000, catalogSize: 4, catalogAt: catalogAt.toISOString() },
-      credentials: { active: null, error: '' },
-      quota: { total: 10, packages: [] },
-      dsh: { routeLive: true, hasBridgeKey: true, bundlesOk: true, bundles: [], registeredModels: [] },
-      console: { version: '1.0.0', node: 'v22' },
+      bridge: { ...bridgeFixture(), running: true, ok: true, host: '127.0.0.1', port: 8790, endpoint: 'http://127.0.0.1:8790/v1', pid: 1, startedAt: new Date(now - 1000).toISOString(), uptimeMs: 1000, catalogSize: 4, catalogAt: catalogAt.toISOString() },
+      credentials: { ...credentialsFixture(), active: null, error: '' },
+      quota: { ...quotaFixture(), total: 10, packages: [] },
+      dsh: { ...dshFixture(), routeLive: true, hasBridgeKey: true, bundlesOk: true, bundles: [], registeredModels: [] },
+      console: { ...consoleFixture(), version: '1.0.0', node: 'v22' },
     },
   },
   '/api/probe-results': { body: { updatedAt: null, results: {}, lastRun: null } },
-  '/api/diagnose': { body: { items: [] } },
+  '/api/diagnose': { body: diagnoseFixture({ items: [] }) },
   '/api/usage': { body: { usage: null } },
-  '/api/requests': { body: { requests: [] } },
-  '/api/accounts': { body: { accounts: [] } },
-  '/api/checkin': { body: { status: null } },
+  '/api/requests': { body: requestsFixture({ requests: [] }) },
+  '/api/accounts': { body: accountsFixture({ accounts: [] }) },
+  '/api/checkin': { body: checkinFailFixture() },
   '/api/bridge/log': { body: { lines: [] } },
 };
 

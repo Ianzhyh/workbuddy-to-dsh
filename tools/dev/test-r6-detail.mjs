@@ -7,6 +7,7 @@
  * 不重建整表、数字紧凑显示与精确值 tooltip。
  */
 import { startStaticServer, openPage, waitFor, q, sleep } from './ui-harness.mjs';
+import { accountsFixture, bridgeFixture, checkinFixture, consoleFixture, credentialsFixture, diagnoseFixture, dshFixture, quotaFixture, requestsFixture } from './fixtures.mjs';
 
 const PORT = 8786;
 const URL_ = `http://127.0.0.1:${PORT}/`;
@@ -27,6 +28,7 @@ const CATALOG = [
 ];
 
 const USAGE = {
+  ok: true,
   windowDays: 7,
   total: { calls: 3, promptTokens: 2000, completionTokens: 0, ms: 300, credit: 0.24, creditCalls: 3, failed: 0 },
   models: [{ model: 'hy4', calls: 3, promptTokens: 2000, completionTokens: 0, ms: 300, credit: 0.24, creditCalls: 3 }],
@@ -38,21 +40,21 @@ const routes = {
   '/api/models': { body: { models: CATALOG } },
   '/api/overview': {
     body: {
-      bridge: { running: true, ok: true, host: '127.0.0.1', port: 8790, endpoint: 'http://127.0.0.1:8790/v1', pid: 1, startedAt: new Date(now - 1000).toISOString(), uptimeMs: 1000, catalogSize: 3, catalogAt: new Date(now - 60000).toISOString() },
-      credentials: { active: { account: 'a', userId: 'a', remainingMs: 40 * 86400000, expiresAt: now + 40 * 86400000 }, error: '' },
-      quota: { total: 10, packages: [] },
-      dsh: { routeLive: true, hasBridgeKey: true, bundlesOk: true, bundles: [], registeredModels: ['hy4'] },
-      console: { version: '1.0.0', node: 'v22' },
+      bridge: { ...bridgeFixture(), running: true, ok: true, host: '127.0.0.1', port: 8790, endpoint: 'http://127.0.0.1:8790/v1', pid: 1, startedAt: new Date(now - 1000).toISOString(), uptimeMs: 1000, catalogSize: 3, catalogAt: new Date(now - 60000).toISOString() },
+      credentials: { ...credentialsFixture(), active: { account: 'a', userId: 'a', remainingMs: 40 * 86400000, expiresAt: now + 40 * 86400000 }, error: '' },
+      quota: { ...quotaFixture(), total: 10, packages: [] },
+      dsh: { ...dshFixture(), routeLive: true, hasBridgeKey: true, bundlesOk: true, bundles: [], registeredModels: ['hy4'] },
+      console: { ...consoleFixture(), version: '1.0.0', node: 'v22' },
     },
   },
   '/api/probe-results': {
     body: { updatedAt: now - 60000, results: { hy4: { ok: true, ms: 1180, at: now - 60000, credit: 0 }, hy3: { ok: false, ms: 2400, at: now - 60000, error: 'HTTP 400' } }, lastRun: { scope: 'checked', count: 2 } },
   },
-  '/api/diagnose': { body: { items: [] } },
+  '/api/diagnose': { body: diagnoseFixture({ items: [] }) },
   '/api/usage': { body: { usage: USAGE } },
-  '/api/requests': { body: { requests: [] } },
-  '/api/accounts': { body: { accounts: [] } },
-  '/api/checkin': { body: { status: { active: true, todayCheckedIn: true } } },
+  '/api/requests': { body: requestsFixture({ requests: [] }) },
+  '/api/accounts': { body: accountsFixture({ accounts: [] }) },
+  '/api/checkin': { body: checkinFixture() },
   '/api/bridge/log': { body: { lines: [] } },
 };
 

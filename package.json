@@ -54,7 +54,8 @@
     "pack:plugin": "node dsh-plugin/scripts/vendor.mjs && cd dsh-plugin && npm pack",
     "check:types": "tsc --noEmit -p jsconfig.json",
     "lint": "eslint .",
-    "release:check": "npm run vendor:check && npm run check:types && npm run lint && npm run test:lib && npm run test:plugin && npm run verify:standalone"
+    "release:check": "npm run vendor:check && npm run check:types && npm run lint && npm run test:lib && npm run test:plugin && npm run verify:standalone",
+    "test:ui": "node tools/dev/run-ui-tests.mjs"
   },
   "keywords": [
     "deepseek-harness",
