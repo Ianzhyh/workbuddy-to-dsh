@@ -1,4 +1,4 @@
-# 发版前检查：vendor 与仓库同步 + 单测 + 独立分发包演练
+# 发版前检查：vendor 与仓库同步 + 静态检查 + 单测 + 桥合约 + 独立分发包演练
 #
 # 为什么放在 CI：这个插件的"发布物"是自带桥与控制台的 vendor/ 快照，
 # 只要忘了重跑 vendor，别人装到的就是旧代码 —— 这类问题本地很容易漏。
@@ -13,7 +13,7 @@ on:
 jobs:
   check:
     # 桥要用 Windows DPAPI 解 WorkBuddy 的 AtRest 凭据；测试本身跨平台，
-    # 但独立演练会真的起桥，所以固定 Windows 更贴近真实使用环境。
+    # 但独立演练会真的起桥，所以主门禁固定 Windows 更贴近真实使用环境。
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -24,6 +24,12 @@ jobs:
       - name: vendor 与仓库是否同步
         run: node dsh-plugin/scripts/vendor.mjs --check
 
+      - name: 类型检查（tsc --checkJs）
+        run: npm run check:types
+
+      - name: ESLint
+        run: npm run lint
+
       - name: 单元测试（协议 / 装配 / 路由矩阵 / 分发形态）
         run: node --test "dsh-plugin/tests/*.test.mjs"
 
@@ -32,3 +38,33 @@ jobs:
 
       - name: 独立分发包演练（没有仓库时也能跑起来）
         run: node dsh-plugin/scripts/verify-standalone.mjs
+
+  cross-platform:
+    # B4：README 承认 macOS/Linux「已实现未实测」—— 矩阵 CI 是唯一低成本的
+    # 兑现方式。跑除 verify-standalone 之外的跨平台子集（独立演练的跨平台
+    # 版本由这个矩阵逐步暴露问题，别一次全上）。
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: vendor 与仓库是否同步
+        run: node dsh-plugin/scripts/vendor.mjs --check
+
+      - name: 类型检查
+        run: npm run check:types
+
+      - name: ESLint
+        run: npm run lint
+
+      - name: 单元测试
+        run: node --test "dsh-plugin/tests/*.test.mjs"
+
+      - name: 桥的合约测试（假凭据，不触真上游）
+        run: node --test bridge/bridge.test.mjs

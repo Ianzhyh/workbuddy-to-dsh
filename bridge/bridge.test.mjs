@@ -17,6 +17,7 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
 import { mkdtempSync, rmSync, writeFileSync, existsSync, readFileSync } from 'node:fs';
@@ -1291,6 +1292,63 @@ test('桥：count_tokens —— 规范同形、纯本地估算（不打上游）
 
     // 纯本地：这个端点一条请求都不该打到上游
     assert.equal(stub.seen.length, 0, 'count_tokens 不得触达上游（没有 tokenizer 可打）');
+  } finally {
+    await bridge.stop();
+    try { await stub.close(); } catch { /* 忽略 */ }
+    rmSync(bridge.dir, { recursive: true, force: true });
+  }
+});
+
+test('桥：客户端凭据分层 —— key 鉴权、账本归因、独立限流桶', { timeout: 120_000 }, async () => {
+  const stub = await startStubUpstream(['ck-model']);
+  const bridge = await startBridge(
+    {
+      CODEBUDDY_ENDPOINT: stub.base,
+      WORKBUDDY_CLIENT_KEYS: 'key-aaa,key-bbb',
+      WORKBUDDY_RATE_LIMIT_RPM: '2',
+      WORKBUDDY_RATE_LIMIT_MODE: 'reject',
+    },
+    { auth: READABLE_FAKE_AUTH },
+  );
+  const chat = (token) => fetch(bridge.baseUrl + '/v1/chat/completions', {
+    method: 'POST',
+    headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+    body: JSON.stringify({ model: 'ck-model', messages: [{ role: 'user', content: 'hi' }] }),
+    signal: AbortSignal.timeout(15000),
+  });
+  try {
+    // ① LOCAL_TOKEN 仍然万能（管理面 / 控制台用它）
+    const rLocal = await chat(TOKEN);
+    assert.equal(rLocal.status, 200, 'LOCAL_TOKEN 必须仍然可用');
+    await rLocal.text();
+
+    // ② client key 可用；未登记的 key 401
+    const rA = await chat('key-aaa');
+    assert.equal(rA.status, 200, '已登记的 client key 应被接受');
+    await rA.text();
+    const rBad = await chat('key-wrong');
+    assert.equal(rBad.status, 401, '未登记的 key 必须 401');
+    await rBad.text();
+
+    // ③ per-key 限流：key-aaa 的桶打满 → 429；key-bbb 的桶独立不受影响
+    const rA2 = await chat('key-aaa');
+    assert.equal(rA2.status, 200);
+    await rA2.text();
+    const rA3 = await chat('key-aaa');
+    assert.equal(rA3.status, 429, 'key-aaa 第 3 条应被自己的桶限流');
+    await rA3.text();
+    const rB1 = await chat('key-bbb');
+    assert.equal(rB1.status, 200, 'key-bbb 的桶独立，不受 key-aaa 打满影响');
+    await rB1.text();
+
+    // ④ 账本归因：client key 的记录带「哈希前 8 位」，明文绝不落账
+    await new Promise((r) => setTimeout(r, 100));
+    const ledger = readFileSync(join(bridge.dir, 'usage.jsonl'), 'utf8')
+      .split('\n').filter(Boolean).map((l) => JSON.parse(l));
+    const expected = createHash('sha256').update('key-aaa').digest('hex').slice(0, 8);
+    assert.ok(ledger.some((l) => l.client === expected), 'key-aaa 的记录必须带哈希前 8 位归因');
+    assert.ok(ledger.some((l) => l.client === 'local'), 'LOCAL_TOKEN 的记录归因为 local');
+    assert.ok(!ledger.some((l) => String(l.client || '').includes('key-aaa')), '明文 key 不得出现在账本');
   } finally {
     await bridge.stop();
     try { await stub.close(); } catch { /* 忽略 */ }

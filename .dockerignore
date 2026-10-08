@@ -1,0 +1,16 @@
+# 构建上下文只需要桥与控制台的运行时文件
+node_modules
+dsh-plugin
+docs
+tools
+.github
+*.md
+!README.md
+.env
+.env.*
+.git
+.gitignore
+*.tgz
+*.tar.gz
+Dockerfile
+.dockerignore

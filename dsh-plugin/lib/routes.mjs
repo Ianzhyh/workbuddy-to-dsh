@@ -48,7 +48,7 @@ async function readJsonBody(req, limit = 64 * 1024) {
  * @param {(line: string, detail?: unknown) => void} deps.log
  */
 export function createRouteTable(deps) {
-  const { snapshot, supervisor, consoleSupervisor, client, adapter, paths, provider, log, onUpstreamMutation = () => {}, readPrefs = () => null, onWritePrefs = () => {}, notifyAdaptersUpdated = () => false } = deps;
+  const { snapshot, supervisor, consoleSupervisor, client, adapter, paths, provider, log, onUpstreamMutation = () => {}, onWritePrefs = () => {}, notifyAdaptersUpdated = () => false } = deps;
 
   /** 写操作的准入检查。 */
   const guard = (req) => req.headers['x-workbuddy-panel'] === '1';

@@ -1,0 +1,226 @@
+openapi: 3.1.0
+info:
+  title: WorkBuddy 本地 API 桥
+  version: 1.2.0
+  description: |
+    把本机 WorkBuddy 桌面端已登录的模型能力，经本地回环桥暴露为
+    OpenAI 兼容与 Anthropic 兼容两套接口。仅监听 127.0.0.1。
+
+    机器可读描述由人工维护（`docs/openapi.yaml`），与实现同步更新；
+    客户端行为的权威口径以 `docs/dsh-llm-adapter-contract.md` 与源码为准。
+servers:
+  - url: http://127.0.0.1:8790
+    description: 本机回环（默认端口，可用 WORKBUDDY_PORT 覆盖）
+security:
+  - bearerAuth: []
+  - apiKeyHeader: []
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: WORKBUDDY_LOCAL_TOKEN（管理面 / 默认钥匙），或 WORKBUDDY_CLIENT_KEYS 中登记的客户端 key
+    apiKeyHeader:
+      type: apiKey
+      in: header
+      name: x-api-key
+      description: 同上（Anthropic 系客户端的惯例写法）
+  schemas:
+    Error:
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            message: { type: string }
+            type: { type: string }
+    ChatCompletionRequest:
+      type: object
+      required: [model, messages]
+      properties:
+        model: { type: string }
+        messages:
+          type: array
+          items: { type: object }
+        stream: { type: boolean, default: false }
+        tools: { type: array, items: { type: object } }
+        tool_choice: {}
+        max_tokens: { type: integer }
+        temperature: { type: number }
+        top_p: { type: number }
+        stop: {}
+    AnthropicMessagesRequest:
+      type: object
+      required: [model, messages]
+      properties:
+        model: { type: string }
+        system: {}
+        messages:
+          type: array
+          items: { type: object }
+        stream: { type: boolean, default: false }
+        tools: { type: array, items: { type: object } }
+        tool_choice: {}
+        max_tokens: { type: integer }
+        temperature: { type: number }
+        top_p: { type: number }
+        stop_sequences: { type: array, items: { type: string } }
+paths:
+  /v1/chat/completions:
+    post:
+      summary: OpenAI 兼容对话（支持流式、工具调用、多模态）
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ChatCompletionRequest' }
+      responses:
+        '200':
+          description: 非流式返回聚合结果；stream=true 时返回 text/event-stream
+        '413': { description: 请求体超限 }
+        '429': { description: 本地限流（需 opt-in），带 Retry-After }
+        '502': { description: 上游错误（透传状态码） }
+  /v1/messages:
+    post:
+      summary: Anthropic Messages 兼容（Claude Code 直连）
+      description: system 顶层字段、tool_use / tool_result 块数组均按 Anthropic 规范翻译；上游拉黑 Claude Code 固定 system 模板的问题已在出站层最小改写。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AnthropicMessagesRequest' }
+      responses:
+        '200': { description: 非流式返回 Anthropic Message；stream=true 返回 SSE 事件序列 }
+        '400': { description: 上游拒绝（含审计模板类，见 TROUBLESHOOTING） }
+        '413': { description: 请求体超限 }
+  /v1/messages/count_tokens:
+    post:
+      summary: 估算输入 token（Anthropic 规范同形）
+      description: 纯本地估算，不打上游、不记账。区分 ASCII（约 4 字符/token）与非 ASCII（CJK 约按字计）。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AnthropicMessagesRequest' }
+      responses:
+        '200':
+          description: 估算结果
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  input_tokens: { type: integer }
+  /v1/models:
+    get:
+      summary: 模型目录（双端点合并）
+      parameters:
+        - in: query
+          name: all
+          schema: { type: string }
+          description: all=1 返回完整目录并刷新缓存
+      responses:
+        '200':
+          description: 目录
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  object: { type: string }
+                  data:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: { type: string }
+  /v1/quota:
+    get:
+      summary: 积分余额（带缓存，TTL 由 WORKBUDDY_QUOTA_TTL_MS 控制）
+      responses:
+        '200': { description: 余额与套餐 }
+  /v1/usage:
+    get:
+      summary: 本地用量聚合（按天 / 按模型）
+      parameters:
+        - in: query
+          name: days
+          schema: { type: integer }
+      responses:
+        '200': { description: 用量统计（来自本地账本） }
+    delete:
+      summary: 清空账本
+      responses:
+        '200': { description: 已清空 }
+  /v1/requests:
+    get:
+      summary: 最近请求明细 + 进行中的请求
+      parameters:
+        - in: query
+          name: limit
+          schema: { type: integer, default: 50 }
+      responses:
+        '200':
+          description: 明细（requests[]，只含元数据）与进行中（active[]，含 runningMs）及 activeAlertMs
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  requests:
+                    type: array
+                    items: { type: object }
+                  active:
+                    type: array
+                    items: { type: object }
+                  activeAlertMs: { type: number }
+  /v1/checkin:
+    get:
+      summary: 查询签到状态
+      responses:
+        '200': { description: 状态 }
+    post:
+      summary: 执行每日签到
+      responses:
+        '200': { description: 签到结果与状态 }
+  /v1/embeddings:
+    post:
+      summary: 明确 501 —— 上游没有任何 embedding 模型
+      description: 桥不做"假的向量"。需要 RAG 的客户端请另配 embedding 提供方。
+      responses:
+        '501': { description: not implemented（有意的） }
+  /health:
+    get:
+      summary: 只读健康检查（毫秒级，绝不等待上游）
+      security: []
+      responses:
+        '200':
+          description: ok=true，带 auth / clientExe / process / clients 等
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  pid: { type: integer }
+                  clientExe: { type: string }
+                  process:
+                    type: object
+                    properties:
+                      requests: { type: integer }
+                      errors: { type: integer }
+                      byStatus: { type: object }
+                      rateLimited: { type: integer }
+                  clients:
+                    type: object
+                    properties:
+                      enabled: { type: boolean }
+                      count: { type: integer }
+        '503': { description: 凭据读不出来（body 带原因；插件据此判 degraded） }
+  /:
+    get:
+      summary: 服务自述（端点清单与精选模型）
+      security: []
+      responses:
+        '200': { description: 说明文本 }

@@ -24,5 +24,5 @@ const child = spawn(process.execPath, [config.paths.bridgeScript], {
 
 child.on('exit', (code) => process.exit(code ?? 0));
 for (const sig of ['SIGINT', 'SIGTERM']) {
-  process.on(sig, () => child.kill(sig));
+  process.on(sig, () => child.kill(/** @type {NodeJS.Signals} */ (sig)));
 }

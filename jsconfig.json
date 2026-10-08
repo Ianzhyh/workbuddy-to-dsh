@@ -1,0 +1,27 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "allowJs": true,
+    "checkJs": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "maxNodeModuleJsDepth": 0,
+    "types": ["node"],
+    "strict": false,
+    "strictNullChecks": false
+  },
+  "include": [
+    "bridge/*.mjs",
+    "config.mjs",
+    "lib/*.mjs"
+  ],
+  "exclude": [
+    "dsh-plugin/**",
+    "dashboard/**",
+    "tools/**",
+    "node_modules/**",
+    "**/*.test.mjs"
+  ]
+}

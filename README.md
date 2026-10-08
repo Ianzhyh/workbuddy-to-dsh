@@ -1,5 +1,7 @@
 # WorkBuddy 本地 API 桥
 
+> 🌏 English summary: [README.en.md](README.en.md)
+
 把本机 **WorkBuddy 桌面端**已登录的模型能力（DeepSeek / GLM / Kimi / MiniMax 等），
 经一个本地桥变成本机的 **OpenAI 兼容**与 **Anthropic 兼容**两套接口 ——
 **Claude Code**、**opencode**、**Cursor**、**Trae**、**Cherry Studio**、**NextChat**、
@@ -26,18 +28,35 @@
 | 接 DeepSeek Harness | DeepSeek Harness 插件 · dsh 插件 · dsh 模型路由 · provider workbuddy |
 | 技术特性 | openai-compatible · anthropic-compatible · llm proxy · local model bridge · 零依赖 Node.js · 仅监听 127.0.0.1 · 本机凭据自用 |
 
-> ### ⚠️ 请先读这一段
+> ### ⚠️ 请先读这一段（免责与边界）
 >
-> **这是个人自用工具的源码，不是产品，也不面向分发推广。**
+> **这是一个自托管的开源工具：欢迎自用、欢迎分享源码，但它是非官方路径，风险自担。**
 >
 > - **非官方路径。** 它依赖 WorkBuddy 桌面端未公开的登录凭据存储格式。上游随时可能
->   改动协议或封禁这种方式，**可用性无任何保证**，且**不承诺任何兼容性**。
-> - **仅供本机、仅供自用。** 它只驱动**你自己机器上已登录**的那个账号，使用的是该账号
->   自身的配额。**请勿**用它做多账号中转、代他人调用、或任何形式的对外提供。
+>   改动协议或收紧风控（已经发生过——见[故障排查](docs/TROUBLESHOOTING.md)里的
+>   真实案例），**可用性无任何保证**，且**不承诺任何兼容性**。把它当作「随时可能
+>   需要更新甚至失效的互操作性实现」，而不是稳定服务。
+> - **只驱动你自己的账号。** 它只读取**你自己机器上已登录**的那个账号，消耗该账号
+>   自身的配额。**请勿**用它做多账号池化、代他人调用、或任何形式的转售 / 托管
+>   服务 —— 那既违背本项目的设计初衷，也最容易触发上游风控（殃及所有用户）。
 > - **请确认你符合 WorkBuddy 的服务条款。** 使用前请自行阅读并确认；若条款不允许，
 >   请不要使用本项目。
-> - **本项目的价值在于演示一种工程做法**（如何在进程外安全地复用 Electron 应用的
->   凭据存储而不落盘密钥）。若你需要长期稳定、可商用的模型接入，**请申请官方 API**。
+> - **无担保。** 按 MIT 许可"按现状"提供。作者不对账号风控、额度异常或任何损失负责。
+>   若你需要长期稳定、可商用的模型接入，**请申请官方 API**。
+> - **自担风险的分享是欢迎的**：转发仓库链接、写教程、提 PR 都可以；但请**不要**
+>   打包转售、绑定付费，或以本项目名义收集任何人的凭据。
+
+### 这个项目与同类工具的关系
+
+- **方向与 [claude-code-router](https://github.com/musistudio/claude-code-router) 相反**：
+  CCR 把别家的 API **注入** Claude Code；本项目把 Claude Code 等**发给 WorkBuddy 的
+  模型额度导出**成标准 API——两者互补而非竞争。
+- **与 WorkBuddy2API 集群（社区 20+ 同目标项目）的差异**：本项目刻意保持
+  **单账号 · 凭据不落盘 · 零运行时依赖 · 单文件自包含**；不支持也不计划支持
+  多账号池化与任务自动化——如果你的需求是后者，社区里已有更对口的工具。
+- 上游协议是**未公开接口**：所有同类项目都在同一片雷区里，失效与修复是常态。
+  本项目的对策是[把排查写清楚](docs/TROUBLESHOOTING.md)（症状、证据、处置），
+  而不是承诺稳定。
 > - 详细的风险与边界见 [注意事项](#注意事项) 与 [docs/SECURITY.md](docs/SECURITY.md)。
 
 **本仓库还提供一个 DeepSeek Harness 原生插件**（[`dsh-plugin/`](dsh-plugin/README.md)）：
@@ -144,6 +163,30 @@ WorkBuddy 的上游后端本身就讲 OpenAI 协议，官方只是没有开放�
 ```cmd
 bridge\start-bridge.cmd     :: 只起桥
 node tools\doctor.mjs       :: 命令行自检，输出缺失项与修法
+```
+
+### 把安装交给 Agent
+
+不想照着文档一步步来？把下面这段话**整段粘给任意 AI Agent**（WorkBuddy 对话、
+Claude Code、opencode…），它会替你完成判定 → 安装 → 验证，出错时自己查排错文档：
+
+```text
+请帮我在本机安装并验证 workbuddy-to-dsh（WorkBuddy 本地 API 桥）。步骤：
+
+1. 环境判定：确认 Node.js 18+（node -v）；确认 WorkBuddy 桌面端已安装并登录过
+   （Windows 下检查 %LOCALAPPDATA%\CodeBuddyExtension\Data\Public\auth\ 里是否有
+   .info 登录文件；没有就先打开 WorkBuddy 登录一次）。
+2. 获取代码：git clone https://github.com/Ianzhyh/workbuddy-to-dsh 并进入目录。
+   本项目零依赖，不需要 npm install。
+3. 启动：Windows 双击根目录的 启动.cmd（或 node dashboard/server.mjs）——它会自动
+   启动桥并打开控制台（http://127.0.0.1:8792）。
+4. 验证：运行 node tools/doctor.mjs 自检全部通过；再请求
+   curl -H "Authorization: Bearer wb-local-bridge" http://127.0.0.1:8790/v1/models
+   确认返回模型目录。
+5. 若我是 DeepSeek Harness 用户：改用 dsh plugin add github:Ianzhyh/workbuddy-to-dsh
+   直装插件，然后在 dsh 设置页的 WorkBuddy 分区完成模型注册并重启 dsh。
+6. 遇到问题先读 docs/TROUBLESHOOTING.md，按里面的处置试过再带报错来问我。
+全程只允许 127.0.0.1 本机回环，不要尝试改绑 0.0.0.0 或暴露到局域网。
 ```
 
 ---
@@ -280,6 +323,9 @@ copilot.tencent.com/v2/chat/completions   ← 上游只说 OpenAI 协议，且�
 
 ## 配置
 
+所有配置项都有合理默认值；完整清单（含中文说明）见 [.env.example](.env.example)。
+机器可读的接口描述见 [docs/openapi.yaml](docs/openapi.yaml)（OpenAPI 3.1）。
+
 统一配置真源是 [`config.mjs`](config.mjs)，优先级：
 **进程环境变量 > `.env` > 内置默认值**。
 
@@ -302,6 +348,18 @@ copy .env.example .env
 完整列表见 [`.env.example`](.env.example) 与 [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md)。
 
 > 改端口后需同步：控制台会按新配置启动桥，无需手工对齐。
+
+### Docker（容器形态）
+
+适合 **API key 网关模式**（`CODEBUDDY_API_KEY` 由外部注入）。桌面凭据模式需要
+本机的 WorkBuddy.exe 取 AtRest 密钥，容器里没有——那种用法保持「本机 + 启动.cmd」：
+
+```bash
+docker build -t workbuddy-bridge .
+docker run -d -p 8790:8790 -p 8792:8792 -e CODEBUDDY_API_KEY=<key> workbuddy-bridge
+```
+
+非 root 用户运行，带 `/health` 健康检查。
 
 ---
 

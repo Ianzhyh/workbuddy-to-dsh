@@ -361,6 +361,22 @@ node dsh-plugin/tests/panel-render.mjs --offline   # 只用内置样例数据
 
 ---
 
+## 通过 npm 分发（维护者备忘）
+
+包定义已就绪（`files` 覆盖 lib/scripts/vendor、`publishConfig.access=public`），
+仓库侧 `private` 已置 false。发布动作（需要 npm 账号与包名确认）：
+
+```cmd
+cd dsh-plugin
+npm publish
+```
+
+发布前先跑根目录 `npm run release:check`（vendor 快照必须与仓库一致）。
+GitHub 直装（`dsh plugin add github:Ianzhyh/workbuddy-to-dsh`）始终可用，npm 只是
+降低"没有 git 环境的用户"的门槛。
+
+---
+
 ## 许可
 
 MIT，与本仓库其余部分一致。与腾讯、WorkBuddy、CodeBuddy、DeepSeek 均无关联。

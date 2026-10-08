@@ -22,7 +22,7 @@ window.__ModuleLoader__.load({
       React = require('react');
     } catch (error) {
       React = globalThis.React;
-      if (!React) throw new Error('dsh-plugin-workbuddy: react is not available in the client module table');
+      if (!React) throw new Error('dsh-plugin-workbuddy: react is not available in the client module table', { cause: error });
     }
     const h = React.createElement;
     const { useState, useEffect, useCallback, useRef, useMemo } = React;
@@ -464,16 +464,6 @@ body.dark .wb-root,
     function fmtClock(ts) {
       const d = parseDate(ts);
       return d ? d.toLocaleTimeString('zh-CN', { hour12: false }) : '—';
-    }
-    function fmtAgo(ts) {
-      const d = parseDate(ts);
-      if (!d) return '—';
-      const ms = Date.now() - d.getTime();
-      if (!isFinite(ms) || ms < 0) return '刚刚';
-      if (ms < 60000) return Math.round(ms / 1000) + ' 秒前';
-      if (ms < 3600000) return Math.round(ms / 60000) + ' 分钟前';
-      if (ms < 86400000) return Math.round(ms / 3600000) + ' 小时前';
-      return Math.round(ms / 86400000) + ' 天前';
     }
     function downloadCsv(name, header, rows) {
       const esc = (v) => {
@@ -1691,7 +1681,6 @@ body.dark .wb-root,
         });
       }
       const items = data?.items || [];
-      const summary = data?.summary || {};
 
       /**
        * 诊断库的「dsh 模型路由」一项用的是**迁移前**的口径：检查 settings.yaml 里
@@ -1989,7 +1978,7 @@ body.dark .wb-root,
      * 模型选择由容器持有（`model` / `setModel`）—— 这样切标签页回来不会被重置，
      * 也就不会给人"模型是写死的"错觉。未选时回落到推荐模型（sampleModel）。
      */
-    function ChatPanel({ onStartConsole, busy, sampleModel, model, setModel, messages, setMessages, accountKey }) {
+    function ChatPanel({ sampleModel, model, setModel, messages, setMessages, accountKey }) {
       /**
        * 模型目录用 `refreshKey` 跟着**桥的登录账号**走。
        *

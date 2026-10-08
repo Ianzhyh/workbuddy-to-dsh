@@ -169,6 +169,12 @@ export const config = {
     rateLimitMinIntervalMs: Math.max(0, Number(env.WORKBUDDY_RATE_LIMIT_MIN_INTERVAL_MS || 0)) || 0,
     rateLimitMode: env.WORKBUDDY_RATE_LIMIT_MODE === 'reject' ? 'reject' : 'queue',
     /**
+     * 客户端凭据分层（opt-in）：逗号分隔的多把 key，每把一个独立调用方
+     * （独立限流桶 + 账本 client 归因）；删除某把即可单独吊销（重启生效）。
+     * **内存中只保留哈希**；默认空 = 功能关，只有 WORKBUDDY_LOCAL_TOKEN。
+     */
+    clientKeys: env.WORKBUDDY_CLIENT_KEYS || '',
+    /**
      * 进行中请求超过该毫秒数即判「疑似卡死」（控制台标黄提醒）。
      * 只影响显示高亮，**不干预请求** —— 桥没有任何默认超时。
      */
@@ -248,6 +254,7 @@ export function bridgeEnv(overrides = {}) {
     WORKBUDDY_RATE_LIMIT_MIN_INTERVAL_MS: String(config.bridge.rateLimitMinIntervalMs),
     WORKBUDDY_RATE_LIMIT_MODE: config.bridge.rateLimitMode,
     WORKBUDDY_ACTIVE_ALERT_MS: String(config.bridge.activeAlertMs),
+    WORKBUDDY_CLIENT_KEYS: config.bridge.clientKeys,
     WORKBUDDY_AUTH_FILE: overrides.authFile || config.workbuddy.authFile,
     // 探测不到时不注入空值 —— 桥会用自己的同款探测重新定位，而不是把
     // 一个空串当成"显式指定的路径"。

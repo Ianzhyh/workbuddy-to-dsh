@@ -150,7 +150,7 @@ export function resolveConfig(raw = {}) {
     fallbackProvider: String(cfg.fallbackProvider || DEFAULTS.fallbackProvider),
     displayName: String(cfg.displayName || DEFAULTS.displayName),
     catalogTtlMs: Number(cfg.catalogTtlMs) || DEFAULTS.catalogTtlMs,
-    bridgeAliveTtlMs: Number(cfg.bridgeAliveTtlMs) ?? DEFAULTS.bridgeAliveTtlMs,
+    bridgeAliveTtlMs: Number(cfg.bridgeAliveTtlMs) || DEFAULTS.bridgeAliveTtlMs,
     modelAllow: asStringArray(cfg.modelAllow),
     modelDeny: asStringArray(cfg.modelDeny),
     defaultMaxTokens: cfg.defaultMaxTokens === undefined || cfg.defaultMaxTokens === null || cfg.defaultMaxTokens === ''

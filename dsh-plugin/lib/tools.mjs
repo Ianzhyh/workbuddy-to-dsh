@@ -168,6 +168,9 @@ export function createTools(deps) {
     },
     async execute(args, exec) {
       const claim = args?.claim === true;
+      // 桥当前账号（用于归属标注）。**容错取**：快照失败不应炸掉签到主流程，
+      // 那样归属提示最多缺席一行。
+      const state = await snapshot({ signal: exec?.signal }).catch(() => ({}));
       // 桥凭据异常（degraded）时 checkin 接口会回 502 —— 把它转成可读的
       // 修法提示，而不是向 agent 抛裸异常（那只会显示一个无上下文的错误码）。
       let result;

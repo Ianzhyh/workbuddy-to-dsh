@@ -29,6 +29,7 @@ import { Agent as HttpsAgent } from 'node:https';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createDecipheriv, createHash, randomUUID } from 'node:crypto';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { spawnSync } from 'node:child_process';
 
 // ── Static constants (values match the desktop app / official extension) ──
@@ -41,7 +42,6 @@ const APP_VERSION = process.env.WORKBUDDY_APP_VERSION || '4.9.29177644';
 const IDE_VERSION = process.env.WORKBUDDY_IDE_VERSION || '1.119.0';
 const IDE_NAME = process.env.WORKBUDDY_IDE_NAME || 'VSCode';
 const CHAT_PATH = '/v2/chat/completions';
-const CONFIG_PATH = '/v3/config';
 const REFRESH_SKEW_MS = 5 * 60 * 1000;
 const REFRESH_COOLDOWN_MS = 15 * 1000;
 const TRANSIENT_400_DELAYS = [1000, 4000, 10000, 25000];
@@ -68,6 +68,23 @@ const agentFor = (endpoint) => (String(endpoint).startsWith('https:') ? httpsAge
 const PORT = Number(process.env.WORKBUDDY_PORT || 8790);
 const HOST = process.env.WORKBUDDY_HOST || '127.0.0.1';
 const LOCAL_TOKEN = process.env.WORKBUDDY_LOCAL_TOKEN || ''; // optional: require a token on the local port
+/**
+ * 客户端凭据分层（opt-in）：`WORKBUDDY_CLIENT_KEYS=逗号分隔的多把 key`。
+ *
+ * 用途：把不同客户端（Claude Code / opencode / Cursor…）**分开记账与限流**；
+ * 某个客户端失控时，在 .env 里删掉它的 key 单独吊销（重启桥生效）。
+ *
+ * **内存中只保留 SHA-256 哈希**（前 8 位作展示标识），明文只在启动时读一次
+ * env，之后不再出现；账本里的 `client` 字段就是这 8 位 —— 日志与账本都不泄露
+ * 完整 key。默认空 = 功能关，行为与之前完全一致（只有 LOCAL_TOKEN 一把钥匙）。
+ */
+const CLIENT_KEY_HASHES = new Map(); // sha256hex -> 展示 id（哈希前 8 位）
+for (const rawKey of String(process.env.WORKBUDDY_CLIENT_KEYS || '').split(',')) {
+  const key = rawKey.trim();
+  if (!key) continue;
+  const hex = createHash('sha256').update(key).digest('hex');
+  CLIENT_KEY_HASHES.set(hex, hex.slice(0, 8));
+}
 const EXPLICIT_ENDPOINT = process.env.CODEBUDDY_ENDPOINT || '';
 const API_KEY = process.env.CODEBUDDY_API_KEY || '';
 /**
@@ -934,30 +951,36 @@ const RATE_LIMIT_MIN_INTERVAL_MS = Math.max(0, Math.floor(Number(process.env.WOR
 const RATE_LIMIT_MODE = process.env.WORKBUDDY_RATE_LIMIT_MODE === 'reject' ? 'reject' : 'queue';
 
 const rateState = {
-  /** 最近 60 秒内已放行的时刻（RPM 滑动窗口）。 */
-  recent: [],
-  /** 上一次放行时刻（最小间隔用）。 */
-  lastStart: 0,
-  /** 许可分配的串行链（并发排队）。 */
-  tail: Promise.resolve(),
+  /** scope -> { recent, lastStart, tail }：local 与每个 client key 各一个独立桶。 */
+  byScope: new Map(),
   /** 触发计数：账本与控制台可见「被限流了多少次」。 */
   limited: 0,
 };
 
+/** 取（或建）调用方自己的限流桶 —— 桶之间互不影响（B2 凭据分层）。 */
+function bucketFor(scope) {
+  let bucket = rateState.byScope.get(scope);
+  if (!bucket) {
+    bucket = { recent: [], lastStart: 0, tail: Promise.resolve() };
+    rateState.byScope.set(scope, bucket);
+  }
+  return bucket;
+}
+
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /** 现在能不能放行？不能则返回还需等待的毫秒数。 */
-function rateWaitMs(now) {
+function rateWaitMs(now, bucket) {
   let wait = 0;
   if (RATE_LIMIT_RPM > 0) {
     const cutoff = now - 60_000;
-    while (rateState.recent.length && rateState.recent[0] <= cutoff) rateState.recent.shift();
-    if (rateState.recent.length >= RATE_LIMIT_RPM) {
-      wait = Math.max(wait, rateState.recent[0] + 60_000 - now + 1);
+    while (bucket.recent.length && bucket.recent[0] <= cutoff) bucket.recent.shift();
+    if (bucket.recent.length >= RATE_LIMIT_RPM) {
+      wait = Math.max(wait, bucket.recent[0] + 60_000 - now + 1);
     }
   }
-  if (RATE_LIMIT_MIN_INTERVAL_MS > 0 && rateState.lastStart > 0) {
-    wait = Math.max(wait, rateState.lastStart + RATE_LIMIT_MIN_INTERVAL_MS - now + 1);
+  if (RATE_LIMIT_MIN_INTERVAL_MS > 0 && bucket.lastStart > 0) {
+    wait = Math.max(wait, bucket.lastStart + RATE_LIMIT_MIN_INTERVAL_MS - now + 1);
   }
   return wait;
 }
@@ -967,21 +990,22 @@ function rateWaitMs(now) {
  * queue 模式等到许可返回；reject 模式超限抛 code=RATE_LIMITED（带 retryAfterMs）。
  * @returns {Promise<{ waitedMs: number, limited: boolean }>}
  */
-async function acquireRateSlot(clientSignal) {
+async function acquireRateSlot(clientSignal, scope = 'local') {
   if (RATE_LIMIT_RPM <= 0 && RATE_LIMIT_MIN_INTERVAL_MS <= 0) return { waitedMs: 0, limited: false };
+  const bucket = bucketFor(scope);
   const enter = Date.now();
-  const prev = rateState.tail;
+  const prev = bucket.tail;
   let release;
-  rateState.tail = new Promise((resolve) => { release = resolve; });
+  bucket.tail = new Promise((resolve) => { release = resolve; });
   await prev;
   let limited = false;
   try {
     for (;;) {
       const now = Date.now();
-      const wait = rateWaitMs(now);
+      const wait = rateWaitMs(now, bucket);
       if (wait <= 0) {
-        rateState.recent.push(now);
-        rateState.lastStart = now;
+        bucket.recent.push(now);
+        bucket.lastStart = now;
         return { waitedMs: now - enter, limited };
       }
       if (!limited) {
@@ -990,13 +1014,14 @@ async function acquireRateSlot(clientSignal) {
         log(`rate limit engaged (mode=${RATE_LIMIT_MODE}): waiting ${wait}ms`);
       }
       if (RATE_LIMIT_MODE === 'reject') {
-        const err = new Error(`local rate limit exceeded; retry in ${Math.ceil(wait / 1000)}s`);
+        // Node 惯用：给 Error 挂自定义字段（识别码 + Retry-After 毫秒数）
+        const err = /** @type {Error & { code?: string, retryAfterMs?: number }} */ (new Error(`local rate limit exceeded; retry in ${Math.ceil(wait / 1000)}s`));
         err.code = 'RATE_LIMITED';
         err.retryAfterMs = wait;
         throw err;
       }
       if (clientSignal?.aborted) {
-        const err = new Error('client aborted while waiting for a rate-limit slot');
+        const err = /** @type {Error & { code?: string }} */ (new Error('client aborted while waiting for a rate-limit slot'));
         err.code = 'RATE_LIMIT_ABORTED';
         throw err;
       }
@@ -1009,7 +1034,8 @@ async function acquireRateSlot(clientSignal) {
 
 async function callUpstream(bodyString, model, conversationId, clientSignal) {
   // 限流闸门（opt-in；默认关）。放在最前：超限的请求连凭据都不读、更不打上游。
-  await acquireRateSlot(clientSignal);
+  // 限流桶按调用方分（local / 各 client key）—— B2 凭据分层的一部分。
+  await acquireRateSlot(clientSignal, requestScope.getStore()?.client || 'local');
   // 上游开始前的时刻戳（供端点计算 `X-WorkBuddy-Overhead-Ms`：
   // overhead = 上游请求发出前，桥自身做的前置处理耗时 —— 鉴权、读凭据、
   // payload 归一化、Anthropic→OpenAI 翻译。**不含限流排队**（那是我们主动
@@ -1658,6 +1684,10 @@ function syncUsageMirror(file) {
 
 function recordRequest(entry) {
   try {
+    // 调用方归因（B2 凭据分层）： ALS 里带着本次请求的 client id（local 或
+    // key 哈希前 8 位）—— 桥不可用时静默跳过，不影响记账主流程。
+    const client = requestScope.getStore()?.client;
+    if (client) entry = { ...entry, client };
     const file = usageFile();
     syncUsageMirror(file);
 
@@ -2529,7 +2559,7 @@ const readBody = (req, limit = MAX_BODY_BYTES) => new Promise((resolve, reject) 
     size += c.length;
     if (size > limit) {
       done = true;
-      const err = new Error(`request body exceeds ${limit} bytes`);
+      const err = /** @type {Error & { code?: string }} */ (new Error(`request body exceeds ${limit} bytes`));
       err.code = 'BODY_TOO_LARGE';
       // 先停住继续灌数据，再 reject —— 顺序反过来的话，pause 之前可能又塞进来
       // 几个 chunk（Node 的 data 事件是同步派发的），白占内存。
@@ -2591,11 +2621,32 @@ function originAllowed(req) {
  *
  * 两者承载的是同一个「本机回环令牌」，用途完全一致，没有理由让用户为了换一个
  * 客户端就记两套写法。**只影响本机回环端口上的这一个校验点**，与上游凭据无关。
+ * （B2 起鉴权入口改用下方的 identifyClientId —— 它在令牌之上还支持客户端
+ * 凭据分层；本函数保留给只需要「是不是管理钥匙」布尔判断的调用方。）
  */
-function hasLocalToken(req) {
-  if (req.headers.authorization === `Bearer ${LOCAL_TOKEN}`) return true;
-  const key = req.headers['x-api-key'];
-  return typeof key === 'string' && key === LOCAL_TOKEN;
+
+/**
+ * 请求级上下文（AsyncLocalStorage）：把「这是哪个调用方」传播到请求处理链的
+ * 任何深处（账本、限流都在深处取用），不需要把 res 一路传下去。
+ */
+const requestScope = new AsyncLocalStorage();
+
+/**
+ * 识别调用方：`'local'`（管理 / 控制台 / 默认钥匙）| 客户端 id（key 哈希前 8 位）
+ * | `null`（未识别 → 401）。LOCAL_TOKEN 是万能钥匙；client key 是分层的调用方
+ * 凭据（可单独吊销、独立限流、独立记账）。两种写法（Bearer / x-api-key）同
+ * hasLocalToken，一并支持。
+ */
+function identifyClientId(req) {
+  let token = null;
+  if (typeof req.headers.authorization === 'string' && req.headers.authorization.startsWith('Bearer ')) {
+    token = req.headers.authorization.slice(7);
+  }
+  if (!token && typeof req.headers['x-api-key'] === 'string') token = req.headers['x-api-key'];
+  if (!token) return null;
+  if (LOCAL_TOKEN && token === LOCAL_TOKEN) return 'local';
+  const hex = createHash('sha256').update(token).digest('hex');
+  return CLIENT_KEY_HASHES.get(hex) || null;
 }
 
 // ── 响应观测：进程级计数 + 开销头（横切两件事，只包一次）──────────────────
@@ -2661,15 +2712,21 @@ function trackInflight(req, res, model, stream) {
   res.once('close', () => { inflight.delete(id); });
 }
 
-const server = createServer(async (req, res) => {
+const server = createServer((req, res) => {
+  // 请求级上下文：入口处识别调用方一次（local / client key 哈希前 8 位），
+  // 账本与限流在处理链的任何深处用 requestScope.getStore() 取用。
+  requestScope.run({ client: identifyClientId(req) }, () => handleRequest(req, res));
+});
+
+async function handleRequest(req, res) {
   const url = new URL(req.url, `http://${req.headers.host}`);
   observeResponse(req, res);
   try {
     if (!originAllowed(req)) {
       return json(res, 403, { error: { message: 'workbuddy-bridge: cross-origin request rejected (this bridge serves local clients only)' } });
     }
-    if (LOCAL_TOKEN && !hasLocalToken(req)) {
-      return json(res, 401, { error: { message: 'workbuddy-bridge: bad or missing local token' } });
+    if ((LOCAL_TOKEN || CLIENT_KEY_HASHES.size) && identifyClientId(req) === null) {
+      return json(res, 401, { error: { message: 'workbuddy-bridge: bad or missing token' } });
     }
 
     if (url.pathname === '/health') {
@@ -2704,6 +2761,8 @@ const server = createServer(async (req, res) => {
           byStatus: procStats.byStatus,
           rateLimited: rateState.limited,
         },
+        // 客户端凭据分层（B2）：只暴露启用状态与数量，**绝不回显 key 或哈希**
+        clients: { enabled: CLIENT_KEY_HASHES.size > 0, count: CLIENT_KEY_HASHES.size },
         // 自动签到的内存态：桥重启后清空、重新判定（上游幂等兜底）
         autoCheckinEnabled: AUTO_CHECKIN_ENABLED,
         autoCheckin: autoCheckinState,
@@ -3117,7 +3176,7 @@ const server = createServer(async (req, res) => {
       res.on('close', () => { if (!res.writableEnded) ac.abort(); });
 
       try {
-        const { res: up, bodyText } = await callUpstream(
+        const { res: up, bodyText, upstreamStartedAt } = await callUpstream(
           JSON.stringify(normalizePayload(oai)),
           model,
           req.headers['x-conversation-id'] || trace(),
@@ -3203,7 +3262,7 @@ const server = createServer(async (req, res) => {
     if (!res.headersSent) return json(res, 500, { error: { message: e.message } });
     try { res.end(); } catch {}
   }
-});
+}
 
 // ── Preflight (--check): report prerequisites without starting the server ──
 if (process.argv.includes('--check')) {

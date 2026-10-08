@@ -14,7 +14,34 @@
 
 ## [Unreleased]
 
-（无）
+### Changed
+
+- **定位决策（2026-10-08）：走「可分发产品」线** —— README 免责与生态披露前置、
+  接受社区分享；同时红线不变（单账号、不转售 / 托管、凭据不落盘）。
+  本条目下的批次三 B 线动作随之落地（见下）。
+
+### Added
+
+- **客户端凭据分层**：`WORKBUDDY_CLIENT_KEYS` 支持每客户端独立 key（内存只存
+  SHA-256 哈希）：独立记账（账本 `client` 字段 = 哈希前 8 位，明文不落账）、
+  独立限流桶、删除某把即单独吊销（重启生效）；`LOCAL_TOKEN` 仍是管理面万能
+  钥匙。默认空 = 功能关，行为与之前完全一致。
+- **`docs/openapi.yaml`**：21 个端点的机器可读描述（OpenAPI 3.1，人工维护）。
+- **`CONTRIBUTING.md`**：先红后绿 / 真产物交叉校验 / vendor 约定 / 发版三步 /
+  不做清单，以及「上游观察」纪律。
+- **Docker + 跨平台 CI**：非 root 容器（API key 网关模式，带 /health 健康检查）；
+  CI 增 ubuntu/macos 矩阵（跑除独立演练外的门禁子集）。
+- **npm 发布形态**：插件包解除发布锁（`private: false`），发布动作需 npm 账号，
+  步骤见 `dsh-plugin/README.md`；GitHub 直装始终可用。
+- **`README.en.md`**：英文概览（完整文档仍为中文）。
+- **README「把安装交给 Agent」**：一段可粘贴的安装提示词（判定 → 安装 → 验证）。
+
+### Changed
+
+- **静态检查入门禁**：`tsc --checkJs`（生产代码 0 错误）+ ESLint（minimal 配置，
+  抓到并修复 `tools.mjs` 一处潜在 ReferenceError 等 12 项）；`release:check`
+  现包含 `check:types` 与 `lint`。devDependency 新增 typescript / eslint /
+  @types/node / globals —— **零运行时依赖的承诺不变**。
 
 ## [1.2.0] - 2026-10-08
 
