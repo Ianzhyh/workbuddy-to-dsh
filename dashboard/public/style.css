@@ -93,6 +93,13 @@
   --shadow-primary-sm: 0 2px 6px rgba(37, 99, 235, 0.25);
   --shadow-primary-md: 0 4px 14px rgba(37, 99, 235, 0.35);
 
+  /* ── 6. 浮层提示 (Tooltip) ───────────────────────────────────────────── */
+  /* 提示气泡用「反色面板」：浅色主题下是深底浅字，与系统自带的那只小框
+     拉开距离 —— 一眼就能看出是本页画的。 */
+  --tip-bg: #0f172a;
+  --tip-fg: #f8fafc;
+  --tip-border: transparent;
+
   /* ── 5. 动效曲线 (Transitions & Curves) ──────────────────────────────── */
   --ease: cubic-bezier(0.16, 1, 0.3, 1);
   --transition-fast: all 0.16s var(--ease);
@@ -140,6 +147,11 @@
   --fail: #ef4444;
   --fail-hover: #f87171;
   --fail-soft: rgba(239, 68, 68, 0.12);
+
+  /* 深色主题下不用反色（浅底会晃眼），改用比面板再抬一层的深灰 */
+  --tip-bg: #263041;
+  --tip-fg: #f8fafc;
+  --tip-border: rgba(255, 255, 255, 0.14);
   --fail-border: rgba(239, 68, 68, 0.28);
 
   --promo: #f43f5e;
@@ -660,7 +672,9 @@ button.mini {
   height: 24px;
   padding: 2px 9px;
   font-size: 11.5px;
-  border-radius: var(--radius-xs);
+  /* 与普通按钮同一圆角。原先用 --radius-xs（4px）—— 24px 高的控件只有 4px
+     圆角，混在同排的 8px 按钮里一眼就看出「方」，是实拍能看出来的不一致。 */
+  border-radius: var(--radius-sm);
 }
 
 /* ── 5. 顶部告警栏 Alert Bar ─────────────────────────────────────────── */
@@ -864,12 +878,21 @@ button.mini {
   font-size: 11.5px;
   font-weight: 500;
   padding: 1px 8px;
-  border-radius: var(--radius-xs);
+  /* 标签比按钮紧一档（6px 对 22px 高 ≈ 27%，与按钮的 8px/32px 同比例），
+     但不再用 --radius-xs 的 4px —— 那样在表格里成排出现时偏方。 */
+  border-radius: 6px;
   background: var(--panel-muted);
   color: var(--muted);
   border: 1px solid var(--border);
   white-space: nowrap;
 }
+
+/*
+ * 可点击的标签（如「最近请求」里复制错误详情的那个）本质上**是按钮**：
+ * 32px 高、有 hover / focus 态。它会被上面的 `.tag` 拉到 6px，
+ * 所以这里显式拉回按钮的 8px，保持「按钮一律 8px」这条规则。
+ */
+button.tag { border-radius: var(--radius-sm); }
 .tag.ok {
   background: var(--ok-soft);
   color: var(--ok);
@@ -1037,24 +1060,34 @@ tr.pickrow.rowactive td {
 .filterchip .chipx:hover { opacity: 1; color: var(--fail); }
 
 /* ── 10. 表单控件 Select / Input / Checkbox ──────────────────────────── */
-select {
+/*
+ * 触发器与原生 select **共用外观**。
+ *
+ * 为什么要自绘下拉：原生 <select> 的**展开列表**由操作系统绘制，圆角、内边距、
+ * 悬停态一律改不了（Windows 上是直角方块），和整页 12px 圆角的观感割裂。
+ * 所以把「用户看到的那一层」换成本地绘制的浮层（见 10b 的 .dd-*），
+ * 与 dsh 插件面板里那份下拉同构 —— 两处观感一致。
+ *
+ * 原生 <select> **不删除**，只是透明且不接指针事件（见 enhanceSelect）：
+ * `.value` / `.options` / `change` / 盒模型全都照旧，自动化用例一条都不用改。
+ */
+select,
+.dd-trigger {
   font: inherit;
   font-size: 12px;
   font-weight: 500;
-  padding: 5px 28px 5px 10px;
+  /*
+   * 高度必须和 button 一致（32px）。原先靠 padding 撑出 30px —— 和旁边 32px 的
+   * 按钮混在同一排时上下会差 1~2px，看起来像「没对齐」。显式给高度，
+   * 垂直方向交给浏览器居中（<select> 会自己把选中项文字居中）。
+   */
+  height: 32px;
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-sm);
   background-color: var(--panel);
   color: var(--text);
   outline: none;
   cursor: pointer;
-  -webkit-appearance: none;
-  -moz-appearance: none;
-  appearance: none;
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%2364748b' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
-  background-repeat: no-repeat;
-  background-position: right 8px center;
-  background-size: 13px 13px;
   box-shadow: var(--shadow-xs);
   transition: background-color 0.16s var(--ease),
               border-color 0.16s var(--ease),
@@ -1063,16 +1096,33 @@ select {
               transform 0.16s var(--ease);
 }
 
-select:hover {
+select {
+  padding: 0 28px 0 10px;
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%2364748b' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 9px center;
+  background-size: 13px 13px;
+}
+
+select:hover,
+.dd-trigger:hover {
   border-color: var(--primary);
   color: var(--text);
   box-shadow: var(--shadow-sm);
+}
+select:hover {
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%232563eb' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
 }
 
-select:focus {
+select:focus,
+.dd-trigger:focus-visible {
   border-color: var(--primary);
   box-shadow: 0 0 0 2px var(--primary-subtle);
+}
+select:focus {
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%232563eb' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
 }
 
@@ -1081,28 +1131,131 @@ select:active {
 }
 
 [data-theme="dark"] select {
-  background-color: var(--panel);
-  border-color: var(--border-strong);
-  color: var(--text);
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%2394a3b8' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
 }
 
 [data-theme="dark"] select:hover,
 [data-theme="dark"] select:focus {
-  border-color: var(--primary);
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%233b82f6' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
 }
 
+/*
+ * 原生列表由操作系统绘制，圆角与间距改不了（写 border-radius / padding 是
+ * 自欺欺人，实测无效）—— 真正给用户看的是下面的 .dd-menu。
+ * 这里只留背景色与文字色，兜住「万一走了原生列表」的情况。
+ */
 select option {
   background-color: var(--panel);
   color: var(--text);
-  padding: 6px 10px;
 }
+
+/* ── 10b. 自绘下拉 Dropdown ──────────────────────────────────────────── */
+.dd { position: relative; display: inline-flex; min-width: 0; max-width: 100%; vertical-align: middle; }
+/*
+ * 原生 select **留在常规流里**，只是透明且不接指针事件。
+ *
+ * 三个理由，缺一不可：
+ *   1. **宽度由它决定** —— 原生 <select> 会按最长的 option 撑宽，把它绝对定位掉
+ *      宽度就塌成内容的宽度，和改动前不一致（`#reqModelFilter` 那种长模型名会明显变窄）；
+ *   2. 自动化用例要 `getBoundingClientRect` 它、直接写 `.value` 再派 `change`；
+ *   3. `opacity:0` 不是 `display:none` —— 它仍在无障碍树里。
+ */
+.dd-native { opacity: 0; pointer-events: none; }
+/* 触发器绝对覆盖在上面：外观与原生 select 完全一致（共用上面那条规则） */
+.dd-trigger {
+  position: absolute; inset: 0;
+  display: inline-flex; align-items: center; justify-content: space-between;
+  gap: 8px; padding: 0 9px 0 10px; min-width: 0; text-align: left;
+}
+.dd-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.dd-arrow {
+  flex: none; width: 13px; height: 13px; margin-right: -1px;
+  background-repeat: no-repeat; background-position: center; background-size: 13px 13px;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%2364748b' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+  transition: transform 0.16s var(--ease), background-image 0.16s var(--ease);
+}
+[data-theme="dark"] .dd-arrow {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%2394a3b8' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+}
+.dd.open .dd-arrow, .dd-trigger:hover .dd-arrow {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%232563eb' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+}
+[data-theme="dark"] .dd.open .dd-arrow, [data-theme="dark"] .dd-trigger:hover .dd-arrow {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%233b82f6' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+}
+.dd.open .dd-arrow { transform: rotate(180deg); }
+
+.dd-menu {
+  position: absolute; top: calc(100% + 4px); left: 0; z-index: 80;
+  min-width: 100%; max-width: 340px; max-height: 264px; overflow-y: auto;
+  background: var(--panel);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-drawer);
+  padding: var(--space-1);
+  display: flex; flex-direction: column; gap: 2px;
+  animation: dd-pop 0.16s var(--ease) both;
+  transform-origin: top left;
+}
+.dd.drop-up .dd-menu {
+  top: auto; bottom: calc(100% + 4px);
+  transform-origin: bottom left;
+  animation-name: dd-pop-up;
+}
+@keyframes dd-pop { from { opacity: 0; transform: translateY(-6px) scale(0.98); } to { opacity: 1; transform: none; } }
+@keyframes dd-pop-up { from { opacity: 0; transform: translateY(6px) scale(0.98); } to { opacity: 1; transform: none; } }
+@media (prefers-reduced-motion: reduce) { .dd-menu { animation: none; } }
+
+.dd-item {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  width: 100%; padding: 6px 9px;
+  border: 0; background: transparent; color: var(--text);
+  font: inherit; font-size: 12px; font-weight: 500;
+  text-align: left; border-radius: 6px; cursor: pointer;
+  transition: background-color 0.16s var(--ease), color 0.16s var(--ease);
+}
+.dd-item-t { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.dd-item:hover { background: var(--panel-muted); color: var(--primary); }
+.dd-item.on { color: var(--primary); font-weight: 600; }
+.dd-item.on::after { content: '✓'; flex: none; font-size: 11px; opacity: 0.8; }
+.dd-menu::-webkit-scrollbar { width: 6px; }
+.dd-menu::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: var(--radius-full); }
+.dd-menu::-webkit-scrollbar-track { background: transparent; }
+
+/* ── 10c. 自绘提示气泡 Tooltip ───────────────────────────────────────── */
+/*
+ * 替代浏览器自带的 `title` 提示框。那只框由**操作系统**绘制：直角、系统字体、
+ * 不跟随主题 —— 和原生 <select> 的展开列表是同一类「观感割裂」。
+ *
+ * 元素本身保留 `title` 属性（自动化用例与 i18n 都要读它），只是在**悬停期间**
+ * 把它摘下来存进内存，原生提示框因此永远不会弹（见 initTips）。
+ */
+.tip {
+  position: fixed; z-index: 200; top: 0; left: 0;
+  max-width: min(340px, calc(100vw - 24px));
+  padding: 6px 9px;
+  background: var(--tip-bg);
+  color: var(--tip-fg);
+  border: 1px solid var(--tip-border);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-drawer);
+  font-size: 11.5px;
+  font-weight: 500;
+  line-height: 1.5;
+  white-space: pre-line; /* title 里用 \n 也能换行 */
+  pointer-events: none;
+  animation: tip-in 0.14s var(--ease) both;
+}
+.tip[hidden] { display: none; }
+@keyframes tip-in { from { opacity: 0; transform: translateY(-3px); } to { opacity: 1; transform: none; } }
+@media (prefers-reduced-motion: reduce) { .tip { animation: none; } }
 
 input[type="text"] {
   font: inherit;
   font-size: 12px;
-  padding: 5px 10px;
+  /* 同 select：高度与按钮对齐（32px），别靠 padding 撑 */
+  height: 32px;
+  padding: 0 10px;
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-sm);
   background: var(--panel);
@@ -1309,7 +1462,9 @@ td.copyable:hover .copyicon { opacity: 1; color: var(--primary); }
   margin-left: 3px;
   color: var(--faint);
   vertical-align: -1px;
-  border-radius: var(--radius-xs);
+  /* 它是 32px 高（继承 button 的 height）、只有 21px 宽 —— 4px 圆角在这个长宽比下
+     非常方。跟其它按钮一样用 8px。 */
+  border-radius: var(--radius-sm);
   transition: var(--transition-fast);
 }
 .infobtn:hover, .infobtn[aria-expanded="true"] {

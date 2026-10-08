@@ -442,6 +442,12 @@ function setLang(next, opts = {}) {
   if (b) b.setAttribute('aria-label', next === 'en' ? 'Switch to 中文' : 'Switch to English');
   if (next === 'en') startI18nObserver(); else stopI18nObserver();
   applyI18n();
+  // 自绘下拉的触发器文案是从 option 文本派生的：翻完立刻重取一次，
+  // 免得切回中文后要等 400ms 的兜底同步才还原
+  if (typeof ddSyncAll === 'function') ddSyncAll();
+  // 提示气泡也要收起来：否则「悬停中被切换语言」时 i18n 会把 title 写回去，
+  // 原生提示框可能在气泡旁边再弹一个
+  if (typeof tipHide === 'function') tipHide();
   if (typeof refreshTitle === 'function') refreshTitle();
 }
 
@@ -455,6 +461,293 @@ function initI18n() {
   if (target === 'en') setLang('en', { force: true });
   else { document.documentElement.lang = 'zh-CN'; const el = $('langToggleText'); if (el) el.textContent = 'EN'; }
 }
+/* ---------------------------------------------------------------------------
+ * 自绘下拉：把原生 <select> 的**外观**换成本地绘制的浮层。
+ *
+ * ## 为什么
+ *
+ * 原生 <select> 展开后的候选项列表由**操作系统**绘制 —— 圆角、内边距、悬停态
+ * 一律改不了（Windows 上是直角方块），和整页 12px 圆角的观感割裂。
+ * dsh 插件面板里已经有一份同构实现（`lib/client.js` 的 `DropdownSelect`），
+ * 这里把控制台也对齐，两处观感一致。
+ *
+ * ## 怎么做到「换外观但不换控件」
+ *
+ * 原生 <select> **保留在常规流里**，只是透明 + 不接指针事件（`.dd-native`）：
+ *   - 宽度仍由它决定（它按最长 option 撑宽，改由触发器算宽度会明显变窄）；
+ *   - `.value` / `.options` / `selectedIndex` 照旧 —— 自动化用例直接写
+ *     `sel.value = 'all'; sel.dispatchEvent(new Event('change'))` 仍然有效；
+ *   - `opacity:0` 不是 `display:none`，它仍在无障碍树里。
+ *
+ * 真正给用户看的是 `.dd-trigger`（外观与原生 select 共用同一条 CSS 规则）+
+ * `.dd-menu`。菜单**每次打开时重建**，所以动态填充 options 的下拉
+ * （#reqModelFilter / #modelKind / #probeScope）不会显示过期项。
+ * ------------------------------------------------------------------------- */
+
+/** 下拉当前该显示的文案：跟着 select 的选中项走。 */
+function ddText(sel) {
+  const opt = sel.options && sel.options[sel.selectedIndex];
+  return opt ? (opt.textContent || opt.label || opt.value || '') : '';
+}
+
+function ddClose(dd) {
+  dd.classList.remove('open', 'drop-up');
+  const menu = dd.querySelector('.dd-menu');
+  if (menu) menu.remove();
+  const trig = dd.querySelector('.dd-trigger');
+  if (trig) trig.setAttribute('aria-expanded', 'false');
+}
+
+function ddCloseAll() {
+  for (const dd of document.querySelectorAll('.dd.open')) ddClose(dd);
+}
+
+/** 打开：菜单按**当前** options 重建。 */
+function ddOpen(dd) {
+  const sel = dd.querySelector('select');
+  const trig = dd.querySelector('.dd-trigger');
+  if (!sel || !trig) return;
+  ddCloseAll();
+  const menu = document.createElement('div');
+  menu.className = 'dd-menu';
+  menu.setAttribute('role', 'listbox');
+  for (const opt of Array.from(sel.options)) {
+    const item = document.createElement('button');
+    item.type = 'button';
+    item.className = 'dd-item' + (opt.selected ? ' on' : '');
+    item.setAttribute('role', 'option');
+    item.setAttribute('aria-selected', opt.selected ? 'true' : 'false');
+    const t = document.createElement('span');
+    t.className = 'dd-item-t';
+    t.textContent = opt.textContent;
+    item.append(t);
+    item.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (sel.value !== opt.value) {
+        sel.value = opt.value;
+        // 派 change，让页面按既有逻辑响应 —— 这正是原生 select 的行为
+        sel.dispatchEvent(new Event('change', { bubbles: true }));
+      }
+      ddClose(dd);
+      ddSyncOne(dd);
+    });
+    menu.append(item);
+  }
+  // 靠近视口底部就向上弹，免得菜单被切掉
+  const rect = dd.getBoundingClientRect();
+  const below = window.innerHeight - rect.bottom;
+  dd.classList.toggle('drop-up', below < 280 && rect.top > below);
+  dd.classList.add('open');
+  dd.append(menu);
+  trig.setAttribute('aria-expanded', 'true');
+}
+
+/** 把一个 .dd 的触发器文案 / 标题同步成 select 的当前状态。 */
+function ddSyncOne(dd) {
+  const sel = dd.querySelector('select');
+  const trig = dd.querySelector('.dd-trigger');
+  if (!sel || !trig) return;
+  const label = trig.querySelector('.dd-label');
+  const text = ddText(sel);
+  if (label && label.textContent !== text) label.textContent = text;
+  const title = sel.getAttribute('title') || '';
+  if (title && trig.getAttribute('title') !== title) trig.setAttribute('title', title);
+}
+
+/**
+ * 同步所有下拉的触发器文案。
+ *
+ * **不能只监听 `change`**：页面里有几处直接写 `sel.value = x`
+ * （如 `$('modelKind').value = s.kind`），不派 change —— 只靠事件会漏。
+ * 这个函数很便宜（每个下拉读一次 `.value` 比一下字符串），所以可以多调几次。
+ */
+function ddSyncAll() {
+  for (const dd of document.querySelectorAll('.dd')) ddSyncOne(dd);
+}
+
+/** 把一个原生 select 包成自绘下拉。幂等：已包过的直接跳过。 */
+function enhanceSelect(sel) {
+  if (!sel || sel.dataset.ddOn === '1' || !sel.parentNode) return;
+  const dd = document.createElement('span');
+  dd.className = 'dd';
+  sel.parentNode.insertBefore(dd, sel);
+  dd.append(sel);
+  sel.classList.add('dd-native');
+  sel.dataset.ddOn = '1';
+  // 从 tab 顺序里摘掉：可见的入口是下面那个触发器，留两个焦点停靠点只会让 Tab 变折磨
+  sel.tabIndex = -1;
+
+  const trig = document.createElement('span');
+  trig.className = 'dd-trigger';
+  trig.setAttribute('role', 'combobox');
+  trig.setAttribute('aria-haspopup', 'listbox');
+  trig.setAttribute('aria-expanded', 'false');
+  trig.tabIndex = 0;
+  const label = document.createElement('span');
+  label.className = 'dd-label';
+  const arrow = document.createElement('span');
+  arrow.className = 'dd-arrow';
+  arrow.setAttribute('aria-hidden', 'true');
+  trig.append(label, arrow);
+  dd.append(trig);
+
+  trig.addEventListener('click', (e) => {
+    e.stopPropagation(); // 别让 document 上的「点外面就关」立刻把它关掉
+    if (dd.classList.contains('open')) ddClose(dd); else ddOpen(dd);
+  });
+  trig.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ' ' || e.key === 'ArrowDown') { e.preventDefault(); ddOpen(dd); }
+    else if (e.key === 'Escape') ddClose(dd);
+  });
+  // 程序化派发的 change 也要跟上（自动化用例就是这么驱动页面的）
+  sel.addEventListener('change', () => ddSyncOne(dd));
+
+  ddSyncOne(dd);
+}
+
+function enhanceSelects() {
+  for (const sel of document.querySelectorAll('select')) enhanceSelect(sel);
+  ddSyncAll();
+}
+
+let ddObserver = null;
+let ddTimer = null;
+
+function initDropdowns() {
+  enhanceSelects();
+  /*
+   * 动态渲染出来的 select（#modelKind / #probeScope 是 innerHTML 拼进去的）：
+   * 用观察者兜住。判据是「还有没有没包过的 select」—— 增强完自然就不再触发，
+   * 所以不会自激；`takeRecords()` 顺手丢掉这一批（含我们自己造成的）。
+   */
+  if (window.MutationObserver && !ddObserver) {
+    ddObserver = new MutationObserver(() => {
+      ddObserver.takeRecords();
+      if (document.querySelector('select:not(.dd-native)')) enhanceSelects();
+      else ddSyncAll();
+    });
+    ddObserver.observe(document.body, { childList: true, subtree: true });
+  }
+  // 兜底：直接写 sel.value、既不派 change 又没引起 DOM 变化的场景。
+  // 纯本地比较（8 个元素），不发请求；隐藏时跳过，与页面其它轮询同一纪律。
+  if (!ddTimer) ddTimer = setInterval(() => { if (!document.hidden) ddSyncAll(); }, 400);
+  document.addEventListener('click', () => ddCloseAll());
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') ddCloseAll(); });
+}
+
+/* ---------------------------------------------------------------------------
+ * 自绘提示气泡：替代浏览器自带的 `title` 提示框。
+ *
+ * ## 为什么
+ *
+ * `title` 弹出的那只框由**操作系统**绘制 —— 直角、系统字体、不跟主题色，
+ * 和整页 12px 圆角 + 主题变量的观感割裂（和原生 <select> 的展开列表同一类问题）。
+ *
+ * ## 怎么做到「保留 title 但不让它弹出来」
+ *
+ * 浏览器**没有**提供禁用 `title` 提示的开关。这里的做法是：
+ * **指针进入时把 `title` 摘下来存进内存，离开时再装回去** —— 于是原生提示框
+ * 永远不会弹，而 `.title` 在任何**非悬停**时刻读到的都还是原值
+ * （自动化用例断言 `.title`、i18n 按 `title` 属性翻译，都照旧）。
+ *
+ * 键盘用户走 focusin/focusout，行为一致。
+ * ------------------------------------------------------------------------- */
+
+let tipEl = null;
+let tipOwner = null;
+/** 悬停期间被摘下来的 title，离开时按元素还原。 */
+const tipStash = new Map();
+
+function tipNode() {
+  if (tipEl) return tipEl;
+  tipEl = document.createElement('div');
+  tipEl.className = 'tip';
+  tipEl.id = 'tip';
+  tipEl.setAttribute('role', 'tooltip');
+  tipEl.setAttribute('data-i18n-skip', ''); // 里面放的是已翻好的 title 原文，别再翻一遍
+  tipEl.hidden = true;
+  document.body.append(tipEl);
+  return tipEl;
+}
+
+/** 事件目标往上找第一个带 title / data-tip 的元素。 */
+function tipSource(node) {
+  if (!node || typeof node.closest !== 'function') return null;
+  const el = node.closest('[title], [data-tip]');
+  if (!el || el === tipEl) return null;
+  return el;
+}
+
+function tipPlace(el) {
+  const t = tipEl;
+  const r = el.getBoundingClientRect();
+  const tr = t.getBoundingClientRect();
+  const vw = document.documentElement.clientWidth;
+  const vh = document.documentElement.clientHeight;
+  // 默认贴下方；下面放不下且上面放得下就翻到上面
+  let top = r.bottom + 7;
+  if (top + tr.height > vh - 4 && r.top - tr.height - 7 > 4) top = r.top - tr.height - 7;
+  let left = r.left + (r.width - tr.width) / 2;
+  left = Math.max(6, Math.min(left, vw - tr.width - 6));
+  t.style.top = Math.round(top) + 'px';
+  t.style.left = Math.round(left) + 'px';
+}
+
+function tipShow(el, opts) {
+  const text = el.getAttribute('data-tip') || el.getAttribute('title') || '';
+  if (!text.trim()) return;
+  /*
+   * **只在悬停时摘 title**。原生提示框本来也只在悬停弹（聚焦不弹），
+   * 而 `title` 是屏幕阅读器读的可访问描述 —— 键盘聚焦时把它摘掉等于把
+   * 描述弄丢了。所以聚焦走「只显示气泡、不动 title」。
+   */
+  if (opts && opts.suppressNative && el.hasAttribute('title')) {
+    tipStash.set(el, el.getAttribute('title'));
+    el.removeAttribute('title'); // 摘掉 → 原生提示框不会弹
+  }
+  tipOwner = el;
+  const t = tipNode();
+  t.textContent = text;
+  t.hidden = false;
+  tipPlace(el);
+}
+
+function tipHide() {
+  if (tipOwner && tipStash.has(tipOwner)) {
+    tipOwner.setAttribute('title', tipStash.get(tipOwner));
+    tipStash.delete(tipOwner);
+  }
+  tipOwner = null;
+  if (tipEl) { tipEl.hidden = true; tipEl.textContent = ''; }
+}
+
+function initTips() {
+  // pointerover 会随子元素反复触发，所以用 tipOwner 去重
+  document.addEventListener('pointerover', (e) => {
+    const el = tipSource(e.target);
+    if (!el) { if (tipOwner) tipHide(); return; }
+    if (el === tipOwner) return;
+    tipHide();
+    tipShow(el, { suppressNative: true });
+  });
+  document.addEventListener('pointerout', (e) => {
+    if (!tipOwner) return;
+    // relatedTarget 还在同一个元素内部 → 不算离开
+    if (e.relatedTarget && tipOwner.contains(e.relatedTarget)) return;
+    tipHide();
+  });
+  document.addEventListener('focusin', (e) => {
+    const el = tipSource(e.target);
+    if (el && el !== tipOwner) { tipHide(); tipShow(el, { suppressNative: false }); }
+  });
+  document.addEventListener('focusout', () => tipHide());
+  // 位置是 fixed，滚动/改尺寸后必须收起，否则会飘在错误的地方
+  window.addEventListener('scroll', () => { if (tipOwner) tipHide(); }, { passive: true, capture: true });
+  window.addEventListener('resize', () => { if (tipOwner) tipHide(); });
+  window.addEventListener('blur', () => { if (tipOwner) tipHide(); });
+  document.addEventListener('pointerdown', () => { if (tipOwner) tipHide(); });
+}
+
 /* ---------------------------------------------------------------------------
  * 词条表：`中文原文 → English`。
  *
@@ -5352,6 +5645,8 @@ function initBackToTop() {
 initAlerts(); // 读回失败水位线 / 提醒静默标记（只含时间戳与日期）
 initTheme();
 initI18n();   // 语言开关：读回上次选择；放在渲染之前，避免先出中文再翻一遍
+initDropdowns(); // 原生 select → 自绘下拉（外观与 dsh 插件面板一致）
+initTips();      // 原生 title 提示框 → 自绘气泡
 initNavTabs();
 initQuickPrompts();
 initBackToTop();

@@ -1,4 +1,4 @@
-// 一次性辅助脚本：从 dashboard/public/index.html 里抽出「需要翻译的 UI 文案」候选，
+// 一次性辅助脚本：从 UI 源码里抽出「需要翻译的 UI 文案」候选，
 // 用于人工/半自动构建 i18n 词条表。产出为去重后的列表（含出现次数与首个行号）。
 //
 // 抽三类来源：
@@ -7,13 +7,20 @@
 //   3. 关键属性值（title / placeholder / aria-label / alt）
 // 过滤：纯注释行（// 与 * 开头）、纯代码行。
 //
-// 用法：node tools/dev/extract-ui-strings.mjs [--json]
+// 用法：
+//   node tools/dev/extract-ui-strings.mjs [--json] [文件路径]
+//   缺省文件 = dashboard/public/index.html（控制台）；
+//   插件面板：node tools/dev/extract-ui-strings.mjs dsh-plugin/lib/client.js
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { dirname, join } from 'node:path';
+import { dirname, join, isAbsolute, resolve } from 'node:path';
 
 const here = dirname(fileURLToPath(import.meta.url));
-const file = join(here, '..', '..', 'dashboard', 'public', 'index.html');
+const repoRoot = join(here, '..', '..');
+const argFile = process.argv.slice(2).find((a) => !a.startsWith('--'));
+const file = argFile
+  ? (isAbsolute(argFile) ? argFile : resolve(process.cwd(), argFile))
+  : join(repoRoot, 'dashboard', 'public', 'index.html');
 const src = readFileSync(file, 'utf8');
 const lines = src.split('\n');
 
