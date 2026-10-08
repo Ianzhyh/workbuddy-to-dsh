@@ -199,6 +199,10 @@ export function validateBody(route, body, shape = loadShape()) {
     } else {
       const parent = parentOf(path);
       if (parent !== '$' && real[parent] === undefined) continue; // 父层本身就不对，已在父层报过
+      // 真实接口在父层捕获到的是 `null`（例如当时没开自动签到时的
+      // `bridge.autoCheckin`）——**没有证据**说子键不该存在，不能据此报「多余」。
+      // 与上面 missing 方向的同一条判断对齐。
+      if (parent !== '$' && real[parent] && real[parent].type === 'null') continue;
     }
     unknown.push(path);
   }

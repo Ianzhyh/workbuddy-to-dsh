@@ -1647,7 +1647,13 @@ pre.log {
   .top-bar-sticky { padding: 14px 0 8px; }
   .top-bar-sticky.is-scrolled { padding: 6px 0 6px; }
   header { flex-direction: column; align-items: flex-start; gap: 12px; }
-  .head-right { width: 100%; justify-content: space-between; }
+  /*
+   * `flex-wrap: wrap` 是给**英文**留的：状态戳 + 徽章 + 语言/主题/刷新 五个元素
+   * 在 390px 上本来刚好塞满，换成 "Updated 13:51:45" / "Refresh" 这类更长的英文
+   * 就会顶破一行（实测溢出 7px，整页出现横向滚动条）。允许换行后，中文布局
+   * 因为本来就不满行，视觉零变化。
+   */
+  .head-right { width: 100%; justify-content: space-between; flex-wrap: wrap; row-gap: 8px; }
   .cards { grid-template-columns: repeat(2, 1fr); }
   .diag-row { grid-template-columns: 10px 130px 1fr; gap: 8px; }
   .panel { padding: 16px 16px; border-radius: var(--radius); }

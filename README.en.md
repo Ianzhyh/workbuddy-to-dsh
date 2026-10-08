@@ -7,12 +7,18 @@ and **Anthropic-compatible** APIs — so **Claude Code**, **opencode**, **Cursor
 with a custom Base URL can use them directly.
 
 Also included: a web console (status / start-stop / diagnostics / model registration /
-usage / health check / chat test) and an optional **DeepSeek Harness (dsh) native plugin**.
+usage / health check / chat test) — **bilingual (Chinese / English, switchable in the
+top-right corner, remembered locally)** — and an optional **DeepSeek Harness (dsh)
+native plugin**.
 
 > **In one line**: WorkBuddy quota → local API → any AI client you like.
 
+![WorkBuddy Local API Bridge console (English UI)](docs/screenshot-en.png)
+
 > 🌏 **English summary only.** The full documentation is in Chinese
 > ([README.md](README.md), [docs/](docs/)); both cover the same system.
+> The console itself has a complete English UI — the `EN` toggle sits next to the
+> theme switch.
 
 ## ⚠️ Read this first (disclaimer & boundaries)
 
@@ -63,6 +69,8 @@ register models in the plugin's settings page.
   (per-key accounting / revocation / rate-limit buckets), local usage ledger.
 - **Honest console** — 9 tabs of diagnostics that distinguish "model thinking"
   from "actually stuck", and never fake capabilities (embeddings return 501).
+- **Bilingual console** — complete Chinese / English UI, switchable in-page
+  (no reload, no build step); your choice is remembered.
 
 ## Configuration
 

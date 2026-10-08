@@ -9,6 +9,14 @@
   /* 旋转加载动画 */
   .spin-icon { animation: spin 1s linear infinite; }
   @keyframes spin { 100% { transform: rotate(360deg); } }
+  /* 语言开关：文字按钮，宽度固定住，切换 EN / 中 时不会把右侧按钮挤动 */
+  #langToggle {
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: .02em;
+    min-width: 42px;
+    justify-content: center;
+  }
 </style>
 </head>
 <body>
@@ -30,6 +38,10 @@
       <div class="head-right">
         <span class="stamp" id="overviewStamp"></span>
         <span class="badge" id="badge"><span class="dot"></span><span id="badgeText">检测中</span></span>
+        <!-- 语言开关的标签（EN / 中）本身就是语言指示，不参与翻译 -->
+        <button type="button" id="langToggle" class="icon-btn" title="切换语言 / Switch language" aria-label="Switch to English" data-i18n-skip>
+          <span id="langToggleText">EN</span>
+        </button>
         <button type="button" id="themeToggle" class="icon-btn" title="切换深色/浅色主题">
           <svg id="themeIconSun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="display:none;width:15px;height:15px"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
           <svg id="themeIconMoon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:15px;height:15px"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
@@ -201,7 +213,8 @@
         <span class="stamp" id="logInfo"></span>
         <button class="mini danger" id="logClearBtn">清空日志</button>
       </div>
-      <pre class="log" id="logOut"></pre>
+      <!-- 桥日志是**数据**（上游原文），不参与 i18n -->
+      <pre class="log" id="logOut" data-i18n-skip></pre>
     </details>
   </section>
 
@@ -217,6 +230,1072 @@
 
 <script>
 const $ = (id) => document.getElementById(id);
+
+/* ============================================================================
+ * i18n —— 中 / 英双语
+ *
+ * ## 为什么用「以中文原文为 key 的词条表 + 一次 DOM 翻译遍」，而不是给每个
+ *    渲染点加 `t('key')`
+ *
+ * 这个控制台是**单文件、无构建**的：全部 UI 文案散在 4000 行内联脚本里，
+ * 而且大量文案是拼出来的（`'完成 ' + done + ' / ' + total`）。逐点改成 `t()`
+ * 意味着要动几百处渲染代码——收益是英文更整齐，代价是把一个已经稳定的页面
+ * 重新引入几百个改动点，而这里面**没有任何一条有测试覆盖**。
+ *
+ * 所以这里选 gettext 风格：**中文原文即词条 key**。
+ *   - 加一种语言 = 加一张表；加一条文案 = 加一行；**不必改渲染代码**。
+ *   - 静态 HTML 与 JS 渲染出来的 DOM 走**同一条**翻译路径，不会两套口径。
+ *   - 拼接串（计数 / 时长 / 状态）交给 `I18N_RULES_EN` 正则兜。
+ *
+ * 代价（如实写在 `dashboard/README.md`）：整句被 `<b>` / `<code>` 拆开的段落，
+ * 需要给每个**文本片段**各写一条词条；译文要保证拼起来读得通。
+ *
+ * ## 幂等与可逆
+ *
+ * 翻译前把节点原文记在 `node.__i18nSrc`（文本节点）与 `el.__i18nAttr`（属性）上。
+ * 于是：
+ *   - 切语言 = 拿原文重算一遍，**不需要**「英文 → 中文」的反向表；
+ *   - 规则生成的动态串也能**精确还原**，不会留下半句英文。
+ * 只有 `data-i18n-skip` 子树与「数据而非界面」的区域（桥日志、对话正文）不碰。
+ *
+ * ## 轮询友好
+ *
+ * 英文模式下挂 `MutationObserver` 增量翻译新渲染出来的节点（20 秒一轮的表格
+ * 重绘靠它兜住），自己写回时用 `takeRecords()` 丢掉自己造成的记录，不会自激。
+ * 中文模式下**不挂**观察器——JS 本来写出的就是中文，无需处理。
+ * ========================================================================== */
+
+const I18N_LANG_KEY = 'wb-lang';
+const I18N_LANGS = ['zh', 'en'];
+/**
+ * 这些标签里的文字是**数据**（代码、用户输入），一律不翻。
+ * 刻意**不含** `OPTION`：下拉选项是界面文案，得翻；唯一读选项文本的地方
+ * （体检范围那句提示）由规则兜住，不会翻出半句中文。
+ */
+const I18N_SKIP_TAGS = new Set(['SCRIPT', 'STYLE', 'TEXTAREA']);
+/** 参与翻译的属性（`value` 刻意不在列：它承载用户输入，翻它会把用户打的字冲掉）。 */
+const I18N_ATTRS = ['title', 'placeholder', 'aria-label', 'alt', 'data-prompt'];
+
+let LANG = 'zh';
+let i18nObserver = null;
+/** 规则里允许再调一次 translateText（如「只测「勾选的（12）」」要把内层也翻掉）；
+ *  深度上限防止规则互相触发时转不出来。 */
+let i18nDepth = 0;
+
+/** 当前语言下的单条文案翻译：先查词条表，再走动态规则，都不中则原样返回。 */
+function translateText(text) {
+  if (text == null || LANG === 'zh') return text;
+  const s = String(text);
+  if (Object.prototype.hasOwnProperty.call(I18N_EN, s)) return I18N_EN[s];
+  if (i18nDepth >= 3) return s;
+  i18nDepth += 1;
+  try {
+    for (const rule of I18N_RULES_EN) {
+      const m = s.match(rule[0]);
+      if (!m) continue;
+      return typeof rule[1] === 'function' ? rule[1].apply(null, m) : s.replace(rule[0], rule[1]);
+    }
+    return s;
+  } finally {
+    i18nDepth -= 1;
+  }
+}
+
+/** 供**原生弹窗**（confirm/alert）与代码里主动拼接的场景使用。 */
+function t(text) { return translateText(text); }
+
+/**
+ * 多行文本（复制到剪贴板用）：**逐行**翻译，保住换行结构。
+ * 不能直接对整段调用 `translateText` —— 那会把整段当成一条文案去查表，
+ * 永远查不到，而且规则里的 `[\s\S]*` 会把换行吃掉。
+ */
+function translateMultiline(text) {
+  if (text == null || LANG === 'zh') return text;
+  return String(text).split('\n').map((line) => {
+    const m = line.match(/^(\s*)([\s\S]*?)(\s*)$/);
+    return m[1] + translateText(m[2]) + m[3];
+  }).join('\n');
+}
+
+/** 文本节点：记原文 → 按当前语言重算 → 只在不同时才写回（少制造 mutation）。 */
+function i18nTranslateNode(node) {
+  const raw = node.__i18nSrc === undefined ? node.data : node.__i18nSrc;
+  node.__i18nSrc = raw;
+  const norm = raw.replace(/\s+/g, ' ').trim();
+  if (!norm) return;
+  const out = translateText(norm);
+  const next = out === norm ? raw
+    : raw.match(/^\s*/)[0] + out + raw.match(/\s*$/)[0];
+  if (next !== node.data) node.data = next;
+}
+
+/** 属性：同样先记原文，切回中文时精确还原。 */
+function i18nTranslateAttrs(el) {
+  for (const name of I18N_ATTRS) {
+    if (!el.hasAttribute(name)) continue;
+    const store = el.__i18nAttr || (el.__i18nAttr = {});
+    const raw = store[name] === undefined ? el.getAttribute(name) : store[name];
+    store[name] = raw;
+    const out = translateText(raw);
+    if (out !== el.getAttribute(name)) el.setAttribute(name, out);
+  }
+}
+
+function i18nCollectNodes(root, out) {
+  if (!root) return out;
+  if (root.nodeType === Node.TEXT_NODE) { out.push(root); return out; }
+  if (root.nodeType !== Node.ELEMENT_NODE && root.nodeType !== Node.DOCUMENT_NODE
+    && root.nodeType !== Node.DOCUMENT_FRAGMENT_NODE) return out;
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+    acceptNode(node) {
+      const p = node.parentElement;
+      if (!p || I18N_SKIP_TAGS.has(p.tagName) || p.closest('[data-i18n-skip]')) {
+        return NodeFilter.FILTER_REJECT;
+      }
+      return NodeFilter.FILTER_ACCEPT;
+    },
+  });
+  let n;
+  while ((n = walker.nextNode())) out.push(n);
+  return out;
+}
+
+function i18nTranslateSubtree(root) {
+  const nodes = i18nCollectNodes(root, []);
+  for (const node of nodes) i18nTranslateNode(node);
+  if (root && root.nodeType === Node.ELEMENT_NODE) {
+    i18nTranslateAttrs(root);
+    for (const el of root.querySelectorAll('[title],[placeholder],[aria-label],[alt],[data-prompt]')) {
+      i18nTranslateAttrs(el);
+    }
+  } else if (root && root.querySelectorAll) {
+    for (const el of root.querySelectorAll('[title],[placeholder],[aria-label],[alt],[data-prompt]')) {
+      i18nTranslateAttrs(el);
+    }
+  }
+}
+
+/** 全量翻译一遍（切语言、初次加载时用）。自己造成的 mutation 会被丢弃。 */
+function applyI18n() {
+  i18nTranslateSubtree(document.body);
+  if (i18nObserver) i18nObserver.takeRecords();
+}
+
+function startI18nObserver() {
+  if (i18nObserver || !window.MutationObserver) return;
+  i18nObserver = new MutationObserver((records) => {
+    if (LANG === 'zh') return;
+    for (const rec of records) {
+      if (rec.type === 'characterData') i18nTranslateNode(rec.target);
+      else if (rec.type === 'attributes') i18nTranslateAttrs(rec.target);
+      else for (const n of rec.addedNodes) i18nTranslateSubtree(n);
+    }
+    i18nObserver.takeRecords();
+  });
+  i18nObserver.observe(document.body, {
+    childList: true, subtree: true, characterData: true, attributes: true,
+    attributeFilter: I18N_ATTRS,
+  });
+}
+
+function stopI18nObserver() {
+  if (!i18nObserver) return;
+  i18nObserver.disconnect();
+  i18nObserver = null;
+}
+
+/** 切换语言：记住原文重算一遍 → 同步 <html lang> / <title> / 按钮文案。 */
+function setLang(next, opts = {}) {
+  if (!I18N_LANGS.includes(next) || (next === LANG && !opts.force)) return;
+  LANG = next;
+  try { localStorage.setItem(I18N_LANG_KEY, next); } catch { /* 隐私模式：忽略 */ }
+  document.documentElement.lang = next === 'en' ? 'en' : 'zh-CN';
+  const btn = $('langToggleText');
+  if (btn) btn.textContent = next === 'en' ? '中' : 'EN';
+  const b = $('langToggle');
+  if (b) b.setAttribute('aria-label', next === 'en' ? 'Switch to 中文' : 'Switch to English');
+  if (next === 'en') startI18nObserver(); else stopI18nObserver();
+  applyI18n();
+  if (typeof refreshTitle === 'function') refreshTitle();
+}
+
+function initI18n() {
+  let saved = null;
+  try { saved = localStorage.getItem(I18N_LANG_KEY); } catch { /* 忽略 */ }
+  LANG = 'zh';                       // 先按中文（原文）落定，再切到目标语言
+  const target = I18N_LANGS.includes(saved) ? saved : 'zh';
+  const btn = $('langToggle');
+  if (btn) btn.addEventListener('click', () => setLang(LANG === 'en' ? 'zh' : 'en'));
+  if (target === 'en') setLang('en', { force: true });
+  else { document.documentElement.lang = 'zh-CN'; const el = $('langToggleText'); if (el) el.textContent = 'EN'; }
+}
+/* ---------------------------------------------------------------------------
+ * 词条表：`中文原文 → English`。
+ *
+ * 分组顺序：外壳 → 动作 → 各面板（账号 / 用量 / 签到 / 请求 / 诊断 / 模型 /
+ * 客户端接入 / 对话）→ 通用词 → 动态串规则。
+ * 加文案：找到对应分组，`'中文原文': 'English',` 一行即可。
+ * 注意 key 会被**折叠空白并去首尾空格**后匹配（多行模板字面量也能命中）。
+ * ------------------------------------------------------------------------- */
+const I18N_EN = {
+  // ---- 外壳（标题 / 导航 / 主题） ----
+  'WorkBuddy 本地 API 桥 · 控制台': 'WorkBuddy Local API Bridge · Console',
+  'WorkBuddy 本地 API 桥': 'WorkBuddy Local API Bridge',
+  '控制台': 'Console',
+  '把 WorkBuddy 桌面端已登录的模型，经本地桥暴露为 OpenAI / Anthropic 兼容接口，供任意 AI 客户端调用。':
+    'Expose the models your WorkBuddy desktop app is already signed in to as OpenAI / Anthropic compatible endpoints through a local bridge, for any AI client to use.',
+  '检测中': 'Checking',
+  '桥运行中': 'Bridge running',
+  '桥未运行': 'Bridge not running',
+  '桥有响应但异常': 'Responds but unhealthy',
+  '控制台异常': 'Console error',
+  '切换深色/浅色主题': 'Toggle dark / light theme',
+  '切换语言': 'Switch language',
+  '全部面板': 'All panels',
+  '概览与用量': 'Overview & usage',
+  '可用模型': 'Available models',
+  '对话测试与诊断': 'Chat test & diagnostics',
+  '客户端接入': 'Client setup',
+  '返回页面顶部': 'Back to top',
+  '回顶部': 'Top',
+
+  // ---- 顶部动作条 ----
+  '启动桥服务': 'Start bridge',
+  '重启桥': 'Restart bridge',
+  '停止': 'Stop',
+  '重新诊断': 'Re-run diagnostics',
+  '复制地址': 'Copy URL',
+  '复制诊断报告': 'Copy diagnostics report',
+  '刷新': 'Refresh',
+  '刷新中…': 'Refreshing…',
+  '正在刷新全部面板…': 'Refreshing all panels…',
+
+  // ---- 通用词 ----
+  '加载中…': 'Loading…',
+  '正在读取…': 'Loading…',
+  '正在检测…': 'Checking…',
+  '暂无数据': 'No data',
+  '更新时间': 'Updated',
+  '更新于': 'Updated',
+  '失败': 'Failed',
+  '成功': 'Success',
+  '可用': 'Available',
+  '不可用': 'Unavailable',
+  '未测': 'Not tested',
+  '未知': 'Unknown',
+  '未知错误': 'unknown error',
+  '未知模型': 'unknown model',
+  '未知原因': 'unknown reason',
+  '无状态码': 'no status code',
+  '(未知模型)': '(unknown model)',
+  '全部': 'All',
+  '是': 'Yes',
+  '否': 'No',
+  '完成': 'Done',
+  '进度': 'Progress',
+  '取消测试': 'Cancel test',
+  '清除体检': 'Clear probe results',
+  '导出 CSV': 'Export CSV',
+  '复制': 'Copy',
+  '已复制': 'Copied',
+  '复制失败': 'Copy failed',
+  '知道了': 'Got it',
+  '展开查看': 'Expand',
+  '收起': 'Collapse',
+  '清空': 'Clear',
+  '（留空）': '(leave empty)',
+  '（点击移除）': ' (click to remove)',
+  '（点击加入）': ' (click to add)',
+  '（无匹配模型）': '(no matching model)',
+
+  // ---- 卡片指标（也用于 CARD_ICONS 的 key） ----
+  '账号': 'Account',
+  '令牌剩余': 'Token TTL',
+  '凭据加密': 'Credential encryption',
+  '上游端点': 'Upstream endpoint',
+  '桥进程': 'Bridge process',
+  '积分余额': 'Credit balance',
+  'DSH 配置': 'DSH config',
+  '调用次数': 'Calls',
+  '输入 tokens': 'Input tokens',
+  '输出 tokens': 'Output tokens',
+  '平均耗时': 'Avg duration',
+  '消耗积分': 'Credit spent',
+
+  // ---- 账号面板 ----
+  '登录目录下有多个账号快照时，可切换桥使用哪一个。切换会自动重启桥，并清空上一个账号的体检结论。':
+    'When the login directory holds several account snapshots, you can pick which one the bridge uses. Switching restarts the bridge and clears the previous account\'s probe results.',
+  '未找到账号快照。': 'No account snapshot found.',
+  '切换': 'Switch',
+  '使用中': 'In use',
+  '· 剩余': ' · remaining',
+  '正在切换账号，桥会重启，请稍候…': 'Switching account — the bridge will restart, please wait…',
+  '切换失败：': 'Switch failed: ',
+  '切换会自动重启桥，并**清空上一个账号的体检结论**（结论只对被测时的账号成立）。':
+    'Switching restarts the bridge and **clears the previous account\'s probe results** (they only hold for the account they were measured on).',
+
+  // ---- 用量面板 ----
+  '用量统计': 'Usage',
+  '统计天数': 'Number of days',
+  '最近': 'Last',
+  '天 · 只记元数据，不含对话内容': 'days · metadata only, no conversation content',
+  '趋势图指标': 'Trend metric',
+  '积分': 'Credit',
+  '趋势图粒度': 'Trend granularity',
+  '按天': 'By day',
+  '最近 24 小时': 'Last 24 hours',
+  '清空账本': 'Clear ledger',
+  '用量图表': 'Usage chart',
+  '输入': 'Input',
+  '输出': 'Output',
+  '累计': 'Cumulative',
+  '这段时间没有调用。': 'No calls in this period.',
+  '，合计': ', total ',
+  '，其中': ', of which ',
+  '次调用未回报扣分': ' calls reported no credit',
+  '，输入': ', input ',
+  '/ 输出': ' / output',
+  '积分排行（按模型）': 'Credit ranking (by model)',
+  '其它（': 'Others (',
+  '个）': ')',
+  '未回报扣分的模型（': 'Models that reported no credit (',
+  '不计入': 'not counted',
+  '上面的占比。': ' in the shares above.',
+  '暂无数据（桥未运行或还没有请求过）。': 'No data (bridge not running, or no requests yet).',
+  '已回报': 'Reported',
+  '平均': 'Avg',
+  '上游按两位小数回报': 'upstream reports two decimal places',
+  '上游未回报（': 'not reported upstream (',
+  '次调用）': ' calls)',
+  '不计入 token / 积分': 'not counted toward tokens / credit',
+  '次数': 'Calls',
+  '积分/次': 'Credit / call',
+  '总耗时': 'Total time',
+  '点击筛选「最近请求」': 'Click to filter Recent requests',
+  '上游未回报该模型的扣分': 'Upstream reported no credit for this model',
+  '耗时(ms)': 'Duration (ms)',
+  '状态码': 'Status',
+  '错误码': 'Error code',
+  '错误原文': 'Raw error',
+  '积分回报次数': 'Credit reports',
+  '总耗时(ms)': 'Total time (ms)',
+  '合计': 'Total',
+  '模型': 'Model',
+  '模型 id': 'Model id',
+  '显示名': 'Display name',
+  '上下文': 'Context',
+  '最大输出': 'Max output',
+  '倍率': 'Multiplier',
+  '免费': 'Free',
+  '已注册 dsh': 'Registered in dsh',
+  '体检结论': 'Probe verdict',
+  '体检耗时(ms)': 'Probe time (ms)',
+  '支持图片(空=未声明)': 'Vision (blank = not declared)',
+  '实测成本(每千 token)': 'Measured cost (per 1k tokens)',
+  '成本样本(次)': 'Cost samples',
+  '实测成本': 'Measured cost',
+  'dsh': 'dsh',
+  '可用性': 'Availability',
+
+  // ---- 签到面板 ----
+  '每日签到': 'Daily check-in',
+  '今天已签': 'Signed in today',
+  '领取当天的签到积分。签到的判定与奖励由上游决定，重复签到会被识别为"今天已签"而不是失败。':
+    'Claim today\'s check-in credit. Eligibility and reward are decided upstream; a repeat check-in is reported as "already signed in today" rather than a failure.',
+  '今日已签到': 'Checked in today',
+  '今日尚未签到': 'Not checked in today',
+  '已领取': 'Claimed',
+  '立即签到': 'Check in now',
+  '签到中…': 'Checking in…',
+  '签到失败：': 'Check-in failed: ',
+  '连续': 'Streak',
+  '尚未开始': 'Not started',
+  '每日 +': 'Daily +',
+  '天可得': 'days',
+  '手动': 'Manual',
+  '自动': 'Auto',
+  '自动（桥的定时器）': 'Auto (bridge timer)',
+  '自动（每小时检查）': 'Auto (hourly check)',
+  '自动（启动时）': 'Auto (on startup)',
+  '还没有自动尝试记录。': 'No automatic attempts recorded yet.',
+  '上游已签到（按成功处理）': 'Already checked in upstream (treated as success)',
+  '当前账号没有签到活动': 'This account has no check-in program',
+  '当前账号没有签到活动（国际版网关不含积分系统）。':
+    'This account has no check-in program (the international gateway has no credit system).',
+  '上次尝试：': 'Last attempt: ',
+  '每日自动签到': 'Daily auto check-in',
+  '桥在跑：每天首次模型请求时自动签；控制台开着：启动时与每小时检查一次。':
+    'Bridge running: auto check-in on the day\'s first model request. Console open: once at startup and once per hour.',
+  '桥侧需重启桥生效': 'restart the bridge for the bridge-side change to take effect',
+  '（这里不自动重启）。': ' (this page does not restart it automatically).',
+  '已开启': 'On',
+  '已关闭': 'Off',
+  '已开启每日自动签到（桥侧需重启桥生效）': 'Daily auto check-in enabled (restart the bridge for the bridge side to apply)',
+  '已关闭每日自动签到（桥侧需重启桥生效）': 'Daily auto check-in disabled (restart the bridge for the bridge side to apply)',
+  '今天还没签到，签到积分过期不补。': 'Not checked in today yet — check-in credit expires and is not made up.',
+  '）· 可手动重试': ') · you can retry manually',
+
+  // ---- 最近请求面板 ----
+  '最近请求': 'Recent requests',
+  '只含元数据（模型、耗时、token、结果），不含对话内容': 'Metadata only (model, duration, tokens, result) — no conversation content',
+  '只看某个模型的请求': 'Show requests for one model only',
+  '全部模型': 'All models',
+  '仅看失败': 'Failures only',
+  '显示条数': 'Rows',
+  '40 条': '40 rows',
+  '100 条': '100 rows',
+  '200 条': '200 rows',
+  '暂停后 20 秒轮询不再刷新本面板；手动「刷新」仍然可用':
+    'While paused, the 20-second poll stops refreshing this panel; manual Refresh still works',
+  '暂停自动刷新': 'Pause auto-refresh',
+  '已暂停自动刷新': 'Auto-refresh paused',
+  '导出当前筛选与条数下的明细': 'Export the rows under the current filter and row count',
+  '还没有请求记录。': 'No requests recorded yet.',
+  '当前筛选下没有记录。': 'No records under the current filter.',
+  '· 仅失败': ' · failures only',
+  '已筛选：': 'Filtered: ',
+  '清除筛选': 'Clear filter',
+  '流式': 'Streaming',
+  '非流式': 'Non-streaming',
+  '进行中的请求：桥不设默认超时，长回答可能持续很久；超过阈值标黄仅为提醒':
+    'In-flight requests: the bridge sets no default timeout, so long answers may run for a while; the yellow highlight past the threshold is only a heads-up',
+  '时间': 'Time',
+  '方式': 'Mode',
+  '耗时': 'Duration',
+  '输入/输出': 'Input / output',
+  '结果': 'Result',
+  '点击复制错误详情（悬停已看原文）': 'Click to copy the error details (hover shows the raw text)',
+
+  // ---- 环境诊断 ----
+  '环境诊断': 'Environment diagnostics',
+  '按优先级排序：红色项不解决，模型在选择器里就不会出现。':
+    'Ordered by priority: until the red items are resolved, models will not show up in the selector.',
+  '建议：': 'Suggestion: ',
+  '诊断失败：': 'Diagnostics failed: ',
+  '正在检测（需读取客户端密钥）…': 'Checking (needs to read the client key)…',
+  '响应格式不符': 'unexpected response shape',
+  '正在读取模型目录…': 'Loading the model catalog…',
+  '模型目录读取失败：': 'Failed to load the model catalog: ',
+  '桥未运行或目录为空': 'bridge not running, or the catalog is empty',
+  '个套餐': ' plans',
+  '无套餐': 'No plan',
+  '桥未运行或查询失败': 'bridge not running, or the query failed',
+  '已就绪': 'Ready',
+  '待修复': 'Needs fixing',
+  '未就绪': 'Not ready',
+  '路由 ✓': 'Routing ✓',
+  '路由 ✗': 'Routing ✗',
+  '凭据 ✓': 'Credentials ✓',
+  '凭据 ✗': 'Credentials ✗',
+  'AtRest 信封': 'AtRest envelope',
+  '明文': 'plaintext',
+  'keyId 不匹配': 'keyId mismatch',
+  '本地': 'Local',
+  '运行': 'Running',
+  '未运行': 'Not running',
+  '目录': 'Catalog',
+  '该桥未汇报进程信息（版本较旧）': 'This bridge reported no process info (older version)',
+  '桥未运行，暂无数据。': 'Bridge is not running — no data yet.',
+  '未取到': 'not obtained',
+  '至': 'to',
+
+  // ---- 可用模型面板 ----
+  '以下模型由桥从 WorkBuddy 上游实时取回。体检范围可只测「勾选的 / 已注册的」； 「全选 / 加选免费」只跳过':
+    'The models below are fetched live by the bridge from the WorkBuddy upstream. The probe scope can cover only 「checked / registered」; 「Select all / add free」only skips',
+  '已知不可用': 'known-unavailable',
+  '的模型，': ' models, ',
+  '未测的不会被跳过': 'untested ones are never skipped',
+  '——跳过只依据已知结论。': ' — skipping relies only on known results.',
+  '桥未运行，暂无数据。': 'Bridge is not running — no data yet.',
+  '测试中…': 'Testing…',
+  '测得时间': 'Probed at',
+  '先勾选要测的模型': 'Check the models you want to test first',
+  '当前范围里没有可测的模型': 'No testable models in the current scope',
+  '开始测试': 'Start test',
+  '已取消：完成': 'Cancelled: done',
+  '（已完成的结果已保存，未测模型保留上次结论）':
+    '(completed results are saved; untested models keep their previous verdict)',
+  '测试完成：': 'Test finished: ',
+  '个模型可正常调用': ' models respond normally',
+  '已清除体检结果': 'Probe results cleared',
+  '上次体检': 'Last probe',
+  '本轮': 'This run',
+  '· 可用': ' · ok',
+  '· 当前': ' · current',
+  '· 已用': ' · elapsed',
+  '· 预计剩余': ' · ~',
+  '· 扣': ' · credit ',
+  '· 新失败': ' · new failure(s) ',
+  '刷新目录': 'Refresh catalog',
+  '立即强制重取上游模型目录': 'Force an immediate re-fetch of the upstream catalog',
+  '正在刷新目录…': 'Refreshing the catalog…',
+  '；表格保留原有内容': '; the table keeps its current content',
+  '目录已更新（': 'Catalog updated (',
+  '个模型）': ' models)',
+  '刷新失败：上游未返回新目录；仍显示': 'Refresh failed: the upstream returned no new catalog; still showing ',
+  '上一次的缓存': 'the previous cache',
+  '有': 'There are ',
+  '个已注册模型已不在上游目录中：': ' registered models no longer in the upstream catalog: ',
+  '—— 它们仍会出现在 dsh 的模型列表里，但调用必然失败。':
+    ' — they still appear in the dsh model list, but calls to them will always fail.',
+  '清理并保存': 'Clean up and save',
+  '清理会把注册列表清空，已取消；请先勾选要保留的模型再保存':
+    'Cleaning would empty the registration list, so it was cancelled; check the models to keep, then save',
+  '正在清理失效注册…': 'Cleaning up stale registrations…',
+  '已清理': 'Cleaned up ',
+  '个失效注册（保留': ' stale registrations (kept ',
+  '清理失败：': 'Cleanup failed: ',
+  '点击复制': 'Click to copy',
+  '查看模型详情': 'View model details',
+  '正在计算…': 'Calculating…',
+  '已注册': 'Registered',
+  '未注册': 'Not registered',
+  '搜索模型…': 'Search models…',
+  '仅免费': 'Free only',
+  '仅已注册': 'Registered only',
+  '仅未注册': 'Unregistered only',
+  '仅可用': 'Available only',
+  '仅不可用': 'Unavailable only',
+  '按倍率排序': 'Sort by multiplier',
+  '全选': 'Select all',
+  '加选免费': 'Add free models',
+  '清空勾选': 'Clear selection',
+  '取消勾选不可用的': 'Uncheck unavailable',
+  '保存到 dsh 设置': 'Save to dsh settings',
+  '同步可用模型到 dsh': 'Sync available models to dsh',
+  '把体检可用的模型一次写入 dsh': 'Write all probe-ok models into dsh in one go',
+  '体检范围：只测勾选的 / 已注册的 / 目录里全部': 'Probe scope: checked only / registered only / everything in the catalog',
+  '勾选的': 'Checked',
+  '已注册的': 'Registered',
+  '测试可用性': 'Test availability',
+  '取消勾选不可用的（': 'Uncheck unavailable (',
+  '没有处于勾选状态的不可用模型': 'No unavailable models are currently checked',
+  '已取消勾选': 'Unchecked ',
+  '个不可用模型（未保存前不影响 dsh）': ' unavailable models (dsh is untouched until you save)',
+  '，跳过': ', skipped ',
+  '个已知不可用的模型': ' known-unavailable models',
+  '加选了': 'Added ',
+  '个免费模型': ' free models',
+  '，点「保存到 dsh 设置」生效': ' — click Save to dsh settings to apply',
+  '可选的免费模型已经都选上了（跳过': 'All selectable free models are already checked (skipped ',
+  '个已知不可用的）': ' known-unavailable)',
+  '免费模型已经都选上了': 'all free models already checked',
+  '已清空勾选（未保存前不影响 dsh 配置）': 'Selection cleared (dsh config is untouched until you save)',
+  '正在写入…': 'Writing…',
+  '已写入': 'Wrote ',
+  '个模型': ' models',
+  '，原文件已备份': ', original file backed up',
+  '；cordis.patch.yml 写入失败：': '; writing cordis.patch.yml failed: ',
+  '写入失败：': 'Write failed: ',
+  '；已写入 cordis.patch.yml，立即生效。': '; cordis.patch.yml written — effective immediately.',
+  '；DSH Desktop 0.2.0 会在下次启动时把 settings.yaml 导入 patch 层；已生效路径同时写入 cordis.patch.yml。':
+    '; DSH Desktop 0.2.0 imports settings.yaml into the patch layer on next launch; the effective path is also written to cordis.patch.yml.',
+  '先做一次体检：当前没有「可用」结论可同步': 'Run a probe first: there is no "available" verdict to sync yet',
+  '把体检可用的模型一次写入 dsh（会替换当前勾选，原文件自动备份）':
+    'Write all probe-ok models into dsh in one go (replaces the current selection; the original file is backed up automatically)',
+  '先做一次体检：当前没有「可用」的模型可同步': 'Run a probe first: there are no "available" models to sync yet',
+  '将把': 'This will write ',
+  '个「体检可用」的模型写入 dsh，会替换当前勾选；': ' "probe-ok" models into dsh, replacing the current selection;',
+  '原文件会自动备份。': 'the original file is backed up automatically.',
+  '确定继续？': 'Continue?',
+  '已全选当前可见的模型': 'Selected all currently visible models',
+  '已全选当前可见模型，跳过': 'Selected all currently visible models, skipped ',
+  '已取消全选': 'Deselected all',
+  '已按可用性排序：': 'Sorted by availability: ',
+  '（点表头继续切换）': ' (click the header to cycle)',
+  '已恢复默认顺序（按模型 id）': 'Restored the default order (by model id)',
+  '已按倍率升序排列': 'Sorted by multiplier, ascending',
+  '可用优先': 'Available first',
+  '耗时↑': 'Duration ↑',
+  '耗时↓': 'Duration ↓',
+  '点击切换排序：可用优先 / 耗时升序 / 耗时降序': 'Click to cycle sorting: available first / duration asc / duration desc',
+  '显示': 'Showing ',
+  '还没有用量数据（桥未运行或没有调用）': 'No usage data yet (bridge not running, or no calls)',
+  '天没有该模型的成功调用': ' days without a successful call to this model',
+  '天该模型': ' days this model made ',
+  '次成功调用，但上游一次都没回报扣分': ' successful calls, but the upstream reported no credit at all',
+  '天该模型没有可计入的 token，无法折算': ' days this model had no countable tokens, so cost cannot be derived',
+  '/ 千 token（': ' / 1k tokens (',
+  '天：扣分': ' days: credit ',
+  'tokens × 1000（': ' tokens × 1000 (',
+  '次回报了扣分）': ' calls reported credit)',
+  '账本最近 N 天：扣分合计 ÷ token 合计 × 1000，只含成功且回报了扣分的调用':
+    'Ledger over the last N days: total credit ÷ total tokens × 1000; only successful calls that reported credit',
+  '中文描述': 'Chinese description',
+  '英文描述': 'English description',
+  '厂商': 'Vendor',
+  '标签': 'Tags',
+  '支持图片': 'Vision',
+  '上下文（精确）': 'Context (exact)',
+  '最大输出（精确）': 'Max output (exact)',
+  '促销': 'Promotion',
+  'dsh 注册': 'dsh registration',
+  '这个模型没有更多可展示的信息。': 'No further information for this model.',
+
+  // ---- 客户端接入 ----
+  '复制全部': 'Copy all',
+  '桥同时讲两套协议：': 'The bridge speaks two protocols: ',
+  '（': ' (',
+  '，绝大多数客户端走这条） 与': ', which most clients use) and ',
+  '，Claude Code 走这条）。下面三个值填进客户端即可，点一下就能复制。':
+    ', which Claude Code uses). Fill these three values into your client — one click copies each.',
+  '全部接入信息': 'All setup information',
+  '图形表单': 'Form',
+  '其它客户端': 'Other clients',
+  'opencode / Cherry Studio / Cursor / Trae 等填这里': 'opencode / Cherry Studio / Cursor / Trae and friends go here',
+  'Claude Code 的 ANTHROPIC_BASE_URL（注意不带 /v1）': 'Claude Code\'s ANTHROPIC_BASE_URL (no /v1 suffix)',
+  'API Key / 令牌': 'API key / token',
+  '本地回环令牌，不是上游凭据；只用于防止同机其它程序误用端口':
+    'A loopback token, not an upstream credential; it only keeps other local programs from using the port by mistake',
+  '桥未运行，客户端连不上。先点上方「启动桥服务」。':
+    'The bridge is not running, so clients cannot connect. Click Start bridge above first.',
+  '你要接哪个？选一个，只看它': 'Which one are you wiring up? Pick one to see only that.',
+  '选择要接入的客户端': 'Choose the client to set up',
+  '提供商 ID': 'Provider ID',
+  '只允许小写字母 / 数字 / 连字符 / 下划线': 'Lowercase letters / digits / hyphen / underscore only',
+  '显示名称': 'Display name',
+  '随便填，只影响界面显示': 'Anything; it only affects what the UI shows',
+  '基础 URL': 'Base URL',
+  '必须带 /v1 结尾': 'Must end with /v1',
+  'API 密钥': 'API key',
+  '请求头': 'Headers',
+  '留空 —— 桥不需要额外请求头': 'Leave empty — the bridge needs no extra headers',
+  '要填上游真实 id，不是 claude-* 那种': 'Use the real upstream id, not a claude-* alias',
+  '上下文长度': 'Context length',
+  '留空或填 0 → 客户端显示「上下文 0」': 'Empty or 0 → the client shows "context 0"',
+  '输出上限': 'Max output',
+  '逐格可复制': 'Each field is copyable',
+  '提供商 ID / 显示名称 / 基础 URL / API 密钥 / 模型 / 请求头 —— 每格的值都能单独复制，照着填完点提交。':
+    'Provider ID / display name / base URL / API key / model / headers — every value copies on its own; fill them in and submit.',
+  '注意：不是每个表单都有「上下文长度 / 输出上限」这两格 —— opencode 的表单就没有，':
+    'Note: not every form has the "context length / max output" fields — opencode\'s does not,',
+  '所以填完会看到「上下文 0」。这不是桥的问题，也不是填错了：上下文只能靠**配置文件**声明。':
+    'so after filling it in you will see "context 0". That is not a bridge bug and not a typo: context can only be declared in a config file.',
+  'opencode 请切到上面的「opencode」页签，那段 opencode.json 里的 limit 就是干这个的。':
+    'For opencode, switch to the opencode tab above — the limit in that opencode.json is exactly for this.',
+  '下面这些都只用 /v1/models 与 /v1/chat/completions 两个端点，填同样的 Base URL 和令牌即可。':
+    'All of these use only /v1/models and /v1/chat/completions — fill in the same Base URL and token.',
+  '「未实测」是指没有真的装一遍跑通，不是已知有问题——但也没法替你保证。':
+    '"Not verified" means we have not actually installed and run it — it does not mean something is known to be broken, but we cannot vouch for it either.',
+  'Cursor / Trae 这类带 Agent 模式的客户端依赖工具调用。桥已把上游只认字符串的 tool_choice 做了归一化':
+    'Clients with an agent mode such as Cursor / Trae rely on tool calling. The bridge normalizes tool_choice, which the upstream only accepts as a string',
+  '（对象形式会被上游 400），工具调用本身也实测可用；但它们具体发哪种写法没有验证过。':
+    ' (an object form gets a 400 from upstream); tool calling itself is verified working, but which form those clients send is untested.',
+  '知识库 / RAG 类功能': 'Knowledge base / RAG features',
+  '上游 30 个模型全是对话类，没有任何 embedding 模型，所以 /v1/embeddings 会明确返回 501。':
+    'All 30 upstream models are chat models; there is no embedding model, so /v1/embeddings deliberately returns 501.',
+  '这里不做「假的向量」——那会让知识库看起来建成了、实际全是噪声，要等检索结果离谱时才发现。':
+    'We do not fake vectors here — that would make a knowledge base look built while being pure noise, and you would only notice when retrieval went badly wrong.',
+  '需要 RAG 的客户端请单独配一个 embedding 服务。': 'Clients that need RAG should point at a separate embedding service.',
+  '用它的底层 AI SDK（@ai-sdk/openai-compatible）实测：基础生成、工具调用、流式输出三项全通过。':
+    'Verified with its underlying AI SDK (@ai-sdk/openai-compatible): basic generation, tool calling and streaming all pass.',
+  '界面表单只填得进 id 和显示名，**上下文长度必须写在 opencode.json 的 limit 里**':
+    'The UI form only takes an id and a display name; **context length must go in the limit field of opencode.json**',
+  '——不写就会显示「上下文 0」。下面这份已经按上游真实值填好了。':
+    ' — leave it out and you get "context 0". The file below is already filled with the real upstream values.',
+  '把下面这段写进项目根目录的 opencode.json（表单里填过的模型，limit 要回到这里补）':
+    'Paste the block below into opencode.json at your project root (models added in the form need their limit filled in here)',
+  '运行 /connect → 选 Other，provider id 填 workbuddy，API Key 填上面的令牌':
+    'Run /connect → choose Other, set provider id to workbuddy, and paste the token above as the API key',
+  '运行 /models，选 workbuddy 下的模型': 'Run /models and pick a model under workbuddy',
+  'Anthropic 协议层全路径实测：流式事件序列、tool_use、多轮 tool_result 往返均正确。':
+    'The Anthropic layer is verified end to end: streaming event sequence, tool_use, and multi-turn tool_result round trips are all correct.',
+  '模型名照常填 claude-*，桥会映射到真实模型（当前': 'Keep using claude-* model names; the bridge maps them to the real model (currently ',
+  '，小快模型': ', small fast model ',
+  '）。': ').',
+  '设好下面两个环境变量后直接启动 claude': 'Set the two environment variables below, then start claude directly',
+  '环境变量': 'Environment variables',
+  '任何「自定义 OpenAI 兼容提供商」表单': 'Any "custom OpenAI-compatible provider" form',
+  '已实测': 'Verified',
+  '协议兼容': 'Protocol-compatible',
+  '不支持': 'Not supported',
+  '已实测 : opencode、Claude Code（Anthropic 协议）': 'Verified: opencode, Claude Code (Anthropic protocol)',
+  '协议兼容: Cherry Studio / NextChat / LobeChat / ChatBox / Open WebUI / Cursor / Trae':
+    'Protocol-compatible: Cherry Studio / NextChat / LobeChat / ChatBox / Open WebUI / Cursor / Trae',
+  '不支持 : 知识库 / RAG（上游没有 embedding 模型，/v1/embeddings 返回 501）':
+    'Not supported: knowledge base / RAG (no upstream embedding model; /v1/embeddings returns 501)',
+  'WorkBuddy 本地桥 — 客户端接入': 'WorkBuddy Local Bridge — client setup',
+  'OpenAI 兼容 Base URL :': 'OpenAI-compatible Base URL :',
+  '（Claude Code 用，注意不带 /v1）': '(for Claude Code; note there is no /v1)',
+  'API Key / 令牌 :': 'API key / token :',
+  '--- 图形界面「自定义提供商」表单，逐格填 ---': '--- GUI "custom provider" form, field by field ---',
+  '--- opencode（opencode.json）---': '--- opencode (opencode.json) ---',
+  '--- Claude Code（环境变量）---': '--- Claude Code (environment variables) ---',
+  '--- 兼容性 ---': '--- compatibility ---',
+
+  // ---- 对话测试 ----
+  '对话测试': 'Chat test',
+  '多轮对话（带上下文），直接走完整链路。会消耗少量额度；历史过长只提示清空，不会自动裁剪。':
+    'Multi-turn conversation (with context) straight through the full path. Consumes a little credit; when the history gets long it only suggests clearing — it never trims automatically.',
+  '用一句话介绍你自己': 'Introduce yourself in one sentence.',
+  '介绍你自己': 'Introduce yourself',
+  '写一个 Python 快速排序算法并附带简短注释': 'Write a Python quicksort with brief comments.',
+  '快速排序': 'Quicksort',
+  '请简述大语言模型中 Context Window 与输出 Token 的关系':
+    'Briefly explain how the context window relates to output tokens in an LLM.',
+  'Context Window 概念': 'Context window',
+  '讲一个关于程序员调 bug 的冷笑话': 'Tell a programming joke about debugging.',
+  '程序员冷笑话': 'Dev joke',
+  '例如：用一句话介绍你自己': 'e.g. introduce yourself in one sentence',
+  '发送': 'Send',
+  '清空对话历史与输出（不影响模型选择与搜索词）': 'Clear chat history and output (keeps the model choice and search term)',
+  '清空对话': 'Clear chat',
+  '等待发送…': 'Waiting to send…',
+  '你': 'You',
+  '助手': 'Assistant',
+  '没有选中的模型：等「可用模型」加载完成，或清空搜索词再选。':
+    'No model selected: wait for Available models to load, or clear the search term and pick one.',
+  '查看桥日志（最近 80 行）': 'View bridge log (last 80 lines)',
+  '只看本次启动': 'This run only',
+  '按关键字过滤（大小写不敏感）…': 'Filter by keyword (case-insensitive)…',
+  '只看错误': 'Errors only',
+  '清空日志': 'Clear log',
+  '（暂无日志）': '(no log entries)',
+  '（当前过滤条件下没有匹配的行）': '(no rows match the current filter)',
+  '桥已就绪。下一步：': 'The bridge is ready. Next:',
+  '把 Base URL 与令牌填进你的客户端（Claude Code / opencode / Cursor …）；':
+    'Fill the Base URL and token into your client (Claude Code / opencode / Cursor …);',
+  '若用 DeepSeek Harness，则去「可用模型」勾选后保存。': 'for DeepSeek Harness, check models under Available models and save.',
+  '去接客户端': 'Set up a client',
+  '桥已启动': 'Bridge started',
+  '桥已重启': 'Bridge restarted',
+  '桥已停止': 'Bridge stopped',
+  '正在启动桥服务…': 'Starting the bridge…',
+  '正在停止…': 'Stopping…',
+  '正在重启桥服务…': 'Restarting the bridge…',
+  '确定停止桥服务？': 'Stop the bridge?',
+  '停止后 dsh / 其它客户端将无法调用模型，需要重新点「启动桥服务」才能恢复。':
+    'After stopping, dsh and other clients cannot call models; click Start bridge again to recover.',
+  '确定重启桥服务？': 'Restart the bridge?',
+  '重启会中断正在进行的调用（约几秒不可用）；桥内存里的状态（如自动签到记录）会重新开始。':
+    'Restarting interrupts in-flight calls (a few seconds of downtime); in-memory state such as auto check-in records starts over.',
+  '确定清空用量账本？历史记录将被删除，且不会被恢复。':
+    'Clear the usage ledger? History will be deleted and cannot be recovered.',
+  '已清空用量账本': 'Usage ledger cleared',
+  '清空账本失败：': 'Failed to clear the ledger: ',
+  '确定清空 bridge.log？当前桥进程会继续往新文件里写。':
+    'Clear bridge.log? The running bridge process will keep writing to a new file.',
+  '已清空桥日志': 'Bridge log cleared',
+  '清空日志失败：': 'Failed to clear the log: ',
+  '诊断报告已复制到剪贴板（不含任何令牌值）': 'Diagnostics report copied to the clipboard (contains no token values)',
+  '复制失败，请手动复制': 'Copy failed — please copy manually',
+  '，请手动选择复制': ' — please select and copy manually',
+  '# WorkBuddy 本地 API 桥 · 控制台诊断报告': '# WorkBuddy Local API Bridge · console diagnostics report',
+  '## 账号与凭据': '## Account and credentials',
+  '## 诊断逐项': '## Diagnostics, item by item',
+  '## 目录摘要': '## Catalog summary',
+  '## 最近 5 条失败': '## Last 5 failures',
+  '（建议：': ' (suggestion: ',
+  '（未取到诊断结果）': '(no diagnostics result available)',
+  '（最近明细里没有失败）': '(no failures in the recent details)',
+  '正常': 'Healthy',
+  '有响应但异常': 'Responds but unhealthy',
+  '（PID': ' (PID ',
+  '/ 运行': ' / up ',
+  '（uid': ' (uid ',
+  '…）': '…)',
+  '未取到有效凭据': 'no valid credentials obtained',
+  '目录模型数：': 'Models in catalog: ',
+  '被排除的非对话模型：': 'Non-chat models excluded: ',
+  '无': 'none',
+  '已注册：': 'Registered: ',
+  '（其中': ' (of which ',
+  '个已不在目录：': ' are no longer in the catalog: ',
+  // ---- 环境诊断（内容由桥的 lib/diagnostics.mjs 生成，label/detail/hint 在这里兜） ----
+  'WorkBuddy 客户端': 'WorkBuddy client',
+  '登录文件': 'Login file',
+  'AtRest 密钥': 'AtRest key',
+  '凭据解密': 'Credential decryption',
+  '桥服务': 'Bridge service',
+  'dsh 模型路由': 'dsh model routing',
+  '凭据引用': 'Credential reference',
+  'profile bundles': 'profile bundles',
+  '未找到 WorkBuddy 客户端（已探测默认位置并扫描常见安装目录）':
+    'WorkBuddy client not found (probed the default location and scanned common install dirs)',
+  '未取得密钥，跳过': 'no key obtained, skipped',
+  '缺少占位凭据': 'placeholder credential missing',
+  'settings.yaml 存在，但缺少 workbuddy 路由': 'settings.yaml exists, but the workbuddy route is missing',
+  '尚未配置 workbuddy 路由': 'the workbuddy route is not configured yet',
+  '.credentials.yaml 已含 WORKBUDDY_BRIDGE_KEY': '.credentials.yaml already contains WORKBUDDY_BRIDGE_KEY',
+  '确认 WorkBuddy 客户端已安装且本机可执行': 'make sure the WorkBuddy client is installed and runnable on this machine',
+  '登录文件可能由另一个 build 写入（如国际版客户端）': 'the login file may have been written by another build (e.g. the international client)',
+  '令牌已过期，请在桌面端重新登录': 'the token has expired — sign in again in the desktop app',
+  '点「启动桥服务」': 'click Start bridge',
+  '在「可用模型」里勾选后保存。DSH Desktop 0.2.0 会在下次启动时把 settings.yaml 导入 profile 的 patch 层':
+    'Check models under Available models and save. DSH Desktop 0.2.0 imports settings.yaml into the profile patch layer on next launch.',
+  '在「可用模型」里勾选后保存': 'check models under Available models and save',
+  'pi-ai 的 OpenAI 实现要求必须提供 API key 引用': 'the pi-ai OpenAI implementation requires an API key reference',
+  '存在多个账号快照，已固定使用': 'multiple account snapshots exist; pinned to ',
+  '，避免选错账号': ' to avoid picking the wrong account',
+  '缺失：': 'Missing: ',
+  '；在 profile 目录执行 pnpm add <包名>@<与 DSH 一致的版本>。注意版本必须对齐——装错代次会连 peer 依赖一起错':
+    '; in the profile directory run pnpm add <package>@<same version as DSH>. Versions must line up — installing the wrong generation breaks peer dependencies too.',
+
+  // ---- 诊断 / 模型面板的零散标签 ----
+  '范围': 'Scope',
+  '要包含哪些模型？': 'Which models should be included?',
+  '上游所有可用模型都能加，不限桥默认精选的那几个。勾选后下面的配置片段立刻按你的选择重算。':
+    'Every available upstream model can be added — not just the handful the bridge curates by default. The snippets below recompute immediately as you pick.',
+  '用它的底层 AI SDK（@ai-sdk/openai-compatible）实测：基础生成、工具调用、流式输出三项全通过。界面表单只填得进 id 和显示名，**上下文长度必须写在 opencode.json 的 limit 里**——不写就会显示「上下文 0」。下面这份已经按上游真实值填好了。':
+    'Verified with its underlying AI SDK (@ai-sdk/openai-compatible): basic generation, tool calling and streaming all pass. The UI form only takes an id and a display name, so **context length must go in the limit field of opencode.json** — leave it out and you get "context 0". The file below is already filled with the real upstream values.',
+  '上游 30 个模型全是对话类，没有任何 embedding 模型，所以 /v1/embeddings 会明确返回 501。这里不做「假的向量」——那会让知识库看起来建成了、实际全是噪声，要等检索结果离谱时才发现。需要 RAG 的客户端请单独配一个 embedding 服务。':
+    'All 30 upstream models are chat models; there is no embedding model, so /v1/embeddings deliberately returns 501. We do not fake vectors here — that would make a knowledge base look built while being pure noise, and you would only notice when retrieval went badly wrong. Clients that need RAG should point at a separate embedding service.',
+
+  '已过期': 'Expired',
+};
+/* ---------------------------------------------------------------------------
+ * 动态串规则：**拼出来**的文案（计数、时长、状态组合）没法进词条表，
+ * 用「正则 → 替换」兜住。数组顺序即优先级，**具体规则必须排在通用规则前面**。
+ * 第二项可以是字符串（支持 `$1`）或函数（收到 match + 各捕获组）。
+ *
+ * 为什么要这一层：这个页面大量用 `'完成 ' + done + ' / ' + total` 这种拼接，
+ * 词条表只能命中**完整**文本节点。规则层让「渲染代码一行不改」也能出英文。
+ * ------------------------------------------------------------------------- */
+const I18N_RULES_EN = [
+  /* -------------------------------------------------------------------------
+   * 0. 复制到剪贴板的文本（诊断报告 / 接入信息）—— **必须排最前**
+   *
+   * 这些文本不进 DOM（直接进剪贴板），只能靠 `translateMultiline()` 逐行翻。
+   * 它们的形状是「整行锚定」的（`^- ` / ` : `），比后面的通用规则**更具体**，
+   * 所以必须排在前面：例如 `- [✓] 桥服务：127.0.0.1:8790 已响应` 若先被
+   * `已响应` 那条通用规则匹配，就会得到「- [✓] 桥服务：… responding」——
+   * 半句英文半句中文，比不翻还糟。
+   * ---------------------------------------------------------------------- */
+  [/^已复制 (.+)$/, (m, label) => 'Copied ' + translateText(label)],
+  [/^复制失败：(.+)$/, (m, label) => 'Copy failed: ' + translateText(label)],
+  [/^OpenAI 兼容 Base URL : (.*)$/, 'OpenAI-compatible Base URL: $1'],
+  [/^Anthropic Base URL   : (.*?)\s*（Claude Code 用，注意不带 \/v1）$/,
+    'Anthropic Base URL   : $1   (for Claude Code; note there is no /v1)'],
+  [/^API Key \/ 令牌       : (.*)$/, 'API key / token      : $1'],
+  [/^已实测  : opencode、Claude Code（Anthropic 协议）$/,
+    'Verified   : opencode, Claude Code (Anthropic protocol)'],
+  [/^协议兼容: Cherry Studio \/ NextChat \/ LobeChat \/ ChatBox \/ Open WebUI \/ Cursor \/ Trae$/,
+    'Compatible : Cherry Studio / NextChat / LobeChat / ChatBox / Open WebUI / Cursor / Trae'],
+  [/^不支持  : 知识库 \/ RAG（上游没有 embedding 模型，\/v1\/embeddings 返回 501）$/,
+    'Unsupported: knowledge base / RAG (no upstream embedding model; /v1/embeddings returns 501)'],
+  // 表单字段行（`提供商 ID : workbuddy`）：键查词条表，值也过一遍（可能是「（留空）」）
+  [/^(.+) : (.*)$/, (m, k, v) =>
+    translateText(k) + ' : ' + translateText(v).replace(/、/g, ', ')],
+  [/^- 时间：(.+)$/, '- Time: $1'],
+  [/^- 控制台 v(.+) · Node (.+)$/, '- Console v$1 · Node $2'],
+  [/^- 桥：(.+)（PID (.+) \/ 运行 (.+) \/ 目录 (.+) 个( @ (.+))?）$/,
+    (m, ep, pid, up, size, _at, at) => '- Bridge: ' + ep + ' (PID ' + pid + ' / up ' + translateText(up)
+      + ' / catalog ' + size + (at ? ' @ ' + at : '') + ')'],
+  [/^- 桥状态：(.+)$/, (m, s) => '- Bridge status: ' + translateText(s)],
+  [/^- 账号：(.+)（uid (.+)…）$/, '- Account: $1 (uid $2…)'],
+  [/^- 域名：(.+)$/, '- Domain: $1'],
+  [/^- 令牌剩余：(.+)$/, (m, d) => '- Token TTL: ' + translateText(d)],
+  [/^- 未取到有效凭据：(.+)$/, '- No valid credentials: $1'],
+  [/^- AtRest：(.+)$/, (m, d) => '- AtRest: ' + translateText(d)],
+  [/^- \[(.)\] (.+)：(.+)（建议：(.+)）$/, (m, mark, label, detail, hint) =>
+    '- [' + mark + '] ' + translateText(label) + ': ' + translateText(detail)
+      + ' (suggestion: ' + translateText(hint) + ')'],
+  [/^- \[(.)\] (.+)：(.+)$/, (m, mark, label, detail) =>
+    '- [' + mark + '] ' + translateText(label) + ': ' + translateText(detail)],
+  [/^- （未取到诊断结果）$/, '- (no diagnostics result available)'],
+  [/^- 目录模型数：(.+)$/, '- Models in catalog: $1'],
+  [/^- 被排除的非对话模型：(.+)$/, (m, v) => '- Non-chat models excluded: ' + translateText(v)],
+  [/^- 已注册：(\d+) 个（其中 (\d+) 个已不在目录：(.+)）$/,
+    '- Registered: $1 (of which $2 are no longer in the catalog: $3)'],
+  [/^- 已注册：(\d+) 个$/, '- Registered: $1'],
+  [/^- （最近明细里没有失败）$/, '- (no failures in the recent details)'],
+
+  // 时长 / 相对时间（fmtDuration / fmtUptime / fmtAgo / fmtRunMs）
+  [/^(\d+) 天 (\d+) 小时$/, '$1d $2h'],
+  [/^(\d+) 小时 (\d+) 分$/, '$1h $2m'],
+  [/^(\d+) 分 (\d+) 秒$/, '$1m $2s'],
+  [/^(\d+) 分$/, '$1m'],
+  [/^(\d+) 秒$/, '$1s'],
+  [/^(\d+) 秒前$/, '$1s ago'],
+  [/^(\d+) 分钟前$/, '$1m ago'],
+  [/^(\d+) 小时前$/, '$1h ago'],
+  [/^(\d+) 天前$/, '$1d ago'],
+  [/^已用 (\d+)s$/, 'used $1s'],
+
+  // 面板时间戳
+  [/^更新于 (\d{2}:\d{2}:\d{2}) · 目录 (.+)$/, 'Updated $1 · catalog $2'],
+  [/^更新于 (\d{2}:\d{2}:\d{2})$/, 'Updated $1'],
+
+  // 标签页标题（refreshTitle）
+  [/^桥运行中 · (\d+) 模型$/, 'Bridge running · $1 models'],
+  [/^ · 新失败 (\d+)$/, ' · $1 new failure(s)'],
+  [/^ · WorkBuddy 本地 API 桥$/, ' · WorkBuddy Local API Bridge'],
+
+  // 体检进度（updateProbeProgress）
+  [/^完成 (\d+) \/ (\d+)([\s\S]*)$/, (m, done, total, rest) =>
+    'Done ' + done + ' / ' + total + rest
+      .replace(/ · 可用 (\d+)/, ' · $1 ok')
+      .replace(/ · 当前 (.+)/, (mm, cur) => ' · current ' + cur.replace(/、/g, ', '))
+      .replace(/ · 已用 (\d+)s/, ' · elapsed $1s')
+      .replace(/ · 预计剩余 (\d+)s/, ' · ~$1s left')],
+  [/^进度 (\d+)\/(\d+)([\s\S]*)$/, (m, done, total, rest) =>
+    'Progress ' + done + '/' + total + rest
+      .replace(/ · 可用 (\d+)/, ' · $1 ok')
+      .replace(/ · 已用 (\d+)s/, ' · elapsed $1s')],
+  [/^已取消：完成 (\d+) \/ (\d+)([\s\S]*)$/, (m, done, total, rest) =>
+    'Cancelled: done ' + done + ' / ' + total + rest
+      .replace(/ · 可用 (\d+)/, ' · $1 ok')
+      .replace(/ · 已用 (\d+)s/, ' · elapsed $1s')],
+  [/^开始测试 (\d+) 个模型…（会消耗少量额度）$/, 'Starting test on $1 models… (consumes a little credit)'],
+  [/^测试完成：(\d+) \/(\d+) 个模型可正常调用$/, 'Test finished: $1 / $2 models respond normally'],
+  // 内层再翻一次：范围选项的文案本身也是拼出来的（「勾选的（12）」）
+  [/^只测「(.+)」；会消耗少量额度$/, (m, scope) =>
+    'Only probing “' + translateText(scope) + '”; consumes a little credit'],
+  [/^勾选的（(\d+)）$/, 'Checked ($1)'],
+  [/^已注册的（(\d+)）$/, 'Registered ($1)'],
+  [/^全部（(\d+)）$/, 'All ($1)'],
+  [/^测试可用性（(\d+) 个）$/, 'Test availability ($1)'],
+
+  // 模型面板的按钮计数与批量提示
+  [/^保存到 dsh 设置（(\d+) 个）$/, 'Save to dsh settings ($1)'],
+  [/^同步可用模型到 dsh（(\d+) 个）$/, 'Sync available models to dsh ($1)'],
+  [/^取消勾选不可用的（(\d+) 个）$/, 'Uncheck unavailable ($1)'],
+  [/^已取消勾选 (\d+) 个不可用模型（未保存前不影响 dsh）$/, 'Unchecked $1 unavailable models (dsh is untouched until you save)'],
+  [/^已全选当前可见模型，跳过 (\d+) 个已知不可用的模型$/, 'Selected all currently visible models, skipped $1 known-unavailable models'],
+  [/^已全选当前可见模型$/, 'Selected all currently visible models'],
+  [/^加选了 (\d+) 个免费模型，点「保存到 dsh 设置」生效$/, 'Added $1 free models — click Save to dsh settings to apply'],
+  [/^可选的免费模型已经都选上了（跳过 (\d+) 个已知不可用的）$/, 'All selectable free models are already checked (skipped $1 known-unavailable)'],
+  [/^已写入 (\d+) 个模型，原文件已备份$/, 'Wrote $1 models, original file backed up'],
+  [/^已写入 (\d+) 个模型$/, 'Wrote $1 models'],
+  [/^已清理 (\d+) 个失效注册（保留 (\d+) 个）$/, 'Cleaned up $1 stale registrations (kept $2)'],
+  [/^已按可用性排序：(.+)（点表头继续切换）$/, 'Sorted by availability: $1 (click the header to cycle)'],
+  [/^有 (\d+) 个已注册模型已不在上游目录中：([\s\S]*)$/, 'There are $1 registered models no longer in the upstream catalog: $2'],
+  [/^目录已更新（(\d+) 个模型）$/, 'Catalog updated ($1 models)'],
+  [/^刷新失败：上游未返回新目录；仍显示 (.+) 的缓存$/, 'Refresh failed: the upstream returned no new catalog; still showing the $1 cache'],
+  [/^显示 (\d+) \/ 总 (\d+) 行$/, 'Showing $1 / $2 rows'],
+  [/^显示 (\d+) \/ (\d+)$/, 'Showing $1 / $2'],
+  [/^已选 (\d+) 个$/, '$1 selected'],
+
+  // 用量面板
+  [/^已导出请求明细（(\d+) 条）$/, 'Exported request details ($1 rows)'],
+  [/^已导出用量 CSV（最近 (\d+) 天）$/, 'Exported usage CSV (last $1 days)'],
+  [/^其它（(\d+) 个）$/, 'Others ($1)'],
+  [/^未回报扣分的模型（(\d+) 个）：([\s\S]*)$/, 'Models that reported no credit ($1): $2'],
+  [/^上游未回报（(\d+) 次调用）$/, 'Not reported upstream ($1 calls)'],
+  [/^(\d+) 次）$/, '$1 calls)'],
+  [/^(.+) 次$/, '$1 calls'],
+  [/^本轮 (\d+) 个$/, 'This run: $1'],
+  [/^上次体检 (.+)$/, 'Last probe $1'],
+
+  // 最近请求
+  [/^最近 (\d+) 条里有 (\d+) 条失败（([\d.]+)%）；最多：(.+)。鼠标悬停结果标签可看上游返回的错误原文。$/,
+    'Of the last $1 requests, $2 failed ($3%); most common: $4. Hover a result tag to see the raw upstream error.'],
+  [/^最近 (\d+) 条里没有 (.+) 的记录，可把条数调大到 200。$/,
+    'No $2 records among the last $1 — try raising the row count to 200.'],
+  [/^最近 60 秒内有 (\d+) 条请求，会打断正在进行的调用。$/,
+    '$1 request(s) in the last 60 seconds; restarting will interrupt in-flight calls.'],
+  [/^最近请求里有 (\d+) 条新的失败。$/, '$1 new failures in Recent requests.'],
+  [/^「(.+)」已不在最近明细里，已恢复「全部模型」$/, '“$1” is no longer in the recent details; restored to All models'],
+  [/^疑似卡死（超过 (.+)）—— 桥不会主动打断，请检查客户端与上游$/,
+    (m, dur) => 'Possibly stuck (over ' + translateText(dur) + ') — the bridge never interrupts; check the client and the upstream'],
+  [/^(.+) · (流式|非流式) · 已运行$/, (m, model, mode) =>
+    model + ' · ' + translateText(mode) + ' · running for'],
+
+  // 签到
+  [/^连续 (\d+) 天可得$/, 'Streak $1 days'],
+  [/^每日 \+(\d+)$/, 'Daily +$1'],
+  [/^今天已经签过了（(.+)）$/, 'Already checked in today ($1)'],
+  [/^签到成功，获得 (.+)$/, 'Checked in — earned $1'],
+  [/^（上次自动签到失败：(.+)）$/, '(last auto check-in failed: $1)'],
+  [/^自动签到失败：(.+)$/, 'Auto check-in failed: $1'],
+
+  // 账号切换 / 启停
+  [/^确定切换到账号 (.+)？$/, 'Switch to account $1?'],
+  [/^将把 (\d+) 个「体检可用」的模型写入 dsh，会替换当前勾选； 原文件会自动备份。 确定继续？$/,
+    (m, n) => 'This will write ' + n + ' "probe-ok" models into dsh, replacing the current selection;'
+      + '\n\nthe original file is backed up automatically.\n\nContinue?'],
+  [/^已切换到 (.+)$/, 'Switched to $1'],
+  [/^桥仍在运行（PID (.+)），本次未能完成重启$/, 'Bridge is still running (PID $1); the restart did not complete'],
+  [/^已停止 \(PID (.+)\)$/, 'Stopped (PID $1)'],
+  [/^新进程启动失败，仍在复用旧进程（PID (.+)）$/, 'New process failed to start; still reusing the old one (PID $1)'],
+  [/^桥已在运行（PID (.+)）$/, 'Bridge already running (PID $1)'],
+  [/^已刷新全部面板（(.+)）$/, 'All panels refreshed ($1)'],
+
+  // 对话面板
+  [/^本轮发送 (\d+) 条消息 · 约 (\d+) 字符（建议清空对话）$/,
+    'Sent $1 messages this turn · about $2 characters (consider clearing the chat)'],
+  [/^本轮发送 (\d+) 条消息 · 约 (\d+) 字符$/,
+    'Sent $1 messages this turn · about $2 characters'],
+  [/^输入 (.+) \/ 输出 (.+) tokens · 扣分 (.+) · (.+)$/,
+    'Input $1 / output $2 tokens · credit $3 · $4'],
+  [/^用时 (.+)$/, 'Took $1'],
+  [/^已手动停止 · 用时 (.+)$/, 'Stopped manually · took $1'],
+  [/^（无内容返回）用时 (.+)$/, '(no content returned) took $1'],
+  [/^失败：(.+)$/, 'Failed: $1'],
+  [/^请求异常：(.+)$/, 'Request error: $1'],
+  [/^· 思考 (\d+) 字$/, ' · reasoning $1 chars'],
+
+  // 总览卡片 / 面板 note（都是拼出来的）
+  [/^模型 (\d+)$/, 'Model $1'],
+  [/^(模型 \d+) · (.+)$/, (m, g, k) => translateText(g) + ' · ' + translateText(k)],
+  [/^至 (.+)$/, 'until $1'],
+  [/^本地 (.+)$/, 'Local $1'],
+  [/^运行 (.+)$/, (m, d) => 'up ' + translateText(d)],
+  [/^PID (\d+) 目录 (\d+) 个模型$/, 'PID $1 · catalog $2 models'],
+  [/^(.+) 等 (\d+) 个$/, (m, ids, n) => ids + ' … (' + n + ' total)'],
+  [/^每日签到 (\d+)\/(\d+)$/, 'Daily check-in $1/$2'],
+  [/^路由 (.) 凭据 (.) bundle (.)$/, 'Route $1 Credentials $2 bundle $3'],
+  [/^(.+) · (.+) · 剩余 (.+)$/, (m, a, b, d) => a + ' · ' + b + ' · ' + translateText(d) + ' left'],
+  [/^最近 (\d+) 天$/, 'Last $1 days'],
+  [/^已回报 (\d+)\/(\d+) 次 平均 (.+) 上游按两位小数回报$/,
+    'Reported $1/$2 calls · avg $3 · upstream reports two decimals'],
+  // 注意顺序：`千 token（N 次）` 必须在通用的 `（N 次）` **之前**，否则先被通用规则吃掉
+  [/^(.+) \/ 千 token（(\d+) 次）$/, '$1 / 1k tokens ($2 calls)'],
+  [/^(.+)（(\d+) 次）$/, (m, a, n) => a + ' (' + n + (n === '1' ? ' call' : ' calls') + ')'],
+  [/^已选 (\d+) \/ (\d+)$/, '$1 / $2 selected'],
+  [/^测得时间(.+)$/, 'probed $1'],
+  [/^今日已签到 · (.+)$/, (m, rest) => 'Checked in today · ' + translateText(rest)],
+  [/^自动（(.+)）$/, 'auto ($1)'],
+  [/^连续 (\d+) 天$/, 'Streak $1 days'],
+  [/^每日 \+(\d+) 连续 (\d+) 天可得 (\d+) 积分$/, 'Daily +$1 · $3 credit for a $2-day streak'],
+  [/^上次尝试：(.+) · (.+) · (.+)$/, (m, when, how, res) =>
+    'Last attempt: ' + when + ' · ' + translateText(how) + ' · ' + translateText(res)],
+
+  // 环境诊断（detail / hint 由桥生成，值里带动态内容）
+  [/^目录为空：(.+)$/, 'directory is empty: $1'],
+  [/^keyId=(.+)（与信封一致）$/, 'keyId=$1 (matches the envelope)'],
+  [/^keyId=(.+)（与信封不一致）$/, 'keyId=$1 (does NOT match the envelope)'],
+  [/^账号 (.+) · 剩余 (.+)$/, (m, acct, d) => 'account ' + acct + ' · ' + translateText(d) + ' left'],
+  [/^(.+) 已响应$/, '$1 responding'],
+  [/^(.+) 未监听$/, '$1 not listening'],
+  [/^建议：(.+)$/, (m, h) => 'Suggestion: ' + translateText(h)],
+  [/^workbuddy 路由已生效（(.+)）· 已注册 (\d+) 个模型$/,
+    'workbuddy route is live ($1) · $2 models registered'],
+  [/^(\d+) 个，缺失 (\d+) 个( · DSH (.+))?$/, 'bundles: $1, missing: $2$3'],
+  [/^未找到 profile( · DSH (.+))?$/, 'no profile found$1'],
+  [/^存在多个账号快照，已固定使用 (.+)，避免选错账号$/,
+    'multiple account snapshots exist; pinned to $1 to avoid picking the wrong account'],
+  [/^缺失：(.+)；在 profile 目录执行 pnpm add <包名>@<与 DSH 一致的版本>。注意版本必须对齐——装错代次会连 peer 依赖一起错$/,
+    'Missing: $1; in the profile directory run pnpm add <package>@<same version as DSH>. Versions must line up — installing the wrong generation breaks peer dependencies too.'],
+
+  // 图表 tooltip / 无障碍标签
+  [/^(.+)：调用次数 (\d+)$/, '$1: $2 calls'],
+  [/^(.+)：输入 (.+)$/, '$1: input $2'],
+  [/^(.+)：输出 (.+)$/, '$1: output $2'],
+  [/^(.+)：积分 (.+)$/, '$1: credit $2'],
+  [/^(.+)：累计 (.+)$/, '$1: cumulative $2'],
+  [/^最近 (\d+) 天调用次数图，合计 (\d+) 次$/, 'Last $1 days, calls chart, $2 total'],
+  [/^最近 (\d+) 天tokens图，输入 (.+) \/ 输出 (.+)$/, 'Last $1 days, tokens chart, input $2 / output $3'],
+  [/^最近 (\d+) 天积分图，合计 (.+?)(，其中 (\d+) 次调用未回报扣分)?$/,
+    (m, days, sum, _all, unrep) => 'Last ' + days + ' days, credit chart, total ' + sum
+      + (unrep ? ', of which ' + unrep + ' calls reported no credit' : '')],
+
+  // 最近请求的失败摘要（被 <b> 拆成多段，逐段翻）
+  [/^最近 (\d+) 条里有$/, 'Of the last $1,'],
+  [/^条失败（([\d.]+)%）；最多：(.+)。鼠标悬停结果标签可看上游返回的错误原文。$/,
+    (m, pct, combo) => 'failed (' + pct + '%); most common: ' + translateText(combo)
+      + '. Hover a result tag to see the raw upstream error.'],
+
+  // 复制文本 / 诊断报告的整行规则在数组**最前面**（见文件上方说明）：它们最具体，
+  // 排在后面会被 `已响应` 这类通用规则抢先匹配，label 就会留在中文。
+
+  // 通用兜底：`<动词>失败：<原因>` 与 `<动词> (PID n)`
+  [/^(桥已启动|桥已重启|桥已停止|启动桥服务|重启桥|停止) \(PID (.+)\)$/,
+    (m, verb, pid) => (I18N_EN[verb] || verb) + ' (PID ' + pid + ')'],
+  [/^([^：\s]+)失败：([\s\S]*)$/, (m, verb, rest) => (I18N_EN[verb] || verb) + ' failed: ' + rest],
+];
+
+
 
 async function api(path, options) {
   // 每个请求都带 x-workbuddy-panel:1 —— 后端用它拒绝跨站写操作（自定义头会
@@ -347,7 +1426,9 @@ async function confirmDangerous(title, extraLines = []) {
   } catch {
     recentLine = '无法确认最近 60 秒是否有请求（读取明细失败）。';
   }
-  return confirm([title, '', recentLine, ...extraLines].join('\n'));
+  // 原生 confirm 弹窗**不在 DOM 里**，i18n 的 DOM 翻译遍够不着它 —— 必须在这里
+  // 逐段翻译后再拼。标题与补充行都可能带动态内容（账号名 / 数量），所以走 t()。
+  return confirm([t(title), '', t(recentLine), ...extraLines.map((line) => t(line))].join('\n'));
 }
 
 /** 体检进行中时，危险动作要额外提醒一句。 */
@@ -585,7 +1666,8 @@ function refreshTitle() {
     head = '桥运行中 · ' + m + ' 模型';
   }
   const n = countNewFailures();
-  document.title = head + (n ? ' · 新失败 ' + n : '') + TITLE_SUFFIX;
+  // 标题是**拼出来**的，且不经过 DOM（i18n 的翻译遍够不着），所以逐段 t()
+  document.title = t(head) + t(n ? ' · 新失败 ' + n : '') + t(TITLE_SUFFIX);
 }
 
 /**
@@ -2235,8 +3317,8 @@ function updateSyncUsableBtn() {
 async function syncUsableModels() {
   const ids = usableIds();
   if (!ids.length) { setRegMsg('先做一次体检：当前没有「可用」的模型可同步', 'err'); return; }
-  const ok = confirm('将把 ' + ids.length + ' 个「体检可用」的模型写入 dsh，会替换当前勾选；'
-    + '原文件会自动备份。\n\n确定继续？');
+  const ok = confirm(t('将把 ' + ids.length + ' 个「体检可用」的模型写入 dsh，会替换当前勾选；'
+    + '原文件会自动备份。\n\n确定继续？'));
   if (!ok) return; // 取消 → 什么都不写
   const set = new Set(ids);
   document.querySelectorAll('#modelTable input[data-id]').forEach((c) => { c.checked = set.has(c.dataset.id); });
@@ -3017,7 +4099,8 @@ function buildDiagReport() {
 }
 
 async function copyDiagReport() {
-  const text = buildDiagReport();
+  // 报告是**多行纯文本**，不进 DOM，所以在这里逐行翻译
+  const text = translateMultiline(buildDiagReport());
   // 报告很长：quiet 模式避免把全文塞进提示条，成功/失败各给一句人话
   const ok = await copyText(text, { quiet: true });
   if (ok) setMsg('诊断报告已复制到剪贴板（不含任何令牌值）', 'good');
@@ -3064,7 +4147,7 @@ function refreshLogIfOpen() {
 $('refreshBtn').onclick = refreshAll;
 // 「复制全部」：贴进聊天/笔记用；面板里每一块也都有各自的复制按钮
 $('clientsCopyAllBtn').onclick = () => runCopy(
-  $('clientsCopyAllBtn'), '全部接入信息', clientsCheatSheet(lastClients || {}),
+  $('clientsCopyAllBtn'), '全部接入信息', translateMultiline(clientsCheatSheet(lastClients || {})),
 );
 
 $('diagBtn').onclick = () => { loadDiag(); };
@@ -3084,7 +4167,7 @@ $('reqPause').onchange = () => {
 
 // 「清空账本」：交给桥执行（它在内存里也持有一份副本），带二次确认
 $('usageClearBtn').onclick = async () => {
-  if (!confirm('确定清空用量账本？历史记录将被删除，且不会被恢复。')) return;
+  if (!confirm(t('确定清空用量账本？历史记录将被删除，且不会被恢复。'))) return;
   const r = await api('/api/usage', { method: 'DELETE' });
   if (r.cleared) {
     setMsg('已清空用量账本', 'good');
@@ -3101,7 +4184,7 @@ $('logFilter').oninput = renderLog;
 $('logErrorsOnly').onchange = renderLog;
 
 $('logClearBtn').onclick = async () => {
-  if (!confirm('确定清空 bridge.log？当前桥进程会继续往新文件里写。')) return;
+  if (!confirm(t('确定清空 bridge.log？当前桥进程会继续往新文件里写。'))) return;
   const r = await api('/api/bridge/log', { method: 'DELETE' });
   if (r.cleared) {
     setMsg('已清空桥日志', 'good');
@@ -3202,7 +4285,9 @@ function renderChat() {
             + (t.meta ? ' <span>' + escapeAttr(t.meta) + '</span>' : '')
           : '') +
       '</div>' +
-      '<div class="turn-body">' + escapeAttr(t.text || (t.streaming ? '…' : '')) + '</div>' +
+      // 对话**正文**是数据（用户输入 + 模型输出），绝不能被 i18n 碰 —— 标 skip；
+      // 角色名 / 用量摘要属于界面文案，照常参与翻译。
+      '<div class="turn-body" data-i18n-skip>' + escapeAttr(t.text || (t.streaming ? '…' : '')) + '</div>' +
     '</div>').join('');
   const info = chatLastSend
     ? '<div class="chat-sendinfo">本轮发送 ' + chatLastSend.n + ' 条消息 · 约 '
@@ -4179,6 +5264,7 @@ function initBackToTop() {
 // 过一会儿又被落盘的结果刷掉，看起来像闪了一下
 initAlerts(); // 读回失败水位线 / 提醒静默标记（只含时间戳与日期）
 initTheme();
+initI18n();   // 语言开关：读回上次选择；放在渲染之前，避免先出中文再翻一遍
 initNavTabs();
 initQuickPrompts();
 initBackToTop();

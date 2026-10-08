@@ -8,6 +8,7 @@
 **LobeChat**、**Open WebUI** 等任何支持自定义 Base URL 的客户端都能直连。
 
 另附一个网页控制台（状态 / 启停 / 诊断 / 模型注册 / 用量 / 体检 / 对话测试），
+**中 / 英双语**（右上角切换，选择记在本机），
 以及一个可选的 **DeepSeek Harness（dsh）原生插件**（见下方说明）。
 
 > **一句话**：WorkBuddy 的模型额度 → 本地 API → 你惯用的任意 AI 客户端。
@@ -88,7 +89,7 @@ dsh plugin --profile desktop add github:Ianzhyh/workbuddy-to-dsh
 
 # 方式二：release 附件（tgz 安装包，无构建、无需 allowBuilds 授权）
 #   从 GitHub Releases 下载 dsh-plugin-workbuddy-<版本>.tgz 后：
-dsh plugin --profile desktop add ./dsh-plugin-workbuddy-1.2.0.tgz
+dsh plugin --profile desktop add ./dsh-plugin-workbuddy-1.3.0.tgz
 
 # 方式三：从源码（插件在 dsh-plugin/ 子目录，接第 1 步的 git clone）
 dsh plugin --profile desktop add workbuddy-to-dsh/dsh-plugin

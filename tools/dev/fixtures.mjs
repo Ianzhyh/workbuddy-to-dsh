@@ -150,6 +150,10 @@ export function requestsFixture({ requests = null } = {}) {
       { t: NOW - 60000, model: 'glm-5.3', stream: false, ok: false, ms: 2400, status: 400, code: 11101, error: '{"msg":"Non-stream chat request is currently not supported"}' },
       { t: NOW - 90000, model: 'kimi-k3-1', stream: true, ok: true, ms: 960, promptTokens: 410, completionTokens: 130, credit: 0.02 },
     ],
+    // 进行中的请求（批次二加的字段）：默认给空数组 = 没有在途请求，
+    // 需要验收「疑似卡死」提示的用例自己传 active。
+    active: [],
+    activeAlertMs: 300000,
   };
 }
 

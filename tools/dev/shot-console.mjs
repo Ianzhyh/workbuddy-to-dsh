@@ -15,6 +15,7 @@ import { baseRoutes } from './fixtures.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const OUT = join(root, 'docs', 'screenshot.png');
+const OUT_EN = join(root, 'docs', 'screenshot-en.png');
 const PORT = 8791;
 
 const now = Date.now();
@@ -70,6 +71,16 @@ try {
   const res = await cdp.send('Page.captureScreenshot', { format: 'png', captureBeyondViewport: true });
   writeFileSync(OUT, Buffer.from(res.result.data, 'base64'));
   console.log('已生成：' + OUT);
+
+  // 英文版：同一份桩数据切到 EN 再拍一张（README.en.md 用）。
+  // 刻意走**真实**的语言开关而不是改源码，这样截图也顺带验收了一次切换。
+  await q(cdp, `document.getElementById('langToggle').click()`);
+  await sleep(700);
+  await q(cdp, 'window.scrollTo(0, 0)');
+  await sleep(300);
+  const resEn = await cdp.send('Page.captureScreenshot', { format: 'png', captureBeyondViewport: true });
+  writeFileSync(OUT_EN, Buffer.from(resEn.result.data, 'base64'));
+  console.log('已生成：' + OUT_EN);
 } finally {
   close(); server.close();
 }
