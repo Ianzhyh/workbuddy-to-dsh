@@ -312,6 +312,11 @@ export class BridgeSupervisor {
 
     const env = {
       ...process.env,
+      // 显式确保以 node 模式运行：本插件的宿主是 DSH Desktop（Electron），
+      // nodePath 默认取 process.execPath —— 那是 Electron 二进制，没有这个
+      // 变量会以"应用模式"启动（弹一个 DSH 窗口而不是跑桥脚本）。手动用
+      // 真 node 跑插件时该变量无害（node 会忽略它）。
+      ELECTRON_RUN_AS_NODE: '1',
       WORKBUDDY_HOST: this.host,
       WORKBUDDY_PORT: String(this.port),
       WORKBUDDY_LOCAL_TOKEN: this.token,

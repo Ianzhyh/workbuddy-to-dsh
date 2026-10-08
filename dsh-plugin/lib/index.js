@@ -190,7 +190,6 @@ export function projectRootCandidates(configured = '') {
   candidates.push({ path: resolve(PLUGIN_DIR, '..', '..', '..'), kind: 'node_modules' });
   candidates.push({ path: resolve(process.cwd(), '..'), kind: 'cwd' });
   candidates.push({ path: join(homedir(), 'workbuddy-to-dsh'), kind: 'home' });
-  candidates.push({ path: 'E:\\workbuddy-to-dsh', kind: 'fallback' });
   return candidates;
 }
 

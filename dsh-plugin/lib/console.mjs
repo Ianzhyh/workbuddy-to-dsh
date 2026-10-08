@@ -160,6 +160,9 @@ export class ConsoleSupervisor {
 
     const env = {
       ...process.env,
+      // 同 bridge.start()：宿主是 Electron 时确保以 node 模式运行（不依赖
+      // 环境变量继承）；真 node 环境下该变量无害。
+      ELECTRON_RUN_AS_NODE: '1',
       // 桥的生命周期归插件管：插件拉起的这个控制台实例**不要**再去拉一次桥，
       // 否则两个进程会同时探测→同时 spawn，后到的那个以 EADDRINUSE 收场。
       // （控制台页面上的「启动桥服务」按钮不受影响，那是明确的用户动作。）

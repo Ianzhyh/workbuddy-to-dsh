@@ -65,10 +65,16 @@ const env = projectRoot ? readProjectEnv(projectRoot) : {};
 const pick = (key, fallback) => process.env[key] || env[key] || fallback;
 
 /** 3. WorkBuddy 桌面端 + 登录文件 */
+const homeDir = homedir();
 const authDirs = [
   process.env.WORKBUDDY_AUTH_DIR,
-  join(process.env.LOCALAPPDATA || '', 'CodeBuddyExtension', 'Data', 'Public', 'auth'),
-  join(homedir(), 'AppData', 'Local', 'CodeBuddyExtension', 'Data', 'Public', 'auth'),
+  // 与 config.mjs 的 authDir() 同一套平台分支 —— 原实现只有 Windows 形态，
+  // 且在 LOCALAPPDATA 缺失时会拼出相对路径（`\CodeBuddyExtension\…`）。
+  process.platform === 'win32'
+    ? join(process.env.LOCALAPPDATA || join(homeDir, 'AppData', 'Local'), 'CodeBuddyExtension', 'Data', 'Public', 'auth')
+    : process.platform === 'darwin'
+      ? join(homeDir, 'Library', 'Application Support', 'CodeBuddyExtension', 'Data', 'Public', 'auth')
+      : join(homeDir, '.local', 'share', 'CodeBuddyExtension', 'Data', 'Public', 'auth'),
 ].filter(Boolean);
 const authDir = authDirs.find((d) => existsSync(d));
 if (!authDir) {

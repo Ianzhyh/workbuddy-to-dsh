@@ -92,7 +92,9 @@ export function readDshStatus() {
       const list = pkg.dsh?.profile?.bundles || [];
       for (const name of list) {
         const candidates = [
-          join(config.dsh.runtime, 'node_modules', name),
+          // runtime 探测不到时**不要给空串候选**：join('') 会拼出相对路径，
+          // existsSync 相对 cwd 判断可能误命中。
+          ...(config.dsh.runtime ? [join(config.dsh.runtime, 'node_modules', name)] : []),
           join(config.dsh.home, 'profiles', 'node_modules', name),
           join(config.dsh.profileDir, 'node_modules', name),
         ];

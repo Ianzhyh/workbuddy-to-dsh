@@ -11,6 +11,7 @@ import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { findWorkBuddyExe } from './lib/find-workbuddy.mjs';
+import { findDshRuntime } from './lib/find-dsh.mjs';
 
 /** 项目根目录。 */
 export const ROOT = resolve(dirname(fileURLToPath(import.meta.url)));
@@ -57,21 +58,18 @@ export function resolveWorkBuddyExe() {
 /**
  * dsh 运行时目录。
  *
- * 本机有两套：DSH Desktop（Electron 应用）自带的 bundled 运行时，以及一份
- * 独立的旧安装。二者版本不同（例如 0.2.0-rc.2 与 0.1.0-rc.6），据此得出的
- * 结论也会不同——例如 `llm-pi-ai` 插件的可用版本、`.credentials.yaml` 的
- * 格式要求。因此优先取 DSH Desktop 的那一套。
+ * 多级探测（env 覆盖 → 常见安装位置 → 运行中进程 → 磁盘浅扫描），
+ * 实现见 lib/find-dsh.mjs —— 与 WorkBuddy 客户端探测同族：写死路径在
+ * DSH 换目录安装后必然失配，而 dsh 集成（模型注册 / profile bundles /
+ * 凭据引用）全都依赖这个目录。
+ *
+ * 注意优先取 **DSH Desktop** 的那一套 bundled 运行时：本机可能并存一份
+ * 独立的旧安装，二者版本不同（例如 0.2.0-rc.2 与 0.1.0-rc.6），据此得出的
+ * 结论（llm-pi-ai 可用版本、.credentials.yaml 格式要求）也不同。
+ * 探测不到时返回 ''（而不是一个不存在的路径），各消费点对空值有防御。
  */
-const DSH_RUNTIME_CANDIDATES = [
-  env.DSH_RUNTIME,
-  'E:\\harness\\resources\\runtime',
-  'C:\\Program Files\\DeepSeek Harness\\resources\\runtime',
-  '/Applications/DeepSeek Harness.app/Contents/Resources/runtime',
-  join(homedir(), 'DeepSeek-Harness', 'runtime'),
-].filter(Boolean);
-
 export function resolveDshRuntime() {
-  return DSH_RUNTIME_CANDIDATES.find((p) => existsSync(p)) || DSH_RUNTIME_CANDIDATES[0];
+  return findDshRuntime();
 }
 
 /** DSH Desktop 的版本号，读自 bundled 运行时的 runtime.json。 */

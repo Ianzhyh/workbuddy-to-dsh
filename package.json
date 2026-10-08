@@ -44,7 +44,7 @@
     "bridge": "node bridge/workbuddy-bridge.mjs",
     "doctor": "node tools/doctor.mjs",
     "verify": "node tools/verify-atrest.mjs",
-    "test:lib": "node --test lib/find-workbuddy.test.mjs",
+    "test:lib": "node --test lib/find-workbuddy.test.mjs lib/find-dsh.test.mjs",
     "test:plugin": "node --test \"dsh-plugin/tests/*.test.mjs\"",
     "panel:shot": "node dsh-plugin/tests/panel-render.mjs",
     "preflight": "node dsh-plugin/scripts/preflight.mjs",
