@@ -4,15 +4,29 @@
 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
-## 维护约定（发版三步）
+## 维护约定（发版四步）
 
 1. `npm run release:check` 全绿（vendor 同步 + lib 单测 + 插件测试 + 独立分发演练）；
-2. 把本次变化落进本文档的 `[Unreleased]` 段 → 转成版本条目；版本号写进 `package.json`；
-3. `git tag vX.Y.Z` 并推送。
+   改了界面还要 `npm run test:ui` / `npm run panel:check`（它们需要本机 Chrome，
+   不塞进 CI 矩阵）；
+2. 把本次变化落进本文档的 `[Unreleased]` 段 → 转成版本条目；版本号同步 5 处
+   （见 `CONTRIBUTING.md` 的发版四步）；改了界面还要重出截图；
+3. `git tag vX.Y.Z` 并推送，`gh release create` 带上 tgz；
+4. `npm run verify:release` —— 把**已发布**的 tgz 下下来验一遍
+   （`release:check` 验的是本地 `vendor/`，验不到 `npm pack` 到底打进去了什么）。
 
 只支持最近 2 个 minor 版本。
 
 ## [Unreleased]
+
+### Added
+
+- **`npm run verify:release`**：把**已发布**的 tgz 下下来验一遍 ——
+  与本地打包产物逐字节比对、列出包内文件、核对关键文件在不在、并把几个关键文件
+  取出内容与仓库当前版本逐字节比对（防止「改了代码但打的是旧快照」）。
+  `release:check` 里的 `verify:standalone` 验的是**本地** `vendor/`，
+  验不到「`npm pack` 到底打进去了什么」——少打包一个文件本地门禁不会红。
+  实测 v1.4.0 的发布产物与本地打包产物逐字节一致（sha256 `f94c4260…`）。
 
 ## [1.4.0] - 2026-10-08
 

@@ -98,15 +98,36 @@ node dsh-plugin\scripts\vendor.mjs          :: 重新生成
 node dsh-plugin\scripts\vendor.mjs --check  :: CI 与门禁会自动校验
 ```
 
-## 发版三步
+## 发版四步
 
 1. `npm run release:check` 全绿；改了 `dashboard/` 或 `tools/dev/` 还要 `npm run test:ui` 全绿
    （它不在 `release:check` 里：需要本机 Chrome，且要几分钟，不适合塞进 CI 矩阵）；
+   改了面板或 `dsh-plugin/` 还要 `npm run panel:check`；
 2. 在 `CHANGELOG.md` 的 `[Unreleased]` 落本次变化，转成版本条目（Keep a Changelog），
-   版本号写进 `package.json`；
-3. `git tag vX.Y.Z` 并推送。
+   版本号同步 **5 处**：`package.json`、`dsh-plugin/package.json`、
+   `docs/openapi.yaml` 的 `info.version`、README 里的 tgz 文件名、
+   以及 `package-lock.json` 的根版本（`version` 与 `packages[""].version`）；
+   改了 UI 还要重出截图（`docs/screenshot*.png`、`docs/plugin-panel*.png`）——
+   **截图不在任何门禁里**，最容易漏；
+3. `npm run pack:plugin` → `git tag vX.Y.Z` → 推送 → `gh release create` 带上 tgz
+   （说明里引用图片要用**绝对 URL**：release notes 不在仓库树里，相对路径解析不了）；
+4. `npm run verify:release` —— 把**已发布**的那个 tgz 下下来验一遍
+   （`release:check` 验的是本地 `vendor/`，验不到「`npm pack` 到底打进去了什么」）。
+   本机要带合并 CA 跑，见下。
 
 只支持最近 2 个 minor 版本。
+
+### 本机跑网络相关的命令
+
+这台机器上有中间证书，且 GitHub 直连不稳定：
+
+```sh
+NODE_EXTRA_CA_CERTS=E:/tmp/combined-ca.pem npm run verify:release
+```
+
+（与 `git push` 用的是同一个 `combined-ca.pem`；不用 `curl` —— 它的 schannel
+后端会报 `CRYPT_E_NO_REVOCATION_CHECK`。`verify:release` 会把下载缓存在
+`.tmp-research/release/`，重跑不必再下；`--refresh` 强制重下。）
 
 ## 提交信息
 
