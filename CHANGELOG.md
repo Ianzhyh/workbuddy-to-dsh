@@ -19,6 +19,22 @@
 
 ## [Unreleased]
 
+### Changed
+
+- **`tools/dev/` 纳入 lint 范围**。它原先被当作「一次性探针脚本」排除在外，
+  但后来成了常驻门禁的所在地（`run-ui-tests.mjs` / `test-i18n.mjs` /
+  `verify-release.mjs` / `check-i18n-coverage.mjs`）—— 排除它等于**让门禁自己不被检查**。
+  实际开启时全目录只有 1 个问题，成本远低于预期。
+  `.tmp-*` / `.backup/` / `.optimize/` / `dsh-plugin/vendor/` 仍排除在外。
+
+### Fixed
+
+- **`tools/dev/test-clients-panel.mjs` 里被注入到页面的那段表达式其实是有问题的**：
+  它是**模板串**，而模板串里简写的空白转义会被 JS 吃掉反斜杠 ——
+  实际注入的正则是「`✓` + 若干 `s`」而不是「`✓` + 空白」，只是靠后面的 `.trim()`
+  侥幸没出错。改成字符类并**把反斜杠写两层**，语义才真正正确。
+  （顺带：这类注入串里写注释**不能带反引号**，会直接闭合模板串 —— 这个坑我踩了第二次。）
+
 ### Added
 
 - **`dsh-plugin/tests/i18n-terms.test.mjs`：把「两张 i18n 表不能漂移」钉成测试**。

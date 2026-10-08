@@ -179,7 +179,11 @@ const pick = await q(cdp, `(() => {
   return {
     count: (w.querySelector('.modelpick-count') || {}).textContent || '',
     chips: [...w.querySelectorAll('.modelpick-chip')].map((c) => ({
-      id: c.textContent.replace(/^✓\s*/, '').trim(), on: c.classList.contains('on'),
+      // 这段是**注入到页面里执行的模板串**：里面的反斜杠必须写两层，
+      // 否则制表符/换行的转义会先被模板串求值成真字符，塞进正则字面量直接语法错误。
+      // （原写法用简写的空白转义，在模板串里反斜杠会被吃掉 —— 实际注入的是
+      //  匹配「✓ + 若干 s」的正则，只是靠后面的 .trim() 侥幸没错。）
+      id: c.textContent.replace(/^✓[ \\t\\r\\n]*/, '').trim(), on: c.classList.contains('on'),
     })),
     blockVisible: (() => {
       const pre = document.querySelector('#clientsBox .codeblock pre');

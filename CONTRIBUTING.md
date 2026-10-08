@@ -15,6 +15,12 @@ npm run release:check    :: 完整门禁（vendor:check + 单测 + 插件测试 
 零运行时依赖：**不要**给 `dependencies` 加东西（devDependency 可以）；桥与控制台
 保持**单文件自包含**（桥 = `bridge/workbuddy-bridge.mjs` 一个文件）。
 
+**lint 范围**：`npm run lint`（`eslint .`）覆盖仓库自有源码，**包括 `tools/dev/`**。
+那里原先被当作「一次性探针脚本」排除在外，但后来它成了常驻门禁的所在地
+（`run-ui-tests.mjs` / `test-i18n.mjs` / `verify-release.mjs` / `check-i18n-coverage.mjs`），
+排除它等于让门禁自己不被检查。实际开启时全目录只有 1 个问题，成本远低于预期。
+`.tmp-*` / `.backup/` / `.optimize/` / `dsh-plugin/vendor/` 仍排除在外。
+
 ## 测试纪律（先红后绿）
 
 1. **涉及代码的改动，先加一条会失败的测试，再修实现**（插件 `npm run test:plugin`、

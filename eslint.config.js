@@ -2,8 +2,8 @@
  * ESLint 平面配置 —— 目标是「挡住真 bug」，不是统一风格：
  *   - 开：recommended 里能抓低级错误的核心规则；
  *   - 关：与本项目既有模式冲突、或纯风格类（每条都注明理由）；
- *   - 范围：仓库自有源码。vendor 快照、临时研究/优化目录、tools/dev 的一次性
- *     探针脚本不在门禁内；测试目录放宽 no-unused-vars（夹具常量常见）。
+ *   - 范围：仓库自有源码。vendor 快照、临时研究/优化目录不在门禁内；
+ *     `tools/dev/` **在门禁内**（见下），测试目录放宽 no-unused-vars（夹具常量常见）。
  *
  * 门禁：`npm run lint`；类型检查是另一条腿（`npm run check:types`）。
  */
@@ -15,7 +15,6 @@ export default [
     ignores: [
       'dsh-plugin/vendor/**',
       'node_modules/**',
-      'tools/dev/**',
       '.tmp-*/**',
       '.tmp-*',
       '.optimize/**',
