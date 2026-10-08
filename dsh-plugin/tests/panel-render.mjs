@@ -40,7 +40,7 @@ const offline = !process.argv.includes('--live');
  */
 const OUT_DIR = offline ? join(ROOT, 'docs') : join(ROOT, 'docs', '_review');
 const OUT = join(OUT_DIR, 'plugin-panel.png');
-const PORT = 8795;
+const PORT = 8810; // 与控制台用例（8774~8798）分开，避免同时跑时抢端口
 const LIVE = 'http://127.0.0.1:19387';
 
 // 桩数据与渲染骨架在 _panel-fixtures.mjs 里，与 panel-i18n.test.mjs 共用一份

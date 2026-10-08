@@ -95,11 +95,21 @@ export const FIXTURES = {
   checkin: { ok: true, status: { todayCheckedIn: true, todayCredit: 18, streakDays: 6 }, auto: { auto: true, lastError: null } },
   log: { ok: true, path: 'bridge\\bridge.log', size: 4096, lines: ['workbuddy-bridge listening on http://127.0.0.1:8790/v1', '→ deepseek-v4.1-flash stream=true msgs=12 tools=8', 'stream interrupted ECONNRESET'] },
 };
+/*
+ * `/workbuddy/models` 的响应形状 = **归一化器（lib/models.mjs）的输出**，
+ * 不是桥的原始形状。
+ *
+ * ⚠️ 这里原来写的是桥的原始字段名（`supports_images` / `context_window` /
+ * `max_output_tokens`）—— 于是对话页那个模型下拉读 `m.images` 拿到 undefined，
+ * `· 多模态` 后缀**根本没渲染出来**，i18n 验收因此漏掉了一处未翻译文案
+ * （用户实拍才发现）。桩的形状与真实契约不一致时，验收会在错误的地方变绿。
+ */
 FIXTURES.models.models = FIXTURES.status.directory.map((m) => ({
-  id: m.id, name: m.name, context_window: m.contextWindow, max_output_tokens: m.maxTokens,
-  credits: m.credits, supports_images: m.images, free: m.free,
-  // tags / badges 必须一起带上：模型页的促销徽章就靠它们渲染
-  tags: m.tags, badges: m.badges,
+  id: m.id, name: m.name, contextWindow: m.contextWindow, maxTokens: m.maxTokens,
+  credits: m.credits, images: m.images, free: m.free, vendor: m.vendor,
+  // tags 要洗干净（`badge:标签:#色` 已拆进 badges）；模型页的促销徽章靠 badges 渲染
+  tags: (m.tags || []).filter((t) => !/^badge:/.test(t)), badges: m.badges,
+  description: '',
 }));
 
 /**

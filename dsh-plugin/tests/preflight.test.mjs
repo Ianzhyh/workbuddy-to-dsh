@@ -80,22 +80,38 @@ function assertNoCrash(r, label) {
 }
 
 test('preflight：登录文件路径不存在时，必须给出可读结论而不是崩溃', async () => {
-  const r = runPreflight({
-    // 指向一个几乎不可能存在的路径；同时清掉 AUTH_DIR，
-    // 让它走"用户显式指定了文件"这条分支（这才是崩溃的那条）。
-    WORKBUDDY_AUTH_FILE: join(tmpdir(), 'wb-no-such-dir-xyz', 'no-such-auth.info'),
-    WORKBUDDY_AUTH_DIR: '',
-  });
+  /*
+   * 造一个**真实存在**的登录目录，再把 WORKBUDDY_AUTH_FILE 指到里面一个不存在的
+   * 文件 —— 这样命中的必然是「指定的文件不存在」那条分支。
+   *
+   * 为什么必须自己造目录：原来的写法只把 WORKBUDDY_AUTH_DIR 清空，指望 preflight
+   * 的候选列表回落到**本机真实的**登录目录。于是这条测试的结论取决于
+   * 「跑测试的机器装没装 WorkBuddy」：装了才走文件分支，没装就落到
+   * 「找不到登录目录」分支，而那条消息里没有 `不存在`，断言直接失败。
+   *
+   * 实测表现是最难查的那种：单独跑 `node --test preflight.test.mjs` 是绿的，
+   * 跑全套 `test:plugin` 就红（沙箱里读不到用户目录）。本文件自己的注释就写着
+   * 「不该让结论取决于运行环境」—— 这里把它落到实处。
+   */
+  const authDir = mkdtempSync(join(tmpdir(), 'wb-preflight-auth-'));
+  try {
+    const r = runPreflight({
+      WORKBUDDY_AUTH_DIR: authDir,
+      WORKBUDDY_AUTH_FILE: join(authDir, 'no-such-auth.info'),
+    });
 
-  assertNoCrash(r, '登录文件不存在');
+    assertNoCrash(r, '登录文件不存在');
 
-  // 必须把这件事报成一条检查项，并且带上"修法"（这是 preflight 的契约）
-  assert.match(r.stdout, /登录文件/, '应当报告登录文件这一项');
-  assert.match(r.stdout, /不存在|ENOENT/, '应当说明文件不存在');
-  assert.match(r.stdout, /修法/, '应当给出可操作的修法');
+    // 必须把这件事报成一条检查项，并且带上"修法"（这是 preflight 的契约）
+    assert.match(r.stdout, /登录文件/, '应当报告登录文件这一项');
+    assert.match(r.stdout, /不存在|ENOENT/, '应当说明文件不存在');
+    assert.match(r.stdout, /修法/, '应当给出可操作的修法');
 
-  // 有 bad 项 → 退出码 1（这是脚本既有的契约，不能因为不崩了就变成 0）
-  assert.equal(r.status, 1, '存在 bad 项时应以退出码 1 结束');
+    // 有 bad 项 → 退出码 1（这是脚本既有的契约，不能因为不崩了就变成 0）
+    assert.equal(r.status, 1, '存在 bad 项时应以退出码 1 结束');
+  } finally {
+    rmSync(authDir, { recursive: true, force: true });
+  }
 });
 
 test('preflight：登录目录整体不存在时也不崩（真实目录解析不到的场景）', async () => {

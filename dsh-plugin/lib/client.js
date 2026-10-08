@@ -566,14 +566,48 @@ body.dark .wb-root,
       '立即领取': 'Claim now',
 
       // ── 诊断 ──
+      /*
+       * 这一组与控制台词条表**逐条对齐**：诊断项的 label / detail / hint 由共用的
+       * `lib/diagnostics.mjs` 生成 —— 那是**我们自己库产出的界面文案**，不是上游数据，
+       * 所以两边都得翻（第一版只翻了插件自己的壳，整块诊断列表漏了）。
+       */
       '环境诊断': 'Environment diagnosis',
       '环境诊断（诊断由控制台调用项目自带的 lib/diagnostics.mjs，与控制台页面同一套结论）':
         'Environment diagnosis (the console runs the project\'s own lib/diagnostics.mjs, so this is the same verdict as the console page)',
-      'dsh 模型路由': 'dsh model route',
+      'dsh 模型路由': 'dsh model routing',
       '原生 provider=': 'native provider=',
       '（插件运行时注册，无需 settings.yaml）': ' (registered at plugin runtime; no settings.yaml needed)',
       '建议（': 'Suggestions (',
       '）：': '): ',
+      'WorkBuddy 客户端': 'WorkBuddy client',
+      '登录文件': 'Login file',
+      'AtRest 密钥': 'AtRest key',
+      '凭据解密': 'Credential decryption',
+      '桥服务': 'Bridge service',
+      '凭据引用': 'Credential reference',
+      '未找到 WorkBuddy 客户端（已探测默认位置并扫描常见安装目录）':
+        'WorkBuddy client not found (probed the default location and scanned common install dirs)',
+      '未找到 WorkBuddy 可执行文件（已探测默认位置并扫描常见安装目录）':
+        'WorkBuddy executable not found (probed the default location and scanned common install dirs)',
+      '客户端似乎未安装；若装在非常规目录，设置 WORKBUDDY_APP_EXECUTABLE 指向其 WorkBuddy.exe':
+        'The client does not appear to be installed; if it lives in an unusual directory, point WORKBUDDY_APP_EXECUTABLE at its WorkBuddy.exe',
+      '未能取得 AtRest 密钥': 'could not obtain the AtRest key',
+      '由另一个客户端 build 写入，本机密钥解不开': 'written by another client build; this machine\'s key cannot decrypt it',
+      '未取得密钥，跳过': 'no key obtained, skipped',
+      '缺少占位凭据': 'placeholder credential missing',
+      'settings.yaml 存在，但缺少 workbuddy 路由': 'settings.yaml exists, but the workbuddy route is missing',
+      '尚未配置 workbuddy 路由': 'the workbuddy route is not configured yet',
+      '.credentials.yaml 已含 WORKBUDDY_BRIDGE_KEY': '.credentials.yaml already contains WORKBUDDY_BRIDGE_KEY',
+      '确认 WorkBuddy 客户端已安装且本机可执行': 'make sure the WorkBuddy client is installed and runnable on this machine',
+      '登录文件可能由另一个 build 写入（如国际版客户端）': 'the login file may have been written by another build (e.g. the international client)',
+      '令牌已过期，请在桌面端重新登录': 'the token has expired — sign in again in the desktop app',
+      '点「启动桥服务」': 'click Start bridge',
+      '在「可用模型」里勾选后保存。DSH Desktop 0.2.0 会在下次启动时把 settings.yaml 导入 profile 的 patch 层':
+        'Check models under Available models and save. DSH Desktop 0.2.0 imports settings.yaml into the profile patch layer on next launch.',
+      '在「可用模型」里勾选后保存': 'check models under Available models and save',
+      'pi-ai 的 OpenAI 实现要求必须提供 API key 引用': 'the pi-ai OpenAI implementation requires an API key reference',
+      '注意版本必须对齐——装错代次会连 peer 依赖一起错':
+        'Versions must line up — installing the wrong generation breaks peer dependencies too.',
 
       // ── 模型 ──
       '正在读取模型目录…': 'Reading the model catalog…',
@@ -617,11 +651,19 @@ body.dark .wb-root,
       '支持图片输入（多模态）': 'Accepts image input (multimodal)',
       '图片': 'Image',
       '免费': 'Free',
+      /*
+       * 上游促销徽章的**已知**标签（藏在 `tags` 里的 `badge:限时免费:#FF0000`）。
+       * 与控制台词条表里那两条保持一致 —— 未知徽章不翻（那是数据，
+       * 上游随时会加新的，宁可原样显示）。
+       */
+      '限时免费': 'Limited-time free',
+      '夜间免费': 'Free at night',
+      '夜间折扣': 'Night discount',
       '未测': 'Not tested',
       '测': 'Test',
       '测…': 'Testing…',
-      '模型列表来自桥的动态目录，**不需要勾选或保存**：选模型时 provider 选 “WorkBuddy” 就能看到全部。体检结论存在 .state.json 的 probe 字段，与控制器共用一份。':
-        'The model list comes from the bridge\'s live catalog — **no checking or saving needed**: pick "WorkBuddy" as the provider when choosing a model and you will see them all. Probe results live in the probe field of .state.json, shared with the controller.',
+      '模型列表来自桥的动态目录，不需要勾选或保存：选模型时 provider 选 “WorkBuddy” 就能看到全部。体检结论存在 .state.json 的 probe 字段，与控制器共用一份。':
+        'The model list comes from the bridge\'s live catalog — no checking or saving needed: pick "WorkBuddy" as the provider when choosing a model and you will see them all. Probe results live in the probe field of .state.json, shared with the controller.',
       '实测扣分': 'Measured credit',
       '厂商标识': 'Vendor code',
       '上游返回的厂商代码（单字母），不是厂商名': 'The vendor code returned by the upstream (a single letter), not the vendor name',
@@ -726,13 +768,54 @@ body.dark .wb-root,
       [/^已勾选 (\d+) \/ (\d+)$/, '$1 / $2 selected'],
       [/^共 (\d+) 个可选$/, '$1 available'],
       [/^建议（(\d+)）$/, 'Suggestions ($1)'],
+      /*
+       * 签到胶囊：源码是 `'已签到' + '（+' + credit + '）'` 拼出来的，
+       * 整串在词条表里查不到 —— 桩数据只覆盖了「未签到」那一支，所以第一版
+       * 验收没发现（用户实拍才看到）。现在两支都进桩，这条规则把它兜住。
+       */
+      [/^已签到（\+(\d+)）$/, 'Checked in (+$1)'],
+      /*
+       * 对话页模型下拉的选项：`m.id + ' · 多模态'`。
+       * **下拉不打开就扫不到** —— 验收脚本里补了「先点开再扫」。
+       */
+      [/^(.+) · 多模态$/, '$1 · multimodal'],
+      /* 「上次尝试」那行的 `时间（auto）`：全角括号是界面文案，里面是数据 */
+      [/^(.+)（(auto|manual|\?)）$/, '$1 ($2)'],
+
+      /*
+       * ── 环境诊断的 detail / hint ──────────────────────────────────────
+       * 由共用的 `lib/diagnostics.mjs` 生成，值里带动态内容（路径、账号、keyId…）。
+       * 规则与控制台那组对齐 —— 两边渲染同一份库的输出，口径必须一致。
+       */
+      [/^无法读取登录目录：(.+)$/, 'cannot read the login directory: $1'],
+      [/^目录为空：(.+)$/, 'directory is empty: $1'],
+      [/^keyId=(.+)（与信封一致）$/, 'keyId=$1 (matches the envelope)'],
+      [/^keyId=(.+)（与信封不一致）$/, 'keyId=$1 (does NOT match the envelope)'],
+      [/^账号 (.+) · 剩余 (.+)$/, (m, acct, d) => 'account ' + acct + ' · ' + translateText(d) + ' left'],
+      [/^(.+) 已响应$/, '$1 responding'],
+      [/^(.+) 未监听$/, '$1 not listening'],
+      [/^workbuddy 路由已生效（(.+)）· 已注册 (\d+) 个模型$/,
+        'workbuddy route is live ($1) · $2 models registered'],
+      [/^(\d+) 个，缺失 (\d+) 个( · DSH (.+))?$/, 'bundles: $1, missing: $2$3'],
+      [/^未找到 profile( · DSH (.+))?$/, 'no profile found$1'],
+      [/^存在多个账号快照，已固定使用 (.+)，避免选错账号$/,
+        'multiple account snapshots exist; pinned to $1 to avoid picking the wrong account'],
+      [/^缺失：(.+)；在 profile 目录执行 pnpm add <包名>@<与 DSH 一致的版本>。注意版本必须对齐——装错代次会连 peer 依赖一起错$/,
+        'Missing: $1; in the profile directory run pnpm add <package>@<same version as DSH>. Versions must line up — installing the wrong generation breaks peer dependencies too.'],
+      [/^缺失：(.+)$/, 'Missing: $1'],
+      /* `建议（<项名>）：<hint>` 是拼接串（源码里三段相加），整串查不到词条 */
+      [/^建议（(.+)）：(.+)$/, (m, who, hint) => 'Suggestions (' + translateText(who) + '): ' + translateText(hint)],
+      [/^建议：(.+)$/, (m, h) => 'Suggestion: ' + translateText(h)],
+      /* 概览：权益包计数 + 归属账号 */
+      [/^归属账号 (.+)（与桥一致）$/, 'Owner account $1 (matches the bridge)'],
 
       // ── 图表 / 明细里的动态串 ──
       // 捕获组里的内容**自己也是文案**（如 `各模型占比 (调用次数)`），必须再翻一次
       [/^各模型占比 \((.+)\)$/, (m, metric) => 'Model share (' + translateText(metric) + ')'],
       [/^共 (\d+) 个活跃模型 · 合计 (.+)$/, (m, n, sum) => n + ' active models · ' + translateText(sum) + ' total'],
       [/^(.+)：(.+) \((\d+(?:\.\d+)?)%\)$/, (m, a, b, pct) => translateText(a) + ': ' + translateText(b) + ' (' + pct + '%)'],
-      [/^(\d+) 种套餐(.*)$/, '$1 package(s)$2'],
+      [/^(\d+) 种套餐( · 更新于 (.+))?$/,
+        (m, n, _s, at) => n + ' package(s)' + (at ? ' · updated ' + at : '')],
       [/^ · 更新于 (.+)$/, ' · updated $1'],
 
       // ── 概览 / 账号 / 模型里的拼接串 ──
@@ -768,10 +851,11 @@ body.dark .wb-root,
       [/^ · 实测扣分 (.+)$/, ' · measured credit $1'],
       [/^（本轮 (\d+) 个，范围 (.+)）$/, ' ($1 models this run, scope $2)'],
       [/^共 (\d+) 个模型，其中 (\d+) 个支持图片输入（名称旁标「图片」），$/,
-        '$1 models total, $2 accept image input (marked "Image" next to the name),'],
+        '$1 models total, $2 accept image input (marked "Image" next to the name), '],
       [/^(\d+) 个免费；体检过的 (\d+) 个。$/, '$1 free; $2 probed.'],
       [/^(\d+) 项通过 \/ (\d+) 项警告 \/ (\d+) 项失败 —— 红色项不解决，模型就不会出现。$/,
-        '$1 passed / $2 warnings / $3 failed — until the red ones are fixed, models will not appear.'],
+        (m, ok, warn, fail) => ok + ' passed / ' + warn + ' warning' + (warn === '1' ? '' : 's')
+          + ' / ' + fail + ' failed — until the red ones are fixed, models will not appear.'],
       [/^已保存并即时生效：dsh 选择器现在显示 (\d+) 个模型。$/,
         'Saved and applied immediately: the dsh picker now shows $1 models.'],
       [/^已保存（(\d+) 个模型）。此 dsh 版本不支持即时刷新 —— 重启一次 dsh 后生效。$/,
@@ -1199,6 +1283,12 @@ body.dark .wb-root,
      */
     function Segmented(props) {
       const { value, onChange, options, className, ariaLabel } = props;
+      /*
+       * 订阅语言：切语言会改变选项文字的宽度，指示框必须重新量。
+       * 只靠 `[value, options]` 不行 —— 两者都没变，effect 不会重跑，
+       * 指示框就停在旧宽度上（与标签栏那个是同一个 bug，实拍发现的）。
+       */
+      const lang = useLang();
       const selectRef = useRef(null);
       const containerRef = useRef(null);
       const [indicatorStyle, setIndicatorStyle] = useState({ opacity: 0 });
@@ -1220,11 +1310,15 @@ body.dark .wb-root,
         updateIndicator();
         const t = setTimeout(updateIndicator, 30);
         window.addEventListener('resize', updateIndicator);
+        // 与标签栏同理：选项文字变长会把这一行挤成两行，resize 抓不到
+        const ro = typeof ResizeObserver === 'function' ? new ResizeObserver(updateIndicator) : null;
+        if (ro) ro.observe(containerRef.current);
         return () => {
           clearTimeout(t);
           window.removeEventListener('resize', updateIndicator);
+          if (ro) ro.disconnect();
         };
-      }, [value, options]);
+      }, [value, options, lang]);
 
       return h('div', { className: 'wb-segmented-wrap' + (className ? ' ' + className : '') },
         h('select', {
@@ -2476,7 +2570,7 @@ body.dark .wb-root,
         data && data.ok === false ? h(Alert, { bad: true }, data.error) : null,
         message ? h(Alert, null, message) : null,
         h('p', { className: 'wb-note', style: { marginTop: 0 } },
-          '模型列表来自桥的动态目录，**不需要勾选或保存**：选模型时 provider 选 “WorkBuddy” 就能看到全部。体检结论存在 .state.json 的 probe 字段，与控制器共用一份。'),
+          '模型列表来自桥的动态目录，不需要勾选或保存：选模型时 provider 选 “WorkBuddy” 就能看到全部。体检结论存在 .state.json 的 probe 字段，与控制器共用一份。'),
         models.length
           ? h('p', { className: 'wb-note' },
             // 两段**分开传**：它们各自在词条表里有条目，先拼成一串就查不到词条了
@@ -2894,7 +2988,7 @@ body.dark .wb-root,
       }, []);
 
       useEffect(() => {
-        if (!tabsRef.current || typeof window === 'undefined') return;
+        if (!tabsRef.current || typeof window === 'undefined') return undefined;
         const updateIndicator = () => {
           const activeBtn = tabsRef.current?.querySelector('.wb-tab.on');
           if (activeBtn) {
@@ -2909,8 +3003,23 @@ body.dark .wb-root,
         };
         updateIndicator();
         window.addEventListener('resize', updateIndicator);
-        return () => window.removeEventListener('resize', updateIndicator);
-      }, [tab]);
+        /*
+         * 光有 `resize` 不够，两件事都得管：
+         *
+         * 1. **语言切换会改变标签文字的宽度** —— 所以 `lang` 必须在依赖里，
+         *    否则 effect 不重跑，指示框会停在旧宽度上（用户看到的是「白框没包住
+         *    当前标签，字跑到框外面」）。这一条是实拍发现的。
+         * 2. 英文比中文长，标签行**会被挤成两行** —— 此时窗口尺寸没变、`resize`
+         *    不触发，`offsetTop` 也变了。ResizeObserver 盯容器，
+         *    换行引起的高度变化它抓得到。
+         */
+        const ro = typeof ResizeObserver === 'function' ? new ResizeObserver(updateIndicator) : null;
+        if (ro) ro.observe(tabsRef.current);
+        return () => {
+          window.removeEventListener('resize', updateIndicator);
+          if (ro) ro.disconnect();
+        };
+      }, [tab, lang]);
 
       // 对话测试的模型与消息由容器持有：切标签页回来不丢，也不会让人以为"模型写死了"
       const [chatModel, setChatModel] = useState('');
