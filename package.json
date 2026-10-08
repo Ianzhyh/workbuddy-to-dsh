@@ -44,6 +44,7 @@
     "bridge": "node bridge/workbuddy-bridge.mjs",
     "doctor": "node tools/doctor.mjs",
     "verify": "node tools/verify-atrest.mjs",
+    "test:lib": "node --test lib/find-workbuddy.test.mjs",
     "test:plugin": "node --test \"dsh-plugin/tests/*.test.mjs\"",
     "panel:shot": "node dsh-plugin/tests/panel-render.mjs",
     "preflight": "node dsh-plugin/scripts/preflight.mjs",
@@ -51,7 +52,7 @@
     "vendor:check": "node dsh-plugin/scripts/vendor.mjs --check",
     "verify:standalone": "node dsh-plugin/scripts/verify-standalone.mjs",
     "pack:plugin": "node dsh-plugin/scripts/vendor.mjs && cd dsh-plugin && npm pack",
-    "release:check": "npm run vendor:check && npm run test:plugin && npm run verify:standalone"
+    "release:check": "npm run vendor:check && npm run test:lib && npm run test:plugin && npm run verify:standalone"
   },
   "keywords": [
     "deepseek-harness",

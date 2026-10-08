@@ -136,9 +136,16 @@ function doScan() {
   return found;
 }
 
-/** 扫描（带缓存与失败防抖）。返回命中的 exe 列表，可能为空。 */
+/**
+ * 扫描（带缓存与失败防抖）。返回命中的 exe 列表，可能为空。
+ *
+ * 缓存**必须校验文件仍在**：客户端被卸载/移走后，陈旧的命中列表会让
+ * 后续探测永远拿不到有效结果（调用方的 existsSync 过滤掉旧路径，但这里
+ * 直接返回缓存、不再重扫）。校验成本是几次 existsSync，可忽略。
+ */
 export function scanForWorkBuddyExe() {
-  if (scanCache) return scanCache;
+  if (scanCache && scanCache.some((p) => existsSync(p))) return scanCache;
+  scanCache = null; // 陈旧：命中的文件都不在了 → 允许重扫（由防抖限制频率）
   if (Date.now() - scanAt < SCAN_MIN_INTERVAL_MS) return [];
   scanAt = Date.now();
   const hits = doScan();
@@ -249,6 +256,13 @@ foreach ($hive in @('HKCU:\Software\Microsoft\Windows\CurrentVersion\App Paths',
 `;
 
 /**
+ * PowerShell 5.1 的 ConvertTo-Json 会把**单元素数组退化成标量**（`["a"]` 输出成
+ * `"a"`）。单客户端机器上 procs / reg 恰好可能只有一个元素——不归一化就会
+ * 在 `for...of` 里遍历字符串的字符、或直接解析失败。一律先过数组。
+ */
+const asArray = (v) => (v == null ? [] : Array.isArray(v) ? v : [v]);
+
+/**
  * 从进程/注册表信号里提取客户端 exe（导出以便开发期测试）。
  *
  * 注册表记录里的 exe 可能是卸载器（`Uninstall WorkBuddy.exe`）或图标路径
@@ -260,11 +274,11 @@ export function extractExePathsFromSignals(signal) {
     const v = String(p || '').trim();
     if (v && !out.includes(v)) out.push(v);
   };
-  for (const p of signal?.procs || []) {
+  for (const p of asArray(signal?.procs)) {
     const base = basename(String(p || ''));
     if (EXE_NAME_RE.test(base)) push(p);
   }
-  for (const rec of signal?.reg || []) {
+  for (const rec of asArray(signal?.reg)) {
     // 三个字段都要尝试（而非短路取值）：icon 可能指向无关程序甚至系统图标，
     // 此时 uninst（卸载器路径）是唯一线索。形态示例：
     //   icon   "…\WorkBuddy.exe,0"
@@ -289,9 +303,13 @@ export function extractExePathsFromSignals(signal) {
 /**
  * 系统信号兜底（Windows）。带成功缓存 + 失败防抖（PowerShell 贵，勿频繁跑）。
  * 返回命中的 exe 列表；任何失败都返回 []（不影响上层已有结论）。
+ *
+ * 与扫描层同理：缓存要校验文件仍在 —— 客户端被卸载/移走后，陈旧的命中
+ * 会让兜底层永远失效，直至进程重启。
  */
 export function probeSystemSignalsExe() {
-  if (sysHitsCache) return sysHitsCache;
+  if (sysHitsCache && sysHitsCache.some((p) => existsSync(p))) return sysHitsCache;
+  sysHitsCache = null; // 陈旧：命中都已不存在 → 允许重探（由防抖限制频率）
   if (process.platform !== 'win32') return [];
   if (Date.now() - sysProbeAt < SYS_PROBE_MIN_INTERVAL_MS) return [];
   sysProbeAt = Date.now();

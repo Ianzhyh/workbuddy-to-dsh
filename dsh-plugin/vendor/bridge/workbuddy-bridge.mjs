@@ -266,6 +266,9 @@ function workBuddyExeCandidates() {
     out.push('/opt/WorkBuddy/workbuddy');
   }
 
+  if (wbScanCache && !wbScanCache.some((p) => existsSync(p))) {
+    wbScanCache = null; // 陈旧：命中的文件都不在了 → 允许重扫（由防抖限制频率）
+  }
   if (!wbScanCache && Date.now() - wbScanAt >= WB_SCAN_MIN_INTERVAL_MS) {
     wbScanAt = Date.now();
     const hits = wbScan();
@@ -331,6 +334,13 @@ foreach ($hive in @('HKCU:\Software\Microsoft\Windows\CurrentVersion\App Paths',
 [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes(($out | ConvertTo-Json -Depth 5 -Compress)))
 `;
 
+/**
+ * PowerShell 5.1 的 ConvertTo-Json 会把**单元素数组退化成标量**（`["a"]` 输出成
+ * `"a"`）。单客户端机器上 procs / reg 恰好可能只有一个元素 —— 不归一化就会在
+ * `for...of` 里遍历字符串的字符。一律先过数组。
+ */
+const wbAsArray = (v) => (v == null ? [] : Array.isArray(v) ? v : [v]);
+
 /** 从信号里提取客户端 exe：exe 名直接认；卸载器/图标路径取所在目录再找本体。 */
 function wbExtractExePaths(signal) {
   const out = [];
@@ -339,10 +349,10 @@ function wbExtractExePaths(signal) {
     if (v && !out.includes(v)) out.push(v);
   };
   const baseOf = (p) => String(p || '').split(/[\\/]/).pop() || '';
-  for (const p of signal?.procs || []) {
+  for (const p of wbAsArray(signal?.procs)) {
     if (WB_EXE_NAME_RE.test(baseOf(p))) push(p);
   }
-  for (const rec of signal?.reg || []) {
+  for (const rec of wbAsArray(signal?.reg)) {
     // 三个字段都要尝试（而非短路取值）：icon 可能指向无关程序甚至系统图标，
     // 此时 uninst（卸载器路径）是唯一线索。
     for (const raw of [rec.icon, rec.uninst, rec.cmd]) {
@@ -362,7 +372,8 @@ function wbExtractExePaths(signal) {
 
 /** 系统信号兜底（Windows）。成功缓存；失败 2 分钟内不重试；任何异常静默返回 []。 */
 function wbProbeSystemSignals() {
-  if (wbSysHits) return wbSysHits;
+  if (wbSysHits && wbSysHits.some((p) => existsSync(p))) return wbSysHits;
+  wbSysHits = null; // 陈旧：命中都已不存在 → 允许重探（由防抖限制频率）
   if (process.platform !== 'win32') return [];
   if (Date.now() - wbSysProbeAt < WB_SYS_PROBE_MIN_INTERVAL_MS) return [];
   wbSysProbeAt = Date.now();
@@ -2401,6 +2412,9 @@ const server = createServer(async (req, res) => {
         uptimeMs: Date.now() - STARTED_AT,
         auth,
         authFile: AUTH_PATH,
+        // 客户端定位结果（**只读内存缓存、绝不触发探测** —— /health 有 4 秒超时
+        // 约束，慢探测会让控制台把桥误判成"未运行"；没定位过就显示空）
+        clientExe: atRestUsedExe || wbExeCache || '',
         models: (catalog.length ? pickFeatured(catalog) : FEATURED).map((m) => m.id),
         catalogSize: catalog.length,
         catalogAt: catalogCache.at ? new Date(catalogCache.at).toISOString() : null,
