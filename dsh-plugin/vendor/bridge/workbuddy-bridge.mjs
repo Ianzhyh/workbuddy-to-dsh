@@ -2719,7 +2719,22 @@ const server = createServer((req, res) => {
 });
 
 async function handleRequest(req, res) {
-  const url = new URL(req.url, `http://${req.headers.host}`);
+  /*
+   * `Host` 是**客户端可控的**，而 `new URL()` 会对非法 Host 抛 `ERR_INVALID_URL`。
+   * 这一句原先在下面那个 try **之外** —— 抛出的异常没被捕获，Node 直接退出进程：
+   * 任何能访问本机端口的进程用一条 `Host: bad host with spaces` 就能把桥打死
+   * （实测 exitCode=1，见 bridge.test.mjs 的「畸形 Host 头回 400」）。
+   * 现在按「非法请求」挡下，与其余入口校验同一处理方式。
+   *
+   * `Host` 缺失/为空时给个回环默认值：`http://undefined` 也是合法 URL，
+   * 但把它当成本机更贴近事实，也不会让下游的绝对 URL 拼出怪东西。
+   */
+  let url;
+  try {
+    url = new URL(req.url, `http://${req.headers.host || '127.0.0.1'}`);
+  } catch {
+    return json(res, 400, { error: { message: 'workbuddy-bridge: invalid Host header' } });
+  }
   observeResponse(req, res);
   try {
     if (!originAllowed(req)) {

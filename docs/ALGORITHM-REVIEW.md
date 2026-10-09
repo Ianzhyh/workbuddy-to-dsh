@@ -319,25 +319,27 @@ out.bundlesOk = out.bundles.every((b) => b.installed);
 **修法**：`out.bundles.length > 0 && out.bundles.every(...)`（空即未知，未知不该等于健康）。
 **覆盖**：`lib/find-dsh.test.mjs` 里没有空 bundles 的用例。
 
-## BUG-6 探测失败被当成「端口已释放」（`dashboard/server.mjs:645` 与 `:213`）
+## BUG-6 探测失败被当成「端口已释放」（`dashboard/server.mjs`）
 
-`:213` 的注释写得很清楚：
+`probePortPid` 原先把三种情况**都**返回 `null`：
 
-> 任何异常（命令不存在、超时、输出为空）都返回 null：对调用方来说
-> "探测不出来" 与 "没找到" 在轮询里是同一件事 —— **都表示还没释放/还不能关**。
+| 情况 | 应该的含义 |
+|---|---|
+| 命令正常退出、解析不出 PID | **确认**没有监听者 → 已释放 |
+| `spawn` 直接抛（没有 `lsof`）、超时、输出为空、子进程报错 | **探测不出来** → 未知 |
 
-而调用方（`stopBridge` 的等待循环）是：
+而调用方把 `null` 读作「已释放」（`if (!(await probePortPid(port))) { freed = true; break; }`）。
+合并之后，「未知」被当成了好消息。后果两层：
+① 没有 `lsof` 的 Linux 上停桥**从不真正校验**就报成功；
+② `freed` 提前变 true，让下面「SIGTERM 被忽略时升级 SIGKILL」那段**永远不执行** ——
+可它存在的理由正是防止重启一直撞在旧进程上。
 
-```js
-if (!(await probePortPid(port))) { freed = true; break; }
-```
-
-**语义正好相反**：`null` 被当成「已释放」→ 立刻跳出循环。
-后果有两层：① 在没有 `lsof` 的 Linux 上 `probePortPid` 恒返回 `null` →
-停桥**从不真正校验**就报成功；② 循环提前退出后，下面
-`if (!freed && process.platform !== 'win32')` 的 **SIGKILL 升级永远不会执行** ——
-而那段代码存在的理由正是「POSIX 下 SIGTERM 被忽略时升级为 SIGKILL，
-否则重启会一直撞在旧进程上」。**注释与实现互相矛盾，实现这边是错的。**
+**我第一版把这条写成「注释与实现矛盾，实现这边是错的」—— 那个判断太武断。**
+调用方把 `null` 解读成「没有监听者」本身是合理的（探测没找到 PID 就是没监听者）；
+真正的缺陷是**把「探测不出来」也塞进同一个 `null`**。
+修法是拆成三态：`number`（有监听者）/ `null`（确认没有）/ `undefined`（探测不出来），
+调用方只在 `null` 时认定已释放，`undefined` 时不再空等、交给兜底与告警。
+**这条自纠也写在这里：我核别人的结论时也会过强，自己的判断同样要复核。**
 
 ## BUG-7 切账号后积分缓存被在途请求覆盖（`lib/diagnostics.mjs:226` 与 `:244`）
 

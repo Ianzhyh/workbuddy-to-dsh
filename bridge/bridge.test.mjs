@@ -19,7 +19,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
-import { createServer } from 'node:http';
+import { createServer, request as httpRequest } from 'node:http';
 import { mkdtempSync, rmSync, writeFileSync, existsSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -122,6 +122,23 @@ async function startBridge(env = {}, opts = {}) {
   }
   child.kill();
   throw new Error(`桥未在 20 秒内就绪：\n${output}`);
+}
+
+/**
+ * 用**原始 socket** 发一个请求，返回状态码。
+ *
+ * 为什么不用 `fetch`：**Fetch 规范把 `Host` 列为禁止头**，用它根本发不出去 ——
+ * 排查「畸形 Host」时用 `fetch` 只会得到假阴性（第一次就是这么误判的）。
+ */
+function rawStatus(port, path, headers = {}) {
+  return new Promise((resolve, reject) => {
+    const req = httpRequest(
+      { host: '127.0.0.1', port, path, method: 'GET', headers: { authorization: `Bearer ${TOKEN}`, ...headers } },
+      (res) => { res.resume(); res.on('end', () => resolve(res.statusCode)); },
+    );
+    req.on('error', reject);
+    req.end();
+  });
 }
 
 // ── 打桩上游：验证「桥实际发了什么出去」─────────────────────────────────
@@ -1352,6 +1369,40 @@ test('桥：客户端凭据分层 —— key 鉴权、账本归因、独立限�
   } finally {
     await bridge.stop();
     try { await stub.close(); } catch { /* 忽略 */ }
+    rmSync(bridge.dir, { recursive: true, force: true });
+  }
+});
+
+/**
+ * 畸形 `Host` 头必须回 400，**进程必须活着**。
+ *
+ * 踩过的坑：`handleRequest` 里 `new URL(req.url, 'http://' + req.headers.host)`
+ * 原先在 `try` **之外**，而 Host 是客户端可控的 —— `new URL()` 对
+ * `Host: bad host with spaces` 抛 `ERR_INVALID_URL`，异常没被捕获，
+ * Node 直接退出进程（实测 exitCode=1）。也就是说**任何能访问本机端口的进程
+ * 用一条请求就能把桥打死**，之后控制台/插件只会显示「桥未运行」。
+ *
+ * 用原始 socket 发：`fetch` 发不出自定义 Host（Fetch 规范把它列为禁止头），
+ * 用它测这条只会得到假阴性。
+ */
+test('桥：畸形 Host 头回 400，且进程不被带走', { timeout: 30_000 }, async () => {
+  const bridge = await startBridge();
+  try {
+    const port = Number(new URL(bridge.baseUrl).port);
+    const status = await rawStatus(port, '/v1/models', { Host: 'bad host with spaces' });
+    assert.equal(status, 400, '畸形 Host 应当按非法请求挡下（400）');
+
+    await new Promise((r) => setTimeout(r, 300));
+    const health = await fetch(`${bridge.baseUrl}/health`, {
+      headers: { authorization: `Bearer ${TOKEN}` }, signal: AbortSignal.timeout(3000),
+    });
+    assert.ok(health.status > 0, '桥必须还活着 —— 畸形 Host 不该让进程退出');
+    assert.ok(
+      !/ERR_INVALID_URL|Unhandled/i.test(bridge.out()),
+      `输出里不该有未捕获异常：\n${bridge.out().slice(-300)}`,
+    );
+  } finally {
+    await bridge.stop();
     rmSync(bridge.dir, { recursive: true, force: true });
   }
 });

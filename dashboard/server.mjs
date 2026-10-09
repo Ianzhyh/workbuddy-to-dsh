@@ -213,6 +213,19 @@ function parsePortPid(stdout, port) {
  * 任何异常（命令不存在、超时、输出为空）都返回 null：对调用方来说
  * "探测不出来" 与 "没找到" 在轮询里是同一件事 —— 都表示还没释放/还不能关。
  */
+/**
+ * 探测端口上还有没有监听者。**三种结果必须分开**：
+ *
+ *   `number`    —— 有监听者，这是它的 PID
+ *   `null`      —— **确认**没有监听者（端口已释放）
+ *   `undefined` —— **探测不出来**（命令缺失 / 超时 / 输出为空 / 子进程报错）
+ *
+ * 早先这三者都返回 `null`，而调用方把 `null` 读作「已释放」——
+ * 于是在没有 `lsof` 的 Linux 上（`spawn` 直接抛），停桥**从不真正校验**就报成功；
+ * 而且 `freed` 提前变 true 会让下面「SIGTERM 被忽略时升级 SIGKILL」那段
+ * **永远不执行**，可它存在的理由正是防止重启撞在旧进程上。
+ * 「探测不出来」和「确认没有」不是一回事，合并它们就会把未知当成好消息。
+ */
 function probePortPid(port) {
   return new Promise((ok) => {
     let child;
@@ -221,7 +234,7 @@ function probePortPid(port) {
         ? spawn(systemExe('netstat'), NETSTAT_ARGS, ASYNC_OPTS)
         : spawn('lsof', ['-nP', `-iTCP:${port}`, '-sTCP:LISTEN', '-t'], ASYNC_OPTS);
     } catch {
-      ok(null);
+      ok(undefined); // 探测命令都起不来：未知，不是「已释放」
       return;
     }
     let out = '';
@@ -233,16 +246,17 @@ function probePortPid(port) {
       ok(value);
     };
     // 探测命令本身卡住时必须能放弃：否则"停桥"会挂在一个永远不返回的 netstat 上
-    const killer = setTimeout(() => { try { child.kill(); } catch { /* 已经退了 */ } finish(null); }, 5000);
+    const killer = setTimeout(() => { try { child.kill(); } catch { /* 已经退了 */ } finish(undefined); }, 5000);
     child.stdout.on('data', (c) => {
       out += c;
       // 输出量兜底：真出问题时别把整个 stdout 攒进内存
-      if (out.length > 4 * 1024 * 1024) { try { child.kill(); } catch { /* 同上 */ } finish(null); }
+      if (out.length > 4 * 1024 * 1024) { try { child.kill(); } catch { /* 同上 */ } finish(undefined); }
     });
-    child.on('error', () => finish(null));
+    child.on('error', () => finish(undefined));
     child.on('close', () => {
       if (process.platform === 'win32') { finish(parsePortPid(out, port)); return; }
       const pid = Number(out.split('\n').map((s) => s.trim()).filter(Boolean)[0]);
+      // 命令正常退出、输出解析不出 PID → 这是「确认没有监听者」，返回 null
       finish(Number.isInteger(pid) && pid > 0 ? pid : null);
     });
   });
@@ -643,14 +657,20 @@ export async function stopBridgeAndWait(target) {
   let freed = false;
   for (let i = 0; i < 20; i += 1) {
     await sleep(250);
-    if (!(await probePortPid(port))) { freed = true; break; }
+    // 三态：null = 确认没监听者（已释放）；undefined = 探测不出来（不能当已释放）
+    const pid = await probePortPid(port);
+    if (pid === null) { freed = true; break; }
+    if (pid === undefined) break; // 未知就别在这儿空等 5 秒，交给下面的兜底与告警
   }
   // POSIX 下 SIGTERM 被忽略时升级为 SIGKILL，否则重启会一直撞在旧进程上
   if (!freed && process.platform !== 'win32') {
     try { process.kill(result.pid, 'SIGKILL'); } catch { /* 已经退出了 */ }
     for (let i = 0; i < 12; i += 1) {
       await sleep(250);
-      if (!(await probePortPid(port))) { freed = true; break; }
+      // 三态：null = 确认没监听者（已释放）；undefined = 探测不出来（不能当已释放）
+    const pid = await probePortPid(port);
+    if (pid === null) { freed = true; break; }
+    if (pid === undefined) break; // 未知就别在这儿空等 5 秒，交给下面的兜底与告警
     }
   }
   return freed ? result : { ...result, warning: `进程未在超时内退出，端口 ${port} 可能仍被占用` };
