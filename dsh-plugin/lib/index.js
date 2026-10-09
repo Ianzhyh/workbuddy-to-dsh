@@ -94,6 +94,8 @@ const BRIDGE_TOKEN_PATH = join(PLUGIN_DIR, '.bridge-token');
 function readBridgeToken() {
   try {
     const text = readFileSync(BRIDGE_TOKEN_PATH, 'utf8').trim();
+    // 同样的正则在仓库根的 `config.mjs:218` 还有一份 —— 改动时两处一起改，
+    // 否则会出现「桥认、插件不认」的怪现象。
     return /^[A-Za-z0-9._-]{16,}$/.test(text) ? text : '';
   } catch { return ''; }
 }
