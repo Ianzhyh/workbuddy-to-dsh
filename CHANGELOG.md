@@ -19,6 +19,8 @@
 
 ## [Unreleased]
 
+## [1.4.8] - 2026-10-09
+
 ### Security
 
 - **令牌文件在 Windows 上其实是「任何用户可读」**（`config.mjs`）。
