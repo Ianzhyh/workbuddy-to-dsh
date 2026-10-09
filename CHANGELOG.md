@@ -19,6 +19,17 @@
 
 ## [Unreleased]
 
+### 测试
+
+- **补上积分缓存竞态的用例**（`lib/diagnostics.quota.test.mjs`）。
+  v1.4.5 修 `quotaGeneration` 时**没有用例**（`fetchQuota` 是模块私有的，
+  构造那个时序需要能替换 `bridgeFetch`）。现在改用「起一个假桥 + 动态 import」：
+  `config.bridge` 的 host/port 来自环境变量，import 之前设好即可。
+
+  桩故意**慢 500ms**，让「作废缓存」落在在途窗口里 —— 快桩会让请求在作废之前
+  就结束，竞态根本触发不到，用例就白写了。**实测有牙**：还原旧逻辑后取到的
+  是上一个账号的余额（`实际 A`）。
+
 ## [1.4.6] - 2026-10-09
 
 ### Fixed
