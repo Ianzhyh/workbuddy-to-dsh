@@ -1596,7 +1596,22 @@ test('桥：令牌过期瞬间的 5 个并发请求只刷新一次', { timeout: 
       headers: { ...auth, 'content-type': 'application/json' },
       body: JSON.stringify({ model: 'stub-model', messages: [{ role: 'user', content: 'hi' }] }),
     }).then((r) => r.text());
-    await Promise.all([one(), one(), one(), one(), one()]);
+    /*
+     * 先确认请求**真的成功了**再数刷新次数。
+     *
+     * 为什么：这条用例原本只断言「刷新 1 次」。如果因为环境原因（端口冲突、
+     * 凭据没写进去、上游桩没起来）请求根本没走到刷新那一步，计数会是 **0** ——
+     * 断言会红，但红的原因看不出是「设置坏了」还是「单飞坏了」。
+     * 在门禁链里就遇到过 `实际 0 次`，单跑却 3/3 全过。把这一步显式断言出来，
+     * 失败时能直接看到响应内容。
+     */
+    const bodies = await Promise.all([one(), one(), one(), one(), one()]);
+    for (const b of bodies) {
+      assert.ok(
+        b.includes('"content"') || b.includes('"role"'),
+        `每个请求都应当拿到正常的补全响应；实际是：${b.slice(0, 160)}`,
+      );
+    }
     await new Promise((r) => setTimeout(r, 300));
 
     assert.equal(stub.refreshCalls, 1, `5 个并发请求只该刷新一次，实际 ${stub.refreshCalls} 次`);
