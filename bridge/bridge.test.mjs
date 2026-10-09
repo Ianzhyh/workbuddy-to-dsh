@@ -745,19 +745,29 @@ test('桥：拒绝外来 Origin（DNS rebinding 防线），且不误伤本机�
   await new Promise((r) => upstream.listen(0, '127.0.0.1', r));
   const upstreamBase = `http://127.0.0.1:${upstream.address().port}`;
 
+  /*
+   * 用自动生成的令牌（传空 = 让桥自己生成），再从启动日志里取出来。
+   *
+   * 注意这里**不能在 `WORKBUDDY_LOCAL_TOKEN: ''` 下裸跑请求** —— 那正是
+   * 「未配置即放行」的旧契约，已被「不得静默放行」用例推翻。本用例要验的是
+   * **Origin 这道防线**，所以必须在一个合法令牌之上比对，否则 403 会被 401 抢先。
+   */
   const bridge = await startBridge(
     { CODEBUDDY_ENDPOINT: upstreamBase, WORKBUDDY_LOCAL_TOKEN: '' },
     { auth: READABLE_FAKE_AUTH },
   );
+  const autoToken = bridge.out().match(/WORKBUDDY_LOCAL_TOKEN=([A-Za-z0-9._-]{16,})/)?.[1];
+  assert.ok(autoToken, '本用例依赖桥自动生成令牌（启动日志里应有 WORKBUDDY_LOCAL_TOKEN=…）');
+  const bearer = { authorization: `Bearer ${autoToken}` };
   const body = JSON.stringify({ model: 'origin-model', messages: [{ role: 'user', content: 'hi' }] });
   try {
-    await fetch(bridge.baseUrl + '/v1/models?all=1'); // 预热目录，让预校验认识该模型
+    await fetch(bridge.baseUrl + '/v1/models?all=1', { headers: bearer }); // 预热目录，让预校验认识该模型
 
     // ① 外来 Origin（跨站形状：text/plain 简单请求）→ 403，且**一次上游都不打**
     const before = calls.chat;
     const cross = await fetch(bridge.baseUrl + '/v1/chat/completions', {
       method: 'POST',
-      headers: { Origin: 'https://evil.example', 'Content-Type': 'text/plain' },
+      headers: { ...bearer, Origin: 'https://evil.example', 'Content-Type': 'text/plain' },
       body,
       signal: AbortSignal.timeout(15000),
     });
@@ -768,7 +778,7 @@ test('桥：拒绝外来 Origin（DNS rebinding 防线），且不误伤本机�
     // ② 回环 Origin 放行（本机网页版客户端仍然可用）
     const loop = await fetch(bridge.baseUrl + '/v1/chat/completions', {
       method: 'POST',
-      headers: { Origin: 'http://127.0.0.1:9999', 'Content-Type': 'application/json' },
+      headers: { ...bearer, Origin: 'http://127.0.0.1:9999', 'Content-Type': 'application/json' },
       body,
       signal: AbortSignal.timeout(15000),
     });
@@ -778,7 +788,7 @@ test('桥：拒绝外来 Origin（DNS rebinding 防线），且不误伤本机�
     // ③ 无 Origin（curl / dsh 插件 / 控制台内部代理）放行
     const none = await fetch(bridge.baseUrl + '/v1/chat/completions', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { ...bearer, 'Content-Type': 'application/json' },
       body,
       signal: AbortSignal.timeout(15000),
     });
@@ -786,7 +796,7 @@ test('桥：拒绝外来 Origin（DNS rebinding 防线），且不误伤本机�
     await none.text();
 
     // ④ 基础安全响应头
-    const models = await fetch(bridge.baseUrl + '/v1/models');
+    const models = await fetch(bridge.baseUrl + '/v1/models', { headers: bearer });
     assert.equal(models.headers.get('x-content-type-options'), 'nosniff');
     assert.match(models.headers.get('content-security-policy') || '', /frame-ancestors 'none'/);
     await models.text();
@@ -1455,6 +1465,45 @@ test('桥：上游 200 但不是 SSE → 记失败，不回「空回答成功」
 });
 
 /**
+ * 账本超过 `MAX_USAGE_LINES`(2000) 时的**截断路径** —— 这条路径此前从未被执行过。
+ *
+ * 它做的是「重写整份文件」，而原来是直接 `writeFileSync` 覆盖：进程正好在这时
+ * 被杀 / 断电就留下半份文件，丢的是用户自己的用量历史（项目里没有第二份副本）。
+ * 现在改成「写临时文件 + rename」原子替换。
+ *
+ * 断言里那句「每一行都必须是合法 JSON」就是用来抓半截行的：
+ * 非原子写入一旦发生，文件末尾会出现一行断掉的 JSON。
+ */
+test('桥：账本截断保留最近一半，且每行仍是合法 JSON（原子替换）', { timeout: 30_000 }, async () => {
+  const stub = await startStubUpstream(['stub-model']);
+  const bridge = await startBridge({ CODEBUDDY_ENDPOINT: stub.base }, { auth: READABLE_FAKE_AUTH });
+  try {
+    const file = join(bridge.dir, 'usage.jsonl');
+    const pre = Array.from({ length: 2001 }, (_, i) => JSON.stringify({
+      t: Date.now() - (2001 - i) * 1000, model: 'pre', stream: false, ms: 1, ok: true,
+    }));
+    writeFileSync(file, `${pre.join('\n')}\n`);
+
+    await fetch(`${bridge.baseUrl}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { ...auth, 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'stub-model', messages: [{ role: 'user', content: 'hi' }] }),
+    });
+    await new Promise((r) => setTimeout(r, 400));
+
+    const lines = readFileSync(file, 'utf8').trim().split('\n').filter(Boolean);
+    assert.ok(lines.length <= 1002, `截断后应保留最近一半，实际 ${lines.length} 行`);
+    assert.ok(lines.length >= 900, `不该把账本清空，实际 ${lines.length} 行`);
+    for (const l of lines) JSON.parse(l); // 半截行会在这里抛
+    assert.ok(!existsSync(`${file}.tmp`), '临时文件必须被 rename 掉，不该留在目录里');
+  } finally {
+    await bridge.stop();
+    try { await stub.close(); } catch { /* 忽略 */ }
+    rmSync(bridge.dir, { recursive: true, force: true });
+  }
+});
+
+/**
  * 未配置本地令牌时，桥**不得**静默放行。
  *
  * 为什么必须钉住：`handleRequest` 的闸门写成
@@ -1511,6 +1560,162 @@ test('桥：自动生成令牌时必须把值打印到启动日志（否则用�
       signal: AbortSignal.timeout(5000),
     });
     assert.equal(ok.status, 200, '日志里打印的令牌必须真的能用');
+  } finally {
+    await bridge.stop();
+    rmSync(bridge.dir, { recursive: true, force: true });
+  }
+});
+
+/**
+ * 账本的数值字段必须**永远是数字**，NaN / Infinity / 字符串都不能进磁盘。
+ *
+ * 为什么必须钉住：账本由控制台「用量统计」直接聚合。一个 NaN 进去，
+ * `合计` 会变成 NaN 并让整张表显示成 NaN —— 用户看到的是"统计坏了"，
+ * 而根因是上游回了脏 usage。`usageOf` 用 `Number(x) || 0` 兜底，这里把它钉死。
+ *
+ * 上游回 `"prompt_tokens": "abc"`（字符串）、`Infinity`、缺字段，都是真实可能
+ * 出现的脏数据（网关版本漂移 / 代理改写）。
+ */
+test('桥：上游 usage 是脏数据（字符串 / NaN / 缺字段）时账本不得落 NaN', { timeout: 30_000 }, async () => {
+  const stub = await startStubUpstream(['stub-model'], {
+    // 一坨脏 usage：字符串、null、缺字段混在一起
+    chatRaw: 'data: {"choices":[{"delta":{"content":"hi"}}]}\n\n'
+      + 'data: {"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":"abc","completion_tokens":null,"total_tokens":1e999}}\n\n'
+      + 'data: [DONE]\n\n',
+    chatType: 'text/event-stream',
+  });
+  const bridge = await startBridge({ CODEBUDDY_ENDPOINT: stub.base }, { auth: READABLE_FAKE_AUTH });
+  try {
+    const res = await fetch(`${bridge.baseUrl}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { ...auth, 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'stub-model', messages: [{ role: 'user', content: 'hi' }] }),
+    });
+    await res.text();
+
+    await new Promise((r) => setTimeout(r, 300));
+    const rows = readFileSync(join(bridge.dir, 'usage.jsonl'), 'utf8')
+      .split('\n').filter(Boolean).map((l) => JSON.parse(l));
+    assert.ok(rows.length > 0, '应当记了一条账');
+
+    const last = rows[rows.length - 1];
+    for (const k of ['promptTokens', 'completionTokens', 'ms']) {
+      if (k in last) {
+        assert.equal(typeof last[k], 'number', `${k} 必须是数字（实际 ${typeof last[k]}）`);
+        assert.ok(Number.isFinite(last[k]), `${k} 不能是 NaN / Infinity（实际 ${last[k]}）`);
+      }
+    }
+    // 原始 JSON 里也不能出现 NaN/Infinity 字面量（JSON.stringify 会把它们变成 null）
+    assert.ok(!/NaN|Infinity/.test(JSON.stringify(last)), '账本行不得含 NaN/Infinity');
+  } finally {
+    await bridge.stop();
+    try { await stub.close(); } catch { /* 忽略 */ }
+    rmSync(bridge.dir, { recursive: true, force: true });
+  }
+});
+
+/**
+ * 超长错误原文必须被截断并压成单行。
+ *
+ * 上游的 401 会返回**整段 HTML**（APISIX 网关），若不截断：
+ * ① 账本单行被撑到几十 KB；② 控制台「点失败标签复制错误详情」会复制出一坨 HTML。
+ * `shortError` 同时做「压单行 + 截断 160」，这里双向钉住。
+ */
+test('桥：上游超长错误原文必须压成单行并截断（不得把整段 HTML 灌进账本）', { timeout: 120_000 }, async () => {
+  /*
+   * 超时给到 120 秒（而不是别的用例的 30 秒）：上游回 401 会**触发一次令牌刷新**，
+   * 而刷新在测试桩上必然失败（桩没有 /v2/plugin/auth/token/refresh），
+   * 走满 `refreshAuth` 的 8 秒超时 + 后续重试。这是**刻意保留的真实行为**
+   * （生产里刷新成功就会重试），不该为了让测试快而去掉。
+   */
+  // 造一段带换行的长 HTML：既测截断，也测换行被压平
+  const longHtml = '<html>\n  <head><title>401</title></head>\n  <body>\n'
+    + 'x'.repeat(4000)
+    + '\n  </body>\n</html>';
+  const stub = await startStubUpstream(['stub-model'], { chatRaw: longHtml, chatStatus: 401, chatType: 'text/html' });
+  const bridge = await startBridge({ CODEBUDDY_ENDPOINT: stub.base }, { auth: READABLE_FAKE_AUTH });
+  try {
+    const res = await fetch(`${bridge.baseUrl}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { ...auth, 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'stub-model', messages: [{ role: 'user', content: 'hi' }] }),
+    });
+    await res.text();
+    assert.ok(res.status >= 400, '上游 401 时桥不能回 200');
+
+    await new Promise((r) => setTimeout(r, 300));
+    const rows = readFileSync(join(bridge.dir, 'usage.jsonl'), 'utf8')
+      .split('\n').filter(Boolean).map((l) => JSON.parse(l));
+    const last = rows[rows.length - 1];
+    assert.equal(last.ok, false, '必须记失败');
+    assert.ok(typeof last.error === 'string' && last.error.length <= 201,
+      `错误原文必须被截断到 160 字符左右（实际 ${last.error?.length}）`);
+    assert.ok(!last.error.includes('\n'), '错误原文必须压成单行（换行会被账本/CSV 吃掉）');
+  } finally {
+    await bridge.stop();
+    try { await stub.close(); } catch { /* 忽略 */ }
+    rmSync(bridge.dir, { recursive: true, force: true });
+  }
+});
+
+/*
+ * ── 401 的自诊断 ────────────────────────────────────────────────────────
+ *
+ * 背景：令牌默认值从固定串 `wb-local-bridge` 改成随机值之后，**所有老用户
+ * 升级后都会撞 401** —— 他们的客户端配置里还存着旧口令。断得毫无预兆，
+ * 且原响应体只有一句 `bad or missing token`，用户根本不知道该去哪找新值。
+ *
+ * 契约（三条同时成立）：
+ *   ① 401 必须说明「可能是升级前的旧令牌」并指出去哪拿新值；
+ *   ② **绝不能**把真实令牌写进响应体 —— 那等于给同机攻击者直接送答案；
+ *   ③ 用对令牌的请求不受影响（提示只在失败路径上）。
+ */
+test('桥：401 必须自带排查指引（升级后旧令牌失效是高频场景）', { timeout: 30_000 }, async () => {
+  const bridge = await startBridge();
+  try {
+    // 老用户升级后的典型状态：配置里还存着历史默认值
+    const stale = await fetch(bridge.baseUrl + '/v1/models', {
+      headers: { authorization: 'Bearer wb-local-bridge' },
+    });
+    assert.equal(stale.status, 401, '旧令牌必须被拒绝（这正是本次安全修复的目的）');
+
+    const body = await stale.text();
+    // ① 必须给出可操作指引
+    assert.match(body, /bridge-token|-token|客户端接入|clients/,
+      `401 响应体要指出去哪拿新令牌，实际是：${body.slice(0, 200)}`);
+    assert.match(body, /upgrade|升级|旧|stale|changed|变/i,
+      `401 响应体要说明「令牌可能变了」，实际是：${body.slice(0, 200)}`);
+
+    // ② 绝不能泄漏真实令牌。取启动日志里的自动生成值作为对照。
+    const out = bridge.out();
+    const real = out.match(/WORKBUDDY_LOCAL_TOKEN=([A-Za-z0-9._-]{16,})/)?.[1];
+    if (real) {
+      assert.ok(!body.includes(real), '401 响应体绝不能包含真实令牌（等于把答案送给攻击者）');
+    }
+
+    // ③ 用对令牌时正常，且提示不会污染成功响应
+    const ok = await fetch(bridge.baseUrl + '/v1/models', { headers: auth });
+    assert.equal(ok.status, 200, '正确令牌必须照常放行');
+    const okBody = await ok.text();
+    assert.ok(!/bridge-token|升级/.test(okBody), '成功响应里不该出现排查提示');
+  } finally {
+    await bridge.stop();
+    rmSync(bridge.dir, { recursive: true, force: true });
+  }
+});
+
+test('桥：完全没带凭据时也要给指引（新用户第一次接入手忙脚乱）', { timeout: 30_000 }, async () => {
+  const bridge = await startBridge();
+  try {
+    const res = await fetch(bridge.baseUrl + '/v1/models');
+    assert.equal(res.status, 401);
+    const body = await res.text();
+    assert.match(body, /bridge-token|-token|客户端接入|clients/,
+      `无凭据的 401 同样要指路，实际是：${body.slice(0, 200)}`);
+
+    // 同样地，不许泄漏真实令牌
+    const real = bridge.out().match(/WORKBUDDY_LOCAL_TOKEN=([A-Za-z0-9._-]{16,})/)?.[1];
+    if (real) assert.ok(!body.includes(real), '401 响应体绝不能包含真实令牌');
   } finally {
     await bridge.stop();
     rmSync(bridge.dir, { recursive: true, force: true });
