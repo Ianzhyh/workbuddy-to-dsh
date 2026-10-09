@@ -25,7 +25,8 @@
  * （只调用 providerInfo / providerRetryPolicy，没有 instanceof 检查）。
  */
 
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, chmodSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -82,7 +83,9 @@ function writeModelPrefs(visible) {
  * 用户已经填进客户端的密钥就全失效了。两难只能靠落盘解决：
  * 首次随机生成 → 存这里 → 后续复用同一个值。
  *
- * 权限：0600（仅本人可读）。文件里是本地回环口令，泄漏不等于泄漏上游
+ * 权限：**只有当前用户可读**。POSIX 上靠 `mode: 0o600`，Windows 上 `mode` 无效，
+ * 由 `hardenBridgeTokenFile()` 用 icacls 收紧 —— 别只看那一行 `mode` 就以为安全了。
+ * 文件里是本地回环口令，泄漏不等于泄漏上游
  * 凭据，但也没有理由让同机其它用户读到。
  */
 const BRIDGE_TOKEN_PATH = join(PLUGIN_DIR, '.bridge-token');
@@ -105,12 +108,44 @@ function resolveLocalToken(rawToken) {
   const explicit = typeof rawToken === 'string' ? rawToken.trim() : '';
   if (explicit) return explicit;
   const stored = readBridgeToken();
-  if (stored) return stored;
+  if (stored) {
+    hardenBridgeTokenFile(); // 旧版本创建的文件权限是继承来的，这里补一次
+    return stored;
+  }
   const token = randomBytes(24).toString('base64url');
   try {
     writeFileSync(BRIDGE_TOKEN_PATH, `${token}\n`, { mode: 0o600 });
+    hardenBridgeTokenFile();
   } catch { /* 只读介质：本次运行用这个值，下次会换新的（用户需重填密钥） */ }
   return token;
+}
+
+/**
+ * 把令牌文件收成「只有当前用户能读」。
+ *
+ * **`writeFileSync({ mode: 0o600 })` 在 Windows 上不起作用**：那个 `mode` 只在
+ * POSIX 上有意义，Windows 走 NTFS ACL，`mode` 基本被忽略。实测新建出来的文件
+ * 继承目录权限，结果是 `Authenticated Users:(M)` + `Users:(RX)` ——
+ * **同机任何用户都能读到令牌**。上面那句「权限：0600（仅本人可读）」在 Windows
+ * 上是不成立的，这个函数才是让它成立的地方。
+ *
+ * 与 `config.mjs` 里那份是同一套做法（插件包不引用仓库根的 config，
+ * 所以各自持有一份小实现，改动时两处要一起看）。
+ * 尽力而为：拿不到就保持默认，绝不因此让插件启动失败。
+ */
+function hardenBridgeTokenFile() {
+  try {
+    if (process.platform !== 'win32') {
+      chmodSync(BRIDGE_TOKEN_PATH, 0o600);
+      return;
+    }
+    const user = process.env.USERNAME || process.env.USER;
+    if (!user) return;
+    // 用 spawnSync 而不是 execSync：后者经 cmd.exe 且默认给 stdin 开管道，
+    // 在 Windows 上必抛 EBUSY。
+    spawnSync('icacls', [BRIDGE_TOKEN_PATH, '/inheritance:r', '/grant:r', `${user}:F`],
+      { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+  } catch { /* 尽力而为 */ }
 }
 
 /** 默认值集中在一处，README 与面板都读它。 */

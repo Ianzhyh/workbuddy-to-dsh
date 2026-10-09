@@ -19,6 +19,22 @@
 
 ## [Unreleased]
 
+### Security
+
+- **补齐 v1.4.8 漏掉的一处：插件侧的令牌文件同样没收紧权限**（`dsh-plugin/lib/index.js`）。
+  令牌文件（`dsh-plugin/.bridge-token`）有**两份**解析代码：仓库根的 `config.mjs`
+  和插件自己的 `lib/index.js`，两处都用 `writeFileSync(..., { mode: 0o600 })`。
+  v1.4.8 只修了前者 —— 也就是说**由插件创建**的那个文件权限仍然是继承来的
+  （`Authenticated Users:(M)` + `Users:(RX)`），同机任何用户都能读。
+
+  现在插件侧也加了 `hardenBridgeTokenFile()`（同一套做法：POSIX `chmod 0600`、
+  Windows `icacls /inheritance:r /grant:r <当前用户>:F`），读已存在文件时也补一次。
+  顺手把那段注释里「权限：0600（仅本人可读）」改准 —— 在 Windows 上那句话不成立，
+  真正起作用的是这个函数。
+
+  > 插件包不引用仓库根的 `config.mjs`，所以这个 helper 是**两份实现**。
+  > 已在两处注释里互相标注「改动时两处一起看」。
+
 ## [1.4.8] - 2026-10-09
 
 ### Security
