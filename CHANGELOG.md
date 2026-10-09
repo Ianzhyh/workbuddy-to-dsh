@@ -19,6 +19,35 @@
 
 ## [Unreleased]
 
+### Security
+
+- **令牌文件在 Windows 上其实是「任何用户可读」**（`config.mjs`）。
+  v1.4.6 把本地令牌改成随机生成，文档里写「文件权限 0600」—— 但
+  `writeFileSync({ mode: 0o600 })` 的 `mode` **只在 POSIX 上有意义**；
+  Windows 走 NTFS ACL，`mode` 基本被忽略。实测新建出来的文件继承目录权限：
+
+  ```
+  NT AUTHORITY\Authenticated Users:(I)(M)   ← 任何已认证用户可改
+  BUILTIN\Users:(I)(RX)                     ← 任何用户可读
+  ```
+
+  也就是**同机任何用户都能读到令牌**。而令牌改成随机的**理由**恰恰是
+  「旧默认值是公开口令，本机任何程序都能拿它调用桥」—— 权限不收，
+  这个理由就被抵消掉一半。
+
+  修法：新增 `hardenTokenFile()` —— POSIX 上 `chmod 0600`，Windows 上用
+  `icacls /inheritance:r /grant:r <当前用户>:F` 去掉继承、只留当前用户。
+  对**已存在**的令牌文件也会补一次（旧版本创建的都带着继承来的权限）。
+  用 `spawnSync` 而不是 `execSync`（后者经 cmd.exe，在这台机器上必抛 EBUSY）。
+
+  实测：加固前 5 条 ACE（`CodexSandboxUsers` + 裸 SID + SYSTEM +
+  Administrators + 当前用户）→ 加固后**只剩当前用户一条**。
+  用例 `lib/config.token-perm.test.mjs`（仅 Windows 跑）钉住这一点。
+
+  > 用例第一版是**假绿**：写的是「不该有 Authenticated Users / Users」，
+  > 而实际继承到的主体根本没有这两个名字，不加修复也会通过。
+  > 改成「数 ACE 条目数必须为 1」才真的能区分。
+
 ## [1.4.7] - 2026-10-09
 
 ### Fixed

@@ -6,7 +6,8 @@
  * spawn 时注入同样的环境变量，从而保持桥的单文件自包含特性；两边使用的
  * 变量名以本文件为准。
  */
-import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, writeFileSync, chmodSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { homedir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
@@ -214,13 +215,43 @@ function resolveLocalToken() {
   if (env.WORKBUDDY_LOCAL_TOKEN) return env.WORKBUDDY_LOCAL_TOKEN;
   try {
     const stored = readFileSync(BRIDGE_TOKEN_PATH, 'utf8').trim();
-    if (/^[A-Za-z0-9._-]{16,}$/.test(stored)) return stored;
+    if (/^[A-Za-z0-9._-]{16,}$/.test(stored)) {
+      hardenTokenFile(); // 旧版本创建的文件权限是继承来的，这里补一次
+      return stored;
+    }
   } catch { /* 首次运行：文件还不存在 */ }
   const token = randomBytes(24).toString('base64url');
   try {
     writeFileSync(BRIDGE_TOKEN_PATH, `${token}\n`, { mode: 0o600 });
+    hardenTokenFile();
   } catch { /* 只读介质：本次运行有效，下次会换新（用户需重填客户端密钥） */ }
   return token;
+}
+
+/**
+ * 把令牌文件收成「只有当前用户能读」。
+ *
+ * **为什么 `writeFileSync({ mode: 0o600 })` 不够**：那个 `mode` 只在 POSIX 上有意义。
+ * Windows 走 NTFS ACL，`mode` 基本被忽略 —— 实测新建出来的文件继承目录权限，
+ * 结果是 `Authenticated Users:(M)`（任何已认证用户可改）+ `Users:(RX)`（任何用户可读），
+ * 也就是**同机任何用户都能读到令牌**。而令牌改成随机的**理由**恰恰是
+ * 「本机任何程序都能拿公开默认值调用桥」—— 权限不收，那个理由就被抵消了一半。
+ *
+ * 尽力而为：拿不到就保持默认，绝不因此让启动失败。
+ */
+export function hardenTokenFile(path = BRIDGE_TOKEN_PATH) {
+  try {
+    if (process.platform !== 'win32') {
+      chmodSync(path, 0o600);
+      return;
+    }
+    const user = env.USERNAME || env.USER;
+    if (!user) return;
+    // 去掉继承、只留给当前用户。用 spawnSync 而不是 execSync：
+    // 后者经 cmd.exe 且默认给 stdin 开管道，在 Windows 上必抛 EBUSY。
+    spawnSync('icacls', [path, '/inheritance:r', '/grant:r', `${user}:F`],
+      { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+  } catch { /* 尽力而为 */ }
 }
 
 export const config = {
