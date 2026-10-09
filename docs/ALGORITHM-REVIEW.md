@@ -375,7 +375,9 @@ quotaCache = { at: Date.now(), ttl: ..., value };  // 在途请求完成后无�
 | **BUG-6** 探测三态混淆 | ✅ 已修 | `number` / `null`（确认没有）/ `undefined`（未知），调用方只在 `null` 时认定已释放 |
 | **BUG-4** 账本截断非原子 | ✅ 已修 | 改「写临时文件 + `renameSync`」原子替换；新增用例**第一次真正执行这条路径**（预填 2001 行 → 触发记账 → 断言只剩约一半、每行仍是合法 JSON、`.tmp` 不残留） |
 | **BUG-7** 积分缓存竞态 | ✅ 已修（**无用例**） | 加 `quotaGeneration` 代次：在途请求只在「自己那一代仍是当前代」时写回缓存；`invalidateQuotaCache()` 同时作废在途句柄。**测试缺口**：`fetchQuota` 是模块私有的，要构造这个时序得能替换 `bridgeFetch`，本轮没做 |
-| BUG-3 Anthropic 工具名分片 | ⬜ 待修 | 要先定「名字收齐再发 `content_block_start`」的缓冲策略 |
+| **BUG-3** Anthropic 工具名分片 | ✅ 已修（v1.4.6） | 名字改成「初值空串 + 每片追加」，并把 `content_block_start` **推迟到名字收齐**（参数开始到达时才发，收尾时补发）；`closeOpen()` 会先补发未 start 的块以保证索引顺序。用例用 `chatRaw` 手写分片 SSE，**验证过有牙**：还原旧逻辑即红 |
+| 第一轮 P3：`today()` 与 `localDateStr()` 重复 | ✅ 已修（已推送 `990d0a4e`） | 删掉 UTC 版的 `today()`，三处 CSV 导出统一用 `localDateStr()`。验收补两条，**第二条才是关键**：第一条在 UTC 与本地同一天时（一天里 2/3 的时间）区分不出两种实现，只有凌晨才红 —— 所以直接断言 `typeof today === 'undefined'` |
+| 写 dsh 配置非原子（P3，本轮补做） | ✅ 已修 | 与账本同款做法：写临时文件 + `renameSync`。原先只有 `.bak-<stamp>` 备份兜底，但「半份 YAML」用户多半不会去翻 `.bak-` |
 | 第一轮：刷新单飞 / 背压 / `today()` / `persistRefreshed` 命名 | ⬜ 待修 | 见第一轮 |
 
 ## 修 BUG-2 时抓到的一次**假绿**
