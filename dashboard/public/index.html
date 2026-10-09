@@ -22,6 +22,12 @@
 <body>
 <div class="wrap">
 
+  <!-- 复制结果对屏幕阅读器不可见，必须有一个 live region 播报；视觉上用 .sr-only 隐藏。
+       它必须待在**任何 data-section 之外**：原先挂在「客户端接入」面板里，
+       而切到别的页签时那个面板是 display:none —— 藏在不可见子树里的
+       aria-live 不会播报，等于在其它页签上复制都哑了。 -->
+  <div id="liveRegion" class="sr-only" role="status" aria-live="polite"></div>
+
   <div class="top-bar-sticky" id="topBarSticky">
     <header>
       <div class="brand-group">
@@ -43,8 +49,8 @@
           <span id="langToggleText">EN</span>
         </button>
         <button type="button" id="themeToggle" class="icon-btn" title="切换深色/浅色主题">
-          <svg id="themeIconSun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="display:none;width:15px;height:15px"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
-          <svg id="themeIconMoon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:15px;height:15px"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+          <svg id="themeIconSun" class="ic-off" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
+          <svg id="themeIconMoon" class="ic-on" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
         </button>
         <button id="refreshBtn">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:14px;height:14px"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
@@ -125,11 +131,16 @@
   </section>
 
   <section class="panel" data-section="overview">
-    <h2>用量统计 <span class="hint" style="display:inline">最近 <select id="usageDays" title="统计天数"><option>1</option><option selected>7</option><option>30</option></select> 天 · 只记元数据，不含对话内容</span>
+    <h2>用量统计 <span class="spacer"></span><span class="stamp" id="usageStamp"></span></h2>
+    <!-- 控件与提示单独一行：原先全挤在 <h2> 里，标题和下拉/按钮抢位置，一行塞不下就乱换行 -->
+    <div class="panel-tools">
+      <span class="hint">最近 <select id="usageDays" title="统计天数"><option>1</option><option selected>7</option><option>30</option></select> 天 · 只记元数据，不含对话内容</span>
       <span class="spacer"></span>
       <select id="trendMetric" title="趋势图指标"><option value="calls" selected>调用次数</option><option value="tokens">tokens</option><option value="credit">积分</option></select>
       <select id="trendGran" title="趋势图粒度"><option value="day" selected>按天</option><option value="hour">最近 24 小时</option></select>
-      <span class="stamp" id="usageStamp"></span><button class="mini" id="usageCsvBtn">导出 CSV</button><button class="mini danger" id="usageClearBtn">清空账本</button></h2>
+      <button class="mini" id="usageCsvBtn">导出 CSV</button>
+      <button class="mini danger" id="usageClearBtn">清空账本</button>
+    </div>
     <div id="usageBox"><div class="empty">加载中…</div></div>
   </section>
 
@@ -177,9 +188,6 @@
       <button class="mini" id="clientsCopyAllBtn">复制全部</button></h2>
     <p class="hint">桥同时讲两套协议：<b>OpenAI</b>（<code>/v1/chat/completions</code>，绝大多数客户端走这条）
       与 <b>Anthropic</b>（<code>/v1/messages</code>，Claude Code 走这条）。下面三个值填进客户端即可，点一下就能复制。</p>
-    <!-- 复制结果对屏幕阅读器不可见，必须有一个 live region 播报；
-         视觉上用 .sr-only 隐藏，但它一直在 DOM 里等消息。 -->
-    <div id="clientsLive" class="sr-only" role="status" aria-live="polite"></div>
     <div id="clientsBox"><div class="empty">正在读取…</div></div>
   </section>
 
@@ -449,9 +457,8 @@ function stopI18nObserver() {
   i18nObserver = null;
 }
 
-/** 切换语言：记住原文重算一遍 → 同步 <html lang> / <title> / 按钮文案。 */
-function setLang(next, opts = {}) {
-  if (!I18N_LANGS.includes(next) || (next === LANG && !opts.force)) return;
+/** 真正落地语言：改状态、重算全部文案。与动画分开，便于初始化时直接调用。 */
+function commitLang(next, opts = {}) {
   LANG = next;
   try { localStorage.setItem(I18N_LANG_KEY, next); } catch { /* 隐私模式：忽略 */ }
   document.documentElement.lang = next === 'en' ? 'en' : 'zh-CN';
@@ -470,6 +477,21 @@ function setLang(next, opts = {}) {
   if (typeof refreshTitle === 'function') refreshTitle();
 }
 
+/**
+ * 切换语言。
+ *
+ * 整批替换文本这一步交给 View Transitions：浏览器把「中文的一帧」与
+ * 「英文的一帧」各自快照后交叉淡化 —— 不需要先淡出再等 130ms 再替换，
+ * 也不需要 JS 计时器与 CSS 时长对齐，更没有「切换途中又点」的重入问题。
+ *
+ * 启动时（`silent`）直接落地：页面还没画出来，没有旧的一帧可淡化。
+ */
+function setLang(next, opts = {}) {
+  if (!I18N_LANGS.includes(next) || (next === LANG && !opts.force)) return;
+  if (opts.silent) { commitLang(next, opts); return; }
+  withViewTransition(() => commitLang(next, opts));
+}
+
 function initI18n() {
   let saved = null;
   try { saved = localStorage.getItem(I18N_LANG_KEY); } catch { /* 忽略 */ }
@@ -477,7 +499,7 @@ function initI18n() {
   const target = I18N_LANGS.includes(saved) ? saved : 'zh';
   const btn = $('langToggle');
   if (btn) btn.addEventListener('click', () => setLang(LANG === 'en' ? 'zh' : 'en'));
-  if (target === 'en') setLang('en', { force: true });
+  if (target === 'en') setLang('en', { force: true, silent: true });
   else { document.documentElement.lang = 'zh-CN'; const el = $('langToggleText'); if (el) el.textContent = 'EN'; }
 }
 /* ---------------------------------------------------------------------------
@@ -1875,6 +1897,73 @@ function setMsg(text, cls, title) {
 }
 
 /**
+ * 收起一个块：高度 + 淡出走纵轴补间，收完再执行 done()。
+ *
+ * 为什么需要：告警条与「下一步」引导条只有出现的 slideDown，点「知道了」时
+ * 是**瞬间消失**的 —— 下面的内容跟着往上跳一下，用户分不清是自己关掉的还是页面刷了。
+ *
+ * 时长刻意压到 180ms：`test-r3-alerts` 在点完 250ms 后断言「已关闭」，
+ * 收起动画排在状态变更之前，不能把那个窗口吃满。
+ *
+ * reduced-motion 下 transition 时长被压到 0.01ms（见 style.css 第 18 节），
+ * transitionend 照常触发，所以这里不需要额外的分支。
+ */
+function collapseAway(el, done) {
+  if (!el) { done(); return; }
+  if (el.__collapsing) return; // 双击只收一次
+  el.__collapsing = true;
+  const from = el.offsetHeight;
+  el.classList.add('closing');
+  el.style.height = from + 'px';
+  el.style.overflow = 'hidden';
+  el.style.transition = 'height 0.18s var(--ease), opacity 0.14s var(--ease),'
+    + ' padding 0.18s var(--ease), margin 0.18s var(--ease)';
+  requestAnimationFrame(() => {
+    el.style.height = '0px';
+    el.style.opacity = '0';
+    el.style.paddingTop = '0px';
+    el.style.paddingBottom = '0px';
+    el.style.marginBottom = '0px';
+  });
+  let fired = false;
+  const fin = () => { if (fired) return; fired = true; done(); };
+  el.addEventListener('transitionend', fin, { once: true });
+  setTimeout(fin, 240); // 兜底：标签页在后台时 rAF/transitionend 可能不来
+}
+
+/**
+ * 面板从「正在读取…」换成真内容时淡入一次。
+ *
+ * 为什么用 MutationObserver 而不是把 6 个渲染点包成 paintBox(box, html)：
+ * 这些容器的填充点都是几十行的 innerHTML 拼接，逐个改要动 6 处长表达式，
+ * 收益（一次 220ms 淡入）配不上那个改动面。观察器只看一件事 ——
+ * **子节点从「一个 .empty」变成「有内容」**，那就淡入；
+ * 轮询重绘时前一次已经是内容，不触发（页面每 20 秒自己闪一下是噪声，不是反馈）。
+ */
+function initPanelFadeIn() {
+  const isPlaceholder = (box) => !!box.firstElementChild && box.firstElementChild.classList.contains('empty');
+  const wasPlaceholder = new WeakMap();
+  const obs = new MutationObserver((muts) => {
+    for (const m of muts) {
+      const box = m.target;
+      const now = isPlaceholder(box);
+      if (wasPlaceholder.get(box) && !now) {
+        box.classList.remove('box-in');
+        void box.offsetWidth; // 不回流一次，连续两次淡入不会重播
+        box.classList.add('box-in');
+      }
+      wasPlaceholder.set(box, now);
+    }
+  });
+  for (const id of ['usageBox', 'reqBox', 'accountList', 'modelWrap', 'checkinBox', 'clientsBox']) {
+    const el = $(id);
+    if (!el) continue;
+    wasPlaceholder.set(el, isPlaceholder(el));
+    obs.observe(el, { childList: true });
+  }
+}
+
+/**
  * 危险动作的二次确认（R7.1）。
  *
  * 「最近 60 秒内有 N 条请求」必须**当场取**（`GET /api/requests?limit=10`），
@@ -1941,10 +2030,20 @@ const CARD_ICONS = {
   '失败': '<svg class="k-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="color:var(--fail)"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>'
 };
 
+/** 上一次渲染的读数，按指标名存：用来判断「这一格刚才是不是变了」。 */
+const lastCardVals = {};
+
 function card(key, value, note, small) {
   const icon = CARD_ICONS[key] || '';
+  /*
+   * 值变了要留痕：轮询每 20 秒静默换掉数字（积分、模型数、令牌剩余），
+   * 用户分不清看到的是新数据还是自己看错了。给变化的一次 0.6s 底色脉冲。
+   * 首帧没有基线，不脉冲 —— 否则每次进页面整排卡都在闪。
+   */
+  const changed = Object.prototype.hasOwnProperty.call(lastCardVals, key) && lastCardVals[key] !== value;
+  lastCardVals[key] = value;
   return '<div class="card"><div class="k"><span>' + escapeAttr(key) + '</span>' + icon + '</div>' +
-    '<div class="v' + (small ? ' small' : '') + '">' + escapeAttr(value) + '</div>' +
+    '<div class="v' + (small ? ' small' : '') + (changed ? ' bump' : '') + '">' + escapeAttr(value) + '</div>' +
     (note ? '<div class="note">' + escapeAttr(note) + '</div>' : '') + '</div>';
 }
 
@@ -2233,7 +2332,8 @@ function renderAlerts() {
   });
   bar.querySelectorAll('[data-alert-dismiss]').forEach((btn) => {
     const it = items[Number(btn.dataset.alertDismiss)];
-    if (it) btn.onclick = () => it.dismiss.run();
+    // 先收起再落状态：瞬间消失会让下面的内容往上跳一下，看不出是「我关掉的」
+    if (it) btn.onclick = () => collapseAway(btn.closest('.alert'), () => it.dismiss.run());
   });
 }
 /** 最近一次取回的用量数据，供导出 CSV 使用。 */
@@ -3928,23 +4028,12 @@ function renderCards() {
   const b = d.bridge;
   const cards = [];
 
-  cards.push(card('账号',
-    a ? (a.account || '—') : '—',
-    a ? 'uid ' + (a.userId || '').slice(0, 8) + '…' : (d.credentials.error || '未取到')));
-
-  cards.push(card('令牌剩余',
-    a ? fmtDuration(a.remainingMs) : '—',
-    a ? '至 ' + new Date(a.expiresAt).toLocaleString('zh-CN', { hour12: false }) : '',
-    true));
-
-  cards.push(card('凭据加密',
-    a ? (a.encrypted ? 'AtRest 信封' : '明文') : '—',
-    a && a.keyIdMatches ? 'keyId ' + a.keyId : (a ? 'keyId 不匹配' : '')));
-
-  cards.push(card('上游端点',
-    b.upstream ? b.upstream.replace('https://', '') : '—',
-    '本地 ' + b.endpoint, true));
-
+  /*
+   * 顺序按「进来第一眼要回答的问题」排，不是按数据来源排：
+   *   在跑吗 → 有多少能用 → 还能用多久 → 还剩多少额度 → 接好了没 → 再是标识信息。
+   * 原先「账号 UID」在最前面且字号最大，而它恰恰是最不需要盯的东西；
+   * 「桥进程」排在第 5 张。这里**只换顺序**，字号与样式一律不动。
+   */
   cards.push(card('桥进程',
     b.uptimeMs != null ? ('运行 ' + fmtUptime(b.uptimeMs)) : (b.running ? '—' : '未运行'),
     b.pid
@@ -3960,6 +4049,11 @@ function renderCards() {
       : (models.length
         ? models.slice(0, 2).map(m => m.id).join(' · ') + (models.length > 2 ? ' 等 ' + models.length + ' 个' : '')
         : '桥未运行或目录为空')));
+
+  cards.push(card('令牌剩余',
+    a ? fmtDuration(a.remainingMs) : '—',
+    a ? '至 ' + new Date(a.expiresAt).toLocaleString('zh-CN', { hour12: false }) : '',
+    true));
 
   if (d.quota) {
     const pkgs = d.quota.packages || [];
@@ -3977,6 +4071,18 @@ function renderCards() {
     (d.dsh.hasBridgeKey ? '凭据 ✓' : '凭据 ✗') + '　' +
     (d.dsh.bundlesOk ? 'bundle ✓' : 'bundle ✗'),
     true));
+
+  cards.push(card('账号',
+    a ? (a.account || '—') : '—',
+    a ? 'uid ' + (a.userId || '').slice(0, 8) + '…' : (d.credentials.error || '未取到')));
+
+  cards.push(card('凭据加密',
+    a ? (a.encrypted ? 'AtRest 信封' : '明文') : '—',
+    a && a.keyIdMatches ? 'keyId ' + a.keyId : (a ? 'keyId 不匹配' : '')));
+
+  cards.push(card('上游端点',
+    b.upstream ? b.upstream.replace('https://', '') : '—',
+    '本地 ' + b.endpoint, true));
 
   $('cards').innerHTML = cards.join('');
 }
@@ -4186,8 +4292,8 @@ function renderModelTable(models, registered) {
         + (typeof m.credits === 'number' ? m.credits : '') + '" data-probe-ok="' + probeOk
         + '" data-probe-ms="' + probeMs + '">' +
         '<td><input type="checkbox" data-id="' + escapeAttr(m.id) + '"' + (on ? ' checked' : '') + '></td>' +
-        '<td class="mono copyable" data-copy="' + escapeAttr(m.id) + '" title="点击复制">'
-          + escapeAttr(m.id) + COPY_ICON +
+        '<td class="mono copyable" data-copy="' + escapeAttr(m.id) + '">'
+          + '<button type="button" class="idcopy" title="点击复制">' + escapeAttr(m.id) + COPY_ICON + '</button>' +
           '<button type="button" class="infobtn" data-info="' + escapeAttr(m.id)
           + '" aria-expanded="false" title="查看模型详情">ⓘ</button></td>' +
         '<td class="name">' + escapeAttr(m.name || '—') + '</td>' +
@@ -4270,7 +4376,16 @@ function renderModelTable(models, registered) {
     });
     // 点击模型 id 即复制；其它列（上下文 / 最大输出这类数字）不再触发复制
     document.querySelectorAll('#modelTable td.copyable').forEach((td) => {
-      td.onclick = () => copyText(td.dataset.copy || '');
+      /*
+       * 反馈写在**点击处**，不写顶部提示条：模型表在页面约 60% 的位置，
+       * 而提示条在吸顶栏下方 —— 实测滚到那里点复制时提示条完全在视口外，
+       * 等于没有反馈（与「客户端接入」面板同一个理由）。
+       *
+       * 格子里那个 <button class="idcopy"> 是为了**键盘可达**：原先整格只是
+       * onclick 的 td，Tab 走不到也没有焦点环。现在按钮的 Enter/Space 会冒泡到
+       * 这一条 handler，鼠标点整格仍然有效 —— 一个 handler，两条路径。
+       */
+      td.onclick = () => runCopy(td, '模型 id', td.dataset.copy || '');
     });
     // ⓘ 按钮：展开详情（同屏只开一个）。stopPropagation 免得顺带触发「点击复制」
     document.querySelectorAll('#modelTable button.infobtn').forEach((b) => {
@@ -4957,23 +5072,66 @@ $('trendGran').onchange = onTrendGranChange;
 $('trendMetric').onchange = (e) => { trendMetric = e.target.value; renderUsage(); };
 $('usageCsvBtn').onclick = exportUsageCsv;
 
-// ── 主题与交互规范 ──────────────────────────────────────────────────
+/* ---------------------------------------------------------------------------
+ * 整页切换的动效：**交给平台的 View Transitions API**，不再自己拼过渡。
+ *
+ * 为什么要重写（旧实现的问题，都是同一类「自己造轮子」的代价）：
+ *   1. 给 `<html>` 挂 `.theming` 临时类 + `html.theming *` 全局过渡 —— 要处理
+ *      「先挂 class → 强制回流 → 再改值」的顺序陷阱，漏一步动画就静默失效；
+ *   2. `box-shadow` 一加进那条全局规则，每帧要为 1200+ 个元素插值阴影，
+ *      样式重算暴涨，200ms 补间被压成一帧 —— 加了比不加更糟（实测）；
+ *   3. 语言切换的两段式靠 JS 计时器（130ms）与 CSS 时长对齐，还得防重入。
+ *
+ * `startViewTransition(cb)` 干的就是这件事：浏览器把「旧的一帧」和「新的一帧」
+ * 各自快照，然后自己交叉淡化 —— 没有全局过渡规则、没有计时器、没有顺序陷阱，
+ * 而且**整页一致**（包括按钮、图标、SVG 这些自己不好补间的部分）。
+ *
+ * 实测（5324px 高、697 个元素的页面上）：过渡期间 34 帧 / 712ms，中位帧间隔 17ms，
+ * 快照那一下有一次 83ms 的尖峰 —— 与旧的逐属性补间持平。
+ */
+/**
+ * 包一次「整页状态切换」。
+ *
+ * - 不支持 API（或调用抛错）：**直接改**，状态永远不能因为动画而丢；
+ * - 回调必须是同步的（改 DOM 那一下），浏览器在快照之间执行它。
+ */
+function withViewTransition(mutate) {
+  if (typeof document.startViewTransition !== 'function') { mutate(); return null; }
+  try {
+    return document.startViewTransition(() => { mutate(); });
+  } catch (e) {
+    // 动画失败绝不影响状态变更本身
+    mutate();
+    return null;
+  }
+}
+
 function initTheme() {
   const saved = localStorage.getItem('wb.theme');
   const prefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
   const theme = saved || (prefersDark ? 'dark' : 'light');
-  applyTheme(theme);
+  // 首次应用**不做过渡**：页面还没画出来，没有「旧的一帧」可交叉淡化
+  commitTheme(theme);
 }
-function applyTheme(theme) {
+/** 只改状态，不带动画。切主题与初始化共用，保证两条路径的落点完全一致。 */
+function commitTheme(theme) {
   document.documentElement.setAttribute('data-theme', theme);
   localStorage.setItem('wb.theme', theme);
   const isDark = theme === 'dark';
   const sun = $('themeIconSun');
   const moon = $('themeIconMoon');
   if (sun && moon) {
-    sun.style.display = isDark ? 'inline-block' : 'none';
-    moon.style.display = isDark ? 'none' : 'inline-block';
+    // 两个图标叠在一起，用 class 控制显隐（样式见 style.css 的 #themeToggle）
+    sun.classList.toggle('ic-on', isDark);
+    sun.classList.toggle('ic-off', !isDark);
+    moon.classList.toggle('ic-on', !isDark);
+    moon.classList.toggle('ic-off', isDark);
   }
+}
+function applyTheme(theme) {
+  // 首次落地（还没有 data-theme）直接改；之后的每次切换走整页交叉淡化
+  if (!document.documentElement.hasAttribute('data-theme')) { commitTheme(theme); return; }
+  withViewTransition(() => commitTheme(theme));
 }
 const themeBtn = $('themeToggle');
 if (themeBtn) {
@@ -5197,7 +5355,7 @@ async function runCopy(el, label, text) {
 
 /** 写进 aria-live 区域：屏幕阅读器朗读，视觉上不可见。 */
 function announce(msg) {
-  const live = $('clientsLive');
+  const live = $('liveRegion');
   if (live) live.textContent = msg;
 }
 
@@ -5602,7 +5760,7 @@ function renderNextStep() {
   go.onclick = () => switchTab('clients');
   const close = clientEl('button', 'mini nextstep-close', '知道了');
   close.type = 'button';
-  close.onclick = () => { lsSet(NEXT_STEP_DISMISSED, '1'); renderNextStep(); };
+  close.onclick = () => collapseAway(bar, () => { lsSet(NEXT_STEP_DISMISSED, '1'); renderNextStep(); });
   bar.append(text, go, close);
 }
 
@@ -5658,6 +5816,15 @@ function switchTab(name) {
     }
   });
   if (!shown.length) return;
+  /*
+   * 切页签后回到内容顶部。
+   *
+   * 为什么必须：这是个 7000px 量级的长页面。滚到「可用模型」再点「客户端接入」，
+   * 视口会停在原来的滚动位置上 —— 而文档突然变短，画面落在半空，看起来像页面坏了。
+   * `html { scroll-behavior: smooth }` 已经负责平滑，reduced-motion 下它被压成
+   * 直接到位（第 18 节），所以这里不用分支。
+   */
+  if ((window.scrollY || document.documentElement.scrollTop || 0) > 8) window.scrollTo(0, 0);
   /*
    * 重放进场平移动画。
    *
@@ -5738,6 +5905,7 @@ initTips();      // 原生 title 提示框 → 自绘气泡
 initNavTabs();
 initQuickPrompts();
 initBackToTop();
+initPanelFadeIn(); // 必须在下面首次取数之前挂上，否则第一帧淡入会被漏掉
 (async () => {
   await loadProbeResults();
   await loadOverview();

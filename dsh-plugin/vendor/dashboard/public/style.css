@@ -541,10 +541,13 @@ button {
   background: var(--panel);
   color: var(--text);
   box-shadow: var(--shadow-xs);
+  /* opacity 必须在列表里：启停桥后按钮的可用/禁用态是靠 opacity 表达的，
+     不补间的话那一下是硬切（用户会以为页面闪了一下而不是按钮变了状态）。 */
   transition: background-color 0.16s var(--ease),
               border-color 0.16s var(--ease),
               color 0.16s var(--ease),
               transform 0.16s var(--ease),
+              opacity 0.16s var(--ease),
               box-shadow 0.16s var(--ease);
   display: inline-flex;
   align-items: center;
@@ -653,13 +656,36 @@ button.icon-btn {
   border-radius: var(--radius-sm);
   height: 32px;
 }
-#themeToggle svg {
-  transition: transform 0.24s var(--ease), opacity 0.2s var(--ease);
+/*
+ * 主题图标：两个叠在一起，用 class 控制显隐。
+ *
+ * 显隐**不需要自己的过渡** —— 主题切换整页走 View Transitions（见 17.7），
+ * 浏览器会把「旧的一帧」（月亮）与「新的一帧」（太阳）交叉淡化，按钮、图标
+ * 一起淡。早先给图标单独写了 opacity + transform 的补间，其实是在给
+ * 一个已经被整页淡化覆盖的东西再补一层，反而把「点下去到看见变化」拆成了两段。
+ *
+ * `transform` 的过渡保留：那是 hover / active 的交互反馈，与主题无关。
+ */
+#themeToggle {
+  position: relative;
+  width: 34px; /* 两个图标都绝对定位了，不给宽度按钮会塌成只剩内边距 */
+  padding: 0;
 }
-#themeToggle:hover svg {
+#themeToggle svg {
+  position: absolute;
+  inset: 0;
+  margin: auto;
+  width: 15px;
+  height: 15px;
+  transition: transform 0.24s var(--ease);
+}
+#themeToggle svg.ic-off {
+  opacity: 0;
+}
+#themeToggle:hover svg.ic-on {
   transform: rotate(20deg) scale(1.08);
 }
-#themeToggle:active svg {
+#themeToggle:active svg.ic-on {
   transform: rotate(-15deg) scale(0.95);
 }
 #refreshBtn svg {
@@ -870,6 +896,24 @@ button.mini {
   margin: 0 0 var(--space-4);
   line-height: 1.5;
 }
+
+/*
+ * 面板工具行：标题行只留「标题 + 更新时间」，控件与提示单独一行。
+ *
+ * 为什么：用量面板原先把「最近 [7] 天 · 只记元数据…」两个下拉、时间戳和两个按钮
+ * 全塞进 <h2>，一行放不下就乱换行，标题与控件抢同一个基线 —— 读的人分不清
+ * 哪部分是标题、哪部分能点。拆开后标题稳定，控件右对齐成一组，提示自成一行。
+ */
+.panel-tools {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  row-gap: 8px;
+  margin: -8px 0 var(--space-4);
+}
+.panel-tools .spacer { flex: 1; }
+.panel-tools .hint { margin: 0; }
 
 /* ── 8. 标签与徽章 Tags ──────────────────────────────────────────────── */
 .tag {
@@ -1471,6 +1515,30 @@ td.copyable:hover .copyicon { opacity: 1; color: var(--primary); }
   color: var(--primary);
   background: var(--primary-subtle);
 }
+
+/*
+ * 列宽与折行：内容本来就短的列一律不许折行。
+ *
+ * 实测（1100px 视口、表宽 1002px）：模型 id / 实测成本 / dsh / 可用性 四列都在折行，
+ * 于是行高在 53px 与 89px 之间跳 —— 数据表里行高一会高一会低，竖向扫读就断了。
+ * 上下文 / 最大输出 / 倍率 / dsh / 可用性 这几列内容长度可控，nowrap 不额外吃宽度；
+ * id 列给一个最小宽度，让常见的 id 放得下第一行。
+ * 「实测成本」仍允许折行：它的文案最长（含「（55 次）」），强行 nowrap 会把整表
+ * 撑出横向滚动条 —— 那比行高不齐更糟。
+ */
+#modelTable td:nth-child(4), #modelTable th:nth-child(4),
+#modelTable td:nth-child(5), #modelTable th:nth-child(5),
+#modelTable td:nth-child(6), #modelTable th:nth-child(6),
+#modelTable td:nth-child(8), #modelTable th:nth-child(8),
+#modelTable td:nth-child(9), #modelTable th:nth-child(9) { white-space: nowrap; }
+#modelTable td:nth-child(2) { min-width: 148px; }
+
+/* 9 列的表用全局 14px 横向内边距太费宽度：光内边距就吃掉约 250px，
+   挤得 id 与「实测成本」折行、行高在 53 与 89px 之间跳。
+   这张表单独收到 9px，把宽度还给内容本身。
+   排除 .detail-row：那是展开的详情抽屉，有自己的内边距，不该被列宽规则牵连。 */
+#modelTable th,
+#modelTable tbody tr:not(.detail-row) > td { padding-left: 9px; padding-right: 9px; }
 
 /* ── 14. 抽屉栏 Drawer 规范（详情展开与折叠日志） ───────────────────── */
 /* 模型详情抽屉行 (Table Expandable Drawer) */
@@ -2435,6 +2503,145 @@ pre.log {
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5), 0 0 0 1px var(--border);
 }
 
+/* ── 17.7 整页切换的动效：交给 View Transitions API ────────────────────
+ *
+ * 主题切换与语言切换都是「整页状态换一次」，这类动效**不该自己拼过渡**。
+ * 旧实现（`<html>` 挂 `.theming` 临时类 + `html.theming *` 全局过渡 +
+ * 语言切换的 JS 两段式计时器）已经删掉，原因记在这里，免得再走回去：
+ *
+ *   1. **顺序陷阱**：过渡只在「变化**之前**的样式里已经有这条 transition」时才启动，
+ *      所以必须「挂 class → `void offsetWidth` 强制一次样式计算 → 再改值」。
+ *      漏任何一步动画都**静默失效**，而且读 CSS 看不出来。
+ *   2. **性能悬崖**：往那条全局规则里加 `box-shadow` 之后，每帧要为 1200+ 个元素
+ *      插值阴影，样式重算暴涨 → 200ms 补间被压成**一帧** → 整页反而变成「啪一下」。
+ *      加比不加更糟（实测）。
+ *   3. **时长要在两处对齐**：JS 的 130ms 计时器必须等于 CSS 的动画时长，
+ *      还得自己防重入。改一处忘一处就是 bug。
+ *
+ * 现在由 `withViewTransition()`（见 index.html）包住状态变更，浏览器把
+ * 「旧的一帧」「新的一帧」各自快照后**自己交叉淡化**：没有全局过渡规则、
+ * 没有计时器、没有顺序陷阱，而且**整页一致** —— 按钮、图标、SVG 这些
+ * 自己不好逐属性补间的部分也一起淡。
+ *
+ * 实测（5324px 高、697 个元素的页面上）：过渡期间 34 帧 / 712ms，
+ * 中位帧间隔 17ms，快照那一下有一次 83ms 尖峰 —— 与旧的逐属性补间持平。
+ */
+::view-transition-old(root),
+::view-transition-new(root) {
+  /* 默认 250ms 线性，这里给一点缓动，与页面其余动效的手感对齐 */
+  animation-duration: 260ms;
+  animation-timing-function: var(--ease);
+}
+/*
+ * 减少动态效果下**保留交叉淡化**。
+ *
+ * 交叉淡化是**透明度**，不是位移/缩放 —— WCAG 2.3.3（Animation from Interactions）
+ * 管的是 motion，不在它的射程里。而对关掉系统动画的人，「颜色瞬间翻转、全页文字
+ * 瞬间替换」会被读成「页面闪了一下 / 坏了重绘」，可感知的状态变化对他们反而更重要。
+ * 所以这里只是把时长压短一点，不取消。
+ */
+@media (prefers-reduced-motion: reduce) {
+  ::view-transition-old(root),
+  ::view-transition-new(root) {
+    animation-duration: 120ms;
+  }
+}
+
+/* ── 17.8 可收起的提示条：出现有动画，收起也要有 ─────────────────────────
+ *
+ * 原先只有 slideDown（出现）。点「知道了」时整条**瞬间消失**，
+ * 下面的内容跟着往上跳一下 —— 用户不知道是自己关掉的还是页面刷新了。
+ * 收起用纵轴（高度 + 淡出），与「这里有东西收回去」的方向语义一致；
+ * 具体的宽高由 collapseAway() 逐帧写，这里只负责别把溢出内容露出来。
+ */
+.alert.closing,
+#nextStepBar.closing {
+  overflow: hidden;
+}
+
+/* ── 17.9 面板从「正在读取…」换成真内容：淡入一次 ───────────────────────
+ *
+ * 只在**首次填充**时放（由 paintBox() 判断前一个内容是 .empty）——
+ * 每 20 秒的轮询重绘不再动，否则页面会周期性自己闪一下，那是噪声不是反馈。
+ */
+@keyframes boxIn {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: none; }
+}
+.box-in {
+  animation: boxIn 0.22s var(--ease);
+}
+
+/* ── 17.10 就地复制反馈（模型表）──────────────────────────────────────────
+ *
+ * 复用「客户端接入」那套：值本身闪一下。顶部提示条在长页面里可能在视口外，
+ * 只靠它等于没有反馈。td 本来就带 background-color 过渡，所以亮/退都是平滑的。
+ */
+#modelTable td.copyable.copied {
+  background: var(--ok-soft);
+  box-shadow: inset 0 0 0 1px var(--ok-border);
+  color: var(--ok);
+}
+#modelTable td.copyable.copyfail {
+  background: var(--fail-soft);
+  box-shadow: inset 0 0 0 1px var(--fail-border);
+  color: var(--fail);
+}
+
+/*
+ * 模型 id 的复制**必须能键盘到达**：原先是 `<td onclick>`，
+ * Tab 键走不到、也没有焦点环，只用键盘的用户根本不知道这一格可以复制。
+ * 现在格子里放一个真 <button>，外观仍然像一格文本。
+ */
+#modelTable button.idcopy {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 100%;
+  padding: 2px 4px;
+  margin: -2px -4px;
+  border: none;
+  background: none;
+  box-shadow: none;
+  height: auto;
+  font: inherit;
+  font-weight: 600;
+  color: var(--text);
+  border-radius: var(--radius-xs);
+}
+#modelTable button.idcopy:hover {
+  background: var(--primary-subtle);
+  color: var(--primary-text);
+  transform: none;
+}
+#modelTable button.idcopy:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 1px;
+}
+
+/* ── 17.11 数值变了要留痕 ────────────────────────────────────────────────
+ *
+ * 20 秒一轮的轮询会把积分余额、令牌剩余、模型数悄悄换掉 —— 用户不知道
+ * 数据是新的还是自己看错了。给变化的读数一次 0.6s 的底色脉冲：
+ * 够看见，不够烦。padding/margin 成对出现，避免脉冲时文字横移。
+ */
+@keyframes valueBump {
+  from { background: var(--primary-subtle); box-shadow: 0 0 0 3px var(--primary-subtle); }
+  to { background: transparent; box-shadow: 0 0 0 3px transparent; }
+}
+.card .v.bump {
+  animation: valueBump 0.6s var(--ease);
+  border-radius: var(--radius-xs);
+}
+
+/* ── 17.12 语言切换：交给 View Transitions（见 17.7）─────────────────────
+ *
+ * 这里原先有 `langIn` / `langOut` 两个关键帧（淡入 + 两段式的淡出），
+ * 现在删掉了：整批替换文本这一步由 `withViewTransition()` 包住，
+ * 浏览器自己交叉淡化整页 —— 不需要 JS 计时器与 CSS 时长对齐，
+ * 也不需要「先淡出再替换」的手工编排。
+ */
+
 /* ══════════════════════════════════════════════════════════════════════
  * 18. 动效降级 (prefers-reduced-motion)
  *
@@ -2463,6 +2670,24 @@ pre.log {
   /* 呼吸光晕是纯装饰、不承载任何状态信息（状态由颜色本身表达），直接停掉 */
   .badge .dot {
     animation: none !important;
+  }
+
+  /*
+   * 豁免：**颜色与透明度的渐变不含位移/缩放**，不触发前庭反应，reduce 下保留。
+   *
+   * 为什么必须豁免：上面那条 blanket 规则会把数值脉冲、面板淡入这类全部压成
+   * 0.01ms —— 在「系统关了动画效果」的机器上，用户读到的是「页面闪了一下 /
+   * 坏了重绘」，而不是「状态变了」。对关掉动画的人，**可感知的状态变化**恰恰更重要。
+   * WCAG 2.3.3（Animation from Interactions）管的是 motion —— 移动、缩放、视差；
+   * 纯色与透明度的补间不在它的射程里。
+   *
+   * 位移/缩放类（抽屉展开、hover 上浮、面板滑入、告警收起的高度动画）仍然
+   * 瞬间到位 —— 那才是这条媒体查询要保护的人需要避开的东西。
+   *
+   * 主题切换与语言切换现在走 View Transitions（见 17.7），它们的豁免写在那边。
+   */
+  .card .v.bump {
+    animation-duration: 0.6s !important;
   }
 }
 
