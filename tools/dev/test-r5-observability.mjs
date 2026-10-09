@@ -181,6 +181,38 @@ try {
     } else {
       fail(`R5.2-1 CSV 表头缺列：${header}`);
     }
+    /*
+     * R5.2-4 导出文件名必须是**本地日期**。
+     *
+     * 原先页面里有两个「今天」：`localDateStr()`（本地，注释写明与桥的 localDay
+     * 同规则）与 `today()`（`toISOString().slice(0,10)`，那是 **UTC**）。
+     * 文件名用的是后者 —— 在 UTC+8 的 00:00–08:00 导出，文件名会比墙上时钟早一天。
+     * 现在只留 `localDateStr()`，这条断言钉住文件名走的是它。
+     */
+    const expectDay = await q(cdp, `(() => {
+      const d = new Date();
+      const p = (n) => String(n).padStart(2, '0');
+      return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate());
+    })()`);
+    if (csv && String(csv.filename).includes(expectDay)) {
+      pass(`R5.2-4 导出文件名用本地日期（${expectDay}）`);
+    } else {
+      fail(`R5.2-4 导出文件名没带本地日期：${csv ? csv.filename : 'null'}（期望含 ${expectDay}）`);
+    }
+    /*
+     * 上面那条**在 UTC 与本地同一天时区分不出两种实现**（一天里有 2/3 的时间是
+     * 这种情形），所以再钉一条实现层面的：页面里不该存在那个 UTC 版的「今天」。
+     *
+     * `today()` 是 `new Date().toISOString().slice(0, 10)` —— 只要它回来，
+     * 文件名就会在 UTC+8 的凌晨写成「昨天」，而上面那条断言那时才变红。
+     * 与其等凌晨，不如直接断言它不存在。
+     */
+    const utcToday = await q(cdp, `typeof today`);
+    if (utcToday === 'undefined') {
+      pass('R5.2-4 页面里只有 localDateStr 一个「今天」（UTC 版 today() 已移除）');
+    } else {
+      fail(`R5.2-4 又出现了第二个「今天」：typeof today = ${utcToday}`);
+    }
 
     // 加筛选（模型 beta + 仅失败）→ 只应导出 1 条
     await q(cdp, `(() => { const s = document.querySelector('#reqModelFilter'); s.value = 'beta'; s.dispatchEvent(new Event('change')); const c = document.querySelector('#reqFailOnly'); c.checked = true; c.dispatchEvent(new Event('change')); return true; })()`);

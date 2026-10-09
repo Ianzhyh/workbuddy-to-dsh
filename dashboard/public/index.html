@@ -1882,7 +1882,14 @@ function downloadCsv(filename, rows) {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
-const today = () => new Date().toISOString().slice(0, 10);
+/*
+ * 导出 CSV 的文件名用**本地日期**，与 `localDateStr()` 同一口径。
+ *
+ * 原先这里另有一个 `today()` 用 `new Date().toISOString().slice(0, 10)` —— 那是
+ * **UTC 日期**。在 UTC+8 的 00:00–08:00 导出，文件名会比用户墙上时钟早一天；
+ * 更要紧的是同一个概念在页面里有两套实现（`localDateStr()` 的注释还专门写了
+ * 「与桥的 localDay 同规则」），迟早有人拿错那个去算别的东西。现在只留一个。
+ */
 
 function setBadge(state, text) {
   $('badge').className = 'badge ' + state;
@@ -3920,7 +3927,7 @@ function exportRequestsCsv() {
       r.error ? String(r.error).replace(/\s+/g, ' ').slice(0, 300) : '',
     ]);
   }
-  downloadCsv('workbuddy-requests-' + today() + '.csv', rows);
+  downloadCsv('workbuddy-requests-' + localDateStr() + '.csv', rows);
   setRegMsg('已导出请求明细（' + requestScopeText() + ' · ' + shown.length + ' 条）', 'good');
 }
 
@@ -3952,7 +3959,7 @@ function exportModelsCsv() {
       cost ? cost.calls : '',
     ]);
   }
-  downloadCsv('workbuddy-models-' + today() + '.csv', rows);
+  downloadCsv('workbuddy-models-' + localDateStr() + '.csv', rows);
   setMsg('已导出模型清单 CSV（含体检结论与实测成本）', 'good');
 }
 
@@ -3980,7 +3987,7 @@ function exportUsageCsv() {
     '合计', t.calls, t.promptTokens, t.completionTokens,
     creditCell(t.credit, tc), tc, perCell(t.credit, tc), t.ms,
   ]);
-  downloadCsv('workbuddy-usage-' + today() + '.csv', rows);
+  downloadCsv('workbuddy-usage-' + localDateStr() + '.csv', rows);
   setMsg('已导出用量 CSV（最近 ' + u.windowDays + ' 天）', 'good');
 }
 
