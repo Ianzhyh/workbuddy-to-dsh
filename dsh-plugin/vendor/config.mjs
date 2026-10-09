@@ -215,6 +215,11 @@ function resolveLocalToken() {
   if (env.WORKBUDDY_LOCAL_TOKEN) return env.WORKBUDDY_LOCAL_TOKEN;
   try {
     const stored = readFileSync(BRIDGE_TOKEN_PATH, 'utf8').trim();
+    /*
+     * 令牌的合法形状。**同样的正则在 `dsh-plugin/lib/index.js:97` 还有一份**
+     * （插件包不引用仓库根的 config，只能各持一份）—— 改动时两处一起改，
+     * 否则会出现「桥认、插件不认」的怪现象。
+     */
     if (/^[A-Za-z0-9._-]{16,}$/.test(stored)) {
       hardenTokenFile(); // 旧版本创建的文件权限是继承来的，这里补一次
       return stored;
