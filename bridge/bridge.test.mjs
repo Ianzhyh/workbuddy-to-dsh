@@ -152,6 +152,8 @@ function rawStatus(port, path, headers = {}) {
  */
 async function startStubUpstream(models = ['stub-model'], opts = {}) {
   const seen = [];
+  /** `/v2/plugin/auth/token/refresh` 被调了几次 —— 「并发只刷一次」的用例靠它判定。 */
+  let refreshCalls = 0;
   const srv = createServer((req, res) => {
     const path = new URL(req.url, 'http://127.0.0.1').pathname;
     if (path === '/v2/enterprises/personal/models') {
@@ -160,6 +162,25 @@ async function startStubUpstream(models = ['stub-model'], opts = {}) {
         code: 0,
         data: { models: models.map((id) => ({ id, maxInputTokens: 128000, maxOutputTokens: 4096 })) },
       }));
+    }
+    /*
+     * 刷新端点：给「并发只刷一次」的用例用。
+     *
+     * **故意慢**（默认 200ms）—— 否则并发请求可能前后错开：第一个刷新完，
+     * 第二个才发现令牌已经新鲜，于是「没做单飞」也能凑出 1 次，用例就测不出差异。
+     * 慢一点才能让 N 个请求真的同时在飞。
+     */
+    if (path === '/v2/plugin/auth/token/refresh') {
+      refreshCalls += 1;
+      const n = refreshCalls;
+      setTimeout(() => {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({
+          code: 0,
+          data: { accessToken: `refreshed-${n}`, refreshToken: `rotated-${n}`, expiresIn: 3600, refreshExpiresIn: 86400 },
+        }));
+      }, opts.refreshDelayMs ?? 200);
+      return;
     }
     if (path === '/v3/config') {
       res.writeHead(200, { 'content-type': 'application/json' });
@@ -192,6 +213,7 @@ async function startStubUpstream(models = ['stub-model'], opts = {}) {
   return {
     base: `http://127.0.0.1:${srv.address().port}`,
     seen,
+    get refreshCalls() { return refreshCalls; },
     close: () => new Promise((r) => srv.close(r)),
   };
 }
@@ -1537,6 +1559,47 @@ test('桥：Anthropic 流式工具名分片必须拼完整（不能只留首片�
     assert.match(text, /"name":"get_weather"/, `工具名必须拼完整；实际输出里没有 get_weather：\n${text.slice(0, 400)}`);
     assert.ok(!/"name":"get_"/.test(text), '不能把首片当成完整名字发出去');
     assert.ok(text.includes('event: message_stop'), '流必须正常收尾');
+  } finally {
+    await bridge.stop();
+    try { await stub.close(); } catch { /* 忽略 */ }
+    rmSync(bridge.dir, { recursive: true, force: true });
+  }
+});
+
+/**
+ * 令牌过期瞬间的并发请求，**只该刷新一次**（单飞）。
+ *
+ * 为什么必须有：响应里可能带**轮换后的 refreshToken**，后到的请求拿的是已经
+ * 作废的旧令牌 —— 必然失败，于是写 `lastRefreshFailedAt`，把接下来 15 秒内
+ * **所有**刷新都挡住（包括本该成功的）。确定的代价是每次过期多打 N-1 次上游
+ * 刷新；更坏的推测是上游对 refreshToken 做「重复使用即吊销」检测时会话被吊销。
+ *
+ * 限流**不**会替这里串行化（两个阈值默认都是 0，直接返回），所以并发是真的并行。
+ *
+ * 桩的刷新端点故意慢 200ms：否则并发请求会前后错开、第一个刷完第二个才发现
+ * 令牌已新鲜，「没做单飞」也能凑出 1 次，用例就白写了。
+ */
+test('桥：令牌过期瞬间的 5 个并发请求只刷新一次', { timeout: 30_000 }, async () => {
+  const stub = await startStubUpstream(['stub-model'], { refreshDelayMs: 200 });
+  const nearExpiry = {
+    auth: {
+      accessToken: 'fake-access-token',
+      refreshToken: 'fake-refresh-token',
+      domain: 'example.invalid',
+      expiresAt: Date.now() + 60_000, // < 5 分钟 skew → 每个请求都会先判过期
+    },
+  };
+  const bridge = await startBridge({ CODEBUDDY_ENDPOINT: stub.base }, { auth: nearExpiry });
+  try {
+    const one = () => fetch(`${bridge.baseUrl}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { ...auth, 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'stub-model', messages: [{ role: 'user', content: 'hi' }] }),
+    }).then((r) => r.text());
+    await Promise.all([one(), one(), one(), one(), one()]);
+    await new Promise((r) => setTimeout(r, 300));
+
+    assert.equal(stub.refreshCalls, 1, `5 个并发请求只该刷新一次，实际 ${stub.refreshCalls} 次`);
   } finally {
     await bridge.stop();
     try { await stub.close(); } catch { /* 忽略 */ }

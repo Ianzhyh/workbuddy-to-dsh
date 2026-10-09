@@ -676,9 +676,34 @@ function decodeJwt(token) {
 
 // ── Auth: refresh and write back the login file (cross-process lock + atomic write) ──
 let lastRefreshFailedAt = 0;
-async function refreshAuth(auth) {
-  if (!auth.refresh) return null;
-  if (Date.now() - lastRefreshFailedAt < REFRESH_COOLDOWN_MS) return null;
+/**
+ * 在途的那一次刷新。**过期瞬间的并发请求共用它**，而不是各刷一次。
+ *
+ * 为什么必须单飞：响应里可能带**轮换后的 refreshToken**（下面
+ * `refresh: body.data.refreshToken || auth.refresh` 说明轮换是预期行为）。
+ * 若 N 个并发请求各刷一次，后到的那些拿的是**已经作废**的旧 refreshToken ——
+ * 必然失败，于是写 `lastRefreshFailedAt`，把接下来 `REFRESH_COOLDOWN_MS` 内的
+ * **所有**刷新都挡住（包括本该成功的）。
+ *
+ * 确定的代价：每次过期多打 N-1 次上游刷新、日志里多几条 `refresh failed`。
+ * 更坏的推测：上游若对 refreshToken 做「重复使用即吊销」检测，并发复用同一个
+ * 旧令牌可能让整个会话被吊销、用户被迫重新登录。
+ *
+ * 注意限流**不**会替这里串行化 —— `rateWaitMs()` 在两个阈值都为 0 时直接返回
+ * （默认就是关的），所以并发请求是真的并行。
+ */
+let refreshInFlight = null;
+
+/** 单飞入口：同飞的调用方拿到**同一个** promise。 */
+function refreshAuth(auth) {
+  if (!auth.refresh) return Promise.resolve(null);
+  if (Date.now() - lastRefreshFailedAt < REFRESH_COOLDOWN_MS) return Promise.resolve(null);
+  if (refreshInFlight) return refreshInFlight;
+  refreshInFlight = doRefreshAuth(auth).finally(() => { refreshInFlight = null; });
+  return refreshInFlight;
+}
+
+async function doRefreshAuth(auth) {
   try {
     const res = await fetch(`${auth.endpoint}/v2/plugin/auth/token/refresh`, {
       method: 'POST',
@@ -698,7 +723,6 @@ async function refreshAuth(auth) {
       log('refresh failed', res.status, shortError(reason || '(no protocol message)'));
       return null;
     }
-    persistRefreshed();
     const now = Date.now();
     memoryAuth = {
       access: body.data.accessToken,
@@ -711,6 +735,11 @@ async function refreshAuth(auth) {
       endpoint: auth.endpoint,
       domain: auth.domain,
     };
+    // 放在赋值**之后**：它只是「我们没回写登录文件」的一条说明性日志。
+    // 名字原先叫 persistRefreshed —— 承诺「持久化」，行为却是明确不持久化，
+    // 读代码的人很容易以为令牌已经落盘。这条「绝不回写」是项目的硬约束，
+    // 代码不该长得像在回写。
+    logWriteBackSkipped();
     log('refreshed access token (in memory; file untouched)');
     return memoryAuth;
   } catch (e) {
@@ -720,7 +749,8 @@ async function refreshAuth(auth) {
   }
 }
 
-function persistRefreshed() {
+/** 说明性日志：刷新出的令牌只留内存，登录文件归桌面端所有。 */
+function logWriteBackSkipped() {
   // The login file now holds AES-256-GCM envelopes and the desktop app owns its
   // own refresh cycle. Writing a decrypted token back would corrupt that store,
   // so a refreshed token is kept in memory for this process only.
@@ -1046,6 +1076,31 @@ function bucketFor(scope) {
 }
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * 等 `res` 的发送缓冲排空 —— 流式转发要的**背压**。
+ *
+ * `res.write()` 返回 `false` 表示已超过高水位线：数据还在 Node 的内存里排队。
+ * 客户端读得慢、或者干脆停顿但不 disconnect 时，若继续从上游读多少写多少，
+ * 内存就会随「停顿时长 × 上游速度」增长。停顿这种情况 `res.on('close')` 是
+ * 覆盖不到的（它只处理断开），所以必须在每次写入后看返回值。
+ *
+ * 同时监听 `close`：客户端中途断开时 `drain` 永远不会来，只等 drain 会把
+ * 转发协程挂在这里 —— 那正是「客户端关了页面，桥却卡住」的成因。
+ */
+/**
+ * @param {import('node:http').ServerResponse} res
+ * @returns {Promise<void>} 排空（或客户端断开）后兑现
+ */
+const waitDrain = (res) => new Promise((resolve) => {
+  const done = () => {
+    res.off('drain', done);
+    res.off('close', done);
+    resolve();
+  };
+  res.once('drain', done);
+  res.once('close', done);
+});
 
 /** 现在能不能放行？不能则返回还需等待的毫秒数。 */
 function rateWaitMs(now, bucket) {
@@ -1573,7 +1628,17 @@ function openAIToAnthropicMessage(agg, model) {
  * 返回 `{ finishReason, usage, streamError }` 供调用方记账。
  */
 async function relayAnthropicStream(up, res, model, estInputTokens) {
-  const write = (type, obj) => res.write(`event: ${type}\ndata: ${JSON.stringify(obj)}\n\n`);
+  /*
+   * 背压状态：`res.write()` 返回 false 表示已超过高水位线。
+   *
+   * 这里只**记录**、不 await —— `write` 被散落在十几处事件写入里调用，改成 async
+   * 会污染每一处调用点。统一在下面读循环的顶部等排空就够了（见 waitDrain）：
+   * 那里才是「从上游拉下一块」的节流点。
+   */
+  let backpressured = false;
+  const write = (type, obj) => {
+    backpressured = !res.write(`event: ${type}\ndata: ${JSON.stringify(obj)}\n\n`);
+  };
 
   res.writeHead(200, {
     'Content-Type': 'text/event-stream; charset=utf-8',
@@ -1648,6 +1713,8 @@ async function relayAnthropicStream(up, res, model, estInputTokens) {
 
   try {
     for (;;) {
+      // 背压：上一轮写满了就先等客户端排空，再向上游拉下一块
+      if (backpressured) { await waitDrain(res); backpressured = false; }
       const { done, value } = await reader.read();
       if (done) break;
       buffer += decoder.decode(value, { stream: true });
@@ -3303,7 +3370,8 @@ async function handleRequest(req, res) {
             for (;;) {
               const { done, value } = await reader.read();
               if (done) break;
-              res.write(Buffer.from(value));
+              // 背压：写不动就等排空，别把上游的数据堆进内存（见 waitDrain）
+              if (!res.write(Buffer.from(value))) await waitDrain(res);
               tail += decoder.decode(value, { stream: true });
               const lines = tail.split('\n');
               tail = lines.pop() ?? '';

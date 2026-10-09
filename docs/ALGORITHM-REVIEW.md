@@ -378,6 +378,10 @@ quotaCache = { at: Date.now(), ttl: ..., value };  // 在途请求完成后无�
 | **BUG-3** Anthropic 工具名分片 | ✅ 已修（v1.4.6） | 名字改成「初值空串 + 每片追加」，并把 `content_block_start` **推迟到名字收齐**（参数开始到达时才发，收尾时补发）；`closeOpen()` 会先补发未 start 的块以保证索引顺序。用例用 `chatRaw` 手写分片 SSE，**验证过有牙**：还原旧逻辑即红 |
 | 第一轮 P3：`today()` 与 `localDateStr()` 重复 | ✅ 已修（已推送 `990d0a4e`） | 删掉 UTC 版的 `today()`，三处 CSV 导出统一用 `localDateStr()`。验收补两条，**第二条才是关键**：第一条在 UTC 与本地同一天时（一天里 2/3 的时间）区分不出两种实现，只有凌晨才红 —— 所以直接断言 `typeof today === 'undefined'` |
 | 写 dsh 配置非原子（P3，本轮补做） | ✅ 已修 | 与账本同款做法：写临时文件 + `renameSync`。原先只有 `.bak-<stamp>` 备份兜底，但「半份 YAML」用户多半不会去翻 `.bak-` |
+| 第一轮 P2：刷新缺单飞 | ✅ 已修 | `refreshAuth` 包成单飞（模块级 `refreshInFlight`）。**用例实测**：桩的刷新端点慢 200ms，5 个并发请求修前**真的刷了 5 次**，修后 1 次 |
+| 第一轮 P2：流式无背压 | ✅ 已修 | 写不动就 `await waitDrain(res)` 再拉下一块；OpenAI 与 Anthropic 两条路径都加了。`waitDrain` 同时监听 `close`（客户端断开时 `drain` 永不到来，只等它会挂住转发协程） |
+| 第一轮 P3：`persistRefreshed()` 命名 | ✅ 已修 | 改名 `logWriteBackSkipped()` 并移到 `memoryAuth` 赋值之后 |
+| 第一轮 P3：流式行缓冲无上限 | ✅ 已有 | 复核发现 OpenAI 路径早有 `tail.length > 100000` 兜底；Anthropic 路径是 `buffer`，量级同源，暂不动（已在文档标注） |
 | 第一轮：刷新单飞 / 背压 / `today()` / `persistRefreshed` 命名 | ⬜ 待修 | 见第一轮 |
 
 ## 修 BUG-2 时抓到的一次**假绿**
