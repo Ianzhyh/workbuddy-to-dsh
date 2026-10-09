@@ -1117,6 +1117,16 @@ async function aggregateStream(res) {
   const decoder = new TextDecoder();
   let buffer = '';
   let content = '', reasoning = '', finishReason = null, usage = null, id = null, model = null, created = null;
+  /*
+   * 成功解析出的 SSE 数据块数。
+   *
+   * 为什么需要它：上游回 **HTTP 200 但不是 SSE**（典型：网关把错误包成 200 的
+   * HTML）时，这个函数会安静地返回一个「content 为空」的聚合结果 —— 调用方原先
+   * 无条件记 `ok: true` 并回 200，用户拿到的是「结构完整但没内容」的成功响应，
+   * 账本也记成功。**静默错数据**比报错难查得多。
+   * `parsed === 0` 就是「这一坨根本不是 SSE」，据此按失败处理。
+   */
+  let parsed = 0;
   const toolCalls = [];
   for (;;) {
     const { done, value } = await reader.read();
@@ -1129,6 +1139,7 @@ async function aggregateStream(res) {
       const payload = line.slice(5).trim();
       if (!payload || payload === '[DONE]') continue;
       let j; try { j = JSON.parse(payload); } catch { continue; }
+      parsed += 1;
       id ??= j.id; model ??= j.model; created ??= j.created;
       if (j.usage) usage = j.usage;
       const choice = j.choices?.[0];
@@ -1144,6 +1155,7 @@ async function aggregateStream(res) {
   if (reasoning) message.reasoning_content = reasoning;
   if (toolCalls.length) message.tool_calls = toolCalls.filter(Boolean);
   return {
+    parsed,
     id: id || `chatcmpl-${trace().slice(0, 24)}`,
     object: 'chat.completion',
     created: created || Math.floor(Date.now() / 1000),
@@ -3101,6 +3113,28 @@ async function handleRequest(req, res) {
 
         const aggregated = await aggregateStream(up);
         res.__overheadMs = Math.max(0, upstreamStartedAt - startedAt);
+        /*
+         * 上游回 200 但一个 SSE 块都没解析出来 → 这不是「空回答」，是失败。
+         * 典型场景：网关把错误包成 200 的 HTML。原先这里无条件记 ok:true 并回 200，
+         * 用户看到空白回答、控制台把它算作成功 —— 静默错数据。
+         */
+        if (!aggregated.parsed) {
+          recordRequest({
+            model,
+            stream: false,
+            ms: Date.now() - startedAt,
+            ok: false,
+            status: up.status,
+            code: null,
+            error: 'upstream returned 200 but no parseable SSE data',
+          });
+          return json(res, 502, {
+            error: {
+              message: 'workbuddy-bridge: upstream returned 200 but no parseable SSE data',
+              type: 'upstream_error',
+            },
+          });
+        }
         recordRequest({ model, stream: false, ok: true, ms: Date.now() - startedAt, ...usageOf(aggregated.usage) });
         return json(res, 200, aggregated);
       } catch (e) {
@@ -3233,6 +3267,25 @@ async function handleRequest(req, res) {
 
         const aggregated = await aggregateStream(up);
         res.__overheadMs = Math.max(0, upstreamStartedAt - startedAt);
+        // 同 OpenAI 路径：上游 200 但解析不出任何 SSE 块 = 失败，不是「空回答」
+        if (!aggregated.parsed) {
+          recordRequest({
+            model,
+            stream: false,
+            ms: Date.now() - startedAt,
+            ok: false,
+            status: up.status,
+            code: null,
+            error: 'upstream returned 200 but no parseable SSE data',
+          });
+          return json(res, 502, {
+            type: 'error',
+            error: {
+              type: 'api_error',
+              message: 'workbuddy-bridge: upstream returned 200 but no parseable SSE data',
+            },
+          });
+        }
         recordRequest({ model, stream: false, ok: true, ms: Date.now() - startedAt, ...usageOf(aggregated.usage) });
         return json(res, 200, openAIToAnthropicMessage(aggregated, model));
       } catch (e) {

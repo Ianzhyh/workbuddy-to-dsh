@@ -150,7 +150,7 @@ function rawStatus(port, path, headers = {}) {
  *
  * @param {string[]} [models] `/v2/enterprises/personal/models` 返回的模型 id
  */
-async function startStubUpstream(models = ['stub-model']) {
+async function startStubUpstream(models = ['stub-model'], opts = {}) {
   const seen = [];
   const srv = createServer((req, res) => {
     const path = new URL(req.url, 'http://127.0.0.1').pathname;
@@ -170,6 +170,14 @@ async function startStubUpstream(models = ['stub-model']) {
       req.on('data', (c) => { body += c; });
       req.on('end', () => {
         seen.push({ headers: req.headers, body });
+        /*
+         * `opts.chatRaw`：模拟「上游 HTTP 200，但返回的不是 SSE」。
+         * 网关把错误包成 200 的 HTML 是真实会发生的（见 BUG-2 的用例）。
+         */
+        if (opts.chatRaw !== undefined) {
+          res.writeHead(opts.chatStatus || 200, { 'content-type': opts.chatType || 'text/html' });
+          return res.end(opts.chatRaw);
+        }
         res.writeHead(200, { 'content-type': 'text/event-stream' });
         res.write('data: {"choices":[{"delta":{"content":"ok"}}]}\n\n');
         res.write('data: {"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":1,"total_tokens":4}}\n\n');
@@ -1401,6 +1409,108 @@ test('桥：畸形 Host 头回 400，且进程不被带走', { timeout: 30_000 }
       !/ERR_INVALID_URL|Unhandled/i.test(bridge.out()),
       `输出里不该有未捕获异常：\n${bridge.out().slice(-300)}`,
     );
+  } finally {
+    await bridge.stop();
+    rmSync(bridge.dir, { recursive: true, force: true });
+  }
+});
+
+/**
+ * 上游回 **HTTP 200 但内容不是 SSE**（典型：网关把错误包成 200 的 HTML）时，
+ * 桥必须**记失败**，不能回 200 + 空内容。
+ *
+ * 踩过的坑：非流式路径在 `aggregateStream()` 之后**无条件** `ok: true`，
+ * 于是上游给一坨 HTML 时，客户端拿到的是「结构完整但 content 为空」的成功响应，
+ * 账本记 `{"ok":true,"promptTokens":0,"completionTokens":0}` ——
+ * 用户以为模型没说话，控制台的成功率还把它算作成功。**静默错数据**比报错更难查。
+ *
+ * `choices: []` 是同一类：一个 SSE 块都没解析出内容。
+ */
+test('桥：上游 200 但不是 SSE → 记失败，不回「空回答成功」', { timeout: 30_000 }, async () => {
+  const stub = await startStubUpstream(['stub-model'], { chatRaw: '<html>gateway error</html>' });
+  /*
+   * **必须用 READABLE_FAKE_AUTH**：默认的 FAKE_AUTH 是扁平的（刻意用来复现
+   * 「凭据异常」），桥读到它会直接 500 —— 那样断言会因为「请求压根没走到 chat
+   * 路径」而变绿，是假绿。第一版就是这么写的，靠打印实际响应才发现。
+   */
+  const bridge = await startBridge({ CODEBUDDY_ENDPOINT: stub.base }, { auth: READABLE_FAKE_AUTH });
+  try {
+    const res = await fetch(`${bridge.baseUrl}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { ...auth, 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'stub-model', messages: [{ role: 'user', content: 'hi' }] }),
+    });
+    assert.ok(res.status >= 400, `上游返回非 SSE 时不能回 200（实际 ${res.status}）`);
+
+    await new Promise((r) => setTimeout(r, 300));
+    const ledger = readFileSync(join(bridge.dir, 'usage.jsonl'), 'utf8')
+      .split('\n').filter(Boolean).map((l) => JSON.parse(l));
+    const last = ledger[ledger.length - 1];
+    assert.equal(last.ok, false, '账本必须记失败 —— 否则控制台把它算作成功（静默错数据）');
+  } finally {
+    await bridge.stop();
+    try { await stub.close(); } catch { /* 忽略 */ }
+    rmSync(bridge.dir, { recursive: true, force: true });
+  }
+});
+
+/**
+ * 未配置本地令牌时，桥**不得**静默放行。
+ *
+ * 为什么必须钉住：`handleRequest` 的闸门写成
+ * `if ((LOCAL_TOKEN || CLIENT_KEY_HASHES.size) && identifyClientId(req) === null)` ——
+ * `LOCAL_TOKEN` 为空时整个 401 分支不执行，于是 `/health`、`/v1/chat/completions`
+ * 等全部无鉴权可达。而夹具此前**永远**注入 `WORKBUDDY_LOCAL_TOKEN`（见 startBridge），
+ * 这条默认路径从未被测过，所以漏洞能长期存在。
+ *
+ * 现场证据：用户直接 `node bridge/workbuddy-bridge.mjs`（不经控制台）时，
+ * `config.mjs` 那份默认值不参与 —— 桥拿到的是空令牌，等于无鉴权。
+ *
+ * 断言的是**行为明确**：要么拒绝（401），要么启用了自动生成的替代令牌。
+ * 唯一不允许的结果是「无令牌也 200」。
+ */
+test('桥：未配置 WORKBUDDY_LOCAL_TOKEN 时不得静默放行', { timeout: 30_000 }, async () => {
+  const bridge = await startBridge({ WORKBUDDY_LOCAL_TOKEN: '' }, { auth: READABLE_FAKE_AUTH });
+  try {
+    // ① 不带任何凭据：绝不能 200
+    const anon = await fetch(`${bridge.baseUrl}/v1/models`, { signal: AbortSignal.timeout(5000) });
+    assert.notEqual(anon.status, 200,
+      `未配置令牌时无凭据访问 /v1/models 不能成功（实际 ${anon.status}）—— 等于把账号对同机任意程序敞开`);
+
+    // ② 不带凭据的对话请求更不能成功（这条会真的消耗上游额度）
+    const anonChat = await fetch(`${bridge.baseUrl}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'stub-model', messages: [{ role: 'user', content: 'hi' }] }),
+      signal: AbortSignal.timeout(5000),
+    });
+    assert.notEqual(anonChat.status, 200,
+      `未配置令牌时无凭据对话请求不能成功（实际 ${anonChat.status}）`);
+  } finally {
+    await bridge.stop();
+    rmSync(bridge.dir, { recursive: true, force: true });
+  }
+});
+
+/**
+ * 自动生成的令牌必须**可见**（从启动日志里能读出来），否则用户配不上客户端。
+ *
+ * 「拒绝一切」是安全但不可用；「随机生成 + 打印出来」才是可用的安全。
+ * 这条与上一条配对：一个管「不能放行」，一个管「不能把用户锁在门外」。
+ */
+test('桥：自动生成令牌时必须把值打印到启动日志（否则用户无法接入客户端）', { timeout: 30_000 }, async () => {
+  const bridge = await startBridge({ WORKBUDDY_LOCAL_TOKEN: '' }, { auth: READABLE_FAKE_AUTH });
+  try {
+    // 生成出来的令牌必须能用于访问；并从启动输出里找得到，供用户复制
+    const out = bridge.out();
+    const m = out.match(/WORKBUDDY_LOCAL_TOKEN=([A-Za-z0-9._-]{16,})/);
+    assert.ok(m, `启动日志里必须给出自动生成的令牌（实际输出：\n${out}\n）`);
+
+    const ok = await fetch(`${bridge.baseUrl}/v1/models`, {
+      headers: { authorization: `Bearer ${m[1]}` },
+      signal: AbortSignal.timeout(5000),
+    });
+    assert.equal(ok.status, 200, '日志里打印的令牌必须真的能用');
   } finally {
     await bridge.stop();
     rmSync(bridge.dir, { recursive: true, force: true });

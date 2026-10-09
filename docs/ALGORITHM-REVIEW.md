@@ -362,3 +362,28 @@ quotaCache = { at: Date.now(), ttl: ..., value };  // 在途请求完成后无�
 - 「`settings.json` 非合法 JSON 时整块失败」—— 属于错误处理风格，不是可复现的缺陷，未采信；
 - 「按天分桶跨月/跨年错位」—— 第三轮的差分验证里，桶日期集合与账本实际日期**完全一致**，
   没观察到错位；这条我倾向于是理论推演而非实测，暂不采信。
+
+---
+
+# 修复进度
+
+| 缺陷 | 状态 | 修法与验证 |
+|---|---|---|
+| **BUG-1** 畸形 Host 打死桥 | ✅ 已修 | `new URL` 挪进 try/catch 回 400；用例用原始 socket，**修前红（ECONNRESET）→ 修后绿** |
+| **BUG-2** 上游 200 但不是 SSE → 静默成功 | ✅ 已修 | `aggregateStream` 增加 `parsed` 计数（成功解析的 SSE 块数），两处调用点（OpenAI + Anthropic）在 `parsed === 0` 时记失败并回 502；用例**修前红（实际 200）→ 修后绿** |
+| **BUG-5** 空 bundles 判健康 | ✅ 已修 | 抽出 `bundlesAllInstalled()`（空 = 未知 ≠ 健康），新增 `lib/dsh.test.mjs` 3 条用例 |
+| **BUG-6** 探测三态混淆 | ✅ 已修 | `number` / `null`（确认没有）/ `undefined`（未知），调用方只在 `null` 时认定已释放 |
+| BUG-3 Anthropic 工具名分片 | ⬜ 待修 | 要先定「名字收齐再发 `content_block_start`」的缓冲策略 |
+| BUG-4 账本截断非原子 | ⬜ 待修 | temp + rename，与 `lib/dsh.mjs` 的「先备份再写」对齐 |
+| BUG-7 积分缓存竞态 | ⬜ 待修 | `invalidateQuotaCache()` 要同时作废在途结果（generation 计数） |
+| 第一轮：刷新单飞 / 背压 / `today()` / `persistRefreshed` 命名 | ⬜ 待修 | 见第一轮 |
+
+## 修 BUG-2 时抓到的一次**假绿**
+
+用例第一版直接通过了 —— 打印实际响应才发现返回的是 **500「login file has no
+accessToken」**：`startBridge` 的默认假凭据是**扁平**的（刻意用来复现「凭据异常」），
+请求根本没走到 chat 路径，`assert.ok(status >= 400)` 因为**错误的理由**成立。
+换成 `READABLE_FAKE_AUTH` 后才真正复现（`实际 200`）。
+
+**教训**：断言「失败状态码」这类宽条件时，必须确认失败**来自被测路径** ——
+否则一个环境问题就能让它永远绿。这也是为什么每条修复都要先看到它红。
