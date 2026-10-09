@@ -26,6 +26,7 @@
  */
 
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -71,12 +72,59 @@ function writeModelPrefs(visible) {
   } catch { /* 只读介质：本次运行生效，不持久化 */ }
 }
 
+/**
+ * 本地回环令牌的持久化位置。
+ *
+ * 为什么需要它：插件启动桥时会**显式注入** `WORKBUDDY_LOCAL_TOKEN`，所以
+ * 令牌值从哪来决定了安全强度。历史默认值是硬编码的 `wb-local-bridge` ——
+ * 一个公开口令，本机任何程序（包括网页里的脚本，只要绕开 Origin 检查）
+ * 都能用它白嫖账号配额。改成随机生成后又带来新问题：**每次重启都换值**，
+ * 用户已经填进客户端的密钥就全失效了。两难只能靠落盘解决：
+ * 首次随机生成 → 存这里 → 后续复用同一个值。
+ *
+ * 权限：0600（仅本人可读）。文件里是本地回环口令，泄漏不等于泄漏上游
+ * 凭据，但也没有理由让同机其它用户读到。
+ */
+const BRIDGE_TOKEN_PATH = join(PLUGIN_DIR, '.bridge-token');
+
+/** 读取已持久化的令牌；没有 / 读不通都返回 ''。 */
+function readBridgeToken() {
+  try {
+    const text = readFileSync(BRIDGE_TOKEN_PATH, 'utf8').trim();
+    return /^[A-Za-z0-9._-]{16,}$/.test(text) ? text : '';
+  } catch { return ''; }
+}
+
+/**
+ * 取本地回环令牌：env/config 显式给了就用给的，否则读盘，再否则**生成并落盘**。
+ *
+ * 用 `randomBytes` 而不是 `Math.random()`：后者不是密码学随机，令牌可预测
+ * 就失去了「防同机误用」的意义。24 字节 base64url ≈ 192 位熵。
+ */
+function resolveLocalToken(rawToken) {
+  const explicit = typeof rawToken === 'string' ? rawToken.trim() : '';
+  if (explicit) return explicit;
+  const stored = readBridgeToken();
+  if (stored) return stored;
+  const token = randomBytes(24).toString('base64url');
+  try {
+    writeFileSync(BRIDGE_TOKEN_PATH, `${token}\n`, { mode: 0o600 });
+  } catch { /* 只读介质：本次运行用这个值，下次会换新的（用户需重填密钥） */ }
+  return token;
+}
+
 /** 默认值集中在一处，README 与面板都读它。 */
 export const DEFAULTS = {
   projectRoot: '',
   bridgeHost: '127.0.0.1',
   bridgePort: 8790,
-  localToken: 'wb-local-bridge',
+  /**
+   * 留空 = 首次运行生成随机令牌并持久化到 `.bridge-token`。
+   *
+   * **不要**在这里写死一个具体值：DEFAULTS 会被文档、面板、生成配置片段
+   * 多处引用，写死等于把一个公开口令散播到所有地方 —— 这正是要修的问题。
+   */
+  localToken: '',
   nodePath: '',
   /** 登录文件：留空 = 交给桥自己探测（多账号时应显式指定）。 */
   authFile: '',
@@ -135,7 +183,7 @@ export function resolveConfig(raw = {}) {
     projectRoot: String(cfg.projectRoot || ''),
     bridgeHost: String(cfg.bridgeHost || DEFAULTS.bridgeHost),
     bridgePort: Number(cfg.bridgePort) || DEFAULTS.bridgePort,
-    localToken: String(cfg.localToken ?? DEFAULTS.localToken),
+    localToken: resolveLocalToken(cfg.localToken),
     nodePath: String(cfg.nodePath || ''),
     authFile: String(cfg.authFile || ''),
     autoCheckin: cfg.autoCheckin === undefined || cfg.autoCheckin === null

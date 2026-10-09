@@ -34,10 +34,13 @@ jobs:
         run: npm run lint
 
       - name: 单元测试（协议 / 装配 / 路由矩阵 / 分发形态）
-        run: node --test "dsh-plugin/tests/*.test.mjs"
+        run: npm run test:plugin
 
-      - name: 桥的合约测试（起真桥进程打真实 HTTP）
-        run: node --test bridge/bridge.test.mjs
+      - name: lib 单测（凭据信封 / 配置解析 / 探测 / 状态）
+        run: npm run test:lib
+
+      - name: 桥测试（合约 + 启动参数）
+        run: npm run test:bridge
 
       - name: 独立分发包演练（没有仓库时也能跑起来）
         run: node dsh-plugin/scripts/verify-standalone.mjs
@@ -70,7 +73,10 @@ jobs:
         run: npm run lint
 
       - name: 单元测试
-        run: node --test "dsh-plugin/tests/*.test.mjs"
+        run: npm run test:plugin
 
-      - name: 桥的合约测试（假凭据，不触真上游）
-        run: node --test bridge/bridge.test.mjs
+      - name: lib 单测
+        run: npm run test:lib
+
+      - name: 桥测试（假凭据，不触真上游）
+        run: npm run test:bridge

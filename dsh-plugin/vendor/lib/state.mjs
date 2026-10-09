@@ -7,11 +7,13 @@
  *
  * 存放在项目根的 `.state.json`，已被 .gitignore 忽略。
  */
-import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import config from '../config.mjs';
 
 const STATE_PATH = join(config.paths.root, '.state.json');
+/** 同目录临时文件：必须与目标同分区，rename 才是原子的。 */
+const TMP_PATH = `${STATE_PATH}.tmp`;
 
 let cache = null;
 
@@ -37,9 +39,20 @@ export function writeState(patch) {
   }
   cache = next;
   try {
-    writeFileSync(STATE_PATH, `${JSON.stringify(next, null, 2)}\n`, 'utf8');
+    /*
+     * 原子写：先落临时文件、再 rename 覆盖。
+     *
+     * 原先直接 `writeFileSync(STATE_PATH, ...)`。进程在写入中途被杀、或磁盘写满时，
+     * 会留下半截 JSON —— 下次 `load()` 的 try/catch 会**静默退回 `{}`**，
+     * 用户当前选中的账号、签到开关、体检结论一起丢失，而界面上没有任何异常提示。
+     * rename 在同一分区的 POSIX/NTFS 上是原子的：要么旧内容、要么新内容，
+     * 不存在"读到一个写坏的中间态"。
+     */
+    writeFileSync(TMP_PATH, `${JSON.stringify(next, null, 2)}\n`, 'utf8');
+    renameSync(TMP_PATH, STATE_PATH);
   } catch {
     /* 只读介质上静默降级：状态不可持久化，但本次运行仍然生效 */
+    try { if (existsSync(TMP_PATH)) rmSync(TMP_PATH); } catch { /* 清理失败不影响主流程 */ }
   }
   return { ...next };
 }

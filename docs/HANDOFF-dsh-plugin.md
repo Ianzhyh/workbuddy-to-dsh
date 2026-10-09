@@ -271,7 +271,7 @@ node tools/doctor.mjs                     # 环境自检
 
 # 看运行状态（在 dsh 网页源上）
 #   http://127.0.0.1:19387/workbuddy/status
-#   http://127.0.0.1:8790/health   （需 Authorization: Bearer wb-local-bridge）
+#   http://127.0.0.1:8790/health   （需 Authorization: Bearer <本地令牌>，见 dsh-plugin/.bridge-token）
 ```
 
 配置覆盖示例（profile 的 `cordis.patch.yml`，按 id `workbuddy` 覆盖）：

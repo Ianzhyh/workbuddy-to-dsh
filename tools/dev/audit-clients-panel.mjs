@@ -208,7 +208,7 @@ const fbResult = await q(cdp, `(() => {
   const all = [...box.querySelectorAll('.codeblock-head button.copybtn')];
   const btn = all[all.length - 1];
   const br = btn.getBoundingClientRect();
-  const live = document.getElementById('clientsLive');
+  const live = document.getElementById('liveRegion');
   const msg = document.querySelector('.actions .msg');
   return {
     btnText: (btn.textContent || '').trim(),

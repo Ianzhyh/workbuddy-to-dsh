@@ -458,10 +458,24 @@ section('Phase C：体检（O3 / O4 / O2-2 / O8）');
   else fail(`O8-2 点击上下文列触发了复制：${afterCtx}`);
 
   await cdp.evaluate(`(() => { const tr = document.querySelector('#modelTable tbody tr'); tr.querySelector('td.copyable').click(); })()`);
-  await waitFor(cdp, 'document.getElementById("actionMsg").textContent.length > 0', 3000, '复制反馈').catch(() => {});
-  const afterId = await cdp.evaluate('document.getElementById("actionMsg").textContent');
-  if (/已复制|复制失败/.test(afterId)) pass(`O8-2 点击模型 id 列触发复制：${afterId.slice(0, 40)}`);
-  else fail(`O8-2 点击模型 id 列没有复制反馈：${JSON.stringify(afterId)}`);
+  /*
+   * 反馈断言改到**点击处**：模型 id 的复制现在走 runCopy（就地闪一下 + aria-live），
+   * 成功时不再写顶部提示条 —— 模型表在页面约 60% 处，提示条在吸顶栏下面，
+   * 滚到那里点复制时它整个在视口外，用它当反馈等于没有反馈。
+   * 无头环境里剪贴板可能被拒，所以成功/失败两种就地态都算数，但必须有一个。
+   */
+  await waitFor(cdp, '!!document.querySelector("#modelTable td.copyable.copied, #modelTable td.copyable.copyfail")', 3000, '就地复制反馈').catch(() => {});
+  const afterId = await cdp.evaluate(`(() => {
+    const td = document.querySelector('#modelTable td.copyable');
+    const live = document.getElementById('liveRegion');
+    return {
+      flash: !!td && (td.classList.contains('copied') || td.classList.contains('copyfail')),
+      live: live ? (live.textContent || '').trim() : '',
+      hasButton: !!td && !!td.querySelector('button.idcopy'),
+    };
+  })()`);
+  if (afterId.flash && afterId.live && afterId.hasButton) pass(`O8-2 点击模型 id 就地反馈 + 键盘可达：${afterId.live}`);
+  else fail(`O8-2 模型 id 复制反馈不符：${JSON.stringify(afterId)}`);
 }
 
 {

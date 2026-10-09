@@ -19,6 +19,164 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **Anthropic 流式：工具名分片被丢掉，客户端拿到截断的名字**（`bridge`）。
+  上游把 `function.name` 拆成多帧下发时（`get_` + `weather`），代码里
+  `slot.name` 在**建槽时就写入了首片**，而追加的守卫却是 `!slot.name` ——
+  首片非空，于是除首片外的分片全被丢弃，`tool_use.name` 变成 `get_`，工具调用必然失败。
+  `+=` 本身就说明这里预期分片到达，两者自相矛盾。
+
+  修法分两步（只改守卫不够）：
+  1. `name` 初值改成空串、每片都追加；
+  2. `content_block_start` **推迟到名字收齐**再发 —— 它原先在建槽时就发出去了，
+     里面带着当时那个半截名字。现在改为「参数分片开始到达时」发出
+     （OpenAI 协议里名字总在 arguments 之前到齐），并在 `closeOpen()` 收尾时
+     补发没有参数的工具块；`closeOpen()` 会**先补发再关块**，保证块索引顺序不乱。
+
+  用例用 `chatRaw` 手写一段分片 SSE，断言输出里出现 `"name":"get_weather"`
+  且不出现 `"name":"get_"`。**验证过这条用例有牙**：把旧逻辑还原回去即变红。
+  桥全套 30/30。
+
+  > 这条修复目前在**工作区**，尚未提交 —— 它所在的 `bridge/workbuddy-bridge.mjs`
+  > 同时带着另一处未提交的改动（本机令牌改为随机生成），拆不开，见提交说明。
+
+- **导出 CSV 的文件名用本地日期**（`dashboard/public/index.html`）。
+  页面里原先有**两个「今天」**：`localDateStr()`（本地，注释写明与桥的 `localDay`
+  同规则）与 `today()`（`new Date().toISOString().slice(0, 10)` —— 那是 **UTC**）。
+  导出文件名用的是后者，于是在 UTC+8 的 00:00–08:00 导出，文件名会比墙上时钟早一天。
+  现在删掉 `today()`，三处导出统一用 `localDateStr()`：**同一个概念只留一个实现**。
+  验收（`tools/dev/test-r5-observability.mjs`）补两条 —— 一条断言文件名带本地日期，
+  另一条断言页面里不再存在 UTC 版的「今天」。**后者是必需的**：前者在 UTC 与本地
+  同一天时有 2/3 的时间区分不出两种实现。
+
+
+### ⚠️ 升级须知：客户端里的旧令牌会失效
+
+**本地回环令牌的默认值从固定串 `wb-local-bridge` 改为「首次运行随机生成」。**
+
+- **为什么改**：`wb-local-bridge` 是印在 README 里的公开值，本机任何程序
+  （乃至能绕开 Origin 检查的网页脚本）都能拿它调用桥、消耗你的账号配额 ——
+  这让认证形同虚设。随机值才真正实现「只有你授权的本机客户端能用」。
+- **影响谁**：**手工填过 API Key 的外部客户端**（Claude Code、opencode、
+  图形表单等）升级后会回 401。**dsh 插件用户不受影响** ——
+  插件与桥读同一个 `<插件>/.bridge-token`，自动一致。
+- **怎么修**：控制台 →「客户端接入」面板 → 复制新令牌 → 填回客户端。
+  或直接读 `dsh-plugin/.bridge-token`。
+- **想保持客户端配置不变**：在 `.env` 里设 `WORKBUDDY_LOCAL_TOKEN=<你原来的值>`，
+  显式配置优先级最高，三处都会用它。
+- 令牌文件已加入 `.gitignore`；权限 0600。
+
+### Added
+
+- **401 响应自带排查指引**（`unauthorizedBody()`）。401 是升级后最高频的故障，
+  原先只回一句 `bad or missing token`，用户既不知道"为什么昨天还行"、
+  也不知道"去哪找新值"。现在响应体直接列出三种取值途径与固定值的方法。
+  **不含真实令牌** —— 桥绑回环端口，同机进程都能读到响应体，
+  把值写在错误里等于给攻击者送答案（已作用例锁死这条）。
+- 401 失败也会落账（原先这条路径不进账本，"客户端为什么连不上"在控制台上不可见）。
+
+### Fixed
+
+- **CI 三个 job 全红**：`vendor:check` 报 `bridge/workbuddy-bridge.mjs` 未同步 ——
+  上一个 commit 改了桥源码但漏跑 `npm run vendor`，于是**插件用户装到的
+  vendor 桥仍是旧版本**（缺上游非 2xx 的挂死修复）。已重新同步。
+  这正是 CI 注释里写的那个风险，门禁按设计生效了。
+- **CI 从来没跑过 `lib/` 单测**（`.github/workflows/release-check.yml`）。
+  unit 那步只跑 `dsh-plugin/tests/*.test.mjs`，桥那步手写
+  `node --test bridge/bridge.test.mjs` —— 于是本仓库积攒的 49 例 lib 单测
+  （含凭据信封 / 配置解析）在 CI 里**一例都不执行**，新加的
+  `bridge-startup.test.mjs` 同样跑不到。现在两个 job 都改为调用 npm 脚本
+  （`test:plugin` / `test:lib` / `test:bridge`），以后加测试文件只需改
+  `package.json` 一处，不会再有「加了测试但 CI 没跑到」的盲区。
+- **控制台的「停止桥服务」会强杀端口上的任意进程**（`dashboard/server.mjs`）。
+  `stopBridge()` 拿到的是 `findPortPid()` 的结果——那只是"**谁在监听 8790**"，
+  不等于"谁是我们的桥"。8790 被用户自己的其它服务占用时（另一个 node、
+  开发服务器、别的工具），点一下停止 = 强杀一个与 workbuddy 无关的进程，
+  且没有任何确认。实测（起一个无关 HTTP 服务占住端口）确认可复现。
+  现在 kill 之前先打 `/health` 做**归属校验**（判据与 dsh 插件的
+  `probe()` 对齐）：确认不是桥 → 拒绝并报出占用者 pid；探测不出来 →
+  拒绝并如实说"无法确认"；桥回 401（令牌不一致）→ **仍判为自己人，照常可停**，
+  否则用户会看到"端口上那个不是 bridge"这种**假诊断**。
+- **上游返回非 2xx 时请求永久挂死**（`bridge/workbuddy-bridge.mjs`）。
+  `shimResponse.text()` 走事件式监听，而真实链路里响应回来后还要先等
+  `refreshAuth` 失败（8 秒超时）才轮到读体；这期间无人监听，`IncomingMessage`
+  是**热流、不缓存**，等轮到读时已 `complete && destroyed` —— 事件永不再触发，
+  `text()` 永久 pending，客户端只看到自己的超时。实测证据：
+  `readable=false complete=true destroyed=true`。
+  改为响应到达即挂监听攒缓冲，`text()`/`body` 基于缓冲 + `finished` promise，
+  并补 `close` 兜底。同一场景从「30 秒超时无响应」变为 **33ms 返回 401**。
+- **账本的错误原文未在写入侧截断**（`recordRequest`）。原先只在读取侧截断，
+  写入侧原样落盘 —— 上游一段 4KB 的 HTML 错误页会整段灌进 `usage.jsonl`，
+  撑爆控制台列表与 CSV 导出，且真正有用的信息被淹没。
+  现在在入口统一 `shortError()`（压平换行 + 截到 160 字符）。
+- **令牌比较改为常数时间**（`safeEqual()` 包 `timingSafeEqual`），
+  消除按字节短路带来的前缀时序侧信道。
+- **`lib/state.mjs` 改为原子写**（`.tmp` + `rename`），
+  避免进程在写盘中途被杀导致的状态文件半损。
+- **`.env` 里的写错值不再静默变成 `NaN`**（`config.mjs` **与桥**）。`WORKBUDDY_PORT=879O`
+  （字母 O）、`WORKBUDDY_TIMEOUT_MS=8790ms` 这类手滑原先会让 `Number()` 得 `NaN`
+  并原样进配置。控制台侧的症状是 `listen(NaN)` 报 errno、URL 变成
+  `http://127.0.0.1:NaN`；**桥侧更严重 —— 直接整个起不来**（`RangeError:
+  ERR_SOCKET_BAD_PORT`），而报错里看不出是自己配置写错了。
+  现在两侧统一走 `numEnv()`（桥内联副本，约定与 exe 探测那对副本相同：**改一处要改两处**）：
+  非有限数 / 越界一律回退默认，端口限 1..65535。
+- **`WORKBUDDY_MAX_BODY_BYTES` 写错会让请求体上限静默消失**（`bridge`，**安全相关**）。
+  `MAX_BODY_BYTES = NaN` 时 `readBody` 里的 `size > limit` **恒为 false** ——
+  32MB 的硬上限完全失效，同机任何进程都能灌爆内存。已并入上述 `numEnv()` 收口。
+- **`.env` 的 `export KEY=VALUE` 行不再被忽略**（`config.mjs`）。`.env` 与 shell
+  脚本写法相近，从别处粘一行 `export WORKBUDDY_PORT=8901` 进来时，旧解析器把键名
+  读成 `"export WORKBUDDY_PORT"` —— 配置**完全不生效且无任何提示**。
+- **坏信封不再把 `JSON.parse` 原文漏进「为什么不工作」面板**（`lib/atrest.mjs`）。
+  登录文件被改坏时，错误信息会把解码出的乱码字节一并带上
+  （`Unexpected token '\ufffd', "\ufffd\ufffd~m…" is not valid JSON`），
+  这行字会被 `lib/diagnostics.mjs` 原样展示给用户。现在统一收口为
+  `envelope is not valid base64` / `envelope is not a JSON record`。
+
+### Changed
+
+- **`fetchKeyFor()` 拆出纯函数 `pickKeyCandidate()`**（`lib/atrest.mjs`）。
+  多客户端 build 并存时「按信封 keyId 挑钥」的规则此前与 `execFile` 取载荷揉在一起，
+  无法直接单测。行为不变（含「全不匹配时退回第一个成功的、让上层报
+  `envelope belongs to key X, not Y`」这条刻意设计），现在选择规则有 8 个直接用例。
+
+### Security
+
+- **桥的认证闸门不再有「未配令牌即放行」这条路径**。原写法
+  `if ((LOCAL_TOKEN || ...) && identifyClientId(req) === null)` 在未配置令牌时
+  整条 401 分支不执行，`/health`、`/v1/models`、`/v1/chat/completions` 全部无鉴权可达。
+  现在令牌**始终必需**，未配置则自动生成。
+- **三处联动**（缺一必出「插件与桥令牌不一致 → 401」）：
+  `bridge/workbuddy-bridge.mjs`、`config.mjs`、`dsh-plugin/lib/index.js`，
+  统一读写同一个 `<插件>/.bridge-token`。已实测仓库检出与 vendor 分发两种形态、
+  控制台与插件两个入口**四路取到同一令牌**。
+- 该文件在 vendor 布局下曾算错路径（`vendor/dsh-plugin/…`），会导致两边各生成
+  各的令牌 —— 已按目录形态归一。
+
+### 测试
+
+- 桥合约 27 → **29** 例（新增 401 自诊断 2 例）。
+- **新建 `bridge/bridge-startup.test.mjs`（7 例）并把桥测试接进 CI**。
+  原先 CI 链**根本没跑桥测试**（只跑 plugin / standalone），也**没跑任何
+  `lib/` 单测**。新文件专测「启动参数写错」这条 `bridge.test.mjs` 永远走不到的
+  路径（它的 `startBridge()` 总注入合法端口）：
+  - 5 例纯逻辑（照规则写第二实现，逐条对照边界，跨平台确定）
+  - 1 例进程级 smoke（真起桥，确认不再抛 `ERR_SOCKET_BAD_PORT`）
+  - 1 例**源码守卫**：扫描桥里是否还有裸 `Number(process.env.*)` 数值读取。
+    这条专防「规则写对了但某处忘了改」—— 本轮正是这么复发的
+    （`config.mjs` 修了、桥没修）。已验证插入一处漏改后会红，并报出具体行号。
+  其中 `MAX_BODY_BYTES` 那条用例已验证会先变红（旧实现下 `pass 0 / fail 1`）。
+- 停桥用例 3 → **6** 例：新增「不是桥时必须拒绝 kill」（并断言无关进程仍活着）、
+  「是真桥时仍能停掉」、「401 不等于不是桥」。新增夹具
+  `_bridgeHolder.mjs` / `_auth401Holder.mjs`。
+- 新建 `lib/state.test.mjs`（7 例），纳入 `npm run test:lib`（17 → 21 例）。
+- 新建 `lib/atrest.test.mjs`（17 例）与 `lib/config.test.mjs`（11 例），
+  一并纳入 `npm run test:lib`（21 → **49** 例）。`lib/atrest.mjs` 是凭据红线的
+  核心（信封解密 + keyId 校验的全部逻辑），此前零直接单测；`config.mjs` 是全项目
+  唯一配置真源，同样零单测。加密夹具按算法**独立重实现**一份（不复用被测代码），
+  否则「同错同对」测不出问题。
+
+
 ## [1.4.5] - 2026-10-09
 
 ### Fixed

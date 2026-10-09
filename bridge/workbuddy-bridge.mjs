@@ -38,14 +38,40 @@ import { spawnSync } from 'node:child_process';
  * 来源，官方客户端升级后旧指纹可能被拒（报告 §8.6 风险 1 的「上游版本漂移」）。
  * 因此三个值都可用环境变量覆盖（.env 由 config.mjs 统一注入），改完重启桥即生效。
  */
-const APP_VERSION = process.env.WORKBUDDY_APP_VERSION || '4.9.29177644';
-const IDE_VERSION = process.env.WORKBUDDY_IDE_VERSION || '1.119.0';
+/**
+ * 数值型环境变量解析：非法值回退默认，**绝不产生 NaN**。
+ *
+ * 与 `config.mjs` 的 `numEnv()` 同款逻辑（桥刻意保持单文件自包含，
+ * 不能 import 那个模块，所以这里是内联副本 —— 改动时两处要一起改）。
+ *
+ * 为什么必须有：`Number(process.env.WORKBUDDY_PORT || 8790)` 在用户把
+ * `.env` 写成 `WORKBUDDY_PORT=879O`（字母 O）时得到 `NaN`，`listen(NaN)` 直接抛
+ * `RangeError [ERR_SOCKET_BAD_PORT]` —— 桥**整个起不来**，而报错信息里
+ * 完全看不出是自己配置写错了。实测确认过这条路径。
+ *
+ * 另一条更隐蔽的后果：`MAX_BODY_BYTES = NaN` 会让 `size > NaN` 恒为 `false`，
+ * 请求体上限**静默消失**（无界内存）。
+ *
+ * @param {string} name
+ * @param {number} fallback
+ * @param {{ min?: number, max?: number }} [range] 越界同样回退（不截断到边界）
+ */
+function numEnv(name, fallback, range = {}) {
+  const raw = process.env[name];
+  if (raw === undefined || raw === '') return fallback;
+  const value = Number(raw);
+  if (!Number.isFinite(value)) return fallback;
+  if (value < (range.min ?? -Infinity) || value > (range.max ?? Infinity)) return fallback;
+  return value;
+}
+
+const APP_VERSION = process.env.WORKBUDDY_APP_VERSION || '4.9.29177644';const IDE_VERSION = process.env.WORKBUDDY_IDE_VERSION || '1.119.0';
 const IDE_NAME = process.env.WORKBUDDY_IDE_NAME || 'VSCode';
 const CHAT_PATH = '/v2/chat/completions';
 const REFRESH_SKEW_MS = 5 * 60 * 1000;
 const REFRESH_COOLDOWN_MS = 15 * 1000;
 const TRANSIENT_400_DELAYS = [1000, 4000, 10000, 25000];
-const UPSTREAM_TIMEOUT_MS = Number(process.env.WORKBUDDY_TIMEOUT_MS || 0); // 0 = unlimited (long answers need it)
+const UPSTREAM_TIMEOUT_MS = numEnv('WORKBUDDY_TIMEOUT_MS', 0, { min: 0 }); // 0 = unlimited (long answers need it)
 
 // ── Upstream keep-alive connection pool ────────────────────────────────────
 // 为什么要自己管连接：Node 全局 fetch（undici）的空闲连接只保留 ~4 秒。写代码
@@ -53,7 +79,7 @@ const UPSTREAM_TIMEOUT_MS = Number(process.env.WORKBUDDY_TIMEOUT_MS || 0); // 0 
 // 复现：node tools/dev/bench-overhead.mjs）。
 // 用 http/https 的 keep-alive Agent：空闲连接保留 5 分钟，跨请求复用同一条
 // TLS 会话，「首 token 延迟」稳定砍掉一大截。测试桩走纯 HTTP，所以两套都要。
-const KEEPALIVE_MS = Number(process.env.WORKBUDDY_KEEPALIVE_MS || 300_000); // 5 min, 0 = off
+const KEEPALIVE_MS = numEnv('WORKBUDDY_KEEPALIVE_MS', 300_000, { min: 0 }); // 5 min, 0 = off
 const httpAgent = new HttpAgent({ keepAlive: KEEPALIVE_MS > 0, keepAliveMsecs: Math.max(1000, KEEPALIVE_MS), maxSockets: 8, scheduling: 'lifo' });
 const httpsAgent = new HttpsAgent({
   keepAlive: KEEPALIVE_MS > 0,
@@ -65,7 +91,7 @@ const httpsAgent = new HttpsAgent({
 });
 const agentFor = (endpoint) => (String(endpoint).startsWith('https:') ? httpsAgent : httpAgent);
 
-const PORT = Number(process.env.WORKBUDDY_PORT || 8790);
+const PORT = numEnv('WORKBUDDY_PORT', 8790, { min: 1, max: 65535 });
 const HOST = process.env.WORKBUDDY_HOST || '127.0.0.1';
 /**
  * 本地回环令牌。**永远非空** —— 这是认证闸门的前提。
@@ -914,23 +940,61 @@ function upstreamRequest(endpointUrl, { headers, body, signal }) {
   });
 }
 
-/** http.IncomingMessage → 与 fetch Response 兼容的最小面（bridge 现有消费代码不动）。 */
+/**
+ * 从响应到达的那一刻起**就**开始攒数据，与调用方何时消费无关。
+ *
+ * 为什么必须在拿到响应时立刻挂监听：`IncomingMessage` 是「热」流 ——
+ * 数据在网卡到达就派发，没有暂停机制。真实调用链里，响应回到
+ * `callUpstream` 之后还要先等 `refreshAuth`（失败路径有 8 秒超时）
+ * 才轮到读体；这段时间里没人 `data`/`end` 监听，等轮到读时流早已
+ * `complete && destroyed`，**事件永远不会再触发**，`text()` 永久挂起、
+ * 客户端只看到超时。这不是理论风险，是实测复现的线上卡死（上游回
+ * 401 + 非 JSON 体时必现）。
+ */
 function shimResponse(res) {
+  const chunks = [];
+  let done = false;
+  let failure = null;
+  let settle;
+  const finished = new Promise((r) => { settle = r; });
+
+  res.on('data', (c) => { chunks.push(c); });
+  res.on('end', () => { done = true; settle(); });
+  res.on('aborted', () => { failure = failure || new Error('upstream aborted'); done = true; settle(); });
+  res.on('error', (e) => { failure = failure || e; done = true; settle(); });
+  res.on('close', () => {
+    // 没等到 'end' 就 close = 连接被掐断：不能再等，否则永久挂起。
+    if (!done) { failure = failure || new Error('upstream closed before response completed'); done = true; settle(); }
+  });
+
+  const bodyText = () => Buffer.concat(chunks).toString('utf8');
+
   return {
     ok: res.statusCode >= 200 && res.statusCode < 300,
     status: res.statusCode,
     headers: res.headers,
-    text: () => new Promise((resolve, reject) => {
-      const chunks = [];
-      res.on('data', (c) => chunks.push(c));
-      res.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
-      res.on('error', reject);
-    }),
+    text: async () => {
+      if (!done) await finished;
+      if (failure) throw failure;
+      return bodyText();
+    },
     body: new ReadableStream({
-      start(controller) {
-        res.on('data', (c) => controller.enqueue(new Uint8Array(c)));
-        res.on('end', () => controller.close());
-        res.on('error', (e) => controller.error(e));
+      async start(controller) {
+        // 数据可能已经在 `text()` 之外的时机攒好了：先补发缓冲区，再接力实时事件。
+        let sent = 0;
+        const flush = () => {
+          while (sent < chunks.length) controller.enqueue(new Uint8Array(chunks[sent++]));
+        };
+        for (;;) {
+          flush();
+          if (done) break;
+          const before = chunks.length;
+          await Promise.race([finished, new Promise((r) => res.once('data', r))]);
+          if (chunks.length === before && done) break;
+        }
+        flush();
+        if (failure) controller.error(failure);
+        else controller.close();
       },
       cancel() { res.destroy(); },
     }),
@@ -960,8 +1024,8 @@ function shimResponse(res) {
  * 等待循环对客户端断开敏感（abort 即退出队列，不占位）。闸门在读凭据 / 打上游
  * **之前**：被限流的请求不产生任何上游副作用。
  */
-const RATE_LIMIT_RPM = Math.max(0, Math.floor(Number(process.env.WORKBUDDY_RATE_LIMIT_RPM || 0)) || 0);
-const RATE_LIMIT_MIN_INTERVAL_MS = Math.max(0, Math.floor(Number(process.env.WORKBUDDY_RATE_LIMIT_MIN_INTERVAL_MS || 0)) || 0);
+const RATE_LIMIT_RPM = Math.floor(numEnv('WORKBUDDY_RATE_LIMIT_RPM', 0, { min: 0 }));
+const RATE_LIMIT_MIN_INTERVAL_MS = Math.floor(numEnv('WORKBUDDY_RATE_LIMIT_MIN_INTERVAL_MS', 0, { min: 0 }));
 const RATE_LIMIT_MODE = process.env.WORKBUDDY_RATE_LIMIT_MODE === 'reject' ? 'reject' : 'queue';
 
 const rateState = {
@@ -1093,13 +1157,10 @@ async function callUpstream(bodyString, model, conversationId, clientSignal) {
   };
 
   let res = await attemptWithStaleRetry(auth);
-  console.error('[TRACE] first attempt status', res.status);
   if (!API_KEY && (res.status === 401 || res.status === 403) && auth.refresh) {
     const next = await refreshAuth(auth);
-    console.error('[TRACE] refreshAuth ->', next ? 'ok' : 'null');
     if (next) { auth = next; res = await attemptWithStaleRetry(auth); }
   }
-  console.error('[TRACE] post-refresh status', res.status, 'reused', res.reusedSocket);
 
   // the gateway occasionally wraps a momentary upstream failure as 400 code 11133: retry idempotently
   /*
@@ -1118,12 +1179,9 @@ async function callUpstream(bodyString, model, conversationId, clientSignal) {
    */
   const status = res.status;
   if (status !== 400 && (status < 200 || status >= 300)) {
-    console.error('[TRACE] guard A: reading body');
     const text = await res.text().catch(() => '');
-    console.error('[TRACE] guard A: got body', text.length);
     return { res, bodyText: text, upstreamStartedAt: upEnter };
   }
-  console.error('[TRACE] guard A: skipped, status', status);
 
   for (let i = 0; res.status === 400 && i < TRANSIENT_400_DELAYS.length; i++) {
     const text = await res.text();
@@ -1543,9 +1601,38 @@ async function relayAnthropicStream(up, res, model, estInputTokens) {
 
   let blockIndex = -1;
   let openKind = null; // null | 'text' | 'tool'
-  const toolSlots = new Map(); // 上游 tool_calls 的 index -> { blockIndex, id, name }
+  const toolSlots = new Map(); // 上游 tool_calls 的 index -> { blockIndex, id, name, started }
+  /**
+   * 已分配索引、但 `content_block_start` 还没发出去的工具块。
+   *
+   * 为什么要拖后发：`function.name` **可能分片到达**（上游把名字拆成多帧，
+   * 见下面 `slot.name += ...` 的 `+=`）。而 `content_block_start` 一旦发出，
+   * 里面的 name 就定死了 —— 先发就会把半截名字（如 `get_`）交给客户端，
+   * 工具调用必然失败。
+   *
+   * OpenAI 的流式协议里名字总在 arguments 之前到齐，所以「等第一个
+   * arguments 分片来了再发」是安全的；没有任何 arguments 的调用则在
+   * 收尾时（`closeOpen()`）补发。
+   */
+  let pendingTool = null;
+
+  /** 补发工具块的 content_block_start（幂等）。 */
+  const flushTool = (slot) => {
+    if (!slot || slot.started) return;
+    slot.started = true;
+    pendingTool = null;
+    openKind = 'tool';
+    write('content_block_start', {
+      type: 'content_block_start',
+      index: slot.blockIndex,
+      content_block: { type: 'tool_use', id: slot.id, name: slot.name, input: {} },
+    });
+  };
 
   const closeOpen = () => {
+    // 还没发 start 的工具块必须先补发，否则 content_block_stop 会落在一个
+    // 从未 start 过的 index 上（Anthropic 会判协议错），而且块的顺序也乱了
+    if (pendingTool && !pendingTool.started) flushTool(pendingTool);
     if (openKind !== null) {
       write('content_block_stop', { type: 'content_block_stop', index: blockIndex });
       openKind = null;
@@ -1606,19 +1693,23 @@ async function relayAnthropicStream(up, res, model, estInputTokens) {
             slot = {
               blockIndex,
               id: tc.id || `toolu_${trace().slice(0, 24)}`,
-              name: tc.function?.name || '',
+              name: '',
+              started: false,
             };
             toolSlots.set(upIdx, slot);
-            openKind = 'tool';
-            write('content_block_start', {
-              type: 'content_block_start',
-              index: slot.blockIndex,
-              content_block: { type: 'tool_use', id: slot.id, name: slot.name, input: {} },
-            });
-          } else if (tc.function?.name && !slot.name) {
-            slot.name += tc.function.name;
+            pendingTool = slot; // 先不发 content_block_start，等名字收齐
           }
+          /*
+           * 名字**累加**，不是「只在为空时取一次」。
+           *
+           * 原先的守卫是 `else if (tc.function?.name && !slot.name)`，而 slot 建立时
+           * 已经把首片写进了 `name` —— 于是 `!slot.name` 恒为 false，除首片外的
+           * 分片全被丢掉。`+=` 本身就说明这里预期分片到达，两者自相矛盾。
+           * 现在初值是空串、每片都追加，收齐后再由 flushTool 一次性发出。
+           */
+          if (tc.function?.name) slot.name += tc.function.name;
           if (typeof tc.function?.arguments === 'string' && tc.function.arguments) {
+            flushTool(slot); // 参数开始来了 → 名字必然已收齐，这时才发 start
             write('content_block_delta', {
               type: 'content_block_delta',
               index: slot.blockIndex,
@@ -1745,6 +1836,19 @@ function recordRequest(entry) {
     // key 哈希前 8 位）—— 桥不可用时静默跳过，不影响记账主流程。
     const client = requestScope.getStore()?.client;
     if (client) entry = { ...entry, client };
+    /*
+     * 失败原文在**写入侧**就压平并截断。
+     *
+     * 上游的错误体常常是一整段 HTML（网关 401/502 页面），动辄几 KB 且带换行。
+     * 账本是一行一条 JSON 的 jsonl：原文里的 `\n` 会被 JSON.stringify 转义成
+     * `\\n` 尚可，但**整段 HTML 灌进去**会让单行膨胀到几 KB，控制台「最近请求」
+     * 与 CSV 导出都会被撑爆，而且真正有用的信息（状态码 + 头几个字）被淹没。
+     *
+     * 放在这里而不是每个调用点：调用点有十来处，漏一处就是一个新的漏口。
+     * 读取侧（recentRequests / summary）的 shortError 保留 —— 那是给**历史
+     * 账本**兜底的，老文件里已经存着未截断的原文。
+     */
+    if (typeof entry.error === 'string') entry = { ...entry, error: shortError(entry.error) };
     const file = usageFile();
     syncUsageMirror(file);
 
@@ -2431,7 +2535,7 @@ async function claimDailyCheckin(auth) {
 // 内存态：桥重启后重新判定（上游幂等兜底，重复签也只是「已签到」）。
 // 触发点有两个：/v1/chat/completions 开头（fire-and-forget，绝不阻塞这次调用）
 // 与**桥自己的定时器**（见 startAutoCheckinTimer 的说明）。
-const AUTO_CHECKIN_COOLDOWN_MS = Number(process.env.WORKBUDDY_CHECKIN_COOLDOWN_MS || 3600000); // 失败后冷却 1 小时再试
+const AUTO_CHECKIN_COOLDOWN_MS = numEnv('WORKBUDDY_CHECKIN_COOLDOWN_MS', 3600000, { min: 0 }); // 失败后冷却 1 小时再试
 const AUTO_CHECKIN_MAX_PER_DAY = 3;       // 当天最多试 3 次，避免对上游打无效请求
 let autoCheckinDay = '';                  // 「今天已尝试」的本地日期
 let autoCheckinDoneDay = '';              // 「今天已签成功」的本地日期 —— 当天不再重试
@@ -2514,7 +2618,7 @@ function startAutoCheckinTimer() {
   if (!AUTO_CHECKIN_ENABLED) return;
   // 启动后先等一会儿再试：上游连接预热与目录抓取都在开头，别挤在一起。
   // 可调是为了让测试不必真等 20 秒（生产环境没有理由改它）。
-  const kickMs = Number(process.env.WORKBUDDY_CHECKIN_KICK_MS || 20000);
+  const kickMs = numEnv('WORKBUDDY_CHECKIN_KICK_MS', 20000, { min: 0 });
   const kick = () => maybeAutoCheckin();
   setTimeout(kick, kickMs).unref?.();
   setInterval(kick, AUTO_CHECKIN_COOLDOWN_MS).unref?.();
@@ -2596,7 +2700,7 @@ async function fetchQuota(auth) {
  * 可用 `WORKBUDDY_MAX_BODY_BYTES` 覆盖：上限是随用法变的（比如有人专门灌长
  * 上下文做压测），写死会让那种场景没有任何出口。
  */
-const MAX_BODY_BYTES = Number(process.env.WORKBUDDY_MAX_BODY_BYTES || 32 * 1024 * 1024);
+const MAX_BODY_BYTES = numEnv('WORKBUDDY_MAX_BODY_BYTES', 32 * 1024 * 1024, { min: 1024 });
 
 /**
  * 读取请求体，超过 MAX_BODY_BYTES 立刻失败。
@@ -2735,6 +2839,42 @@ function safeEqual(a, b) {
   return timingSafeEqual(ba, bb);
 }
 
+/**
+ * 401 的响应体：失败原因 + **可操作的排查步骤**。
+ *
+ * 为什么值得单独写一段：令牌默认值从固定串 `wb-local-bridge` 改为随机生成后，
+ * **所有历史用户升级后都会撞 401** —— 他们的客户端配置里还存着旧口令，
+ * 而原响应体只有干巴巴一句 `bad or missing token`，用户既不知道"为什么昨天还行"
+ * 也不知道"去哪找新值"。401 是升级后最高频的故障，却只给了一句无信息量的话。
+ *
+ * **绝不能把真实令牌写进这里**：桥绑在回环端口上，同机的任何进程（包括攻击者
+ * 的脚本）都能发请求拿到响应体 —— 把答案写在错误信息里，等于把 401 变成
+ * "免费领取令牌"接口。所以只给**获取路径**，不给值。
+ *
+ * 措辞刻意覆盖三种来源，因为它们的第一反应各不相同：
+ *   - 老用户升级 → "昨天还能用" → 要明确说令牌变过、旧值请换；
+ *   - 新用户首次接入 → "还没填" → 要直接指到控制台面板；
+ *   - 填错 → 指到同一个地方即可，无需单独分支。
+ */
+function unauthorizedBody() {
+  const hints = [
+    'workbuddy-bridge: bad or missing token',
+    '',
+    '如果之前能用、升级后突然 401：本地回环令牌的默认值已改为**随机生成**'
+      + '（旧版本是固定串 wb-local-bridge）。请把客户端里填的旧值换成新令牌。',
+    '如果这是首次接入：还没填过令牌。',
+    '',
+    '新令牌在这里：',
+    '  · 控制台 →「客户端接入」面板（直接显示，可一键复制）',
+    '  · 或读文件 dsh-plugin/.bridge-token',
+    '  · 或看你启动桥时的日志：WORKBUDDY_LOCAL_TOKEN=<值>',
+    '',
+    '想固定成自己的值：在 .env 里设 WORKBUDDY_LOCAL_TOKEN=<你的值>（优先级最高）。',
+    '注意：桥只服务本机（127.0.0.1），不对外提供令牌查询接口。',
+  ];
+  return { error: { message: hints.join('\n'), type: 'invalid_api_key', code: 'invalid_api_key' } };
+}
+
 // ── 响应观测：进程级计数 + 开销头（横切两件事，只包一次）──────────────────
 /**
  * 进程级计数（供 /health 的 `process` 段）：
@@ -2790,7 +2930,7 @@ function observeResponse(req, res) {
 const inflight = new Map();
 let inflightSeq = 0;
 /** 运行超过该毫秒数即判「疑似卡死」——只影响显示高亮，不干预请求。 */
-const ACTIVE_ALERT_MS = Math.max(1000, Number(process.env.WORKBUDDY_ACTIVE_ALERT_MS || 300_000));
+const ACTIVE_ALERT_MS = numEnv('WORKBUDDY_ACTIVE_ALERT_MS', 300_000, { min: 1000 });
 
 function trackInflight(req, res, model, stream) {
   const id = `req_${(++inflightSeq).toString(36)}-${Date.now().toString(36)}`;
@@ -2835,7 +2975,19 @@ async function handleRequest(req, res) {
      * 保留 `CLIENT_KEY_HASHES.size` 只是为了让「只配了 client key」的语义清楚。
      */
     if (identifyClientId(req) === null) {
-      return json(res, 401, { error: { message: 'workbuddy-bridge: bad or missing token' } });
+      // 带着排查指引返回（见 unauthorizedBody 的说明）；**不含真实令牌**。
+      // API-key-404 的失败同样要落账，否则"客户端为什么连不上"在控制台上
+      // 完全不可见 —— 用户只能看到一个 401，账本上一片空白。
+      recordRequest({
+        model: '',
+        stream: false,
+        ms: 0,
+        ok: false,
+        status: 401,
+        code: null,
+        error: 'bad or missing token (client not identified)',
+      });
+      return json(res, 401, unauthorizedBody());
     }
 
     if (url.pathname === '/health') {

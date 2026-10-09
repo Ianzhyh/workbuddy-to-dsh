@@ -24,7 +24,7 @@ copy .env.example .env
 |---|---|---|
 | `WORKBUDDY_HOST` | `127.0.0.1` | 桥绑定地址。**不要改成 `0.0.0.0`** |
 | `WORKBUDDY_PORT` | `8790` | 桥监听端口 |
-| `WORKBUDDY_LOCAL_TOKEN` | `wb-local-bridge` | 本地回环令牌。仅用于阻止同机其它程序误用该端口，**不是**上游凭据。需与 dsh 的 `WORKBUDDY_BRIDGE_KEY` 值一致 |
+| `WORKBUDDY_LOCAL_TOKEN` | 首次启动随机生成 | 本地回环令牌。仅用于阻止同机其它程序误用该端口，**不是**上游凭据。留空即自动生成并落到 `dsh-plugin/.bridge-token`（控制台与插件共用同一文件，保证一致）；需与 dsh 的 `WORKBUDDY_BRIDGE_KEY` 值一致 |
 | `WORKBUDDY_TIMEOUT_MS` | `0` | 上游请求超时（毫秒）。`0` = 不限——长回答需要保持 0 |
 | `WORKBUDDY_LOG` | `1` | `1` 时打印每次请求的模型、消息数、工具数（**不含对话内容**） |
 | `WORKBUDDY_ANTHROPIC_MODEL` | `glm-5.3` | Claude Code 的模型名映射到哪个上游真实模型。可填任意 `/v1/models` 里的 id |

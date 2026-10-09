@@ -6,9 +6,10 @@
  * spawn 时注入同样的环境变量，从而保持桥的单文件自包含特性；两边使用的
  * 变量名以本文件为准。
  */
-import { existsSync, readFileSync, readdirSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
 import { homedir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { findWorkBuddyExe } from './lib/find-workbuddy.mjs';
 import { findDshRuntime } from './lib/find-dsh.mjs';
@@ -23,10 +24,14 @@ function loadDotEnv(file) {
   for (const rawLine of readFileSync(file, 'utf8').split(/\r?\n/)) {
     const line = rawLine.trim();
     if (!line || line.startsWith('#')) continue;
-    const eq = line.indexOf('=');
+    // 容忍 shell 风格的 `export KEY=VALUE`：`.env` 与 shell 脚本写法相近，
+    // 用户从 README / 别处粘一行过来是常事。若不剥离 `export`，键名会变成
+    // "export KEY" —— 配置**静默失效**，且没有任何提示（最难排查的那类问题）。
+    const body = line.replace(/^export\s+/u, '');
+    const eq = body.indexOf('=');
     if (eq <= 0) continue;
-    const key = line.slice(0, eq).trim();
-    let value = line.slice(eq + 1).trim();
+    const key = body.slice(0, eq).trim();
+    let value = body.slice(eq + 1).trim();
     if (
       (value.startsWith('"') && value.endsWith('"'))
       || (value.startsWith("'") && value.endsWith("'"))
@@ -40,6 +45,41 @@ function loadDotEnv(file) {
 loadDotEnv(join(ROOT, '.env'));
 
 const env = process.env;
+
+// ── 环境变量取值 ────────────────────────────────────────────────────────
+
+/**
+ * 读一个数值型环境变量，非法值回退默认。
+ *
+ * 为什么不能直接用 `Number(env.X || 默认)`：用户手滑写 `WORKBUDDY_PORT=879O`
+ * （字母 O）、`8790ms`、多个空格时，`Number()` 得到 `NaN` 并被原样塞进配置。
+ * 后果是一串**看不出根因**的症状：`listen` 报 errno、派生 URL 变成
+ * `http://127.0.0.1:NaN`、`setTimeout(NaN)` 立即触发。用户看到的是"桥起不来"，
+ * 而不是"我 .env 写错了"。
+ *
+ * 这里统一收口：非有限数 → 默认值；`min`/`max` 越界 → 默认值；小数 → 截断为整数。
+ * 越界也回退（而不是截断到边界）是刻意的 —— 端口写 99999 多半是写错了，
+ * 静默改成 65535 会让用户以为配置生效了。
+ *
+ * @param {string} name 环境变量名
+ * @param {number} fallback 默认值
+ * @param {{ min?: number, max?: number, integer?: boolean }} [range]
+ */
+function numEnv(name, fallback, range = {}) {
+  const raw = env[name];
+  if (raw === undefined || raw === '') return fallback;
+  const value = Number(raw);
+  if (!Number.isFinite(value)) return fallback;
+  const min = range.min ?? -Infinity;
+  const max = range.max ?? Infinity;
+  if (value < min || value > max) return fallback;
+  return range.integer ? Math.trunc(value) : value;
+}
+
+/** 端口专用：1..65535 的整数。 */
+function portEnv(name, fallback) {
+  return numEnv(name, fallback, { min: 1, max: 65535, integer: true });
+}
 
 // ── 路径解析 ────────────────────────────────────────────────────────────
 
@@ -130,13 +170,71 @@ export function resolveAuthFile() {
 
 // ── 配置对象 ────────────────────────────────────────────────────────────
 
+/**
+ * 本地回环令牌的持久化位置。
+ *
+ * **与 DSH 插件共用同一个文件**（`dsh-plugin/lib/index.js` 的 BRIDGE_TOKEN_PATH
+ * 指向同一路径）：控制台与插件都可能拉起桥，两边若各生成各的令牌，就会出现
+ * 「插件起的桥用令牌 A、控制台拿令牌 B 去调 → 401」这种两边都自认正常的故障。
+ * 单一真源，两边都读它。
+ *
+ * 路径必须同时适配两种形态：
+ *   - 仓库检出：`ROOT` = 仓库根 → `<root>/dsh-plugin/.bridge-token`
+ *   - vendor 分发：本文件被拷到 `dsh-plugin/vendor/config.mjs`，`ROOT` 变成
+ *     vendor 目录。此时若仍拼 `ROOT/dsh-plugin/...` 会落到
+ *     `vendor/dsh-plugin/...`，**与插件的令牌文件不是同一个** —— 两边各生成
+ *     各的，必然 401。
+ * 判据：本文件所在目录若有 `vendor/` 子目录，说明我们在分发形态里，往上一层
+ * 取插件目录；否则就是仓库检出的布局。
+ */
+function bridgeTokenPath() {
+  const here = dirname(fileURLToPath(import.meta.url));
+  const installed = basename(here) === 'vendor' && existsSync(join(here, '..', 'lib', 'index.js'));
+  return installed
+    ? join(here, '..', '.bridge-token')
+    : join(ROOT, 'dsh-plugin', '.bridge-token');
+}
+const BRIDGE_TOKEN_PATH = bridgeTokenPath();
+
+/**
+ * 解析本地回环令牌：显式配置 > 已落盘 > 生成并落盘。
+ *
+ * 为什么不沿用历史上的硬编码默认值 `wb-local-bridge`：那是**公开口令**，
+ * 本机任何程序（乃至能绕开 Origin 检查的网页脚本）都能拿它调用桥、白嫖
+ * 账号配额。随机值能真正实现「仅本机授权客户端可用」这一设计意图。
+ *
+ * 为什么要落盘而不是每次随机：客户端（Claude Code / dsh 等）把令牌写在自己
+ * 的配置里，每次重启就换值等于每次都要用户重填。落盘是唯一兼顾安全与可用的
+ * 做法。文件权限 0600。
+ *
+ * 用 randomBytes 而非 Math.random()：后者不是密码学随机，令牌可预测就失去了
+ * 防护意义。24 字节 base64url ≈ 192 位熵。
+ */
+function resolveLocalToken() {
+  if (env.WORKBUDDY_LOCAL_TOKEN) return env.WORKBUDDY_LOCAL_TOKEN;
+  try {
+    const stored = readFileSync(BRIDGE_TOKEN_PATH, 'utf8').trim();
+    if (/^[A-Za-z0-9._-]{16,}$/.test(stored)) return stored;
+  } catch { /* 首次运行：文件还不存在 */ }
+  const token = randomBytes(24).toString('base64url');
+  try {
+    writeFileSync(BRIDGE_TOKEN_PATH, `${token}\n`, { mode: 0o600 });
+  } catch { /* 只读介质：本次运行有效，下次会换新（用户需重填客户端密钥） */ }
+  return token;
+}
+
 export const config = {
   bridge: {
     host: env.WORKBUDDY_HOST || '127.0.0.1',
-    port: Number(env.WORKBUDDY_PORT || 8790),
-    /** 本地回环令牌，仅用于防止同机其它程序误用；并非上游凭据。 */
-    token: env.WORKBUDDY_LOCAL_TOKEN || 'wb-local-bridge',
-    upstreamTimeoutMs: Number(env.WORKBUDDY_TIMEOUT_MS || 0),
+    port: portEnv('WORKBUDDY_PORT', 8790),
+    /**
+     * 本地回环令牌，仅用于防止同机其它程序误用；并非上游凭据。
+     *
+     * 默认值是**首次运行随机生成并落盘**的（见 resolveLocalToken），不再是
+     * 从前的固定串 `wb-local-bridge` —— 那个值是公开的，等于没有防护。
+     */
+    token: resolveLocalToken(),
+    upstreamTimeoutMs: numEnv('WORKBUDDY_TIMEOUT_MS', 0, { min: 0 }),
     /**
      * 积分余额的缓存时长（毫秒）。
      *
@@ -146,7 +244,7 @@ export const config = {
      * 调小可以让页面更快反映余额变化（签到后等），代价是更频繁的上游查询；
      * 自动化测试也用它来构造「缓存已过期但仍有旧值」这条分支，不必真等 60 秒。
      */
-    quotaTtlMs: Number(env.WORKBUDDY_QUOTA_TTL_MS || 60 * 1000),
+    quotaTtlMs: numEnv('WORKBUDDY_QUOTA_TTL_MS', 60 * 1000, { min: 0 }),
     /**
      * Anthropic 兼容层（`POST /v1/messages`，供 Claude Code 使用）的模型映射。
      *
@@ -165,8 +263,8 @@ export const config = {
      * 本地限流（保护账号配额）。**默认全关**（0），关着时行为与没有本机制
      * 完全一致。RPM=每分钟上限、MIN_INTERVAL=两条最小间隔、MODE=queue|reject。
      */
-    rateLimitRpm: Math.max(0, Number(env.WORKBUDDY_RATE_LIMIT_RPM || 0)) || 0,
-    rateLimitMinIntervalMs: Math.max(0, Number(env.WORKBUDDY_RATE_LIMIT_MIN_INTERVAL_MS || 0)) || 0,
+    rateLimitRpm: numEnv('WORKBUDDY_RATE_LIMIT_RPM', 0, { min: 0 }),
+    rateLimitMinIntervalMs: numEnv('WORKBUDDY_RATE_LIMIT_MIN_INTERVAL_MS', 0, { min: 0 }),
     rateLimitMode: env.WORKBUDDY_RATE_LIMIT_MODE === 'reject' ? 'reject' : 'queue',
     /**
      * 客户端凭据分层（opt-in）：逗号分隔的多把 key，每把一个独立调用方
@@ -178,7 +276,7 @@ export const config = {
      * 进行中请求超过该毫秒数即判「疑似卡死」（控制台标黄提醒）。
      * 只影响显示高亮，**不干预请求** —— 桥没有任何默认超时。
      */
-    activeAlertMs: Math.max(1000, Number(env.WORKBUDDY_ACTIVE_ALERT_MS || 300_000)) || 300_000,
+    activeAlertMs: numEnv('WORKBUDDY_ACTIVE_ALERT_MS', 300_000, { min: 1000 }),
     /**
      * 出站客户端身份（UA / X-IDE-* / X-Product-Version 的取值）。
      *
@@ -192,7 +290,7 @@ export const config = {
   },
   dashboard: {
     host: '127.0.0.1',
-    port: Number(env.DASHBOARD_PORT || 8792),
+    port: portEnv('DASHBOARD_PORT', 8792),
     /**
      * 控制台启动时自动拉起桥。默认开启，这是"双击即用"的关键——
      * 用户不需要知道桥和面板是两个东西，更不需要手动分开启动。

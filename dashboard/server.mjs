@@ -358,11 +358,86 @@ function startBridge(opts = {}) {
   return info;
 }
 
-function stopBridge(port = config.bridge.port) {
+/**
+ * 端口上那个监听进程，**是不是我们的桥**？
+ *
+ * 为什么必须问这一句：`stopBridge` 拿到的 pid 来自 `netstat`/`lsof` 的
+ * 「谁在监听这个端口」——那可以是**任何**进程。8790 被用户自己另起的服务
+ * （另一个 node、某个开发服务器、别的工具）占着是常见情况，此时
+ * "停止桥服务"会变成"强杀别人的进程"，且没有任何确认。
+ *
+ * 判据与 dsh 插件的 `BridgeSupervisor.probe()` 保持一致（`health.ok === true`
+ * 且 `pid` 是数字）：两边对"这是不是桥"必须给出同一个答案，否则会出现
+ * 「插件说 foreign、控制台照杀」这种自相矛盾的行为。
+ *
+ * 三态返回（与 probePortPid 同一套语义）：
+ *   true      —— 确认是桥
+ *   false     —— 确认不是（有响应但不是桥的形状 / 明确 401、403 等）
+ *   undefined —— 探测不出来（超时 / 连不上 / 网络错），**不能当作"是"**
+ *
+ * 连不上返回 undefined 而不是 false，是因为"探测失败"与"确认不是桥"
+ * 的处置完全不同：前者不该贸然 kill，也不该断言"不是桥"误导用户。
+ */
+async function isOurBridge(port) {
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/health`, {
+      headers: { Authorization: `Bearer ${config.bridge.token}` },
+      signal: AbortSignal.timeout(3000),
+    });
+    /*
+     * 401 必须单独处理：那说明**这确实是我们的桥**，只是我们手里的令牌跟它不一致
+     * （典型场景：桥是用另一套配置/更早的令牌起来的，或用户改过 .env）。
+     *
+     * 若在这里一律 `return false`（"不是桥"），会同时造成两个错误后果：
+     *   ① 用户看到「端口上的进程不是 workbuddy-bridge」——**这条诊断是假的**，
+     *      他会去找一个不存在的进程冲突，而真正的问题（令牌不一致）被掩盖；
+     *   ② 想停掉这个自己人反而停不了，只能去开任务管理器。
+     * 所以 401 → 仍判为"是自己的桥，可以停"。
+     */
+    if (res.status === 401) return true;
+    if (!res.ok) return false;
+    const body = await res.json().catch(() => null);
+    // 注意：必须显式 `=== true` 再转布尔。写成 `return body && body.ok === true && ...`
+    // 会在 body 为 null 时返回 **null**（`&&` 返回操作数本身），而调用方的
+    // `owner === false` 判定不成立 → 直接掉进 killPid，等于校验失效。
+    return body !== null && body.ok === true && typeof body.pid === 'number';
+  } catch {
+    return undefined;
+  }
+}
+
+async function stopBridge(port = config.bridge.port) {
   const pid = findPortPid(port);
   if (!pid) return { stopped: false, error: `端口 ${port} 上没有监听进程` };
-  // 明确带上 stopped:true —— 下面 stopBridgeAndWait 要靠它短路（"本来就没在跑"
-  // 时不该再白等 5 秒端口轮询）
+
+  /*
+   * 归属校验：**杀之前先确认这是我们的桥**。
+   *
+   * 早先这里直接 `killPid(pid)` —— 那个 pid 只是"谁在监听 8790"，
+   * 完全可能是用户的其它服务。实测（本机起一个无关 HTTP 服务占住端口）：
+   * 控制台会把它当成桥并 `taskkill /F` 杀掉，用户毫无察觉。
+   * 插件侧一直有这道校验（`probe()` 的 foreign 判定），控制台漏了。
+   */
+  const owner = await isOurBridge(port);
+  /*
+   * 只放行「确认是桥」这一种情况。
+   *
+   * 早先写的是 `if (owner === false) reject; if (owner === undefined) reject;`
+   * —— 两个否定条件都过完才 kill。那依赖 isOurBridge **严格**只返回三态值；
+   * 它一旦因为任何写法原因返回了别的假值（null / 0 / ''），两个分支都不进，
+   * 直接掉进 killPid —— 校验静默失效。正向放行是这类"守卫"唯一稳妥的写法。
+   */
+  if (owner !== true) {
+    const why = owner === false
+      ? `端口 ${port} 上的进程（PID ${pid}）不是 workbuddy-bridge，已拒绝结束它。`
+        + '如果桥本应在这里，请检查它是否已经退出、或改 WORKBUDDY_PORT；'
+        + '若该端口被你自己的其它程序占用，请自行处理。'
+      : `无法确认端口 ${port} 上的进程（PID ${pid}）是不是 workbuddy-bridge`
+        + '（/health 探测超时或连不上），为避免误杀无关进程，已放弃结束它。'
+        + '请稍后重试，或手动确认该进程后再处理。';
+    return { stopped: false, pid, error: why };
+  }
+
   return killPid(pid);
 }
 
@@ -648,7 +723,8 @@ async function startBridgeAndWait(opts = {}) {
  */
 export async function stopBridgeAndWait(target) {
   const port = target || config.bridge.port;
-  const result = stopBridge(port);
+  // stopBridge 现在会先做归属校验（发一次 /health），所以是异步的。
+  const result = await stopBridge(port);
   // stopBridge 已经确认过"端口上没有监听进程"（`stopped:false`）：此时再去
   // 轮询端口纯属浪费 —— 直接原样返回。这条短路同时保证了"桥本来就没跑"时
   // 停止按钮是**立刻**返回的，不会先白等 5 秒。

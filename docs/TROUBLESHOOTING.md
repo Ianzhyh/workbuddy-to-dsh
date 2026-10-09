@@ -17,7 +17,7 @@ node tools\doctor.mjs
 
 三个必要条件，缺一不可 —— 逐项确认：
 
-1. **桥在跑** → 控制台徽章应为绿色；或 `curl -H "Authorization: Bearer wb-local-bridge" http://127.0.0.1:8790/health`
+1. **桥在跑** → 控制台徽章应为绿色；或 `curl -H "Authorization: Bearer $WB_TOKEN" http://127.0.0.1:8790/health`
 2. **`settings.yaml` 已写入** → 控制台「可用模型」里至少勾了一个模型并保存过
 3. **profile bundle 完整** → doctor 的 `profile bundles` 项为绿
 
@@ -47,6 +47,28 @@ node %USERPROFILE%\DeepSeek-Harness\runtime\node_modules\@deepseek-ai\dsh\lib\bi
 | `EADDRINUSE` | 端口被占 | 先点「停止桥服务」，或改 `WORKBUDDY_PORT`。控制台会如实告诉你结果：桥已在运行时点「启动桥服务」显示「桥已在运行（PID N）」；新进程确实起不来时显示「新进程启动失败，仍在复用旧进程（PID N）」，并在悬停提示里给出 `EADDRINUSE` 原文 |
 
 ### 401 / 认证类错误
+
+> **先看这条 ——「升级后突然 401」是当前最高频的 401 原因。**
+>
+> **症状**：昨天还能用，更新版本后所有请求都回 401 `bad or missing token`，
+> 客户端配置一个字都没改过。
+>
+> **原因**：本地回环令牌的默认值从固定串 `wb-local-bridge` 改成了
+> **首次运行随机生成**（安全修复：旧值是公开的，等于没有防护）。
+> 你客户端里存的是旧值，自然对不上。
+>
+> **处理（三选一）**：
+> 1. 打开控制台 →「客户端接入」面板 → 复制新令牌 → 填进客户端（推荐）。
+> 2. 读文件：`type dsh-plugin\.bridge-token`
+> 3. 想固定回自己习惯的值：在 `.env` 里写 `WORKBUDDY_LOCAL_TOKEN=你的值`，
+>    重启桥。显式配置优先级最高，桥 / 控制台 / dsh 插件三处都会用它，
+>    不会再自动生成。
+>
+> **dsh 插件用户不受影响** —— 插件与桥读同一个 `.bridge-token`，自动一致。
+> 会断的只有你**手工填过密钥**的外部客户端（Claude Code、opencode、图形表单等）。
+>
+> 顺带一提：桥的 401 响应体现在会直接打印上面这段指引，所以你也可以
+> 直接看客户端报错内容，不用回来翻文档。
 
 | 现象 | 原因 |
 |---|---|
@@ -165,14 +187,14 @@ Claude Code 说的是 **Anthropic 的 Messages 协议**，不是 OpenAI 的 chat
 ```sh
 # macOS / Linux
 export ANTHROPIC_BASE_URL=http://127.0.0.1:8790   # 注意：不带 /v1
-export ANTHROPIC_API_KEY=wb-local-bridge           # 本地回环令牌
+export ANTHROPIC_API_KEY=$WB_TOKEN           # 本地回环令牌
 claude
 ```
 
 ```powershell
 # Windows PowerShell
 $env:ANTHROPIC_BASE_URL="http://127.0.0.1:8790"
-$env:ANTHROPIC_API_KEY="wb-local-bridge"
+$env$env:ANTHROPIC_API_KEY="$WB_TOKEN"
 claude
 ```
 
@@ -202,7 +224,7 @@ claude
 直接复制即可。想自己核对真实值：
 
 ```cmd
-curl -H "Authorization: Bearer wb-local-bridge" "http://127.0.0.1:8790/v1/models?all=1"
+curl -H "Authorization: Bearer $WB_TOKEN" "http://127.0.0.1:8790/v1/models?all=1"
 ```
 
 每个模型都带 `context_window` 与 `max_output_tokens`。
@@ -292,7 +314,7 @@ WORKBUDDY_AUTH_FILE=C:\Users\<you>\AppData\Local\CodeBuddyExtension\Data\Public\
 **先确认是页面误报还是桥真的没起来：**
 
 ```cmd
-curl -H "Authorization: Bearer wb-local-bridge" http://127.0.0.1:8790/health
+curl -H "Authorization: Bearer $WB_TOKEN" http://127.0.0.1:8790/health
 ```
 
 - 有 JSON 返回、`"ok":true` → 桥是好的，是探测超时

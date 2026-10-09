@@ -749,14 +749,14 @@ hack 全部删掉，换成平台的 View Transitions API（`withViewTransition()
 :: ① 桥自身处理开销（响应头）。口径：上游请求发出之前的桥前置处理
 ::    （鉴权 / 读凭据 / payload 归一化 / 协议翻译），不含限流排队与上游等待。
 curl -s -D - -o NUL -X POST http://127.0.0.1:8790/v1/chat/completions ^
-  -H "Authorization: Bearer wb-local-bridge" -H "Content-Type: application/json" ^
+  -H "Authorization: Bearer $WB_TOKEN" -H "Content-Type: application/json" ^
   -d "{\"model\":\"deepseek-v4.1-flash\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"max_tokens\":8}" | findstr /i overhead
 
 :: ② 连续 N 条最短请求：总耗时分布 + 桥开销中位数
 node tools\dev\bench-overhead.mjs 5
 
 :: ③ 进程级计数与状态码分布（真实请求入账，/health 探活不入账）
-curl -s http://127.0.0.1:8790/health -H "Authorization: Bearer wb-local-bridge"
+curl -s http://127.0.0.1:8790/health -H "Authorization: Bearer $WB_TOKEN"
 ```
 
 > 数字依赖网络环境与上游负载，**只用于同机前后对比**，不作为跨机器基准。

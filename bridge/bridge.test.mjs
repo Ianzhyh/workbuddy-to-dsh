@@ -1504,6 +1504,47 @@ test('桥：账本截断保留最近一半，且每行仍是合法 JSON（原子
 });
 
 /**
+ * Anthropic 流式：上游把 `function.name` **分片**下发时，工具名必须拼完整。
+ *
+ * 踩过的坑：slot 建立时把首片写进了 `name`，追加的守卫却是 `!slot.name` ——
+ * 首片非空，所以除首片外的分片全被丢掉，客户端拿到的是截断的名字（`get_`），
+ * 工具调用必然失败。`+=` 本身就说明这里预期分片到达，两者自相矛盾。
+ *
+ * 附带一层：`content_block_start` 原先在**建槽时**就发出去了，里面带着当时那个
+ * 半截名字 —— 所以光把守卫改掉不够，得把 start 推迟到名字收齐（参数开始到达）。
+ */
+test('桥：Anthropic 流式工具名分片必须拼完整（不能只留首片）', { timeout: 30_000 }, async () => {
+  const sse = [
+    'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"get_"}}]}}]}',
+    'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"name":"weather"}}]}}]}',
+    'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\\"city\\":"}}]}}]}',
+    'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\\"SF\\"}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":5,"completion_tokens":6}}',
+    'data: [DONE]',
+    '',
+  ].join('\n\n');
+  const stub = await startStubUpstream(['stub-model'], { chatRaw: sse, chatType: 'text/event-stream' });
+  const bridge = await startBridge({ CODEBUDDY_ENDPOINT: stub.base }, { auth: READABLE_FAKE_AUTH });
+  try {
+    const res = await fetch(`${bridge.baseUrl}/v1/messages`, {
+      method: 'POST',
+      headers: { ...auth, 'content-type': 'application/json', 'anthropic-version': '2023-06-01' },
+      body: JSON.stringify({
+        model: 'stub-model', max_tokens: 64, stream: true,
+        messages: [{ role: 'user', content: 'weather?' }],
+      }),
+    });
+    const text = await res.text();
+    assert.match(text, /"name":"get_weather"/, `工具名必须拼完整；实际输出里没有 get_weather：\n${text.slice(0, 400)}`);
+    assert.ok(!/"name":"get_"/.test(text), '不能把首片当成完整名字发出去');
+    assert.ok(text.includes('event: message_stop'), '流必须正常收尾');
+  } finally {
+    await bridge.stop();
+    try { await stub.close(); } catch { /* 忽略 */ }
+    rmSync(bridge.dir, { recursive: true, force: true });
+  }
+});
+
+/**
  * 未配置本地令牌时，桥**不得**静默放行。
  *
  * 为什么必须钉住：`handleRequest` 的闸门写成

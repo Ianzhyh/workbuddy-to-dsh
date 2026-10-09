@@ -181,9 +181,9 @@ Claude Code、opencode…），它会替你完成判定 → 安装 → 验证，
    本项目零依赖，不需要 npm install。
 3. 启动：Windows 双击根目录的 启动.cmd（或 node dashboard/server.mjs）——它会自动
    启动桥并打开控制台（http://127.0.0.1:8792）。
-4. 验证：运行 node tools/doctor.mjs 自检全部通过；再请求
-   curl -H "Authorization: Bearer wb-local-bridge" http://127.0.0.1:8790/v1/models
-   确认返回模型目录。
+4. 验证：运行 node tools/doctor.mjs 自检全部通过；再请求模型目录（令牌见下）：
+   curl -H "Authorization: Bearer <本地令牌>" http://127.0.0.1:8790/v1/models
+   确认返回模型列表。
 5. 若我是 DeepSeek Harness 用户：改用 dsh plugin add github:Ianzhyh/workbuddy-to-dsh
    直装插件，然后在 dsh 设置页的 WorkBuddy 分区完成模型注册并重启 dsh。
 6. 遇到问题先读 docs/TROUBLESHOOTING.md，按里面的处置试过再带报错来问我。
@@ -204,8 +204,12 @@ Claude Code、opencode…），它会替你完成判定 → 安装 → 验证，
 
 | 协议 | Base URL | API Key |
 |---|---|---|
-| OpenAI 兼容 | `http://127.0.0.1:8790/v1` | `wb-local-bridge`（或你设的 `WORKBUDDY_LOCAL_TOKEN`） |
+| OpenAI 兼容 | `http://127.0.0.1:8790/v1` | 本地令牌（见下方说明） |
 | Anthropic Messages | `http://127.0.0.1:8790`（**不带 `/v1`**） | 同上 |
+
+> **本地令牌从哪来？** 首次启动时随机生成，控制台的「客户端接入」面板里直接显示并
+> 可一键复制（页面上的值就是准的，不用去翻文件）。需要手动读时它在
+> `dsh-plugin/.bridge-token`；也可在 `.env` 里用 `WORKBUDDY_LOCAL_TOKEN=` 显式指定。
 
 控制台的「客户端接入」页签里有每个客户端的完整配置片段，点一下即可复制。
 
@@ -345,7 +349,7 @@ copy .env.example .env
 | 变量 | 默认值 | 说明 |
 |---|---|---|
 | `WORKBUDDY_PORT` | `8790` | 桥监听端口 |
-| `WORKBUDDY_LOCAL_TOKEN` | `wb-local-bridge` | 本地回环令牌，仅防同机误用，**不是**上游凭据 |
+| `WORKBUDDY_LOCAL_TOKEN` | 首次启动随机生成 | 本地回环令牌，仅防同机误用，**不是**上游凭据。生成值落在 `dsh-plugin/.bridge-token` |
 | `DASHBOARD_PORT` | `8792` | 控制台端口 |
 | `WORKBUDDY_APP_EXECUTABLE` | 自动探测 | WorkBuddy 客户端路径 |
 | `WORKBUDDY_AUTH_FILE` | 自动定位 | 登录文件；多账号时务必显式指定 |

@@ -201,9 +201,17 @@ export class BridgeSupervisor {
       return { state: 'running', health };
     } catch (error) {
       if (error?.status === 401) {
+        /*
+         * 令牌不一致。最常见的原因是**升级**：插件与桥现在共用
+         * `dsh-plugin/.bridge-token`，正常情况下自动一致；但如果用户曾手改
+         * `.env` 里的 `WORKBUDDY_LOCAL_TOKEN`，或旧版本残留了不同的值，就会撞上。
+         * 指到文件位置，让用户能自己核对 —— 只说"不一致"等于让人干瞪眼。
+         */
         return {
           state: 'unauthorized',
-          error: '端口上已有桥，但本地令牌与本插件配置不一致（改 WORKBUDDY_LOCAL_TOKEN 或重启桥）',
+          error: '端口上已有桥，但本地令牌与本插件配置不一致。'
+            + '检查 .env 的 WORKBUDDY_LOCAL_TOKEN 是否与 dsh-plugin/.bridge-token 相同，'
+            + '或删掉 .env 里那一行让它自动生成；改完重启桥。',
         };
       }
       /**

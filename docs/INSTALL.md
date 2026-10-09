@@ -83,7 +83,7 @@ dsh plugin --profile desktop add D:\path\to\dsh-plugin-workbuddy-1.0.0.tgz
 
 | 东西 | 位置 / 端口 | 备注 |
 |---|---|---|
-| 桥 | `127.0.0.1:8790`，脚本 `<插件>/vendor/bridge/workbuddy-bridge.mjs` | 本地 token 默认 `wb-local-bridge` |
+| 桥 | `127.0.0.1:8790`，脚本 `<插件>/vendor/bridge/workbuddy-bridge.mjs` | 本地 token 首次启动随机生成，落在 `<插件>/.bridge-token` |
 | 控制台网页 | `127.0.0.1:8792`，脚本 `<插件>/vendor/dashboard/server.mjs` | 插件会复用/拉起，不自动弹浏览器 |
 | 运行期状态 | `<插件>/vendor/.state.json`、`.env`、`bridge/bridge.log`、`dashboard/console.log` | 全在插件目录内，不污染系统 |
 | 凭据 | 只读 WorkBuddy 自己的登录文件，现取现解，不复制不外传 | — |

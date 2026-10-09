@@ -52,13 +52,33 @@ WorkBuddy.exe（以 ELECTRON_RUN_AS_NODE 运行）
 
 控制台的 API 响应中**不包含任何上游令牌片段**。`.credentials.yaml` 也只读取键名、不读值。
 
-> **唯一的例外：本地回环令牌**（`WORKBUDDY_LOCAL_TOKEN`，默认 `wb-local-bridge`）。
+> **唯一的例外：本地回环令牌**（`WORKBUDDY_LOCAL_TOKEN`）。
 > `GET /api/clients` 会原样返回它，因为控制台的「客户端接入」面板要让人把它填进
 > 客户端 —— 不给值，这个面板就没有意义。
 >
+> **默认值不再是固定串。** 首次运行时会生成一个 24 字节的随机令牌并写入
+> `dsh-plugin/.bridge-token`（权限 0600，已 gitignore），之后一直复用它；
+> 控制台与 DSH 插件读同一个文件，保证两边一致。
+>
+> 早先的默认值是硬编码的 `wb-local-bridge` —— 那是个**公开口令**，任何人
+> （包括能绕开 Origin 检查的网页脚本）都能拿它调用桥、消耗账号配额，
+> 等于没有防护。除默认值外还有两处必须同时成立才算安全，见下。
+>
 > 它**不是上游凭据**（上游凭据全程不出桥、不落盘、不进日志），作用仅是防止同机
-> 其它程序误用这个回环端口。接口只绑 `127.0.0.1`；而任何同机程序本来就能直接读
-> `.env` 拿到它，所以这不构成新的暴露面。**改动这条边界时，请连带更新本段。**
+> 其它程序误用这个回环端口。接口只绑 `127.0.0.1`。**改动这条边界时，请连带更新
+> 本段。**
+
+### 回环端口的实际防护（三条同时成立）
+
+| # | 机制 | 位置 | 说明 |
+|---|---|---|---|
+| 1 | **令牌始终必需** | `bridge/workbuddy-bridge.mjs` 的鉴权闸门 | 未配置时自动生成随机令牌并打印到启动日志；**不存在「无令牌即放行」这条路径** |
+| 2 | **比较是常数时间** | `safeEqual()`（`timingSafeEqual`） | 避免按字节短路比较泄漏令牌前缀 |
+| 3 | **写入需要预检** | `x-workbuddy-panel: 1` 头 | 强制跨站请求走 CORS 预检，浏览器不会自发带上它 |
+
+> ⚠️ 第 3 条只对浏览器生效。**本机其它程序**（脚本、其它应用）可以任意伪造头，
+> 唯一的拦阻是第 1 条的令牌。所以令牌绝不能是可猜的固定值 —— 这正是上面
+> 把默认值改成随机的原因。
 
 ---
 
@@ -71,11 +91,13 @@ WorkBuddy.exe（以 ELECTRON_RUN_AS_NODE 运行）
 | `%LOCALAPPDATA%\CodeBuddyExtension\Data\Public\auth\*.info` | 加密后的 access/refresh token |
 | `~/.dsh/.credentials.yaml` | 各 provider 的 API key（含本项目写入的占位值） |
 | `~/.workbuddy/keyblob` | 客户端主密钥的包裹信息 |
+| `dsh-plugin/.bridge-token` | 本地回环令牌（随机生成；已 gitignore） |
 
-`.gitignore` 已排除 `*.info`、`.env`、`*.bak-*` 等模式。
+`.gitignore` 已排除 `*.info`、`.env`、`*.bak-*`、`.bridge-token` 等模式。
 
-> 本项目写入 `.credentials.yaml` 的值是**本地回环占位串**（默认 `wb-local-bridge`），
-> 不是上游凭据——它只用于满足 dsh 侧"必须提供 API key 引用"的要求。
+> 本项目写入 `.credentials.yaml` 的值是**本地回环令牌**（就是上面随机生成的那个，
+> 或你在 `.env` 里显式设的 `WORKBUDDY_LOCAL_TOKEN`），不是上游凭据——它只用于
+> 满足 dsh 侧"必须提供 API key 引用"的要求。
 
 ---
 

@@ -106,7 +106,7 @@ process._linkedBinding('electron_browser_workbuddy_storage').loggerGet()
 E:\workbuddy\2026-10-03-20-02-25\workbuddy-bridge\start-bridge.cmd
 
 :: 2. 自检
-curl -H "Authorization: Bearer wb-local-bridge" http://127.0.0.1:8790/health
+curl -H "Authorization: Bearer $WB_TOKEN" http://127.0.0.1:8790/health
 ```
 
 然后在 DSH 的设置 → 模型 页面里，`WorkBuddy` 分组下会出现三个模型：

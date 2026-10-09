@@ -457,7 +457,6 @@ eq(toggleTrace.restored.aria, 'true', '展开后 aria-expanded=true');
 
 // ── 6b. 可访问性：可访问名、播报区、命中区 ──────────────────────────────
 const a11y = await q(cdp, `(() => {
-  const panel = document.querySelector('[data-section="clients"]');
   const box = document.getElementById('clientsBox');
   const btns = [...box.querySelectorAll('button')];
   const names = btns.map(b => (b.getAttribute('aria-label') || '').trim()).filter(Boolean);
@@ -474,12 +473,26 @@ const a11y = await q(cdp, `(() => {
   // 都有可见文字，给它们也套 aria-label 反而啰嗦。要盯住的是那些全叫「复制」的。
   const copyBtns = btns.filter(b => (b.textContent || '').trim() === '复制');
   const copyNames = copyBtns.map(b => (b.getAttribute('aria-label') || '').trim());
+  const liveEls = [...document.querySelectorAll('[aria-live]')];
+  /*
+   * 播报区查的是**整个文档**，不再只查 clients 面板：它原先挂在那个面板里，
+   * 而切到别的页签时该面板是 display:none —— 藏在不可见子树里的 aria-live
+   * 不会被朗读，等于在其它页签上复制全都哑了。现在它是文档级元素，
+   * 于是这里顺带断言「没有任何一个播报区被隐藏祖先吃掉」。
+   */
+  const liveReachable = liveEls.filter((el) => {
+    for (let p = el; p && p !== document.documentElement; p = p.parentElement) {
+      if (getComputedStyle(p).display === 'none') return false;
+    }
+    return true;
+  }).length;
   return {
     total: btns.length,
     copyCount: copyBtns.length,
     copyLabelled: copyNames.filter(Boolean).length,
     copyUnique: new Set(copyNames.filter(Boolean)).size,
-    live: panel.querySelectorAll('[aria-live]').length,
+    live: liveEls.length,
+    liveReachable,
     small: btns.filter(b => { const h = hit(b); return h.h < 32 || h.w < 32; }).length,
   };
 })()`);
@@ -488,6 +501,7 @@ else fail('当前页签一个「复制」按钮都没有 —— 复制功能丢�
 eq(a11y.copyLabelled, a11y.copyCount, '每个「复制」按钮都有 aria-label');
 eq(a11y.copyUnique, a11y.copyCount, '「复制」按钮的可访问名互不重复');
 if (a11y.live >= 1) pass('存在 aria-live 播报区'); else fail('缺少 aria-live 播报区');
+eq(a11y.liveReachable, a11y.live, '播报区都不在被隐藏的子树里（切到别的页签仍能播报）');
 eq(a11y.small, 0, '有效命中区均 ≥ 32px');
 
 // ── 6c. 交互：就地反馈（顶部提示条在长面板底部够不着）────────────────────
@@ -496,7 +510,7 @@ await q(cdp, `document.querySelector('#clientsBox .codeblock-head button.copybtn
 await sleep(200);
 const fbState = await q(cdp, `(() => {
   const b = document.querySelector('#clientsBox .codeblock-head button.copybtn');
-  const live = document.getElementById('clientsLive');
+  const live = document.getElementById('liveRegion');
   return { text: (b.textContent || '').trim(), live: (live ? live.textContent : '').trim() };
 })()`);
 if (fbState.text === '已复制' || fbState.text === '失败') pass(`就地反馈生效（按钮文本 → "${fbState.text}"）`);
