@@ -19,6 +19,8 @@
 
 ## [Unreleased]
 
+## [1.4.7] - 2026-10-09
+
 ### Fixed
 
 - **`release:check` 会偶发红：`lib/state.test.mjs` 拿真实状态文件做测试**（`lib/state.mjs` + 该测试）。
