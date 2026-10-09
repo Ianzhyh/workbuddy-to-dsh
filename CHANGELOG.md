@@ -19,6 +19,8 @@
 
 ## [Unreleased]
 
+## [1.4.9] - 2026-10-09
+
 ### Security
 
 - **补齐 v1.4.8 漏掉的一处：插件侧的令牌文件同样没收紧权限**（`dsh-plugin/lib/index.js`）。

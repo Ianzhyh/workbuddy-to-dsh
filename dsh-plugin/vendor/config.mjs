@@ -238,6 +238,9 @@ function resolveLocalToken() {
  * 「本机任何程序都能拿公开默认值调用桥」—— 权限不收，那个理由就被抵消了一半。
  *
  * 尽力而为：拿不到就保持默认，绝不因此让启动失败。
+ *
+ * **同样的实现还有一份**在 `dsh-plugin/lib/index.js` 的 `hardenBridgeTokenFile()` ——
+ * 插件包不引用仓库根的 config，所以只能各持一份。改动时**两处一起看**。
  */
 export function hardenTokenFile(path = BRIDGE_TOKEN_PATH) {
   try {
