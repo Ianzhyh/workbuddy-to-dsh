@@ -170,3 +170,96 @@
 最后落点是：**确定的**影响是多打 N-1 次刷新，**推测的**影响是会话可能被吊销，
 按 P2 处理。两次判断都是靠读代码定的，两次都被下一行代码推翻 —— 所以每条结论
 都标了「确定 / 推测」，不混着写。
+
+---
+
+# 第二轮：实测找 bug（同日）
+
+第一轮是读代码。这一轮**上真机灌输入**：假登录文件 + 假上游起桥（自包含，
+不碰真凭据、不打真上游、不耗额度），用 `fetch` 灌畸形请求；
+「畸形 Host」那条改用**原始 socket** —— `fetch` 发不出自定义 `Host`
+（Fetch 规范把它列为禁止头），第一轮用 fetch 试的时候得到「桥没事」的**假结论**。
+
+## 一、已复现的缺陷
+
+### BUG-1（最严重）畸形 `Host` 让桥进程直接退出
+
+- **位置**：`bridge/workbuddy-bridge.mjs:2718-2722`
+- **复现**：原始 socket 发 `GET /v1/models` 带 `Host: bad host with spaces`
+- **实测**：客户端 `ECONNRESET`，**桥进程 `exitCode=1` 已死**；桥输出里是
+  `code: 'ERR_INVALID_URL', input: '/v1/models', base: 'http://bad host with spaces'`，
+  栈指向 `:2722`（`new URL(req.url, 'http://' + host)`）与 `:2718`（请求处理器）
+- **为什么**：`new URL()` 的入参是**客户端可控的 Host 头**，而这一句在 `try` **之外** ——
+  抛出的异常变成未捕获，Node 直接退出进程
+- **影响**：**任何**能访问本机端口的进程都能把桥打死（一条畸形请求即可），
+  控制台/插件随后会显示「桥未运行」。本机自用场景下威胁有限，但可用性上是硬伤
+- **覆盖**：`bridge.test.mjs` 无此用例
+
+### BUG-2 上游返回非 JSON（HTTP 200）→ 桥报「成功」，内容为空
+
+- **位置**：非流式 chat 的上游解析路径
+- **复现**：假上游对 `/v2/chat/completions` 返回 `200` + `<html>gateway</html>`
+- **实测**：桥回 **`status=200`**，body 是结构完整的 completion 且
+  `message.content` 为空；**账本记成 `{"ok":true,"promptTokens":0,"completionTokens":0}`**
+- **为什么**：上游响应解析失败后走了「空成功」分支，而不是按失败上报
+- **影响**：**静默错数据** —— 用户看到空白回答、以为是模型没说话；
+  控制台的成功率统计把它算作成功；`choices: []` 也是同一表现（已一并复现）
+- **覆盖**：`bridge.test.mjs` 有「上游流中途断开必须记成失败」，**没有**「上游返回非 JSON」
+
+### BUG-3 Anthropic 流式的工具名分片被丢弃（代码自相矛盾）
+
+- **位置**：`bridge/workbuddy-bridge.mjs:1551` 与 `:1561`
+- **现状**：
+  ```js
+  slot = { ..., name: tc.function?.name || '' };   // 首片就写进 slot
+  ...
+  } else if (tc.function?.name && !slot.name) {    // 却要求 name 为空才追加
+    slot.name += tc.function.name;                  // ← 首片非空时永远进不来
+  }
+  ```
+- **为什么**：`+=` 说明作者**预期名字会分片**到达；但 `!slot.name` 这个守卫让
+  除首片外的所有分片被静默丢弃
+- **影响**：上游分片发名字时，Anthropic 客户端拿到**截断的工具名** → 工具调用失败。
+  更麻烦的是 `content_block_start` 在**建槽时就发出去了**（`:1557`），
+  带的是当时那个半截名字 —— 所以修法不是把 `!slot.name` 去掉那么简单，
+  要么把工具块**缓冲到名字收齐**再发 `content_block_start`，要么在协议层容忍重发
+- **覆盖**：无用例
+
+### BUG-4 账本截断非原子（读代码确认，未实机触发）
+
+见第一轮 P1-1。触发需要正好在 `writeFileSync` 那一刻崩，概率低但不可逆。
+
+## 二、代理报告里**被我否掉**的一条
+
+- **「`localDay` 用 UTC 日期分桶」** —— **不成立**。
+  `bridge/workbuddy-bridge.mjs:1777` 用的是 `d.getFullYear() / getMonth() / getDate()`，
+  **本地日期**；紧邻的 `localHour` 注释还专门写了「**不用 UTC** —— 否则页面上的
+  「今天 13 时」会和用户墙上时钟错位」。第一轮我读到的是对的，这条不传播。
+
+## 三、代理报告里成立但**影响被高估**的一条
+
+- **限流桶 `bucket.recent` 无界增长** —— 代码成立：`push` 无条件执行（`:1007`），
+  而裁剪（`:977`）在 `if (RATE_LIMIT_RPM > 0)` 里面，默认关闭时永不裁剪。
+  但每个请求只存一个时间戳数字：一万次请求约 80KB，十万次约 800KB。
+  **是真的，但优先级该往后放**（P3 而不是 P2）。
+
+## 四、实测确认「写得很稳、不要动」的部分
+
+- **Anthropic 流式收尾**：三种上游都产出完整且正确的事件序列
+  （干净 / 夹 `event: ping` + SSE 注释 + 半截 JSON + 空 `choices` / 上游**不发 `[DONE]`**）——
+  全部 `message_start → content_block_start → content_block_delta → content_block_stop
+  → message_delta → message_stop`。这块比预期扎实得多。
+- 非法 JSON 体 → `400 invalid JSON body`；空体 → 同样 400；
+  `model` 非字符串 → `400 "model" must be a string`（本地拦下，不打上游）。
+- `usage` 字段是字符串 / 负数 / `1e30` → 落账本时收敛成 `0`（不会把垃圾写进统计）。
+
+## 五、这一轮的方法教训
+
+1. **`fetch` 发不出 `Host`** —— 用它测「畸形 Host」只会得到假阴性。
+   测协议层边界要用原始 socket。
+2. **协议路径要认准**：桥的上游是 `/v2/chat/completions`（不是 `/v1/...`），
+   客户端侧是 `/v1/chat/completions`（OpenAI）与 `/v1/messages`（Anthropic）。
+   我第一轮拿 OpenAI 路径去找 Anthropic 的 `message_stop`，得出「收尾事件丢失」的
+   错误结论 —— **协议混用会让探针自己造出假 bug**。
+3. **代理的结论要自己复核**：这一轮否掉了 1 条、下调了 1 条。报告里每条都标注了
+   「我复现过 / 仅读代码 / 未独立复现」。
