@@ -21,14 +21,14 @@
  * Security boundary: binds 127.0.0.1 only; never logs or persists a token or
  * any conversation content.
  */
-import { readFileSync, writeFileSync, appendFileSync, existsSync, readdirSync, statSync } from 'node:fs';
+import { readFileSync, writeFileSync, appendFileSync, existsSync, readdirSync, statSync, renameSync } from 'node:fs';
 import { createServer, request as httpRequest } from 'node:http';
 import { request as httpsRequest } from 'node:https';
 import { Agent as HttpAgent } from 'node:http';
 import { Agent as HttpsAgent } from 'node:https';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { createDecipheriv, createHash, randomUUID } from 'node:crypto';
+import { createDecipheriv, createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { spawnSync } from 'node:child_process';
 
@@ -67,7 +67,21 @@ const agentFor = (endpoint) => (String(endpoint).startsWith('https:') ? httpsAge
 
 const PORT = Number(process.env.WORKBUDDY_PORT || 8790);
 const HOST = process.env.WORKBUDDY_HOST || '127.0.0.1';
-const LOCAL_TOKEN = process.env.WORKBUDDY_LOCAL_TOKEN || ''; // optional: require a token on the local port
+/**
+ * 本地回环令牌。**永远非空** —— 这是认证闸门的前提。
+ *
+ * 曾经的写法是 `process.env.WORKBUDDY_LOCAL_TOKEN || ''`，配合闸门里的
+ * `if ((LOCAL_TOKEN || ...) && identifyClientId(req) === null)`，含义变成
+ * 「没配令牌就不校验」。而 `config.mjs` 那份默认值只在**控制台启动桥**时注入，
+ * 用户直接 `node bridge/workbuddy-bridge.mjs` 拿到的是空串 → 等于无鉴权：
+ * `/health`、`/v1/chat/completions` 对同机任意进程敞开（会真实消耗账号额度）。
+ *
+ * 现在：未显式配置时**自动生成随机令牌**并在启动日志打印，用户可从日志复制到客户端。
+ * 安全默认应当是「拒绝未授权」，不是「放行一切」。（已由 bridge.test.mjs
+ * 的「未配置 … 时不得静默放行」用例钉住。）
+ */
+const EXPLICIT_LOCAL_TOKEN = process.env.WORKBUDDY_LOCAL_TOKEN || '';
+const LOCAL_TOKEN = EXPLICIT_LOCAL_TOKEN || randomBytes(24).toString('base64url');
 /**
  * 客户端凭据分层（opt-in）：`WORKBUDDY_CLIENT_KEYS=逗号分隔的多把 key`。
  *
@@ -1708,7 +1722,20 @@ function recordRequest(entry) {
     if (usageLines.length > MAX_USAGE_LINES) {
       usageLines = usageLines.slice(-Math.floor(MAX_USAGE_LINES / 2));
       const text = `${usageLines.join('\n')}\n`;
-      writeFileSync(file, text);
+      /*
+       * **原子替换**：先写临时文件再 rename，不直接覆盖账本。
+       *
+       * 截断是「重写整份文件」，用 `writeFileSync(file, ...)` 的话，进程正好
+       * 在这时被杀 / 断电就会留下半份文件 —— 丢的是**用户自己的用量历史**，
+       * 而项目里没有第二份副本。同目录内 rename 是原子的（Windows 上也是），
+       * 崩在任何一步都不会破坏原文件。
+       *
+       * 这也是项目自己的标准：`lib/dsh.mjs` 写 dsh 配置是先备份再写。
+       * 账本这份数据比配置更没有第二份副本，不该比它更随意。
+       */
+      const tmp = `${file}.tmp`;
+      writeFileSync(tmp, text);
+      renameSync(tmp, file);
       usageBytes = Buffer.byteLength(text);
     } else {
       appendFileSync(file, `${line}\n`);
@@ -2656,9 +2683,25 @@ function identifyClientId(req) {
   }
   if (!token && typeof req.headers['x-api-key'] === 'string') token = req.headers['x-api-key'];
   if (!token) return null;
-  if (LOCAL_TOKEN && token === LOCAL_TOKEN) return 'local';
+  if (safeEqual(token, LOCAL_TOKEN)) return 'local';
   const hex = createHash('sha256').update(token).digest('hex');
   return CLIENT_KEY_HASHES.get(hex) || null;
+}
+
+/**
+ * 常量时间字符串比较。
+ *
+ * 为什么不能直接 `token === LOCAL_TOKEN`：JS 的字符串比较**短路**——
+ * 第一个不同的字符就返回，比较耗时与实际匹配长度成正比。本机进程可以反复
+ * 发请求、按返回时序逐字节恢复口令（`wb-local-bridge` 这种短口令尤其容易）。
+ * 走 timingSafeEqual 先比长度（长度不等直接 false，这个信息本身不敏感），
+ * 等长时定时比较。
+ */
+function safeEqual(a, b) {
+  const ba = Buffer.from(String(a), 'utf8');
+  const bb = Buffer.from(String(b), 'utf8');
+  if (ba.length !== bb.length) return false;
+  return timingSafeEqual(ba, bb);
 }
 
 // ── 响应观测：进程级计数 + 开销头（横切两件事，只包一次）──────────────────
@@ -2752,7 +2795,15 @@ async function handleRequest(req, res) {
     if (!originAllowed(req)) {
       return json(res, 403, { error: { message: 'workbuddy-bridge: cross-origin request rejected (this bridge serves local clients only)' } });
     }
-    if ((LOCAL_TOKEN || CLIENT_KEY_HASHES.size) && identifyClientId(req) === null) {
+    /*
+     * 令牌**始终必需**。
+     *
+     * 旧写法是 `if ((LOCAL_TOKEN || CLIENT_KEY_HASHES.size) && ...)` —— 未配置令牌时
+     * 整个分支不执行，等于「不配令牌就不鉴权」。LOCAL_TOKEN 现在永远非空
+     * （未配置时自动生成，见 LOCAL_TOKEN 定义），所以这里可以直接判 null。
+     * 保留 `CLIENT_KEY_HASHES.size` 只是为了让「只配了 client key」的语义清楚。
+     */
+    if (identifyClientId(req) === null) {
       return json(res, 401, { error: { message: 'workbuddy-bridge: bad or missing token' } });
     }
 
@@ -3363,6 +3414,18 @@ server.listen(PORT, HOST, () => {
   console.log(`client exe : ${atRestUsedExe || resolveWorkBuddyExe() || '未找到（设置 WORKBUDDY_APP_EXECUTABLE 指向 WorkBuddy.exe）'}`);
   console.log(`models     : ${FEATURED.map((m) => m.id).join(', ')}  (all models: /v1/models?all=1)`);
   console.log(`keep-alive : ${KEEPALIVE_MS > 0 ? `${Math.round(KEEPALIVE_MS / 1000)}s idle pool` : 'off'}`);
+  /*
+   * 未显式配置令牌时把自动生成的值打印出来。
+   *
+   * 只打印「本次生成的」：用户自己配了 `WORKBUDDY_LOCAL_TOKEN` 就不需要看这段，
+   * 也不该把用户的口令回显到日志里（日志可能被随手贴出去）。
+   * 前缀写成 `WORKBUDDY_LOCAL_TOKEN=` 是刻意的 —— 用户可以直接整行复制进 .env。
+   */
+  if (!EXPLICIT_LOCAL_TOKEN) {
+    console.log(`token      : 未配置 WORKBUDDY_LOCAL_TOKEN，已自动生成（重启会变）：`);
+    console.log(`             WORKBUDDY_LOCAL_TOKEN=${LOCAL_TOKEN}`);
+    console.log(`             要固定它，请把上面这行写进 .env；客户端就用这个值。`);
+  }
 
   // ── 连接预热：listen 后立刻向上游开一条 TLS 连接放进池子 ─────────────────
   // 首次对话请求就免去 DNS + TCP + TLS 握手（实测 ~150ms）。只预热、不发请求体；

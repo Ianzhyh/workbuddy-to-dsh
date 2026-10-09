@@ -373,9 +373,9 @@ quotaCache = { at: Date.now(), ttl: ..., value };  // 在途请求完成后无�
 | **BUG-2** 上游 200 但不是 SSE → 静默成功 | ✅ 已修 | `aggregateStream` 增加 `parsed` 计数（成功解析的 SSE 块数），两处调用点（OpenAI + Anthropic）在 `parsed === 0` 时记失败并回 502；用例**修前红（实际 200）→ 修后绿** |
 | **BUG-5** 空 bundles 判健康 | ✅ 已修 | 抽出 `bundlesAllInstalled()`（空 = 未知 ≠ 健康），新增 `lib/dsh.test.mjs` 3 条用例 |
 | **BUG-6** 探测三态混淆 | ✅ 已修 | `number` / `null`（确认没有）/ `undefined`（未知），调用方只在 `null` 时认定已释放 |
+| **BUG-4** 账本截断非原子 | ✅ 已修 | 改「写临时文件 + `renameSync`」原子替换；新增用例**第一次真正执行这条路径**（预填 2001 行 → 触发记账 → 断言只剩约一半、每行仍是合法 JSON、`.tmp` 不残留） |
+| **BUG-7** 积分缓存竞态 | ✅ 已修（**无用例**） | 加 `quotaGeneration` 代次：在途请求只在「自己那一代仍是当前代」时写回缓存；`invalidateQuotaCache()` 同时作废在途句柄。**测试缺口**：`fetchQuota` 是模块私有的，要构造这个时序得能替换 `bridgeFetch`，本轮没做 |
 | BUG-3 Anthropic 工具名分片 | ⬜ 待修 | 要先定「名字收齐再发 `content_block_start`」的缓冲策略 |
-| BUG-4 账本截断非原子 | ⬜ 待修 | temp + rename，与 `lib/dsh.mjs` 的「先备份再写」对齐 |
-| BUG-7 积分缓存竞态 | ⬜ 待修 | `invalidateQuotaCache()` 要同时作废在途结果（generation 计数） |
 | 第一轮：刷新单飞 / 背压 / `today()` / `persistRefreshed` 命名 | ⬜ 待修 | 见第一轮 |
 
 ## 修 BUG-2 时抓到的一次**假绿**

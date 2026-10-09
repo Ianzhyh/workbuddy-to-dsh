@@ -19,6 +19,52 @@
 
 ## [Unreleased]
 
+## [1.4.5] - 2026-10-09
+
+### Fixed
+
+**六条缺陷，来自一次「读代码 + 上真机灌输入」的排查（记录见 `docs/ALGORITHM-REVIEW.md`）。
+每条修复都配了会先变红的用例。**
+
+- **畸形 `Host` 头能把桥打死**（`bridge/workbuddy-bridge.mjs`）。
+  `handleRequest` 里 `new URL(req.url, 'http://' + req.headers.host)` 原先在 `try`
+  **之外**，而 `Host` 是客户端可控的 —— `Host: bad host with spaces` 让它抛
+  `ERR_INVALID_URL`，未捕获异常让 Node 直接退出进程（实测 `exitCode=1`）。
+  也就是说**任何能访问本机端口的进程，一条请求就能把桥打死**。
+  现在挪进 try/catch 按 400 挡下；`Host` 缺失时用 `127.0.0.1` 兜底。
+- **上游回 HTTP 200 但不是 SSE 时，桥报「空回答成功」**。
+  非流式路径在 `aggregateStream()` 之后**无条件**记 `ok: true` 并回 200 ——
+  上游给一坨 HTML（网关把错误包成 200）时，客户端拿到「结构完整但 content 为空」
+  的成功响应，账本记 `{"ok":true,"promptTokens":0,"completionTokens":0}`：
+  用户以为模型没说话，控制台的成功率还把它算作成功。
+  现在 `aggregateStream()` 返回 `parsed`（成功解析的 SSE 块数），
+  OpenAI 与 Anthropic 两条路径在 `parsed === 0` 时记失败并回 502。
+- **空插件列表被判「健康」**（`lib/dsh.mjs`）。`[].every(...)` 返回 `true`，
+  于是 profile 目录缺失、插件列表读不出来时反而报健康 —— 读不到任何东西却是绿点。
+  抽出 `bundlesAllInstalled()`：**空 = 未知 ≠ 健康**。
+- **「探测不出来」与「确认没有监听者」混为一谈**（`dashboard/server.mjs`）。
+  `probePortPid` 把命令缺失 / 超时 / 输出为空**都**返回 `null`，而调用方把 `null`
+  读作「端口已释放」→ 没有 `lsof` 的机器上停桥**从不真正校验**就报成功，
+  还让「SIGTERM 被忽略时升级 SIGKILL」那段永远不执行。
+  改成三态：`number`（有监听者）/ `null`（确认没有）/ `undefined`（未知）。
+- **账本截断不是原子写**（`bridge`）。超过 2000 条时重写整份文件用的是
+  `writeFileSync` 直接覆盖 —— 正好在这时被杀 / 断电就丢整份本地用量历史
+  （没有第二份副本）。改成「写临时文件 + `renameSync`」，与项目里
+  `lib/dsh.mjs` 写配置「先备份再写」的标准对齐。这条路径**此前从未被测试执行过**，
+  现在有用例覆盖。
+- **切账号后积分缓存会被在途请求覆盖**（`lib/diagnostics.mjs`）。
+  `invalidateQuotaCache()` 只清缓存、没管在途请求，而在途完成时**无条件**写回 ——
+  于是「轮询发起查询 → 用户切账号 → 在途完成」会把**上一个账号**的余额写回缓存，
+  控制台最多 60 秒显示旧账号的余额。加 `quotaGeneration` 代次解决。
+
+### 验收
+
+- 桥：**22 条用例全过**（新增 3 条：畸形 Host、上游非 SSE、账本截断）
+- `release:check` 六步全绿
+- 顺带发现并记录了一条**假绿**：用例第一版用默认假凭据，请求压根没走到 chat 路径，
+  `assert.ok(status >= 400)` 因为「凭据异常」的 500 而成立。教训写进了文档 ——
+  断言宽条件时必须确认失败来自被测路径。
+
 ## [1.4.4] - 2026-10-09
 
 ### Changed（重写，不是修补）
