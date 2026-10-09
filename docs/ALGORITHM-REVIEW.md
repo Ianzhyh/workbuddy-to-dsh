@@ -299,3 +299,64 @@
 同一个项目里，`lib/dsh.mjs` 写自己的配置文件会**先备份**，
 而桥写自己的用量账本（`bridge:1696` 截断）**既不备份也不原子** ——
 标准不一致，且账本那份数据没有第二份副本。这正是 P1-1 值得排第一的理由。
+
+---
+
+# 第四轮：服务端与库的复核（探索代理报告，逐条我亲自核过）
+
+代理报告 7 条，我按「能不能自己复现/自证」逐条核，**确认 3 条、否掉 2 条**（否掉的见第二、三轮）。
+以下 3 条我都读到了确切的代码逻辑，可以直接改。
+
+## BUG-5 空 `bundles` 被判「健康」（`lib/dsh.mjs:107`）
+
+```js
+out.bundlesOk = out.bundles.every((b) => b.installed);
+```
+
+`Array.prototype.every` 在**空数组**上返回 `true`。所以当 profile 目录缺失、
+插件列表读不出来、或上面那段 catch 吞掉异常之后 `bundles` 为空时，
+`bundlesOk` 反而是 `true` —— 读不到任何东西却被判成「健康」。
+**修法**：`out.bundles.length > 0 && out.bundles.every(...)`（空即未知，未知不该等于健康）。
+**覆盖**：`lib/find-dsh.test.mjs` 里没有空 bundles 的用例。
+
+## BUG-6 探测失败被当成「端口已释放」（`dashboard/server.mjs:645` 与 `:213`）
+
+`:213` 的注释写得很清楚：
+
+> 任何异常（命令不存在、超时、输出为空）都返回 null：对调用方来说
+> "探测不出来" 与 "没找到" 在轮询里是同一件事 —— **都表示还没释放/还不能关**。
+
+而调用方（`stopBridge` 的等待循环）是：
+
+```js
+if (!(await probePortPid(port))) { freed = true; break; }
+```
+
+**语义正好相反**：`null` 被当成「已释放」→ 立刻跳出循环。
+后果有两层：① 在没有 `lsof` 的 Linux 上 `probePortPid` 恒返回 `null` →
+停桥**从不真正校验**就报成功；② 循环提前退出后，下面
+`if (!freed && process.platform !== 'win32')` 的 **SIGKILL 升级永远不会执行** ——
+而那段代码存在的理由正是「POSIX 下 SIGTERM 被忽略时升级为 SIGKILL，
+否则重启会一直撞在旧进程上」。**注释与实现互相矛盾，实现这边是错的。**
+
+## BUG-7 切账号后积分缓存被在途请求覆盖（`lib/diagnostics.mjs:226` 与 `:244`）
+
+```js
+export function invalidateQuotaCache() {
+  quotaCache = { at: 0, ttl: 0, value: null };   // 只清缓存，没动 quotaInflight
+}
+...
+quotaCache = { at: Date.now(), ttl: ..., value };  // 在途请求完成后无条件写回
+```
+
+时序：轮询发起了一次积分查询（在途）→ 用户切账号（调用 `invalidateQuotaCache`）→
+**在途请求完成，把上一个账号的余额写回缓存** → 控制台最多 60 秒显示的是**旧账号的余额**。
+签到成功那条路径同理（余额刚变，显示的是变之前的值）。
+**修法**：`invalidateQuotaCache()` 里同时作废在途结果（一个自增的 generation，
+`fetchQuota` 写回前比对），而不是只清缓存。
+
+## 代理报告里我没能复现、暂不采信的两条
+
+- 「`settings.json` 非合法 JSON 时整块失败」—— 属于错误处理风格，不是可复现的缺陷，未采信；
+- 「按天分桶跨月/跨年错位」—— 第三轮的差分验证里，桶日期集合与账本实际日期**完全一致**，
+  没观察到错位；这条我倾向于是理论推演而非实测，暂不采信。
