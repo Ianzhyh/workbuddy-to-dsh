@@ -9,6 +9,16 @@
    ========================================================================== */
 
 :root {
+  /*
+   * 告诉浏览器「这一页现在是浅色的」，让**原生控件**跟着走。
+   *
+   * 为什么必须显式声明：本页主题靠 `[data-theme]` 属性切换，**不是** `prefers-color-scheme`
+   * —— 浏览器因此完全不知道页面已经是深色。后果实测过：深色主题下**未勾选**的复选框
+   * 被渲染成一枚纯白方块，压在 #111622 的面板上极其扎眼（`accent-color` 只管勾选态）。
+   * `color-scheme` 一并覆盖滚动条、原生下拉与自动填充的配色。
+   */
+  color-scheme: light;
+
   /* ── 1. 颜色规范 (Color Tokens) ─────────────────────────────────────── */
   /* 主题色系：纯粹、深邃、高质感的皇家蓝 (Solid Royal Blue) */
   --primary: #2563eb;
@@ -225,6 +235,9 @@
 
 /* ── 深色主题 (Dark Theme) ────────────────────────────────────────────── */
 [data-theme="dark"] {
+  /* 与 :root 的 color-scheme 配对：深色下让原生控件也走深色渲染（见 :root 的注释） */
+  color-scheme: dark;
+
   --primary: #3b82f6;
   --primary-hover: #60a5fa;
   --primary-active: #2563eb;
@@ -917,8 +930,14 @@ button.mini {
   padding: var(--space-3) var(--space-4);
   border-radius: var(--radius);
   border: 1px solid;
+  /*
+   * 左侧 3px 实色条：让「出事了」在滚动的页面里一眼可辨。
+   * 原来四条边同宽同色，告警条看起来只是「一个带底色的面板」，
+   * 而它其实是要用户**立刻处理**的东西。色条的颜色由 .fail / .warn 各自指定。
+   */
+  border-left-width: 3px;
   font-size: var(--fs-body);
-  box-shadow: var(--shadow-xs);
+  box-shadow: var(--shadow-card);
   animation: slideDown 0.22s var(--ease);
 }
 @keyframes slideDown {
@@ -933,11 +952,13 @@ button.mini {
 .alert.fail {
   background: var(--fail-soft);
   border-color: var(--fail-border);
+  border-left-color: var(--fail);
   color: var(--fail);
 }
 .alert.warn {
   background: var(--warn-soft);
   border-color: var(--warn-border);
+  border-left-color: var(--warn);
   color: var(--warn);
 }
 .alert .mini { flex: 0 0 auto; }
@@ -1261,8 +1282,15 @@ td {
  * **模型 id**，那些是文本，右对齐反而更难读。所以必须逐列标明，不能按字体一刀切。
  */
 td.num, th.num { text-align: right; }
+/*
+ * 行悬停：浅色下 --panel-hover(#fafbfc) 与白底几乎无差，扫读时看不出鼠标停在哪一行。
+ * 改成一抹极淡的主色 —— 有指示性，又明显轻于「选中态」（0.035 的那层）。
+ */
 tr:hover td {
-  background: var(--panel-hover);
+  background: rgba(37, 99, 235, 0.05);
+}
+[data-theme="dark"] tr:hover td {
+  background: rgba(59, 130, 246, 0.09);
 }
 tr:last-child td { border-bottom: none; }
 
@@ -1385,7 +1413,7 @@ select:hover {
 select:focus,
 .dd-trigger:focus-visible {
   border-color: var(--primary);
-  box-shadow: 0 0 0 2px var(--primary-subtle);
+  box-shadow: var(--ring-tight);
 }
 select:focus {
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%232563eb' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
@@ -1612,12 +1640,29 @@ input[type="checkbox"]:active {
   border-radius: var(--radius-sm);
   background: var(--panel-subtle);
   border: 1px solid var(--border-subtle);
+  /*
+   * 左侧留一条 3px 的状态位。
+   *
+   * 平时透明（占位，所以状态变化时不会有 2px 的横向跳动），只在 fail / warn 时点亮。
+   * 为什么需要它：这个面板的核心语义是「红色项不解决，模型在选择器里就不会出现」，
+   * 而这条信息原先只由第一列一枚 10px 的小圆点承担 —— 8 行平铺时扫读很容易漏掉。
+   * 用的是与顶部告警条同一套「左侧实色条」语言。
+   */
+  border-left: 3px solid transparent;
   align-items: center;
   transition: var(--transition-fast);
 }
+.diag-row:has(.s-fail) { border-left-color: var(--fail); }
+.diag-row:has(.s-warn) { border-left-color: var(--warn); }
+/*
+ * 悬停时**逐边**改色，不能用 `border-color` 简写 —— 简写会把上面点亮的左边条
+ * 一起重置成灰，hover 一下状态就没了。
+ */
 .diag-row:hover {
   background: var(--panel);
-  border-color: var(--border);
+  border-top-color: var(--border);
+  border-right-color: var(--border);
+  border-bottom-color: var(--border);
   transform: translateY(-1px);
 }
 .diag-row .label {
@@ -2087,8 +2132,13 @@ pre.log {
 .empty {
   color: var(--faint);
   font-size: var(--fs-body);
-  padding: var(--space-3) 0;
+  /*
+   * 空态是「这里暂时没有东西」，得给它留白才读得出是「空」而不是「没加载出来」。
+   * 原先上下各 12px，夹在面板里像一行被压扁的注释。
+   */
+  padding: var(--space-5) var(--space-4);
   text-align: center;
+  line-height: 1.7;
 }
 
 /* ── 17. 响应式布局优化 ──────────────────────────────────────────────── */

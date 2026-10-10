@@ -3108,6 +3108,9 @@ function onTrendGranChange(e) {
  *   xLabels  string[]
  *   opts     { height, ariaLabel, valueFmt }
  */
+/** 图表渐变 id 的自增序号：同一页多张图共存时避免 id 撞车（见 renderChart）。 */
+let chartGradSeq = 0;
+
 function renderChart(spec) {
   const kind = spec.kind;
   const series = spec.series || [];
@@ -3172,7 +3175,9 @@ function renderChart(spec) {
   }
 
   if (kind === 'bar' || kind === 'stackBar') {
-    const barW = Math.max(2, Math.min(34, bandW * 0.62));
+    // 上限从 34 提到 48：桶数少时（7 天视图只有 3~7 根）34px 的柱在 200px 宽的
+    // 槽位里显得又瘦又空，图表读起来像"缺了几根"。窄桶（30 天）仍由 bandW 决定。
+    const barW = Math.max(2, Math.min(48, bandW * 0.62));
     for (let i = 0; i < n; i += 1) {
       const cx = padL + bandW * (i + 0.5);
       let acc = 0;
@@ -3181,9 +3186,11 @@ function renderChart(spec) {
         const v = Number(series[si].values[i]) || 0;
         if (v <= 0) continue;
         const h = (v / top) * plotH;
+        // 圆角随柱高收缩：矮柱若固定给 4px 会圆成一颗胶囊，甚至整根消失
+        const rx = Math.min(4, h / 2, barW / 2);
         bars.push('<rect x="' + (cx - barW / 2).toFixed(1) + '" y="' + (padT + plotH - acc - h).toFixed(1)
           + '" width="' + barW.toFixed(1) + '" height="' + h.toFixed(1)
-          + '" fill="' + colorOf(series[si], si) + '" rx="2"/>');
+          + '" fill="url(#' + gid + '-' + si + ')" rx="' + rx.toFixed(1) + '"/>');
         acc += h;
       }
       const tip = xLabels[i] + '：' + series.map((s) => s.name + ' ' + fmt(Number(s.values[i]) || 0)).join(' · ');
