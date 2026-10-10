@@ -180,8 +180,23 @@ const WIN_LOCAL_APPDATA = process.env.LOCALAPPDATA
 const AUTH_DIRS = [
   process.env.WORKBUDDY_AUTH_DIR,
   WIN_LOCAL_APPDATA && join(WIN_LOCAL_APPDATA, 'CodeBuddyExtension', 'Data', 'Public', 'auth'),
-  process.env.HOME && join(process.env.HOME, 'Library', 'Application Support', 'CodeBuddyExtension', 'Data', 'Public', 'auth'),
-  process.env.HOME && join(process.env.HOME, '.local', 'share', 'CodeBuddyExtension', 'Data', 'Public', 'auth'),
+  /*
+   * macOS / Linux 这两条**必须用 `HOME_FOR_AUTH`（带 `homedir()` 兜底）**，
+   * 不能用裸 `process.env.HOME`。
+   *
+   * 现场（CI 矩阵实测，macOS 上红）：`LOCALAPPDATA` / `HOME` / `XDG_DATA_HOME`
+   * 三者全空时（精简环境、计划任务启动、CI），上面第二条在**非 Windows 平台**
+   * 上直接是空串，而这两条又都依赖 `process.env.HOME` —— 于是整个 AUTH_DIRS 为空，
+   * 末尾 `AUTH_DIRS[0] || '.'` 拼出**相对路径** `workbuddy-desktop.info`。
+   * 相对路径按 cwd 解析，于是「桥找不到登录文件」会表现成「用户没登录」，
+   * 真凶却是环境变量缺失 —— 极难查。
+   *
+   * Windows 之所以没暴露这个问题：`WIN_LOCAL_APPDATA` 会退到
+   * `HOME_FOR_AUTH/AppData/Local`（那条**已经有兜底**）。同一个文件里两套写法不一致，
+   * 于是只在矩阵里才现形。顺序不变 —— Windows 上第二条仍先命中，这两条只是兜底。
+   */
+  join(HOME_FOR_AUTH, 'Library', 'Application Support', 'CodeBuddyExtension', 'Data', 'Public', 'auth'),
+  join(HOME_FOR_AUTH, '.local', 'share', 'CodeBuddyExtension', 'Data', 'Public', 'auth'),
   process.env.XDG_DATA_HOME && join(process.env.XDG_DATA_HOME, 'CodeBuddyExtension', 'Data', 'Public', 'auth'),
 ].filter(Boolean);
 
