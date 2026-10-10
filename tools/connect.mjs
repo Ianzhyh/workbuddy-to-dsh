@@ -4,8 +4,14 @@
  *
  *   node tools/connect.mjs status                        列出三个客户端的状态与将要改动什么
  *   node tools/connect.mjs apply <客户端> [--model <id>]   写入（codex | claude | opencode）
- *   node tools/connect.mjs undo <客户端>                   撤销
+ *   node tools/connect.mjs profile <客户端>                写 profile 文件（**不动基础配置**，用 codex -p <name> 启动）
+ *   node tools/connect.mjs native <客户端>                 切回客户端自己的模型（记录与目录留着）
+ *   node tools/connect.mjs bridge <客户端>                 从原始模型切回桥（沿用记录里那批模型）
+ *   node tools/connect.mjs undo <客户端>                   撤销（拆掉记录，与我们建的目录文件）
  *   node tools/connect.mjs verify <客户端> [--model <id>]  静态读回 + 拿配置里的令牌真打一次桥
+ *
+ * `native` 与 `undo` 的区别：前者是**换挡**（记录、目录文件都留着，随时切回桥），
+ * 后者是**拆掉**（记录归档、目录文件删除，再想用桥得重新接入）。
  *
  * 与控制台的「一键接入」是**同一套实现**（`lib/client-connect.mjs`），
  * 备份、幂等、撤销的行为完全一致 —— 不存在"命令行写的"和"控制台写的"两份不同结果。
@@ -22,9 +28,11 @@ import {
   contextForClient,
   findClient,
   planClient,
+  recordedConnect,
   resolveBackupRoot,
   resolveModelChoice,
   resolveSelection,
+  switchClientMode,
   undoClient,
   verifyAgainstBridge,
   verifyWritten,
@@ -102,24 +110,78 @@ async function main() {
     return;
   }
 
-  if (command === 'apply' || command === 'undo') {
-    const client = findClient(target);
+  if (command === 'apply' || command === 'undo' || command === 'native' || command === 'bridge' || command === 'profile') {
+    /*
+     * `profile <客户端>` = 写那个客户端的 **profile 文件**（目前只有 Codex 有这条路，
+     * 见 `CONNECT_CLIENTS` 里 `codex-profile` 的说明）。与 `apply` 的区别只有一个：
+     * **基础配置一个字节都不动**，用户用 `codex -p workbuddy` 启动。
+     * 所以它复用 apply 的全部逻辑，只是目标换成了 profile 那份文件。
+     */
+    const resolved = command === 'profile' && target ? `${target}-profile` : target;
+    const client = findClient(resolved);
     if (!client) {
       console.error(`不认识的客户端：${target}。可选：${CONNECT_CLIENTS.map((c) => c.id).join(' / ')}`);
       process.exit(1);
     }
+    if (command === 'profile' && !client.profileFor) {
+      console.error(`${target} 没有 profile 通道（目前只有 Codex 有：codex -p <name>）。`);
+      process.exit(1);
+    }
+    /*
+     * 模式切换。`native` **不碰网络**：它只是按记录把我们接管过的键还原，
+     * 桥没起、令牌已经失效都不影响 —— 而那恰恰是用户最需要它的时刻
+     * （"我暂时不想走桥了"）。所以它必须在 `buildConnectBase()` 之前就返回。
+     */
+    if (command === 'native' || command === 'bridge') {
+      let r;
+      if (command === 'native') {
+        r = switchClientMode(resolved, 'native');
+      } else {
+        const base = await buildConnectBase();
+        // 沿用记录里上次接的那批：用户不必重新勾一遍；显式给了就以显式为准
+        const rec = recordedConnect(resolved);
+        const chosen = resolveModelChoice(base, client, chosenModel || rec.model);
+        const selection = resolveSelection(base, client, chosenModels || rec.models);
+        const bad = assertModelKnown(chosen, base) || assertModelsKnown(selection, base);
+        if (bad) { console.error(bad); process.exit(1); }
+        r = switchClientMode(resolved, 'bridge', contextForClient(base, resolved, chosen, selection));
+      }
+      if (!r.ok) { console.error(`切换失败：${r.error}`); process.exit(1); }
+      console.log(r.changed
+        ? (command === 'native' ? '已切回客户端自己的模型。' : '已切回桥的模型。')
+        : (r.message || '无需改动。'));
+      if (r.backup) console.log(`原文件已备份到：${r.backup}`);
+      if (r.backupHardened && r.backupHardened.ok === false) {
+        console.error(`警告：备份目录的权限没能收紧（${r.backupHardened.reason || ''}）`);
+        console.error('  → 备份是"写之前的整份配置"，从第二次写入起里面就有令牌；同机其它用户可能读到它。');
+      }
+      if (r.verify && !r.verify.ok) console.error(`静态自检未通过：${r.verify.reason || ''}`);
+      if (r.auth) {
+        console.log(r.auth.ok
+          ? `端到端验证通过：拿配置里的令牌连上了桥（${r.auth.models} 个模型）。`
+          : `端到端验证没通过：${r.auth.reason || ''}`);
+        if (!r.auth.ok) process.exit(2);
+      }
+      if (r.catalog && r.catalog.kept) {
+        console.log(`模型目录文件保留在：${r.catalog.path}`);
+        console.log('  （它已不再被引用；切回桥时可直接复用。想连文件一起清掉就用 undo）');
+      }
+      return;
+    }
+
     const base = await buildConnectBase();
 
-    if (command === 'apply') {
+    // `profile` 与 `apply` 是同一套写入流程，只是目标换成了 profile 文件
+    if (command === 'apply' || command === 'profile') {
       // 没指定就沿用文件里那批：否则「重新写入」会把用户自己的选择改掉
       const chosen = resolveModelChoice(base, client, chosenModel);
       const selection = resolveSelection(base, client, chosenModels);
       const badModel = assertModelKnown(chosen, base) || assertModelsKnown(selection, base);
       if (badModel) { console.error(badModel); process.exit(1); }
-      const context = contextForClient(base, target, chosen, selection);
+      const context = contextForClient(base, resolved, chosen, selection);
       console.log(`接入模型: ${context.models.map((m) => m.id).join(', ')}（默认 ${context.model}）`);
       // 与控制台同一套确认流程：把要改什么摆出来，再动手
-      const plan = planClient(target, context);
+      const plan = planClient(resolved, context);
       if (plan.error) { console.error(plan.error); process.exit(1); }
       /*
        * 「无需改动」要**连目录一起看**：`model_catalog_json` 早就写对时 config 一个字都不用改，
@@ -138,11 +200,27 @@ async function main() {
       }
       console.log('');
 
-      const r = applyClient(target, context);
+      const r = applyClient(resolved, context);
       if (!r.ok) { console.error(`写入失败：${r.error}`); process.exit(1); }
       if (!r.changed) { console.log('没有改动 —— 已经是接入状态。'); return; }
       console.log('已写入。');
       if (r.backup) console.log(`原文件已备份到：${r.backup}`);
+      /*
+       * profile 通道要把「怎么用」说出来 —— 用户照着敲的那一句 + 一个必须知道的限制。
+       * 不说的话，他写完了却不知道下一步该干什么（而桌面应用又不吃这个开关）。
+       */
+      if (client.profileFor) {
+        console.log('');
+        console.log(`用 ${client.profileName} 这个 profile 启动即可：`);
+        console.log(`  codex -p ${client.profileName}`);
+        console.log(`（你的 ${client.profileFor === 'codex' ? 'config.toml' : '基础配置'} 一个字节都没动；`
+          + `不想要了就删掉这个文件，或执行 connect undo ${resolved}）`);
+        console.log('注意：桌面应用不接受命令行开关，这条通道只对命令行生效。');
+      }
+      if (r.backupHardened && r.backupHardened.ok === false) {
+        console.error(`警告：备份目录的权限没能收紧（${r.backupHardened.reason || ''}）`);
+        console.error('  → 备份是"写之前的整份配置"，从第二次写入起里面就有令牌；同机其它用户可能读到它。');
+      }
       /*
        * 被跳过的键要说出来。`"env": []` 这类中间层是用户自己的数据，我们**不覆盖**它，
        * 于是那几个键没写进去 —— 只报"已写入"等于骗人：下次请求失败时，
@@ -175,12 +253,20 @@ async function main() {
       return;
     }
 
-    const r = undoClient(target);
+    const r = undoClient(resolved);
     if (!r.ok) { console.error(`撤销失败：${r.error}`); process.exit(1); }
     console.log(r.removed
       ? `已撤销（该文件原本不存在，已一并删除）：${r.path}`
       : `已撤销：${r.path}`);
     if (r.backup) console.log(`当时的原始备份还在：${r.backup}`);
+    /*
+     * 目录文件没删掉要说。实测它在 Windows 上会被杀毒实时扫描短暂占用而删不掉
+     * （`rmSync` 抛 EBUSY），而撤销照样报成功 —— 不说的话用户只能自己 `ls` 才发现。
+     */
+    if (r.catalog && r.catalog.error) {
+      console.error(`警告：模型目录文件没能删掉：${r.catalog.path}（${r.catalog.error}）`);
+      console.error('  → 它已经不被任何配置引用了，手动删掉即可。');
+    }
     return;
   }
 
@@ -206,7 +292,7 @@ async function main() {
     return;
   }
 
-  console.error('用法：node tools/connect.mjs [status | apply <客户端> [--model <id>] [--models a,b,c] | undo <客户端> | verify <客户端> [--model <id>] [--models a,b,c]]');
+  console.error('用法：node tools/connect.mjs [status | apply <客户端> [--model <id>] [--models a,b,c] | profile <客户端>（写 profile 文件，不动基础配置） | native <客户端> | bridge <客户端> [--model <id>] [--models a,b,c] | undo <客户端> | verify <客户端> [--model <id>] [--models a,b,c]]');
   console.error(`客户端：${CONNECT_CLIENTS.map((c) => c.id).join(' / ')}`);
   process.exit(1);
 }

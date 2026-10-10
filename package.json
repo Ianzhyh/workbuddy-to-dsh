@@ -61,7 +61,8 @@
     "panel:i18n": "node dsh-plugin/tests/panel-i18n.mjs",
     "panel:check": "node dsh-plugin/tests/panel-render.mjs && node dsh-plugin/tests/panel-i18n.mjs",
     "verify:release": "node tools/dev/verify-release.mjs",
-    "check:i18n": "node tools/dev/check-i18n-coverage.mjs"
+    "check:i18n": "node tools/dev/check-i18n-coverage.mjs",
+    "check:opencode": "node tools/check-opencode-config.mjs"
   },
   "keywords": [
     "deepseek-harness",

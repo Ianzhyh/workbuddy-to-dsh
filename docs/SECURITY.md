@@ -80,6 +80,44 @@ WorkBuddy.exe（以 ELECTRON_RUN_AS_NODE 运行）
 > 唯一的拦阻是第 1 条的令牌。所以令牌绝不能是可猜的固定值 —— 这正是上面
 > 把默认值改成随机的原因。
 
+### 控制台自己也是一个端点（知道这条，你才能正确评估风险）
+
+控制台（`127.0.0.1:8792`）**没有身份认证**。其中 `GET /api/connect` /
+`GET /api/clients` 会返回**桥的令牌**（面板要显示与复制它），`/api/diagnose` 与
+`/api/models?refresh=1` 会**真的干活**（跑诊断、强制打上游）。
+
+自 2026-10-10 起，这几类接口和写操作一样要求带自定义头 `x-workbuddy-panel: 1`
+（控制台页面每个请求都自动带；跨站请求带不上自定义头，会先被 CORS 预检挡住）：
+
+```cmd
+curl -H "x-workbuddy-panel: 1" http://127.0.0.1:8792/api/connect
+:: 不加这个头 → 403 missing x-workbuddy-panel header
+```
+
+> **这挡的是"任意本机进程一句 curl 就拿走令牌"**，挡不住"能读你文件的进程"——
+> 后者是同一台机器上的信任边界，见下面的风险声明。Windows 上 127.0.0.1
+> **不按用户隔离**，所以共用机器上更要谨慎。
+
+**多用户机器上的建议**：不要在共用机器上让控制台/桥常驻；用完就关
+（`启动.cmd` 起的进程关掉窗口即可）。完整评估与未做的两步见
+[客户端接入审计](CLIENT-CONNECT-AUDIT.md) 的 R2。
+
+### 接入备份里也有令牌
+
+「一键接入」每次写入前会把客户端配置**整份备份**到
+`.backup/client-configs/<客户端>/`（或 `%USERPROFILE%\.workbuddy-bridge\client-configs\`）。
+从第二次写入起，备份里就带着上一次写进去的令牌；撤销记录（`applied.json`）的
+`restore.section` 也可能带着更早的令牌。这些文件与客户端配置**同样敏感** ——
+2026-10-10 起本项目会在写入后自动收紧该目录的权限（Windows 用 `icacls /T`，
+POSIX 用 0700/0600），并如实回报结果。
+
+自查一行：
+
+```cmd
+icacls "%USERPROFILE%\.workbuddy-bridge\client-configs" /T
+:: 出现 Authenticated Users / Users / Everyone → 没收紧，建议手工处理
+```
+
 ---
 
 ## 你会看到的敏感信息
@@ -92,6 +130,8 @@ WorkBuddy.exe（以 ELECTRON_RUN_AS_NODE 运行）
 | `~/.dsh/.credentials.yaml` | 各 provider 的 API key（含本项目写入的占位值） |
 | `~/.workbuddy/keyblob` | 客户端主密钥的包裹信息 |
 | `dsh-plugin/.bridge-token` | 本地回环令牌（随机生成；已 gitignore） |
+| `~/.codex/config.toml`、`~/.claude/settings.json`、`opencode.json` | 一键接入写进去的**回环令牌**（写入后自动收紧权限） |
+| `.backup/client-configs/**` | 上述配置的**整份备份**（含历史令牌；已自动收紧） |
 
 `.gitignore` 已排除 `*.info`、`.env`、`*.bak-*`、`.bridge-token` 等模式。
 

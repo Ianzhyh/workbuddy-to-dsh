@@ -52,6 +52,16 @@
           <svg id="themeIconSun" class="ic-off" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
           <svg id="themeIconMoon" class="ic-on" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
         </button>
+        <!--
+          配色方案选择器。用「一排色点」而不是下拉文字：选颜色这件事，
+          色块本身比颜色名直观得多（而且颜色名要翻译五遍）。
+        -->
+        <div class="accentpick">
+          <button type="button" id="accentToggle" class="icon-btn" title="配色方案" aria-label="配色方案" aria-haspopup="menu" aria-expanded="false">
+            <span class="accentdot" id="accentDot"></span>
+          </button>
+          <div class="accentmenu" id="accentMenu" role="menu" hidden></div>
+        </div>
         <button id="refreshBtn">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:14px;height:14px"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
           刷新
@@ -127,7 +137,7 @@
   <section class="panel" data-section="overview">
     <h2>账号 <span class="spacer"></span><span class="stamp" id="accountsStamp"></span></h2>
     <p class="hint">登录目录下有多个账号快照时，可切换桥使用哪一个。切换会自动重启桥，并清空上一个账号的体检结论。</p>
-    <div id="accountList"><div class="empty">正在读取…</div></div>
+    <div id="accountList"><div class="skeleton" role="status" aria-label="正在读取…"><i style="width:70%"></i><i style="width:92%"></i><i style="width:58%"></i></div></div>
   </section>
 
   <section class="panel" data-section="overview">
@@ -141,13 +151,13 @@
       <button class="mini" id="usageCsvBtn">导出 CSV</button>
       <button class="mini danger" id="usageClearBtn">清空账本</button>
     </div>
-    <div id="usageBox"><div class="empty">加载中…</div></div>
+    <div id="usageBox"><div class="skeleton" role="status" aria-label="加载中…"><i style="width:100%"></i><i style="width:88%"></i><i style="width:94%"></i><i style="width:76%"></i></div></div>
   </section>
 
   <section class="panel" data-section="overview">
     <h2>每日签到 <span class="spacer"></span><span class="stamp" id="checkinStamp"></span></h2>
     <p class="hint">领取当天的签到积分。签到的判定与奖励由上游决定，重复签到会被识别为"今天已签"而不是失败。</p>
-    <div id="checkinBox"><div class="empty">正在读取…</div></div>
+    <div id="checkinBox"><div class="skeleton" role="status" aria-label="正在读取…"><i style="width:64%"></i><i style="width:80%"></i><i style="width:52%"></i></div></div>
   </section>
 
   <section class="panel" data-section="overview">
@@ -162,7 +172,7 @@
       <button class="mini" id="exportReqBtn" title="导出当前筛选与条数下的明细">导出 CSV</button>
       <button class="mini" id="reqRefreshBtn">刷新</button></h2>
     <div id="reqFilterChip"></div>
-    <div id="reqBox"><div class="empty">加载中…</div></div>
+    <div id="reqBox"><div class="skeleton" role="status" aria-label="加载中…"><i style="width:96%"></i><i style="width:84%"></i><i style="width:90%"></i><i style="width:72%"></i><i style="width:88%"></i></div></div>
   </section>
 
   <section class="panel" data-section="playground">
@@ -190,7 +200,7 @@
       <b>Anthropic</b>（<code>/v1/messages</code>，Claude Code 走这条）与
       <b>Responses</b>（<code>/v1/responses</code>，Codex 走这条，协议由桥转换）。
       下面三个值填进客户端即可，点一下就能复制。</p>
-    <div id="clientsBox"><div class="empty">正在读取…</div></div>
+    <div id="clientsBox"><div class="skeleton" role="status" aria-label="正在读取…"><i style="width:66%"></i><i style="width:90%"></i><i style="width:74%"></i></div></div>
   </section>
 
   <section class="panel" data-section="playground">
@@ -813,6 +823,12 @@ const I18N_EN = {
   '控制台异常': 'Console error',
   '切换深色/浅色主题': 'Toggle dark / light theme',
   '切换语言': 'Switch language',
+  '配色方案': 'Accent colour',
+  '蓝（默认）': 'Blue (default)',
+  '陶土': 'Terracotta',
+  '苔绿': 'Moss',
+  '雾紫': 'Violet',
+  '青绿': 'Teal',
   '全部面板': 'All panels',
   '概览与用量': 'Overview & usage',
   '可用模型': 'Available models',
@@ -1255,6 +1271,32 @@ const I18N_EN = {
   '已接入，需重新写入': 'connected, needs a re-write',
   '已接入（非本控制台写入）': 'connected (not written by this console)',
   '已接入，验证未通过': 'connected, check failed',
+  // 模式切换（走桥 / 客户端自己的模型）
+  '模式': 'Mode',
+  '正在走桥': 'Using the bridge',
+  '切回原始模型': "Use the client's own models",
+  '已切回原始模型': "Using the client's own models",
+  '客户端自己的模型': "The client's own models",
+  '切到桥的模型': 'Use the bridge models',
+  '已切回原始模型。': "Switched back to the client's own models.",
+  '已切到桥的模型。': 'Switched to the bridge models.',
+  '没有改动。': 'Nothing to change.',
+  '模型目录文件保留在：': 'The model catalog file is kept at: ',
+  '备份目录的权限没能收紧：': 'Could not tighten permissions on the backup directory: ',
+  '重启该客户端后生效。': 'Restart the client for this to take effect.',
+  '切回这个客户端自己的模型？': "Switch back to this client's own models?",
+  '切到桥的模型？': 'Switch to the bridge models?',
+  '写入前会整份备份原文件。': 'The original file is backed up in full before writing.',
+  '切回原始模型后，这个客户端打开时用回它自己原来的模型；我们那份模型目录文件会留在磁盘上（不再被引用），随时能切回来。想连文件一起清掉就用「撤销接入」。':
+    "After switching back, the client opens with its own original model. Our model catalog file stays on disk (no longer referenced), so you can switch back at any time. Use \"Undo\" if you want the file removed as well.",
+  '现在用的是这个客户端自己的模型，配置里没有桥的设置。切到桥的模型会按当前令牌与模型重新写入（沿用上次接的那批）。':
+    'This client is currently using its own models; the config has no bridge settings. Switching to the bridge rewrites it with the current token and models (reusing the set you connected last time).',
+  '（已不再被引用，切回桥时可直接复用；想连文件一起清掉就用「撤销接入」）':
+    '(no longer referenced, and reused if you switch back to the bridge. Use "Undo" to remove the file as well.)',
+  '配置里我们接管过的那几个键会按记录还原成接入之前的样子；模型目录文件留在磁盘上（不再被引用）。随时可以切回来。':
+    'The keys we took over are restored to their pre-setup values from the record; the model catalog file stays on disk (no longer referenced). You can switch back at any time.',
+  '会用当前的令牌与模型重新写入这份配置（沿用上次接的那批模型）。':
+    'The config is rewritten with the current token and models (reusing the set you connected last time).',
   '验证接入': 'Verify',
   '正在验证…': 'checking…',
   '没有得到静态自检的结论。': 'No static-check result was returned.',
@@ -1269,6 +1311,8 @@ const I18N_EN = {
     'Clients marked "not verified locally": the write logic has round-trip tests, but this machine does not have that client installed, so there is no way to promise the client accepts this config.',
   '桥未运行：写入照样能做，但写完的「验证」一定失败。先点上方「启动桥服务」。':
     'The bridge is not running: writing still works, but the check afterwards will fail. Start the bridge first (button above).',
+  '桥未运行：写入照样能做，但写完的「验证」一定失败。模型候选用的是上次抓到的目录，可能已经过期 —— 所以也无法保证这些模型现在还存在。先点上方「启动桥服务」。':
+    'The bridge is not running: writing still works, but the check afterwards will fail. The model candidates come from the last catalog we fetched and may be out of date, so we cannot promise those models still exist. Start the bridge first (button above).',
   '桥在运行，但拒绝了控制台持有的令牌（两边令牌不一致）：照现在写进客户端的配置会连不上。点上方「重启桥」让桥按控制台这份令牌重启，再点「重新读取」。':
     'The bridge is running but rejected the token this console holds (the two tokens differ): clients written now would not connect. Use "Restart bridge" above so the bridge comes back up with this console\'s token, then hit "Reload".',
   '接入模型：': 'Model: ',
@@ -1285,6 +1329,31 @@ const I18N_EN = {
   '搜索模型…': 'Search models…',
   '没有匹配的模型': 'No model matches',
   '设为主模型': 'Set as default model',
+  // 接入方式（Codex 的 profile 通道）
+  '不改我的配置（可选）': "Without touching my config (optional)",
+  'profile 已写入': 'profile written',
+  '写入 profile 文件': 'Write profile file',
+  '删除 profile 文件': 'Delete profile file',
+  '写到下面这个文件，用 profile 启动即可 —— 你的 config.toml 一个字节都不动：':
+    'Written to the file below; launch with the profile — your config.toml is left untouched byte for byte:',
+  '文件：': 'File: ',
+  '启动：': 'Launch: ',
+  '注意：桌面应用不接受命令行开关，这条通道只对命令行生效。':
+    'Note: the desktop app does not accept CLI flags, so this channel is for the command line only.',
+  '这个文件已经存在，但不是我们写的 —— 写入前会整份备份它。':
+    'This file already exists and was not written by us — it will be backed up in full before writing.',
+  '写入 profile 文件？': 'Write the profile file?',
+  '删除 profile 文件？': 'Delete the profile file?',
+  '这份文件是给 `codex -p` 用的，你的 config.toml 一个字节都不会动。':
+    'This file is for `codex -p`; your config.toml is left untouched byte for byte.',
+  '只删这份 profile 文件，你的 config.toml 与 Codex 那一行的接入都不受影响。':
+    'Only this profile file is deleted; your config.toml and the Codex row are unaffected.',
+  '模型目录文件没能删掉：': 'The model catalog file could not be deleted: ',
+  '它已经不被任何配置引用了，手动删掉即可（多半是被别的程序临时占用）。':
+    'Nothing references it any more, so you can delete it by hand (it was probably locked briefly by another program).',
+  '已设为主模型：': 'Default model set to: ',
+  '它就是客户端打开时用的那个模型；点「重新写入」后生效。':
+    'That is the model the client opens with; click "Write" to apply.',
   '★ 是主模型（客户端打开时用的那个）；勾选几个就接几个，上游所有可用模型都能加。':
     '★ marks the default model (the one the client opens with). Tick as many as you like — every model the upstream offers can be added.',
   '接入之后可以在这里验证：静态读回 + 拿配置里的令牌真打一次桥。':
@@ -4787,9 +4856,17 @@ function toggleModelDetail(id, btn) {
   openDetailId = id;
 }
 
-// Esc 关闭；点空白也关闭（点详情行内部或 ⓘ 按钮本身不关）
+/*
+ * Esc 关掉"当前展开的东西"。
+ *
+ * **一次只关一个**：展开的层级可能不止一层（模型详情 / 接入面板的客户端详情 / 下拉），
+ * 一次全关会让用户丢失上下文 —— 所以按"最后打开的先关"的顺序，关掉一个就 return。
+ * 这条对应界面规范里"每个可交互元素都要能被键盘走到、也要能被键盘退出来"。
+ */
 document.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape' && openDetailId) closeModelDetail();
+  if (e.key !== 'Escape') return;
+  if (openDetailId) { closeModelDetail(); return; }
+  if (connectOpen) { connectOpen = null; renderClients(); return; }
 });
 document.addEventListener('click', (e) => {
   if (!openDetailId) return;
@@ -5342,17 +5419,37 @@ function withViewTransition(mutate) {
   }
 }
 
+/*
+ * 主题：「跟随系统」的准确含义是 —— **用户没表态之前一直跟着系统走**，
+ * 表态之后才以用户为准。
+ *
+ * 原先的写法是 `saved || (prefersDark ? 'dark' : 'light')` 然后无条件
+ * `localStorage.setItem`。方向对了，但**第一次访问就把"跟随系统"固化成
+ * "记住这一次"**：用户在系统里切了深色，页面不会跟；而且从此再也回不到
+ * 跟随状态。所以初始化时**不落盘**，只有用户亲手点过切换按钮才落盘。
+ *
+ * 另外挂一个 matchMedia 监听：只要还没落盘（用户没表过态），系统主题一变就跟着变。
+ */
+const THEME_KEY = 'wb.theme';
+const darkQuery = window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)') : null;
+
 function initTheme() {
-  const saved = localStorage.getItem('wb.theme');
-  const prefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
-  const theme = saved || (prefersDark ? 'dark' : 'light');
+  const saved = localStorage.getItem(THEME_KEY);
   // 首次应用**不做过渡**：页面还没画出来，没有「旧的一帧」可交叉淡化
-  commitTheme(theme);
+  commitTheme(saved || (darkQuery && darkQuery.matches ? 'dark' : 'light'), { persist: false });
+  if (darkQuery && darkQuery.addEventListener) {
+    darkQuery.addEventListener('change', (e) => {
+      // 用户已经表过态了，不覆盖他的选择
+      if (localStorage.getItem(THEME_KEY)) return;
+      applyTheme(e.matches ? 'dark' : 'light', { persist: false });
+    });
+  }
 }
 /** 只改状态，不带动画。切主题与初始化共用，保证两条路径的落点完全一致。 */
-function commitTheme(theme) {
+function commitTheme(theme, opts) {
   document.documentElement.setAttribute('data-theme', theme);
-  localStorage.setItem('wb.theme', theme);
+  // 只有用户**亲手**切换才记住；跟随系统而来的主题不落盘，否则就"跟不动"了
+  if (!opts || opts.persist !== false) localStorage.setItem(THEME_KEY, theme);
   const isDark = theme === 'dark';
   const sun = $('themeIconSun');
   const moon = $('themeIconMoon');
@@ -5364,18 +5461,115 @@ function commitTheme(theme) {
     moon.classList.toggle('ic-off', isDark);
   }
 }
-function applyTheme(theme) {
+function applyTheme(theme, opts) {
   // 首次落地（还没有 data-theme）直接改；之后的每次切换走整页交叉淡化
-  if (!document.documentElement.hasAttribute('data-theme')) { commitTheme(theme); return; }
-  withViewTransition(() => commitTheme(theme));
+  if (!document.documentElement.hasAttribute('data-theme')) { commitTheme(theme, opts); return; }
+  withViewTransition(() => commitTheme(theme, opts));
 }
 const themeBtn = $('themeToggle');
 if (themeBtn) {
   themeBtn.onclick = () => {
     const current = document.documentElement.getAttribute('data-theme') || 'light';
-    applyTheme(current === 'dark' ? 'light' : 'dark');
+    // 用户亲手切换 → 落盘，从此不再跟随系统
+    applyTheme(current === 'dark' ? 'light' : 'dark', { persist: true });
   };
 }
+
+// ── 配色方案 ─────────────────────────────────────────────────────────────
+/**
+ * 五套强调色方案。**全部取自 Claude / Anthropic 官方色板**，不另造色：
+ *   Windstorm 蓝 · Peachy Feeling 陶土 · Moss Gardens 苔绿
+ *   Magic Carpet 雾紫 · Emerald Oasis 青绿
+ *
+ * 每套的具体令牌值（浅色 + 深色、共九个）写在 style.css 末尾的
+ * 「强调色方案」一节里，按对比度推导过。这里只管**选哪一套**。
+ *
+ * 为什么用 `data-accent` 属性而不是换一整份样式表：所有组件都已经在用
+ * `var(--primary*)`，所以覆盖这批令牌就够了，**没有任何组件需要知道自己
+ * 有配色方案这回事**。默认方案（蓝）不需要属性 —— 它就是 :root 里的值，
+ * 所以用户选了"蓝"时把属性设成 `blue` 也行（没有对应规则，自然回落到默认）。
+ */
+const ACCENT_KEY = 'wb.accent';
+const ACCENTS = [
+  { id: 'blue', label: '蓝（默认）', dot: '#6a9bcc' },
+  { id: 'terracotta', label: '陶土', dot: '#d97757' },
+  { id: 'moss', label: '苔绿', dot: '#788c5d' },
+  { id: 'violet', label: '雾紫', dot: '#827dbd' },
+  { id: 'teal', label: '青绿', dot: '#629887' },
+];
+
+function currentAccent() {
+  const a = document.documentElement.getAttribute('data-accent');
+  return ACCENTS.some((x) => x.id === a) ? a : 'blue';
+}
+
+/** 把当前方案的色点画在按钮上 —— 按钮本身就是"现在是什么颜色"的指示器。 */
+function syncAccentDot() {
+  const dot = $('accentDot');
+  const cur = ACCENTS.find((a) => a.id === currentAccent());
+  if (dot && cur) dot.style.background = cur.dot;
+  for (const item of document.querySelectorAll('.accentitem')) {
+    item.classList.toggle('on', item.dataset.accent === currentAccent());
+  }
+}
+
+function commitAccent(id) {
+  document.documentElement.setAttribute('data-accent', id);
+  localStorage.setItem(ACCENT_KEY, id);
+  syncAccentDot();
+}
+function applyAccent(id) {
+  // 换配色和换主题一样是"整页状态换一次"，走同一套交叉淡化
+  if (!document.documentElement.hasAttribute('data-theme')) { commitAccent(id); return; }
+  withViewTransition(() => commitAccent(id));
+}
+
+function initAccent() {
+  const menu = $('accentMenu');
+  if (menu) {
+    for (const a of ACCENTS) {
+      const item = document.createElement('button');
+      item.type = 'button';
+      item.className = 'accentitem';
+      item.dataset.accent = a.id;
+      item.setAttribute('role', 'menuitemradio');
+      const dot = document.createElement('span');
+      dot.className = 'accentdot';
+      dot.style.background = a.dot;
+      const text = document.createElement('span');
+      text.textContent = a.label;
+      item.append(dot, text);
+      item.onclick = () => { applyAccent(a.id); closeAccentMenu(); };
+      menu.append(item);
+    }
+  }
+  const saved = localStorage.getItem(ACCENT_KEY);
+  if (saved && ACCENTS.some((a) => a.id === saved)) {
+    document.documentElement.setAttribute('data-accent', saved);
+  }
+  syncAccentDot();
+
+  const btn = $('accentToggle');
+  if (btn && menu) {
+    btn.onclick = (e) => {
+      e.stopPropagation();
+      const open = menu.hidden;
+      menu.hidden = !open;
+      btn.setAttribute('aria-expanded', String(open));
+    };
+  }
+}
+function closeAccentMenu() {
+  const menu = $('accentMenu');
+  const btn = $('accentToggle');
+  if (menu) menu.hidden = true;
+  if (btn) btn.setAttribute('aria-expanded', 'false');
+}
+// 点别处 / 按 Esc 都要能关掉 —— 一个只能用"再点一次按钮"关掉的浮层会烦人
+document.addEventListener('click', (e) => {
+  if (!e.target.closest || !e.target.closest('.accentpick')) closeAccentMenu();
+});
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeAccentMenu(); });
 
 // ── 客户端接入 ───────────────────────────────────────────────────────────
 /**
@@ -5763,6 +5957,39 @@ let connectModel = {};    // { [客户端 id]: 模型 id } —— 用户为各�
 let connectModels = {};
 
 /**
+ * 用户"还没写入"的选择要能留住。
+ *
+ * 面板的勾选状态原本只在**内存**里：刷新一下就得重新勾一遍 —— 而用户往往正是在
+ * "勾好了、还没点写入"这个中间态里刷新页面（比如想先看看配置文件长什么样，
+ * 或者被别的事打断）。实测的抱怨就是这句："我勾了 5 个，刷新一下就回到 4 个了。"
+ *
+ * 只存**选择**（客户端 id → 模型 id 列表 + 主模型），**不存任何凭据** ——
+ * 令牌由服务端在写入那一刻现取，从来不经过这里。
+ *
+ * 恢复出来的选择会随 GET 请求带给服务端，于是「已接入，需重新写入」那句提示
+ * 会照实出现：用户一眼就能看出"我的改动还没落盘"。
+ */
+const CONNECT_SEL_KEY = 'wb-connect-selection';
+let connectSelRestored = false;
+
+function saveConnectSelection() {
+  try {
+    localStorage.setItem(CONNECT_SEL_KEY, JSON.stringify({ models: connectModels, model: connectModel }));
+  } catch { /* 隐私模式 / 存储被禁用：存不住就算了，不影响功能 */ }
+}
+
+function restoreConnectSelection() {
+  if (connectSelRestored) return;
+  connectSelRestored = true;
+  try {
+    const j = JSON.parse(localStorage.getItem(CONNECT_SEL_KEY) || 'null');
+    if (!j || typeof j !== 'object') return;
+    if (j.models && typeof j.models === 'object' && !Array.isArray(j.models)) connectModels = j.models;
+    if (j.model && typeof j.model === 'object' && !Array.isArray(j.model)) connectModel = j.model;
+  } catch { /* 存坏了就当没存过 */ }
+}
+
+/**
  * 读取接入状态的失败原因（`{ status, detail }`），`null` = 这次读到了。
  *
  * **为什么必须单独记一个变量**：`lastConnect === null` 同时表示「还没读完」和
@@ -5908,9 +6135,9 @@ function connectLine(prefix, data) {
 function connectSkippedLines(skipped) {
   const out = [];
   if (!Array.isArray(skipped) || !skipped.length) return out;
-  out.push({ prefix: '以下键没能写入（它们的上一级不是对象，属于你自己的数据，没有覆盖）：', data: '' });
+  out.push({ prefix: t('以下键没能写入（它们的上一级不是对象，属于你自己的数据，没有覆盖）：'), data: '' });
   for (const k of skipped) out.push({ prefix: '· ', data: k });
-  out.push('把上面提到的那个字段改成对象（例如 "env": {}）后再点一次「写入」即可。');
+  out.push(t('把上面提到的那个字段改成对象（例如 "env": {}）后再点一次「写入」即可。'));
   return out;
 }
 
@@ -6026,7 +6253,23 @@ async function runConnect(action, id) {
   try {
     // 撤销按记录逐键还原，与模型无关；只有写入才带上所选模型
     const payload = { client: id };
-    if (action === 'apply' && connectModel[id]) payload.model = connectModel[id];
+    if (action === 'apply') {
+      if (connectModel[id]) payload.model = connectModel[id];
+      /*
+       * **勾选的那一整批模型必须一起发上去。**
+       *
+       * 服务端在没收到 `models` 时会回落到"沿用配置文件里现在那批"
+       * （`resolveSelection` → `currentModelsFor`）—— 那是给命令行
+       * `connect apply <客户端>` 不带 `--models` 时用的兜底，好让「重新写入」
+       * 不会把用户自己的选择改掉。但控制台**知道**用户勾了什么，就该照实发过去。
+       *
+       * 少了这一行，症状是：勾了 5 个 → 面板显示 5 个 / 「需重新写入」→
+       * 点「重新写入」→ 服务端把**文件里原有的 4 个**又写了一遍 →
+       * 文件里还是 4 个 → 面板还是 5 个 / 「需重新写入」。用户重启多少次客户端
+       * 都没用，因为要写的那个模型从来没进过请求体。
+       */
+      if (Array.isArray(connectModels[id]) && connectModels[id].length) payload.models = connectModels[id];
+    }
     const r = await api('/api/connect/' + (action === 'apply' ? 'apply' : 'undo'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -6044,6 +6287,17 @@ async function runConnect(action, id) {
         lines: connectVerifyLines({ written: r.verify || null, auth: r.auth || null }),
       };
     }
+    /*
+     * 写入成功后，用**真正写进去的那批**校准面板自己的状态。
+     *
+     * 面板上显示的个数来自它自己的勾选状态，而文件里到底有几个只有服务端知道。
+     * 两者一旦不一致，面板就会一直显示用户勾的那个数 —— 界面在说假话，
+     * 而且用户没有任何办法看出差异（这正是"勾了 5 个、客户端里只有 4 个"的现场）。
+     * 校准之后，写进去几个就显示几个，差异会立刻暴露出来而不是被盖住。
+     */
+    if (action === 'apply' && r && r.ok && Array.isArray(r.models) && r.models.length) {
+      connectModels[id] = r.models;
+    }
     if (action === 'undo') delete connectVerify[id];
   } catch (err) {
     connectResult = { id, ok: false, lines: [(err && err.message) || String(err)] };
@@ -6054,36 +6308,201 @@ async function runConnect(action, id) {
   }
 }
 
-/** 把接口返回翻成人话。每条都是**独立整句**，拼给界面时逐条成节点。 */
+/**
+ * 把接口返回翻成人话。
+ *
+ * 一行有两种形状，渲染层都认（见 `connectDetail`）：
+ *   - **纯文案**：整句可翻，直接给字符串；
+ *   - **`{prefix, data}`**：前缀是界面文案、`data` 是服务端原文（路径 / 原因…）。
+ *     只要这一行里含动态值，就**必须**用这种形状 —— 拼成一整句之后翻译层再也
+ *     认不出那句前缀，英文模式下就会留下一行中文（实测：「原文件已备份到：C:\…」）。
+ */
 function connectResultLines(action, r) {
+  const line = (prefix, data) => ({ prefix, data: data || '' });
   if (action === 'undo') {
-    if (!r.ok) return [t('撤销失败：') + (r.error || '')];
-    return [t('已撤销，配置文件还原到接入之前。')];
+    if (!r.ok) return [line(t('撤销失败：'), r.error)];
+    const out = [t('已撤销，配置文件还原到接入之前。')];
+    /*
+     * 目录文件没删掉要说 —— 实测它在 Windows 上会被杀毒实时扫描短暂占用而删不掉，
+     * 而撤销照样报成功。不说的话用户只能自己 `ls` 才发现多了个文件。
+     */
+    if (r.catalog && r.catalog.error) {
+      out.push(line(t('模型目录文件没能删掉：'), r.catalog.path));
+      out.push(t('它已经不被任何配置引用了，手动删掉即可（多半是被别的程序临时占用）。'));
+    }
+    return out;
   }
-  if (!r.ok) return [t('写入失败：') + (r.error || '')];
+  if (!r.ok) return [line(t('写入失败：'), r.error)];
   const out = [];
   out.push(r.changed ? t('已写入。') : t('没有改动 —— 已经是接入状态。'));
-  if (r.backup) out.push(t('原文件已备份到：') + r.backup);
+  if (r.backup) out.push(line(t('原文件已备份到：'), r.backup));
   if (r.reformats) out.push(t('该文件被重新排版为 2 空格缩进。'));
   if (r.hardened && r.hardened.ok === false) {
-    out.push(t('令牌文件的权限没能收紧：') + (r.hardened.reason || ''));
+    out.push(line(t('令牌文件的权限没能收紧：'), r.hardened.reason));
   }
   if (r.verify) {
-    out.push(r.verify.ok ? t('静态自检通过：配置里的键都在。') : t('静态自检未通过：') + (r.verify.reason || ''));
+    out.push(r.verify.ok ? t('静态自检通过：配置里的键都在。') : line(t('静态自检未通过：'), r.verify.reason));
   }
   if (r.auth) {
     out.push(r.auth.ok
       ? t('端到端验证通过：拿配置里的令牌连上了桥。')
-      : t('端到端验证没通过：') + (r.auth.reason || ''));
+      : line(t('端到端验证没通过：'), r.auth.reason));
   }
   if (r.warning) out.push(r.warning);
+  /*
+   * 备份目录的权限：备份是"写之前的整份配置"，从第二次写入起里面必然有令牌。
+   * 收紧失败必须说 —— 否则"令牌文件收紧了、它的副本却世界可读"这件事没人知道。
+   */
+  if (r.backupHardened && r.backupHardened.ok === false) {
+    out.push(line(t('备份目录的权限没能收紧：'), r.backupHardened.reason));
+  }
+  /*
+   * 客户端是**启动时读一次配置**：写完不重启就看不到变化。
+   *
+   * 实测有用户写完、客户端里没变，于是反复点「重新写入」——
+   * 这句话比任何"写入成功"都更能解释他眼下的处境，所以放在结论里。
+   */
+  if (action === 'apply' && r.changed) out.push(t('重启该客户端后生效。'));
   // 有键没能写入时必须说 —— 「已写入」+ 静默跳过 = 用户下次请求失败时无从归因
+  // （`connectSkippedLines` 本来就是 `{prefix, data}` 形状，原样带上即可）
   if (r.skippedKeys && r.skippedKeys.length) {
-    for (const line of connectSkippedLines(r.skippedKeys)) {
-      out.push(line.prefix + (line.data || ''));
-    }
+    for (const l of connectSkippedLines(r.skippedKeys)) out.push(l);
   }
   return out;
+}
+
+/**
+ * 把 `/api/connect/mode` 的返回翻成人话。
+ *
+ * 最后一句「重启该客户端后生效」是刻意的：实测踩过 —— 用户写完、客户端里没变、
+ * 于是反复点「重新写入」；而客户端是**启动时读一次配置**，不重启永远看不到变化。
+ * 这句话比任何"写入成功"都更能解释他眼下的处境。
+ */
+function connectModeLines(mode, r) {
+  const toNative = mode === 'native';
+  const line = (prefix, data) => ({ prefix, data: data || '' });
+  if (!r.ok) return [line(t('切换失败：'), r.error)];
+  const out = [r.changed
+    ? (toNative ? t('已切回原始模型。') : t('已切到桥的模型。'))
+    : (r.message ? t(r.message) : t('没有改动。'))];
+  if (r.backup) out.push(line(t('原文件已备份到：'), r.backup));
+  if (toNative && r.catalog && r.catalog.kept) {
+    out.push(line(t('模型目录文件保留在：'), r.catalog.path));
+    out.push(t('（已不再被引用，切回桥时可直接复用；想连文件一起清掉就用「撤销接入」）'));
+  }
+  if (r.verify && r.verify.ok === false) out.push(line(t('静态自检未通过：'), r.verify.reason));
+  if (r.backupHardened && r.backupHardened.ok === false) {
+    out.push(line(t('备份目录的权限没能收紧：'), r.backupHardened.reason));
+  }
+  if (r.auth) {
+    out.push(r.auth.ok
+      ? t('端到端验证通过：拿配置里的令牌连上了桥。')
+      : line(t('端到端验证没通过：'), r.auth.reason));
+  }
+  out.push(t('重启该客户端后生效。'));
+  return out;
+}
+
+/**
+ * 切模式：走桥 ↔ 这个客户端自己的模型。
+ *
+ * 确认框里必须把「与撤销的区别」说清楚 —— 用户点错一个就会丢掉记录
+ * （撤销会把记录归档、把我们建的目录文件删掉，再想用桥得重新接入一遍）。
+ */
+async function runMode(id, mode) {
+  const c = (lastConnect && lastConnect.clients || []).find((x) => x.id === id);
+  if (!c) return;
+  const toNative = mode === 'native';
+  const ok = confirm([
+    toNative ? t('切回这个客户端自己的模型？') : t('切到桥的模型？'),
+    '',
+    c.path,
+    '',
+    toNative
+      ? t('配置里我们接管过的那几个键会按记录还原成接入之前的样子；模型目录文件留在磁盘上（不再被引用）。随时可以切回来。')
+      : t('会用当前的令牌与模型重新写入这份配置（沿用上次接的那批模型）。'),
+    t('写入前会整份备份原文件。'),
+  ].join('\n'));
+  if (!ok) return;
+
+  connectBusy = id;
+  connectResult = null;
+  renderClients();
+  try {
+    const r = await api('/api/connect/mode', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ client: id, mode }),
+    });
+    connectResult = { id, ok: r && r.ok === true, lines: connectModeLines(mode, r || {}) };
+    // 切回原始模型后，之前那份"验证通过"的结论不再适用（配置里已经没有桥了）
+    if (toNative) delete connectVerify[id];
+  } catch (err) {
+    connectResult = { id, ok: false, lines: [(err && err.message) || String(err)] };
+  } finally {
+    connectBusy = null;
+    await loadConnect({ autoVerify: false });
+    renderClients();
+  }
+}
+
+/**
+ * 写 / 删 Codex 的 **profile 文件**（零写入接入）。
+ *
+ * 为什么不复用 `runConnect`：profile 客户端**不是面板上的一行**（它挂在 Codex 行的
+ * 详情里，见 `CONNECT_CLIENTS` 的说明），而 `runConnect` 是按"行"在
+ * `lastConnect.clients` 里找客户端的 —— 拿它去跑会直接 `return`，界面上表现为
+ * **点了没反应**（实测就是这么撞上的）。
+ *
+ * 用哪个模型：沿用面板上给 Codex 勾的那批（`connectModels.codex`），
+ * 用户不必为 profile 再勾一遍；不传的话服务端会回落到桥的精选集，
+ * 与他在上面看到的勾选不一致 —— 那又是一次"界面在说另一件事"。
+ */
+async function runProfile(profileId, action) {
+  const c = (lastConnect && lastConnect.clients || []).find((x) => x.profile && x.profile.id === profileId);
+  if (!c) return;
+  const toApply = action === 'apply';
+  const ok = confirm([
+    toApply ? t('写入 profile 文件？') : t('删除 profile 文件？'),
+    '',
+    c.profile.path,
+    '',
+    toApply
+      ? t('这份文件是给 `codex -p` 用的，你的 config.toml 一个字节都不会动。')
+      : t('只删这份 profile 文件，你的 config.toml 与 Codex 那一行的接入都不受影响。'),
+  ].join('\n'));
+  if (!ok) return;
+
+  connectBusy = c.id;
+  connectResult = null;
+  renderClients();
+  try {
+    const payload = { client: profileId };
+    if (toApply) {
+      const models = connectModels[c.id] || c.effectiveModels || [];
+      if (models.length) payload.models = models;
+      if (connectModel[c.id]) payload.model = connectModel[c.id];
+    }
+    const r = await api('/api/connect/' + (toApply ? 'apply' : 'undo'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    connectResult = { id: c.id, ok: r && r.ok === true, lines: connectResultLines(toApply ? 'apply' : 'undo', r || {}) };
+    if (toApply && r && r.ok) {
+      // 写完把"怎么用"再讲一遍 —— 结论块里最该留下的就是那一句
+      connectResult.lines = connectResult.lines.concat([
+        { prefix: t('启动：'), data: c.profile.launch },
+        t('注意：桌面应用不接受命令行开关，这条通道只对命令行生效。'),
+      ]);
+    }
+  } catch (err) {
+    connectResult = { id: c.id, ok: false, lines: [(err && err.message) || String(err)] };
+  } finally {
+    connectBusy = null;
+    await loadConnect({ autoVerify: false });
+    renderClients();
+  }
 }
 
 /**
@@ -6109,6 +6528,7 @@ function connectModelList(c) {
     if (!list.length) return;                        // 至少留一个：空集合没法接入
     connectModels[c.id] = list;
     connectModel[c.id] = (mainNext && list.includes(mainNext)) ? mainNext : list[0];
+    saveConnectSelection();   // 勾选一变就落盘：刷新页面不该把它丢掉
     delete connectVerify[c.id];
     await loadConnect();
     renderClients();
@@ -6130,6 +6550,7 @@ function connectModelList(c) {
     delete connectModels[c.id];
     delete connectModel[c.id];
     delete connectVerify[c.id];
+    saveConnectSelection();   // 清空也要落盘，否则刷新会把旧勾选又装回来
     loadConnect().then(renderClients);
   }));
   wrap.append(head);
@@ -6189,6 +6610,22 @@ function connectModelList(c) {
       star.onclick = () => {
         const next = new Set(selected);
         next.add(m.id);                                // 设主模型顺带把它勾上
+        /*
+         * 把"主模型意味着什么"当场说出来。
+         *
+         * 实测（本机真实记录）：用户点了 ★ 之后 `config.toml` 的 `model` 就变成了那个
+         * 模型 —— 也就是**客户端下次打开时用的模型**变了 —— 而面板上只是一颗星号，
+         * 用户没有任何地方能看到这个后果。点一下就该有回话，而不是等他某天发现
+         * "打开客户端时跑的模型不对"。
+         */
+        connectResult = {
+          id: c.id,
+          ok: true,
+          lines: [
+            { prefix: t('已设为主模型：'), data: m.id },
+            t('它就是客户端打开时用的那个模型；点「重新写入」后生效。'),
+          ],
+        };
         apply([...next], m.id);
       };
       row.append(star);
@@ -6221,6 +6658,67 @@ function connectDetail(c) {
     b.onclick = fn;
     return b;
   };
+
+  /*
+   * ── 模式：走桥 / 客户端自己的模型 ───────────────────────────────────────
+   *
+   * 放在详情最前面：它回答的是"这个客户端现在到底在用谁"，比"将改动什么"更靠前。
+   *
+   * 两个按钮是**对称**的 —— 用户随时能来回切，记录与目录文件都留着。
+   * 这是它与「撤销接入」的分工：撤销是拆掉（记录归档、我们建的目录文件删掉），
+   * 切模式只是换挡。放错一个用户就得从头接入一遍。
+   */
+  const msec = clientEl('div', 'connectsec connectmode');
+  const mhead = clientEl('div', 'connectsec-head');
+  mhead.append(clientEl('b', null, '模式'));
+  if (c.mode === 'bridge') {
+    mhead.append(clientEl('span', 'tag ok', '正在走桥'));
+    if (c.canSwitchBack) mhead.append(mk('切回原始模型', () => runMode(c.id, 'native')));
+  } else {
+    mhead.append(clientEl('span', 'tag idle', c.canSwitchBack ? '已切回原始模型' : '客户端自己的模型'));
+    mhead.append(mk('切到桥的模型', () => runMode(c.id, 'bridge')));
+  }
+  msec.append(mhead);
+  msec.append(clientEl('p', 'clientcard-note', c.mode === 'bridge'
+    ? '切回原始模型后，这个客户端打开时用回它自己原来的模型；我们那份模型目录文件会留在磁盘上（不再被引用），随时能切回来。想连文件一起清掉就用「撤销接入」。'
+    : '现在用的是这个客户端自己的模型，配置里没有桥的设置。切到桥的模型会按当前令牌与模型重新写入（沿用上次接的那批）。'));
+  d.append(msec);
+
+  /*
+   * ── 接入方式：改我的配置 / 只写 profile 文件（Codex 专有）────────────────
+   *
+   * Codex 支持 `codex -p <name>` 叠加 `$CODEX_HOME/<name>.config.toml`（依据 `codex --help`），
+   * 所以有一条**零写入**的路：只写 profile 文件，用户的基础配置一个字节都不动。
+   * 它是"便捷性与安全性同时更好"的那一档 —— 不需要备份/撤销/权限加固那一整套，
+   * 因为那份配置**根本没被碰过**。
+   *
+   * 限制写在脸上（不写用户会以为桌面应用也能用）：**桌面应用不接受命令行开关**。
+   */
+  if (c.profile) {
+    const psec = clientEl('div', 'connectsec connectprofile');
+    const phead = clientEl('div', 'connectsec-head');
+    phead.append(clientEl('b', null, '不改我的配置（可选）'));
+    if (c.profile.applied) {
+      phead.append(clientEl('span', 'tag ok', 'profile 已写入'));
+      phead.append(mk('删除 profile 文件', () => runProfile(c.profile.id, 'undo'), 'danger'));
+    } else {
+      phead.append(mk('写入 profile 文件', () => runProfile(c.profile.id, 'apply')));
+    }
+    psec.append(phead);
+    psec.append(clientEl('p', 'clientcard-note',
+      '写到下面这个文件，用 profile 启动即可 —— 你的 config.toml 一个字节都不动：'));
+    const fLine = clientEl('div', 'connectcatalog', '文件：');
+    fLine.append(clientEl('code', null, c.profile.path));
+    psec.append(fLine);
+    const lLine = clientEl('div', 'connectcatalog', '启动：');
+    lLine.append(clientEl('code', null, c.profile.launch));
+    psec.append(lLine);
+    psec.append(clientEl('p', 'clientcard-note', '注意：桌面应用不接受命令行开关，这条通道只对命令行生效。'));
+    if (c.profile.exists && !c.profile.applied) {
+      psec.append(clientEl('p', 'clientcard-note', '这个文件已经存在，但不是我们写的 —— 写入前会整份备份它。'));
+    }
+    d.append(psec);
+  }
 
   d.append(connectModelList(c));
 
@@ -6301,7 +6799,19 @@ function connectDetail(c) {
 
   if (connectResult && connectResult.id === c.id) {
     const res = clientEl('div', 'connectresult ' + (connectResult.ok ? 'ok' : 'bad'));
-    for (const line of connectResult.lines) res.append(clientEl('div', null, line));
+    /*
+     * 一行结论有两种形状：纯文案（整句可翻），或 `{prefix, data}` ——
+     * 前缀是**界面文案**、data 是**服务端原文**（路径、原因…）。
+     *
+     * 后者必须拆成两个节点渲染，**不能拼成一整句**：拼了之后翻译层再也认不出
+     * 那句前缀，英文模式下就会留下一行中文（"原文件已备份到：C:\…"）。
+     * 与验证结论（`connectVerifyLines`）同一套渲染。
+     */
+    for (const line of connectResult.lines) {
+      res.append(typeof line === 'string'
+        ? clientEl('div', null, line)
+        : connectLine(line.prefix, line.data));
+    }
     d.append(res);
   }
   return d;
@@ -6337,6 +6847,12 @@ function connectStatus(c) {
       ? { text: '已安装，尚未接入', ok: false }
       : { text: '未检测到该客户端', ok: false };
   }
+  /*
+   * 主动切回了客户端自己的模型：这不是"没接入"，必须说清楚 ——
+   * 否则用户会以为接入丢了，然后再点一次「写入」，又给切回桥模式。
+   * 放在最前面：它比"需重新写入"更准确（那时配置里根本没有桥的设置）。
+   */
+  if (c.mode === 'native' && c.canSwitchBack) return { text: '已切回原始模型', ok: false };
   // 漂移优先：这里给出的下一步动作最具体（重新写入），比一句"验证没过"更有用
   if (c.applied && c.changed) return { text: '已接入，需重新写入', ok: false };
   const v = connectVerify[c.id];
@@ -6514,7 +7030,13 @@ function connectBlock() {
       box.append(clientEl('div', 'notice',
         '桥在运行，但拒绝了控制台持有的令牌（两边令牌不一致）：照现在写进客户端的配置会连不上。点上方「重启桥」让桥按控制台这份令牌重启，再点「重新读取」。'));
     } else {
-      box.append(clientEl('div', 'notice', '桥未运行：写入照样能做，但写完的「验证」一定失败。先点上方「启动桥服务」。'));
+      /*
+       * 桥没起时，模型候选来自**上次成功抓到的目录**（审计 R5：否则连"这个模型
+       * 存不存在"都无从校验）。那就得把话说全 —— 校验过了不等于校验可信。
+       */
+      box.append(clientEl('div', 'notice', lastConnect.catalogStale
+        ? '桥未运行：写入照样能做，但写完的「验证」一定失败。模型候选用的是上次抓到的目录，可能已经过期 —— 所以也无法保证这些模型现在还存在。先点上方「启动桥服务」。'
+        : '桥未运行：写入照样能做，但写完的「验证」一定失败。先点上方「启动桥服务」。'));
     }
   }
   const list = clientEl('div', 'connectlist');
@@ -6526,6 +7048,8 @@ function connectBlock() {
 async function loadClients() {
   const box = $('clientsBox');
   if (!box) return;
+  // 先把上次没写完的选择装回来（见 restoreConnectSelection 的说明）
+  restoreConnectSelection();
   try {
     lastClients = await api('/api/clients');
   } catch (err) {
@@ -7055,6 +7579,7 @@ function initBackToTop() {
 // 过一会儿又被落盘的结果刷掉，看起来像闪了一下
 initAlerts(); // 读回失败水位线 / 提醒静默标记（只含时间戳与日期）
 initTheme();
+initAccent();  // 配色方案：菜单项要在 initI18n 之前建好，否则新文案赶不上这一遍翻译
 initI18n();   // 语言开关：读回上次选择；放在渲染之前，避免先出中文再翻一遍
 initDropdowns(); // 原生 select → 自绘下拉（外观与 dsh 插件面板一致）
 initTips();      // 原生 title 提示框 → 自绘气泡

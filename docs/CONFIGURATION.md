@@ -31,6 +31,7 @@ copy .env.example .env
 | `WORKBUDDY_ANTHROPIC_FAST_MODEL` | `glm-5.3-flash` | Claude Code 后台任务（标题生成、文件摘要）用的小快模型 |
 | `WORKBUDDY_RESPONSES_MODEL` | `glm-5.3` | Codex（`/v1/responses`）的模型名映射。Codex 发的是它 config.toml 里的 `model`（如 `gpt-5.1-codex`），上游没有这些 id，必须映射到真实模型 |
 | `WORKBUDDY_RESPONSES_FAST_MODEL` | `glm-5.3-flash` | Codex 的后台小快模型。**只有名字里带 mini / nano / flash 这类字样才会用到它** —— `gpt-5.1-codex` 是主力模型，刻意不匹配 "codex"，否则会把主任务降级 |
+| `WORKBUDDY_FORWARD_REASONING` | `0` | `1` 时把上游的思维链（`reasoning_content`）按 `type: "reasoning"` 的 output item 转给 Codex。**默认关**：Codex 要求 reasoning 的 delta 到达时已有 active output item，这套事件顺序需要一次真机对照实验才能定论，所以默认保持"丢弃 + 记一条日志"。试法与判断标准见 [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md) 里「Codex 里看不到思考过程」 |
 
 ### 控制台
 

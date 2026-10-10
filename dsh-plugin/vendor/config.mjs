@@ -270,10 +270,22 @@ function resolveLocalToken() {
  *   `code` 让调用方能**区分**「本机压根起不来 icacls」（环境问题，可跳过验证）
  *   和「icacls 跑起来了但配置失败」（真实故障，必须报错）。
  */
-export function hardenTokenFile(path = BRIDGE_TOKEN_PATH) {
+export function hardenTokenFile(path = BRIDGE_TOKEN_PATH, { recursive = false } = {}) {
   try {
     if (process.platform !== 'win32') {
-      chmodSync(path, 0o600);
+      if (!recursive) {
+        chmodSync(path, 0o600);
+        return { ok: true, code: 'ok' };
+      }
+      /*
+       * 递归分支只用于**接入备份目录**（结构是扁平的 `<root>/<客户端>/<文件>`）：
+       * 目录收到 0700，里面的文件逐个收到 0600。不做真递归 ——
+       * 这个目录是我们自己建的，布局固定，走一遍 readdir 就够。
+       */
+      chmodSync(path, 0o700);
+      for (const name of readdirSync(path)) {
+        try { chmodSync(join(path, name), 0o600); } catch { /* 单个文件失败不影响其余 */ }
+      }
       return { ok: true, code: 'ok' };
     }
     const user = env.USERNAME || env.USER;
@@ -282,7 +294,10 @@ export function hardenTokenFile(path = BRIDGE_TOKEN_PATH) {
     }
     // 去掉继承、只留给当前用户。用 spawnSync 而不是 execSync：
     // 后者经 cmd.exe 且默认给 stdin 开管道，在 Windows 上必抛 EBUSY。
-    const r = spawnSync('icacls', [path, '/inheritance:r', '/grant:r', `${user}:F`],
+    // `/T` 连**已有**的子文件一起收紧 —— 备份目录里躺着历史备份，逐个改会漏。
+    const args = [path, '/inheritance:r', '/grant:r', `${user}:F`];
+    if (recursive) args.push('/T');
+    const r = spawnSync('icacls', args,
       { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
     if (r.error) {
       const err = /** @type {NodeJS.ErrnoException} */ (r.error);

@@ -92,7 +92,13 @@ function flatten(value, prefix, out) {
 
 /** 捕获一个接口的形状。 */
 export async function captureRoute(baseUrl, route) {
-  const res = await fetch(baseUrl + route);
+  /*
+   * 必须带面板头：`/api/connect`、`/api/clients`、`/api/diagnose` 这几个读接口
+   * 会回令牌或触发真实动作，控制台要求带 `x-workbuddy-panel: 1`（审计 R2/R4）。
+   * 不加的话捕获会全线 403 —— 而 capture 失败时**照样会把形状文件写成空**，
+   * 于是看起来像"接口变了"，其实只是少了个头。
+   */
+  const res = await fetch(baseUrl + route, { headers: { 'x-workbuddy-panel': '1' } });
   if (!res.ok) throw new Error(`${route} → HTTP ${res.status}`);
   const body = await res.json();
   const paths = {};
@@ -100,14 +106,43 @@ export async function captureRoute(baseUrl, route) {
   return paths;
 }
 
-/** 从运行中的控制台捕获全部形状。 */
-export async function captureAll(baseUrl = 'http://127.0.0.1:8792') {
+/**
+ * 从运行中的控制台捕获全部形状。
+ *
+ * ## 为什么是**合并**而不是覆盖（2026-10-10 踩到）
+ *
+ * 覆盖式捕获的结果取决于**捕获那一刻控制台的状态**：这次在"稳态"下捕
+ * `/api/connect`，那几个客户端正好都没有 `catalog` 字段（目录不需要重写），
+ * 于是 `$.clients[].catalog.*` 整棵子树从形状表里消失了 —— 而夹具里有它，
+ * 下一次跑 UI 用例就会被判成"真实接口没有这个键"，全线飘红。
+ * 形状表本该描述"接口**可能**回什么"，而不是"我这次恰好看到了什么"。
+ *
+ * 所以：这次没出现、但**上次记过**的路径一律保留，并标 `optional: true`
+ * （校验时不强制存在）。这样换一个状态重捕不会把已记录的字段弄丢，
+ * 而真正新增的字段照旧会被记下来。
+ */
+export async function captureAll(baseUrl = 'http://127.0.0.1:8792', { merge = true } = {}) {
+  const prev = merge ? loadShape() : null;
   const out = { _note: '由 tools/dev/api-shape.mjs capture 生成。只有键名与类型，不含真实数据。', routes: {} };
   for (const route of CAPTURED_ROUTES) {
     try {
-      out.routes[route] = await captureRoute(baseUrl, route);
+      const fresh = await captureRoute(baseUrl, route);
+      const before = prev && prev.routes && prev.routes[route];
+      if (before && !before._error) {
+        for (const [path, meta] of Object.entries(before)) {
+          // 之前记过、这次没出现 → 是条件字段，保留但标 optional
+          if (path !== '_error' && !fresh[path]) fresh[path] = { ...meta, optional: true };
+        }
+      }
+      out.routes[route] = fresh;
     } catch (err) {
-      out.routes[route] = { _error: String(err.message || err) };
+      /*
+       * 捕获失败**不能**把这条路由写成空形状 —— 那等于把已记录的字段全丢掉
+       * （实测过一次：控制台没在跑，10 条接口全 `❌ fetch failed`，
+       * 形状文件从 1333 行缩成 34 行）。失败就保留上一次的，并标 `_error` 提醒。
+       */
+      const before = prev && prev.routes && prev.routes[route];
+      out.routes[route] = before ? { ...before, _error: String(err.message || err) } : { _error: String(err.message || err) };
     }
   }
   return out;

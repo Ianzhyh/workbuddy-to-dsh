@@ -154,7 +154,16 @@
         "type": "string"
       },
       "$.bridge.autoCheckin": {
-        "type": "null"
+        "type": "object"
+      },
+      "$.bridge.autoCheckin.at": {
+        "type": "string"
+      },
+      "$.bridge.autoCheckin.result": {
+        "type": "string"
+      },
+      "$.bridge.autoCheckin.credit": {
+        "type": "number"
       },
       "$.bridge.autoCheckinEnabled": {
         "type": "boolean"
@@ -413,6 +422,12 @@
       "$.anthropicFastModel": {
         "type": "string"
       },
+      "$.responsesModel": {
+        "type": "string"
+      },
+      "$.responsesFastModel": {
+        "type": "string"
+      },
       "$.models": {
         "type": "array"
       },
@@ -490,6 +505,15 @@
       "$.clients[].appliedAt": {
         "type": "mixed"
       },
+      "$.clients[].mode": {
+        "type": "string"
+      },
+      "$.clients[].recordedMode": {
+        "type": "mixed"
+      },
+      "$.clients[].canSwitchBack": {
+        "type": "boolean"
+      },
       "$.clients[].pathSource": {
         "type": "object"
       },
@@ -506,31 +530,13 @@
         "type": "string"
       },
       "$.clients[].catalog": {
-        "type": "mixed"
-      },
-      "$.clients[].catalog.path": {
-        "type": "string"
-      },
-      "$.clients[].catalog.name": {
-        "type": "string"
-      },
-      "$.clients[].catalog.added": {
-        "type": "array"
-      },
-      "$.clients[].catalog.refreshed": {
-        "type": "array"
-      },
-      "$.clients[].catalog.refreshed[]": {
-        "type": "string"
-      },
-      "$.clients[].catalog.kept": {
-        "type": "number"
-      },
-      "$.clients[].catalog.from": {
-        "type": "string"
+        "type": "null"
       },
       "$.clients[].catalogSkipped": {
-        "type": "null"
+        "type": "mixed"
+      },
+      "$.clients[].skippedKeys": {
+        "type": "array"
       },
       "$.clients[].effectiveModel": {
         "type": "string"
@@ -540,6 +546,54 @@
       },
       "$.clients[].effectiveModels[]": {
         "type": "string"
+      },
+      "$.clients[].profile": {
+        "type": "object",
+        "optional": true
+      },
+      "$.clients[].profile.id": {
+        "type": "string",
+        "optional": true
+      },
+      "$.clients[].profile.label": {
+        "type": "string",
+        "optional": true
+      },
+      "$.clients[].profile.path": {
+        "type": "string",
+        "optional": true
+      },
+      "$.clients[].profile.exists": {
+        "type": "boolean",
+        "optional": true
+      },
+      "$.clients[].profile.applied": {
+        "type": "boolean",
+        "optional": true
+      },
+      "$.clients[].profile.changed": {
+        "type": "boolean",
+        "optional": true
+      },
+      "$.clients[].profile.canSwitchBack": {
+        "type": "boolean",
+        "optional": true
+      },
+      "$.clients[].profile.error": {
+        "type": "null",
+        "optional": true
+      },
+      "$.clients[].profile.catalogSkipped": {
+        "type": "null",
+        "optional": true
+      },
+      "$.clients[].profile.launch": {
+        "type": "string",
+        "optional": true
+      },
+      "$.clients[].profile.appSupported": {
+        "type": "boolean",
+        "optional": true
       },
       "$.clients[].changes[]": {
         "type": "object"
@@ -658,6 +712,12 @@
       "$.modelOptions[].name": {
         "type": "string"
       },
+      "$.catalogStale": {
+        "type": "boolean"
+      },
+      "$.catalogAt": {
+        "type": "null"
+      },
       "$.running": {
         "type": "boolean"
       },
@@ -672,6 +732,34 @@
       },
       "$.backupDir": {
         "type": "string"
+      },
+      "$.clients[].catalog.path": {
+        "type": "string",
+        "optional": true
+      },
+      "$.clients[].catalog.name": {
+        "type": "string",
+        "optional": true
+      },
+      "$.clients[].catalog.added": {
+        "type": "array",
+        "optional": true
+      },
+      "$.clients[].catalog.refreshed": {
+        "type": "array",
+        "optional": true
+      },
+      "$.clients[].catalog.refreshed[]": {
+        "type": "string",
+        "optional": true
+      },
+      "$.clients[].catalog.kept": {
+        "type": "number",
+        "optional": true
+      },
+      "$.clients[].catalog.from": {
+        "type": "string",
+        "optional": true
       }
     },
     "/api/diagnose": {
@@ -719,6 +807,12 @@
       },
       "$.bridge.ok": {
         "type": "boolean"
+      },
+      "$.bridge.authRejected": {
+        "type": "boolean"
+      },
+      "$.bridge.status": {
+        "type": "number"
       },
       "$.bridge.body": {
         "type": "object"
@@ -889,14 +983,38 @@
       "$.bridge.body.process.byStatus.200": {
         "type": "number"
       },
+      "$.bridge.body.process.byStatus.401": {
+        "type": "number"
+      },
+      "$.bridge.body.process.byStatus.429": {
+        "type": "number"
+      },
       "$.bridge.body.process.rateLimited": {
+        "type": "number"
+      },
+      "$.bridge.body.clients": {
+        "type": "object"
+      },
+      "$.bridge.body.clients.enabled": {
+        "type": "boolean"
+      },
+      "$.bridge.body.clients.count": {
         "type": "number"
       },
       "$.bridge.body.autoCheckinEnabled": {
         "type": "boolean"
       },
       "$.bridge.body.autoCheckin": {
-        "type": "null"
+        "type": "object"
+      },
+      "$.bridge.body.autoCheckin.at": {
+        "type": "string"
+      },
+      "$.bridge.body.autoCheckin.result": {
+        "type": "string"
+      },
+      "$.bridge.body.autoCheckin.credit": {
+        "type": "number"
       },
       "$.credentials": {
         "type": "object"
@@ -1175,6 +1293,18 @@
       "$.requests[].ok": {
         "type": "boolean"
       },
+      "$.requests[].status": {
+        "type": "number",
+        "optional": true
+      },
+      "$.requests[].code": {
+        "type": "mixed",
+        "optional": true
+      },
+      "$.requests[].error": {
+        "type": "string",
+        "optional": true
+      },
       "$.requests[].promptTokens": {
         "type": "number",
         "optional": true
@@ -1183,27 +1313,33 @@
         "type": "number",
         "optional": true
       },
-      "$.requests[].credit": {
-        "type": "number",
-        "optional": true
-      },
-      "$.requests[].status": {
-        "type": "number",
-        "optional": true
-      },
-      "$.requests[].code": {
-        "type": "number",
-        "optional": true
-      },
-      "$.requests[].error": {
-        "type": "string",
-        "optional": true
-      },
       "$.active": {
         "type": "array"
       },
+      "$.active[]": {
+        "type": "object"
+      },
+      "$.active[].id": {
+        "type": "string"
+      },
+      "$.active[].startedAt": {
+        "type": "number"
+      },
+      "$.active[].model": {
+        "type": "string"
+      },
+      "$.active[].stream": {
+        "type": "boolean"
+      },
+      "$.active[].runningMs": {
+        "type": "number"
+      },
       "$.activeAlertMs": {
         "type": "number"
+      },
+      "$.requests[].credit": {
+        "type": "number",
+        "optional": true
       }
     },
     "/api/accounts": {
@@ -1320,28 +1456,33 @@
         "type": "object"
       },
       "$.updatedAt": {
-        "type": "number"
+        "type": "null"
       },
       "$.results": {
         "type": "object"
       },
-      "$.results.hy3": {
-        "type": "object"
-      },
-      "$.results.hy3.ok": {
-        "type": "boolean"
-      },
-      "$.results.hy3.ms": {
-        "type": "number"
-      },
-      "$.results.hy3.at": {
-        "type": "number"
-      },
-      "$.results.hy3.credit": {
-        "type": "number"
-      },
       "$.lastRun": {
         "type": "null"
+      },
+      "$.results.hy3": {
+        "type": "object",
+        "optional": true
+      },
+      "$.results.hy3.ok": {
+        "type": "boolean",
+        "optional": true
+      },
+      "$.results.hy3.ms": {
+        "type": "number",
+        "optional": true
+      },
+      "$.results.hy3.at": {
+        "type": "number",
+        "optional": true
+      },
+      "$.results.hy3.credit": {
+        "type": "number",
+        "optional": true
       }
     }
   }

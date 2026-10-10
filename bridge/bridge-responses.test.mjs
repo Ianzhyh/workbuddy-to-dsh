@@ -73,6 +73,15 @@ const upstream = createServer((req, res) => {
       res.write(sse({ id: 'c1', model: 'm', choices: [{ index: 0, delta: { tool_calls: [{ index: 0, function: { name: 'weather' } }] } }] }));
       res.write(sse({ id: 'c1', model: 'm', choices: [{ index: 0, delta: { tool_calls: [{ index: 0, function: { arguments: '{"city"' } }] } }] }));
       res.write(sse({ id: 'c1', model: 'm', choices: [{ index: 0, delta: { tool_calls: [{ index: 0, function: { arguments: ':"SH"}' } }] } }] }));
+    } else if (scenario.kind === 'reasoning') {
+      /*
+       * 上游先给思维链、再给正文 —— 这是**真实顺序**（实测日志里就是这样），
+       * 也是整件事的难点：Codex 要求 reasoning 的 delta 到达时已有 active output item，
+       * 而 reasoning 永远在最前面。
+       */
+      res.write(sse({ id: 'c1', model: 'm', choices: [{ index: 0, delta: { reasoning_content: '让我想想…' } }] }));
+      res.write(sse({ id: 'c1', model: 'm', choices: [{ index: 0, delta: { reasoning_content: '嗯，答案是 42。' } }] }));
+      res.write(sse({ id: 'c1', model: 'm', choices: [{ index: 0, delta: { content: '答案是 42。' } }] }));
     } else if (scenario.kind === 'empty') {
       // 上游只回 usage、没有任何内容帧
       res.write(sse({ id: 'c1', model: 'm', choices: [{ index: 0, delta: {} }] }));
@@ -475,6 +484,115 @@ test('未带令牌：401 且不落任何上游请求', async () => {
   });
   assert.equal(r.status, 401);
   assert.equal(lastUpstreamBody, null, '未鉴权的请求绝不能打到上游（会真实扣额度）');
+});
+
+/**
+ * 另起一个桥（带额外环境变量）—— 用来验"开关类"行为。
+ *
+ * 主桥的 env 在模块加载时就定死了，而开关必须**在桥启动时**生效（进程级配置），
+ * 所以只能另起一个。端口随机、令牌与假上游都复用主桥那一套。
+ */
+async function startBridge(extraEnv = {}) {
+  const port = 20000 + Math.floor(Math.random() * 20000);
+  const proc = spawn(process.execPath, [BRIDGE], {
+    cwd: dir,
+    stdio: ['ignore', 'pipe', 'pipe'],
+    env: {
+      ...process.env,
+      WORKBUDDY_HOST: '127.0.0.1',
+      WORKBUDDY_PORT: String(port),
+      WORKBUDDY_LOCAL_TOKEN: TOKEN,
+      WORKBUDDY_AUTH_FILE: authFile,
+      CODEBUDDY_ENDPOINT: `http://127.0.0.1:${UPSTREAM_PORT}`,
+      CODEBUDDY_API_KEY: 'stub-key',
+      WORKBUDDY_AUTO_CHECKIN: '0',
+      WORKBUDDY_LOG: '0',
+      WORKBUDDY_RESPONSES_MODEL: 'resolved-default',
+      WORKBUDDY_RESPONSES_FAST_MODEL: 'resolved-fast',
+      ...extraEnv,
+    },
+  });
+  let log = '';
+  proc.stdout.on('data', (d) => { log += d; });
+  proc.stderr.on('data', (d) => { log += d; });
+  const base = `http://127.0.0.1:${port}`;
+  for (let i = 0; i < 100; i += 1) {
+    try {
+      const r = await fetch(`${base}/health`, { headers: auth });
+      if (r.status === 200 && (await r.json())?.pid === proc.pid) {
+        return {
+          base,
+          kill: () => proc.kill(),
+          post: async (payload) => {
+            const rr = await fetch(`${base}/v1/responses`, {
+              method: 'POST', headers: auth, body: JSON.stringify(payload),
+            });
+            return { status: rr.status, text: await rr.text() };
+          },
+        };
+      }
+    } catch { /* 还没起来 */ }
+    await new Promise((r) => setTimeout(r, 150));
+  }
+  proc.kill();
+  throw new Error(`开关桥没起来\n${log.slice(-1500)}`);
+}
+
+/*
+ * 上游的思维链：默认**丢弃**，开了开关才按 reasoning 项转发。
+ *
+ * 为什么默认关（见桥里 `forwardReasoning` 的注释）：Codex 要求 reasoning 的 delta
+ * 到达时已有 active output item，而上游的 reasoning 总在最前面 —— 得先把 reasoning
+ * 项打开、发完再关掉。事件名在 `codex.exe` 里能搜到（说明它认这套），但**事件顺序
+ * 与目录里 `default_reasoning_summary` 的取值**都要一次真机对照实验才能定论。
+ * 所以这里钉两件事：默认行为**一个字节不变**；开了开关时事件顺序符合那条硬约束。
+ */
+test('思维链：默认丢弃；开开关后按 reasoning 项转发且顺序正确', async () => {
+  await waitReady();
+  scenario = { kind: 'reasoning' };
+  const payload = { model: 'gpt-5.1-codex', stream: true, input: [{ type: 'message', role: 'user', content: 'hi' }] };
+
+  // 1) 默认：不许出现任何 reasoning 事件（这条改动不能把现有行为带跑）
+  const off = parseSse((await post(payload)).text);
+  assert.equal(off.some((e) => /reasoning/.test(e.event || '')), false,
+    '默认不该发 reasoning 事件');
+  assert.ok(off.some((e) => e.event === 'response.completed'), '默认路径仍要正常收尾');
+  assert.ok(off.some((e) => e.event === 'response.output_text.delta'), '正文照旧要发');
+
+  // 2) 开开关：另起一个桥
+  const b = await startBridge({ WORKBUDDY_FORWARD_REASONING: '1' });
+  try {
+    const evs = parseSse((await b.post(payload)).text);
+    const names = evs.map((e) => e.event);
+    const first = evs.find((e) => e.event === 'response.reasoning_summary_text.delta');
+    assert.ok(first, '开了开关就要转发思维链 delta');
+    assert.equal(first.data.summary_index, 0, 'summary_index 固定 0');
+    assert.match(JSON.stringify(evs.filter((e) => e.event === 'response.reasoning_summary_text.delta')),
+      /让我想想/, '两段思维链都要发出去');
+    assert.ok(names.includes('response.reasoning_summary_part.added'), '要先开 summary part');
+    /*
+     * 硬约束：reasoning 的 delta 必须**晚于**它自己的 output_item.added，
+     * 且整个 reasoning 项要在文本块之前关掉 —— Codex 就是按这个顺序解析的。
+     */
+    const idxReasonAdded = evs.findIndex((e) => e.event === 'response.output_item.added' && e.data.item?.type === 'reasoning');
+    const idxFirstDelta = evs.findIndex((e) => e.event === 'response.reasoning_summary_text.delta');
+    const idxText = names.indexOf('response.output_text.delta');
+    assert.ok(idxReasonAdded >= 0, 'reasoning 项要先 added');
+    assert.ok(idxFirstDelta > idxReasonAdded, 'delta 必须晚于 reasoning 项的 added（Codex 的硬约束）');
+    assert.ok(idxText > idxFirstDelta, '文本块要排在 reasoning 之后');
+    // 收尾：done 事件齐全，且进 completed.output
+    assert.ok(names.includes('response.reasoning_summary_text.done'));
+    assert.ok(names.includes('response.reasoning_summary_part.done'));
+    const done = evs.find((e) => e.event === 'response.output_item.done' && e.data.item?.type === 'reasoning');
+    assert.ok(done, 'reasoning 项要有 output_item.done');
+    assert.match(JSON.stringify(done.data.item.summary), /答案是 42/, 'done 里要带完整思维链');
+    const completed = evs.find((e) => e.event === 'response.completed');
+    assert.ok(completed.data.response.output.some((it) => it.type === 'reasoning'),
+      'completed.output 里要带上 reasoning 项（否则客户端拼不出完整输出）');
+    assert.equal(completed.data.response.output_text, '答案是 42。', '正文照旧');
+  } finally {
+    b.kill();
+  }
 });
 
 // ── 收尾 ──────────────────────────────────────────────────────────────────

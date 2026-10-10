@@ -17,6 +17,12 @@ import {
 import config from '../config.mjs';
 import { effectiveAuthFile } from './state.mjs';
 import { readDshStatus } from './dsh.mjs';
+/*
+ * 与 `client-connect.mjs` 是**循环引用**（那边也 import 本模块的 bridgeHealth /
+ * bridgeModels）。安全的前提是：两边都只在**函数体里**用它，且这里导入的是
+ * **函数声明**（会被提升）—— 不要在模块顶层读它的值。
+ */
+import { connectSnapshot } from './client-connect.mjs';
 
 // ── 通用工具 ────────────────────────────────────────────────────────────
 
@@ -523,6 +529,38 @@ export async function diagnose() {
   push('bridge', '桥服务', health.ok ? 'ok' : health.running ? 'warn' : 'fail',
     health.running ? `${config.bridge.host}:${config.bridge.port} 已响应` : `${config.bridge.host}:${config.bridge.port} 未监听`,
     health.ok ? '' : '点「启动桥服务」');
+
+  /*
+   * 一键接入的现状（审计 R7）。
+   *
+   * 为什么值得单独一项：客户端**会自己重写配置文件**（实测 Codex 每次运行都会改
+   * 里面别的键）。万一某个版本开始丢掉"不认识的键"，接入就会**静默失效** ——
+   * 配置里没有桥了，而面板还显示「已接入」，用户只会看到"请求没走桥"。
+   * 这一项把那种失效变成一次自检就能看见的结论。
+   *
+   * 判据只看**文件与记录**，不需要桥在跑：记录说桥模式、文件里却不是 → 被动过；
+   * 记录说 native → 是用户主动切回原始模型，不算故障。
+   */
+  const snap = connectSnapshot();
+  const drifted = snap.filter((c) => c.drifted);
+  const onBridge = snap.filter((c) => c.applied);
+  const byChoice = snap.filter((c) => c.nativeByChoice);
+  if (drifted.length) {
+    push('connect', '客户端接入', 'warn',
+      `这些客户端的配置里找不到我们写的键：${drifted.map((c) => c.label).join(' / ')}`,
+      '可能是客户端重写配置时丢掉了，也可能是手工改过。在「客户端接入」页签里点那一行的「写入」重新写一遍即可；'
+      + '想彻底不用桥就点「切回原始模型」。');
+  } else if (onBridge.length) {
+    push('connect', '客户端接入', 'ok',
+      `${onBridge.map((c) => c.label).join(' / ')} 在走桥`
+      + (byChoice.length ? `；${byChoice.map((c) => c.label).join(' / ')} 已切回原始模型` : ''),
+      '');
+  } else if (byChoice.length) {
+    push('connect', '客户端接入', 'ok',
+      `${byChoice.map((c) => c.label).join(' / ')} 已切回原始模型（随时可切回桥）`, '');
+  } else {
+    push('connect', '客户端接入', 'ok', '尚未接入任何客户端', '在「客户端接入」页签里一键接入');
+  }
   const dsh = readDshStatus();
   push('settings', 'dsh 模型路由', dsh.routeLive ? 'ok' : 'fail',
     dsh.routeLive

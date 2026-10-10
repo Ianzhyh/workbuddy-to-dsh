@@ -71,6 +71,17 @@ const CLIENTS = [
     effectiveModel: 'deepseek-v4.1-flash',
     effectiveModels: ['deepseek-v4.1-flash', 'glm-5.3'],
     models: ['deepseek-v4.1-flash', 'glm-5.3'],
+    /**
+     * Codex 的 profile 通道（零写入接入）。它**不是第四行**，而是挂在 Codex 这一行
+     * 详情里的一个可选项 —— 与"改基础配置"是同一个决策的两个选项。
+     */
+    profile: {
+      id: 'codex-profile', label: 'Codex · profile',
+      path: 'C:\\Users\\you\\.codex\\workbuddy.config.toml',
+      exists: false, applied: false, changed: true, canSwitchBack: false,
+      error: null, catalogSkipped: null,
+      launch: 'codex -p workbuddy', appSupported: false,
+    },
     catalog: {
       path: 'C:\\Users\\you\\.codex\\workbuddy-model-catalog.json',
       name: 'workbuddy-model-catalog.json',
@@ -477,6 +488,105 @@ try {
   else fail('令牌不一致时没有指出处置办法');
   if (!mismatch.includes('桥未运行')) pass('没有把「令牌被拒」说成「桥未运行」');
   else fail('把令牌被拒说成了「桥未运行」—— 用户会去点启动桥服务，然后卡住');
+
+  // ── 8b. 桥没起时：模型候选来自"上次抓到的目录"，这件事必须说出来 ──────────
+  /*
+   * 审计 R5：桥没起时 `/v1/models` 拿不到，"这个模型存不存在"本该无从校验。
+   * 现在的做法是拿**上次成功抓到的目录**兜底 —— 那属于"校验过了"，但**不等于**
+   * "校验可信"。所以界面必须把话说全：候选可能已过期。
+   * 不说的话，用户会以为面板上列出的模型一定存在。
+   */
+  const staleDown = {
+    ...CONNECT, running: false, catalogStale: true, catalogAt: '2026-10-10T08:00:00.000Z',
+    bridge: { up: false, authRejected: false },
+  };
+  await q(cdp, `window.__setRoute('/api/connect', { status: 200, body: ${JSON.stringify(staleDown)} })`);
+  await q(cdp, `(() => { const b = [...document.querySelectorAll('#clientsBox .connectbox button')]
+    .find((x) => x.textContent.trim() === '重新读取'); if (b) b.click(); })()`);
+  await waitFor(cdp, `document.querySelector('#clientsBox .connectbox .notice') !== null`, 8000, '桥未运行提示').catch(() => {});
+  const staleNotice = await q(cdp, `(() => { const n = document.querySelector('#clientsBox .connectbox .notice'); return n ? n.textContent : ''; })()`);
+  if (staleNotice.includes('上次抓到的目录')) {
+    pass(`桥没起 + 目录来自缓存 → 明说候选可能过期：${staleNotice.slice(0, 46)}…`);
+  } else {
+    fail(`没说清候选来自缓存（用户会以为列出的模型一定存在）：${JSON.stringify(staleNotice.slice(0, 80))}`);
+  }
+
+  // ── 9. 点「重新写入」：POST 必须带上**整批勾选的模型** ──────────────────
+  /*
+   * 现场（用户实际遇到的那次）：面板里勾了 5 个模型 → 点「重新写入」→ 客户端里
+   * 始终只有 4 个，重启客户端多少次都一样。
+   *
+   * 根因是这个 POST 只发了 `model`（主模型），没发 `models`（勾选的那一批）。
+   * 服务端在没收到 `models` 时会回落到"沿用配置文件里现在那批"（那是给命令行
+   * `connect apply` 不带 `--models` 用的兜底），于是把旧的 4 个又写了一遍；
+   * 而面板显示的个数来自它**自己的**勾选状态 —— 界面于是永远显示 5 个 +
+   * 「已接入，需重新写入」，用户没有任何办法看出差异。
+   *
+   * 这一段钉住两件事：
+   *   a. 请求体里必须带 `models`（否则新勾的模型永远写不进去）；
+   *   b. 写入成功后，面板显示的个数要跟着**真正写进去的那批**走，
+   *      而不是继续念自己那份勾选状态。
+   *
+   * 状态接口换成**按查询串回话**的桩：勾选变了，它回的 effectiveModels 也跟着变。
+   * 不换的话页面拿到的永远是夹具里那份固定状态 —— b 这条就验不出来（假绿）。
+   */
+  await q(cdp, `window.__FIXCONNECT = ${JSON.stringify(CONNECT)}`);
+  await q(cdp, `window.__setRoute('/api/connect', { body: (url) => {
+    const raw = new URL(url, 'http://x').searchParams.get('models.codex');
+    const ids = raw ? raw.split(',') : ['deepseek-v4.1-flash', 'glm-5.3'];
+    const fix = window.__FIXCONNECT;
+    return { ...fix, clients: fix.clients.map((c) => (c.id === 'codex'
+      ? { ...c, effectiveModels: ids, models: ids, effectiveModel: ids[0], changed: false } : c)) };
+  } })`);
+  await q(cdp, `(() => { const b = [...document.querySelectorAll('#clientsBox .connectbox button')]
+    .find((x) => x.textContent.trim() === '重新读取'); if (b) b.click(); })()`);
+  await sleep(300);
+  await q(cdp, `(() => { const row = [...document.querySelectorAll('#clientsBox .connectrow')]
+    .find((r) => (r.querySelector('.connectname') || {}).textContent === 'Codex');
+    const b = [...row.querySelectorAll('.connectacts button')].find((x) => x.textContent.trim() === '详情');
+    if (b) b.click(); })()`);
+  await waitFor(cdp, `document.querySelectorAll('#clientsBox .connectml-row').length > 0`, 8000, '模型清单').catch(() => {});
+
+  // 取消勾选 glm-5.3，只留 deepseek-v4.1-flash
+  await q(cdp, `(() => { const rows = [...document.querySelectorAll('#clientsBox .connectml-row')];
+    const row = rows.find((r) => (r.querySelector('.connectml-id') || {}).textContent === 'glm-5.3');
+    if (row && row.querySelector('.connectml-box').checked) row.querySelector('.connectml-box').click(); })()`);
+  await waitFor(cdp, `window.__urls.some((u) => u.includes('models.codex=deepseek-v4.1-flash') && !u.includes('glm-5.3'))`,
+    8000, '勾选更新').catch(() => {});
+
+  // 写入接口回一份"真正写进去的是另外两个模型"的结果，用来验面板会不会跟着走
+  await q(cdp, `window.__setRoute('/api/connect/apply', { status: 200, body: ${JSON.stringify({
+    ok: true, changed: true, models: ['deepseek-v4.1-flash', 'glm-5.2'],
+    verify: { ok: true }, auth: { ok: true, models: 2 },
+  })} })`);
+  await q(cdp, `(() => { const row = [...document.querySelectorAll('#clientsBox .connectrow')]
+    .find((r) => (r.querySelector('.connectname') || {}).textContent === 'Codex');
+    const b = [...row.querySelectorAll('.connectacts button')].find((x) => x.textContent.trim() === '重新写入');
+    if (b) b.click(); })()`);
+  await waitFor(cdp, `window.__posts.some((p) => p.path === '/api/connect/apply')`, 8000, '写入请求').catch(() => {});
+  const applyBody = await q(cdp, `(window.__posts.filter((p) => p.path === '/api/connect/apply').pop() || {}).body || null`);
+  if (applyBody && Array.isArray(applyBody.models) && applyBody.models.join(',') === 'deepseek-v4.1-flash') {
+    pass(`写入请求带上了整批勾选的模型：models=${JSON.stringify(applyBody.models)}`);
+  } else {
+    fail(`写入请求没带 models —— 勾选的模型永远写不进去：${JSON.stringify(applyBody)}`);
+  }
+  if (applyBody && applyBody.model === 'deepseek-v4.1-flash') pass(`写入请求带上了主模型：model=${applyBody.model}`);
+  else fail(`写入请求没带主模型：${JSON.stringify(applyBody)}`);
+
+  await sleep(400);
+  const afterApply = await q(cdp, `(() => { const row = [...document.querySelectorAll('#clientsBox .connectrow')]
+    .find((r) => (r.querySelector('.connectname') || {}).textContent === 'Codex');
+    return {
+      count: (row.querySelector('.connectmcount') || {}).textContent || '',
+      checked: [...document.querySelectorAll('#clientsBox .connectml-row')]
+        .filter((r) => r.querySelector('.connectml-box').checked)
+        .map((r) => (r.querySelector('.connectml-id') || {}).textContent),
+    }; })()`);
+  if (afterApply.count.trim() === '2 个模型' && afterApply.checked.join(',') === 'deepseek-v4.1-flash,glm-5.2') {
+    pass(`写入后面板跟着真实结果走：${afterApply.count.trim()}（${afterApply.checked.join(' / ')}）`);
+  } else {
+    fail(`面板没跟着写入结果走（界面在说假话）：${JSON.stringify(afterApply)}`);
+  }
 } catch (err) {
   fail(`第一段抛错：${err.message}`);
 }
@@ -580,6 +690,295 @@ try {
     fail(`第三段抛错：${err.message}`);
   } finally {
     page3.close();
+  }
+}
+
+// ── 第四段：模式切换（走桥 ↔ 客户端自己的模型）────────────────────────────
+/*
+ * 这是「撤销」之外的另一条路，也是用户真正会问的那个问题：
+ * "我这两天想用 Codex 自己的模型，回头还想接着用桥"。
+ *
+ * 这一段钉住三件事：
+ *   a. 桥模式下详情里有「切回原始模型」这个入口（而不是只能靠「撤销」拆掉）；
+ *   b. 点它发出的请求体是 `{client, mode:'native'}` —— 少了 mode 服务端就不知道
+ *      用户要干什么（接口是显式的，不靠猜）；
+ *   c. 切完之后界面必须跟着变成「已切回原始模型」，并且告诉用户**要重启客户端**
+ *      —— 实测踩过：用户写完、客户端里没变、于是反复点写入，而客户端是启动时读一次配置。
+ */
+{
+  const clientsFor = (mode) => CLIENTS.map((c) => (c.id === 'codex'
+    ? { ...c, mode, applied: mode === 'bridge', canSwitchBack: true, changed: false }
+    : c));
+  const routes4 = baseRoutes({ clients: clientsFor('bridge') });
+  routes4['/api/connect'] = {
+    body: (url) => (window.__MODE === 'native' ? window.__C.native : window.__C.bridge),
+  };
+  routes4['/api/connect/verify'] = { body: VERIFY_OK };
+  routes4['/api/connect/mode'] = {
+    body: {
+      ok: true, changed: true, mode: 'native', id: 'codex',
+      backup: 'E:\\backup\\client-configs\\codex\\20261010-170000-config.toml',
+      verify: { ok: true },
+      catalog: { path: 'C:\\Users\\you\\.codex\\workbuddy-model-catalog.json', kept: true },
+    },
+  };
+  const inject = 'window.__MODE = "bridge";'
+    + 'window.__C = ' + JSON.stringify({
+      bridge: { ...CONNECT, clients: clientsFor('bridge') },
+      native: { ...CONNECT, clients: clientsFor('native') },
+    }) + ';'
+    + 'window.__modeBody = null;'
+    + 'window.__applyBody = null;'
+    + '(() => { const orig = window.fetch; window.fetch = (input, init) => {'
+    + '  const u = typeof input === "string" ? input : (input && input.url) || "";'
+    + '  if (u.includes("/api/connect/mode")) { window.__MODE = "native"; window.__modeBody = init && init.body; }'
+    + '  if (u.includes("/api/connect/apply")) { window.__applyBody = init && init.body; }'
+    + '  return orig(input, init); }; })();';
+
+  const page4 = await openPage(`${URL_}?case=mode`, routes4, { width: 1440, height: 1000, cdpPort: 9335, inject });
+  const cdp4 = page4.cdp;
+  try {
+    await waitFor(cdp4, `document.querySelectorAll('#clientsBox .connectrow').length === 3`, 10000, '第四段三行');
+    await q(cdp4, `(() => { const row = [...document.querySelectorAll('#clientsBox .connectrow')]
+      .find((r) => (r.querySelector('.connectname') || {}).textContent === 'Codex');
+      const b = [...row.querySelectorAll('.connectacts button')].find((x) => x.textContent.trim() === '详情');
+      if (b) b.click(); })()`);
+    await waitFor(cdp4, `document.querySelector('#clientsBox .connectmode') !== null`, 8000, '模式区块');
+
+    const before = await q(cdp4, `(() => {
+      const box = document.querySelector('#clientsBox .connectmode');
+      const row = [...document.querySelectorAll('#clientsBox .connectrow')]
+        .find((r) => (r.querySelector('.connectname') || {}).textContent === 'Codex');
+      return {
+        text: box.textContent,
+        buttons: [...box.querySelectorAll('button')].map((b) => b.textContent.trim()),
+        tag: (row.querySelector('.connectmeta .tag') || {}).textContent.trim(),
+      };
+    })()`);
+    if (before.text.includes('正在走桥') && before.buttons.includes('切回原始模型')) {
+      pass(`桥模式下详情里有模式区块与「切回原始模型」：${JSON.stringify(before.buttons)}`);
+    } else {
+      fail(`桥模式下的模式区块不对：${JSON.stringify(before)}`);
+    }
+    if (before.tag === '已接入') pass('桥模式下状态标签是「已接入」');
+    else fail(`桥模式下的标签不对：${before.tag}`);
+
+    // 点「切回原始模型」
+    await q(cdp4, `(() => { const box = document.querySelector('#clientsBox .connectmode');
+      [...box.querySelectorAll('button')].find((b) => b.textContent.trim() === '切回原始模型').click(); })()`);
+    await waitFor(cdp4, `window.__modeBody !== null`, 8000, '切模式请求').catch(() => {});
+    const body = await q(cdp4, `window.__modeBody`);
+    let parsed = null;
+    try { parsed = JSON.parse(body || 'null'); } catch { /* 保留 null，下面断言会报出来 */ }
+    if (parsed && parsed.client === 'codex' && parsed.mode === 'native') {
+      pass(`切模式请求体明确带了目标模式：${body}`);
+    } else {
+      fail(`切模式请求体不对（服务端无从判断用户要干什么）：${JSON.stringify(body)}`);
+    }
+
+    await sleep(600);
+    const after = await q(cdp4, `(() => {
+      const box = document.querySelector('#clientsBox .connectmode');
+      const row = [...document.querySelectorAll('#clientsBox .connectrow')]
+        .find((r) => (r.querySelector('.connectname') || {}).textContent === 'Codex');
+      return {
+        text: box.textContent,
+        buttons: [...box.querySelectorAll('button')].map((b) => b.textContent.trim()),
+        tag: (row.querySelector('.connectmeta .tag') || {}).textContent.trim(),
+        result: [...row.querySelectorAll('.connectresult div')].map((d) => d.textContent.trim()).join(' | '),
+      };
+    })()`);
+    if (after.tag === '已切回原始模型') pass(`切完之后标签变成「${after.tag}」（不再挂着绿色的「已接入」）`);
+    else fail(`切完之后标签不对：${after.tag}`);
+    if (after.buttons.includes('切到桥的模型')) pass(`模式区块给了反向入口：${JSON.stringify(after.buttons)}`);
+    else fail(`切完之后没有「切到桥的模型」入口：${JSON.stringify(after.buttons)}`);
+    if (after.text.includes("客户端自己的模型")) pass('模式区块如实说明现在用的是客户端自己的模型');
+    else fail(`模式区块没说清当前模式：${after.text.slice(0, 80)}`);
+    if (after.result.includes('重启该客户端后生效')) {
+      pass('结论里明说「重启该客户端后生效」（客户端是启动时读一次配置）');
+    } else {
+      fail(`没有告诉用户要重启客户端：${after.result}`);
+    }
+
+    // ── 第四段 b：Codex 的 profile 通道（零写入接入）──────────────────────
+    /*
+     * `codex -p <name>` 会叠加 `$CODEX_HOME/<name>.config.toml`，所以有一条
+     * **基础配置一个字节都不动**的接入方式。它是"便捷性与安全性同时更好"的那一档，
+     * 但**桌面应用不接受命令行开关** —— 这条限制必须在界面上写着，否则用户会白试。
+     */
+    const prof = await q(cdp4, `(() => {
+      const box = document.querySelector('#clientsBox .connectprofile');
+      if (!box) return null;
+      return { text: box.textContent, buttons: [...box.querySelectorAll('button')].map((b) => b.textContent.trim()) };
+    })()`);
+    if (prof && prof.buttons.includes('写入 profile 文件')) {
+      pass(`Codex 详情里有 profile 通道入口：${JSON.stringify(prof.buttons)}`);
+    } else {
+      fail(`没有 profile 通道入口：${JSON.stringify(prof && prof.buttons)}`);
+    }
+    if (prof && prof.text.includes('codex -p workbuddy')) pass('给出了要照着敲的启动命令');
+    else fail('没有给出启动命令（用户不知道写完怎么用）');
+    if (prof && prof.text.includes('桌面应用不接受命令行开关')) pass('如实标注了「只对命令行生效」这条限制');
+    else fail('没有标注限制 —— 用户会以为桌面应用也能用 profile');
+    if (prof && prof.text.includes('config.toml') && prof.text.includes('一个字节都不动')) {
+      pass('说清了它不动基础配置');
+    } else {
+      fail('没说清"不动你的配置"这个关键好处');
+    }
+
+    // 点「写入 profile 文件」→ 请求体必须指向 profile 那个客户端，并带上勾选的模型
+    await q(cdp4, `(() => { const box = document.querySelector('#clientsBox .connectprofile');
+      [...box.querySelectorAll('button')].find((b) => b.textContent.trim() === '写入 profile 文件').click(); })()`);
+    await waitFor(cdp4, `window.__applyBody !== null`, 8000, 'profile 写入请求').catch(() => {});
+    const pbody = await q(cdp4, `window.__applyBody`);
+    let pparsed = null;
+    try { pparsed = JSON.parse(pbody || 'null'); } catch { /* 下面断言会报出来 */ }
+    if (pparsed && pparsed.client === 'codex-profile') {
+      pass(`profile 写入请求指向 profile 客户端：${pbody}`);
+    } else {
+      fail(`profile 写入请求的客户端不对（会写到基础配置上去）：${JSON.stringify(pbody)}`);
+    }
+    if (pparsed && Array.isArray(pparsed.models) && pparsed.models.join(',') === 'deepseek-v4.1-flash,glm-5.3') {
+      pass(`并沿用了 Codex 那行勾选的模型：${JSON.stringify(pparsed.models)}`);
+    } else {
+      fail(`profile 没沿用勾选的模型（用户得再勾一遍）：${JSON.stringify(pparsed && pparsed.models)}`);
+    }
+
+    // 英文模式下这块也不许留中文
+    await q(cdp4, `document.getElementById('langToggle').click()`);
+    await sleep(400);
+    const zh4 = await q(cdp4, ZH_IN('#clientsBox .connectbox'));
+    if (zh4.length === 0) pass('英文模式：模式与 profile 区块无残留中文');
+    else fail(`英文模式下模式区块仍有 ${zh4.length} 处中文：\n     ` + zh4.slice(0, 8).join('\n     '));
+
+    // ── 第四段 c：Esc 要能退出展开的详情（键盘可达性）──────────────────────
+    /*
+     * 界面规范里那条"每个可交互元素都要能被键盘走到、也要能被键盘退出来"。
+     * 原先 Esc 只关模型详情，接入面板展开的客户端详情关不掉 —— 键盘用户
+     * 只能回去点「收起详情」按钮。
+     */
+    const openBefore = await q(cdp4, `document.querySelector('#clientsBox .connectdetail') !== null`);
+    await q(cdp4, `document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
+    await sleep(350);
+    const openAfter = await q(cdp4, `document.querySelector('#clientsBox .connectdetail') !== null`);
+    if (openBefore && !openAfter) pass('Esc 关掉了展开的详情（键盘能进也能退）');
+    else fail(`Esc 没能收起详情（前=${openBefore} 后=${openAfter}）—— 键盘用户只能去点按钮`);
+
+    // ── 第四段 d：确认弹窗在英文模式下也必须是英文 ─────────────────────────
+    /*
+     * **翻译层够不到 `confirm()` 弹窗**（它不在 DOM 里），所以"英文模式无残留中文"
+     * 那几条渲染断言**覆盖不到它** —— 而写入确认框是用户每次接入都会看到的一段字，
+     * 还是**多行拼出来**的（最容易漏翻的形状）。
+     *
+     * 这一条以前没有任何测试：`check-i18n-coverage` 会把它的字面量报成"翻不动"，
+     * 而那是**静态扫描**，看不出运行时到底翻了没有。所以这里实测一次。
+     */
+    // 此刻页面已经是英文（上面那条渲染断言切过去之后没有切回来）
+    await q(cdp4, `(() => { const row = [...document.querySelectorAll('#clientsBox .connectrow')]
+      .find((r) => (r.querySelector('.connectname') || {}).textContent === 'Codex');
+      const b = [...row.querySelectorAll('.connectacts button')].find((x) => x.className.includes('primary'));
+      if (b) b.click(); })()`);
+    await sleep(500);
+    const dlg = page4.lastDialog() || '';
+    if (dlg && !/[\u4e00-\u9fff]/.test(dlg)) {
+      pass(`英文模式下写入确认框是英文：${JSON.stringify(dlg.slice(0, 60))}…`);
+    } else if (!dlg) {
+      fail('没抓到确认框 —— 用例失效（按钮选择器变了？）');
+    } else {
+      fail(`英文模式的确认框里还有中文：${JSON.stringify(dlg.slice(0, 120))}`);
+    }
+  } catch (err) {
+    fail(`第四段抛错：${err.message}`);
+  } finally {
+    page4.close();
+  }
+}
+
+// ── 第五段：刷新页面不该丢掉"还没写入的勾选" ──────────────────────────────
+/*
+ * 实测的抱怨：勾好了 5 个、还没点写入，刷新一下回到 4 个 —— 因为面板的勾选状态
+ * 原本只在内存里，刷新后是从配置文件重建的。现在把**选择**存进 localStorage
+ * （只存选择，不存任何凭据），恢复出来的选择还要**真的发给服务端** ——
+ * 只在本地显示没用，预览与写入都得按它算。
+ */
+{
+  const routes5 = baseRoutes({ clients: CLIENTS });
+  routes5['/api/connect'] = {
+    body: (url) => {
+      const fix = window.__F5;
+      const raw = new URL(url, 'http://x').searchParams.get('models.codex');
+      const ids = raw ? raw.split(',') : ['deepseek-v4.1-flash', 'glm-5.3'];
+      return {
+        ...fix,
+        clients: fix.clients.map((c) => (c.id === 'codex'
+          ? { ...c, effectiveModels: ids, models: ids, effectiveModel: ids[0], changed: false } : c)),
+      };
+    },
+  };
+  routes5['/api/connect/verify'] = { body: VERIFY_OK };
+  const page5 = await openPage(`${URL_}?case=persist`, routes5, {
+    width: 1440,
+    height: 1000,
+    cdpPort: 9335,
+    inject: `window.__F5 = ${JSON.stringify({ ...CONNECT, clients: CLIENTS })};` + URL_RECORDER,
+  });
+  const cdp5 = page5.cdp;
+  const expand5 = () => q(cdp5, `(() => { const row = [...document.querySelectorAll('#clientsBox .connectrow')]
+    .find((r) => (r.querySelector('.connectname') || {}).textContent === 'Codex');
+    const b = [...row.querySelectorAll('.connectacts button')].find((x) => x.textContent.trim() === '详情');
+    if (b) b.click(); })()`);
+  try {
+    await waitFor(cdp5, `document.querySelectorAll('#clientsBox .connectrow').length === 3`, 10000, '第五段三行');
+    await expand5();
+    await waitFor(cdp5, `document.querySelectorAll('#clientsBox .connectml-row').length > 0`, 8000, '模型清单');
+
+    // 取消勾选 glm-5.3 → 只剩 1 个（模拟"改完还没点写入"）
+    await q(cdp5, `(() => { const r = [...document.querySelectorAll('#clientsBox .connectml-row')]
+      .find((x) => (x.querySelector('.connectml-id') || {}).textContent === 'glm-5.3');
+      if (r && r.querySelector('.connectml-box').checked) r.querySelector('.connectml-box').click(); })()`);
+    await waitFor(cdp5, `window.__urls.some((u) => u.includes('models.codex=deepseek-v4.1-flash') && !u.includes('glm-5.3'))`,
+      8000, '勾选更新').catch(() => {});
+    const stored = await q(cdp5, `window.localStorage.getItem('wb-connect-selection')`);
+    if (stored && stored.includes('deepseek-v4.1-flash')) pass(`勾选写进了 localStorage：${String(stored).slice(0, 60)}…`);
+    else fail(`勾选没落盘（刷新就会丢）：${stored}`);
+
+    // 刷新页面（harness 只在 openPage 时清一次存储，重载不会清）
+    /*
+     * 重载要**确定性地等到新文档**，不能只等"行数 == 3"：
+     * 重载期间 `Runtime.evaluate` 可能打在新旧文档交替的那一刻，于是抛
+     * `Uncaught`（满负载跑时实测到过 —— 单跑这条用例却过，典型的竞态）。
+     * 判据用一个只存在于旧文档的标记：新文档里它是 undefined。
+     */
+    await q(cdp5, `window.__OLD_DOC = 1`);
+    await q(cdp5, `location.reload()`);
+    await waitFor(cdp5, `typeof window.__OLD_DOC === 'undefined' && document.readyState === 'complete'`,
+      20000, '重载到新文档').catch(() => {});
+    await waitFor(cdp5, `document.querySelectorAll('#clientsBox .connectrow').length === 3`, 20000, '刷新后三行');
+    await waitFor(cdp5, `!![...document.querySelectorAll('#clientsBox .connectrow')]
+      .find((r) => (r.querySelector('.connectname') || {}).textContent === 'Codex')`, 8000, '刷新后 Codex 行').catch(() => {});
+    await expand5();
+    await waitFor(cdp5, `document.querySelectorAll('#clientsBox .connectml-row').length > 0`, 8000, '刷新后模型清单');
+    const after = await q(cdp5, `(() => ({
+      count: (document.querySelector('#clientsBox .modelpick-count') || {}).textContent || '',
+      checked: [...document.querySelectorAll('#clientsBox .connectml-row')]
+        .filter((r) => r.querySelector('.connectml-box').checked)
+        .map((r) => (r.querySelector('.connectml-id') || {}).textContent),
+    }))()`);
+    if (after.checked.join(',') === 'deepseek-v4.1-flash') {
+      pass(`刷新后保住了"还没写入"的选择：${after.count.trim()}（${after.checked.join(',')}）`);
+    } else {
+      fail(`刷新把用户没写完的勾选丢了：${JSON.stringify(after)}`);
+    }
+    const req = await q(cdp5, `window.__urls.filter((u) => u.includes('models.codex=')).pop() || ''`);
+    if (req.includes('models.codex=deepseek-v4.1-flash') && !req.includes('glm-5.3')) {
+      pass('恢复的选择也真的发给了服务端（预览与写入都会按它算）');
+    } else {
+      fail(`恢复的选择没发给服务端（只在本地显示，等于没用）：${req}`);
+    }
+  } catch (err) {
+    fail(`第五段抛错：${err.message}`);
+  } finally {
+    page5.close();
   }
 }
 

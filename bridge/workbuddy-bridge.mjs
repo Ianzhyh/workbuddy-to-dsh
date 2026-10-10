@@ -2281,6 +2281,70 @@ async function relayResponsesStream(up, res, model) {
   const toolSlots = new Map(); // 上游 tool_calls 的 index → slot
   let pendingTool = null;     // 已分配索引但还没发 output_item.added 的工具块
 
+  /**
+   * 上游的思维链要不要转给 Codex（`WORKBUDDY_FORWARD_REASONING=1`）。
+   *
+   * ## 为什么默认**关**
+   *
+   * Codex 要求 `response.reasoning_summary_text.delta` 到达时**已有 active output
+   * item**（桥的注释里记着：不满足会让它中断整轮），而上游的 `reasoning_content`
+   * 总是先于任何 content / tool_call 到达 —— 所以要先把 reasoning 项**打开**、
+   * 发完 delta 再关掉，才轮到文本块。顺序是：reasoning item → message item。
+   *
+   * 事件名不是猜的：在 `codex.exe` 里能搜到 `reasoning_summary_text.delta` /
+   * `reasoning_summary_part.added` / `response.reasoning_summary_text.done` /
+   * `output_item.added`，说明它认这套。但**两件事必须真机对照实验才能定论**：
+   *   1. 这个事件顺序它是否全盘接受（不接受的表现是整轮中断）；
+   *   2. 我们目录条目里的 `default_reasoning_summary` 取值（本机模板给的是
+   *      `"none"`）—— 若 Codex 尊重它，光转发事件用户还是看不到东西。
+   *
+   * 所以做成开关：**默认行为一个字节不变**（丢弃 + 记一条日志），想试的人自己开，
+   * 试坏了把开关去掉即可。验证办法见 `docs/TROUBLESHOOTING.md`。
+   */
+  const forwardReasoning = process.env.WORKBUDDY_FORWARD_REASONING === '1';
+  let reasoningSlot = null;
+
+  /** 关闭打开中的 reasoning 项（幂等）。必须在文本/工具块之前调用。 */
+  const closeReasoning = () => {
+    if (!reasoningSlot) return;
+    send('response.reasoning_summary_text.done', {
+      item_id: reasoningSlot.id, output_index: reasoningSlot.outputIndex, summary_index: 0, text: reasoningSlot.text,
+    });
+    send('response.reasoning_summary_part.done', {
+      item_id: reasoningSlot.id,
+      output_index: reasoningSlot.outputIndex,
+      summary_index: 0,
+      part: { type: 'summary_text', text: reasoningSlot.text },
+    });
+    const item = {
+      id: reasoningSlot.id,
+      type: 'reasoning',
+      status: 'completed',
+      summary: [{ type: 'summary_text', text: reasoningSlot.text }],
+    };
+    send('response.output_item.done', { output_index: reasoningSlot.outputIndex, item });
+    output[reasoningSlot.outputIndex] = item;
+    reasoningSlot = null;
+  };
+
+  /** 打开 reasoning 项（幂等）。`summary` 先给空数组，真实 API 也是这么发的。 */
+  const openReasoning = () => {
+    if (reasoningSlot) return reasoningSlot;
+    outputIndex += 1;
+    reasoningSlot = { id: responsesId('rs'), outputIndex, text: '' };
+    send('response.output_item.added', {
+      output_index: reasoningSlot.outputIndex,
+      item: { id: reasoningSlot.id, type: 'reasoning', status: 'in_progress', summary: [] },
+    });
+    send('response.reasoning_summary_part.added', {
+      item_id: reasoningSlot.id,
+      output_index: reasoningSlot.outputIndex,
+      summary_index: 0,
+      part: { type: 'summary_text', text: '' },
+    });
+    return reasoningSlot;
+  };
+
   /** 关闭打开中的文本项（幂等）。 */
   const closeText = () => {
     if (!textSlot) return;
@@ -2377,16 +2441,24 @@ async function relayResponsesStream(up, res, model) {
         if (choice.finish_reason) finishReason = choice.finish_reason;
         const d = choice.delta || {};
 
-        // 上游给的思维链**刻意不往 Codex 发**：Codex 要求
-        // response.reasoning_summary_text.delta 到达时已有 active_item，
-        // 而思维链总是先于任何 output item 到达 —— 发出去只会让它
-        // error_or_panic 中断整轮。这里改为记一笔日志，不静默吞掉。
-        if (typeof d.reasoning_content === 'string' && d.reasoning_content) sawReasoning = true;
+        // 上游给的思维链：默认**刻意不往 Codex 发**（见上面 forwardReasoning 的说明），
+        // 开了开关才按 reasoning 项转发。无论发不发都要记下"上游给了"，日志里要说。
+        if (typeof d.reasoning_content === 'string' && d.reasoning_content) {
+          sawReasoning = true;
+          if (forwardReasoning) {
+            const rs = openReasoning();
+            rs.text += d.reasoning_content;
+            send('response.reasoning_summary_text.delta', {
+              item_id: rs.id, output_index: rs.outputIndex, summary_index: 0, delta: d.reasoning_content,
+            });
+          }
+        }
 
         if (typeof d.content === 'string' && d.content) {
           if (!textSlot) {
-            // 工具块先关掉，output_index 才能安全前进
+            // 工具块先关掉，output_index 才能安全前进；reasoning 项也必须先关
             for (const s of toolSlots.values()) if (!s.closed) { s.closed = true; closeTool(s); }
+            closeReasoning();
             outputIndex += 1;
             textSlot = { id: responsesId('msg'), outputIndex, text: '' };
             send('response.output_item.added', {
@@ -2412,6 +2484,7 @@ async function relayResponsesStream(up, res, model) {
           let slot = toolSlots.get(upIdx);
           if (!slot) {
             closeText(); // 文本块必须先关，索引才能前进
+            closeReasoning();
             outputIndex += 1;
             slot = {
               id: responsesId('fc'),
@@ -2443,14 +2516,16 @@ async function relayResponsesStream(up, res, model) {
     log('responses stream interrupted', e.message);
   }
 
-  // 收尾：先补发漏掉的工具块，再关文本块，顺序不能反
+  // 收尾：先补发漏掉的工具块，再关文本块，顺序不能反；reasoning 项最先关
   if (pendingTool && !pendingTool.started) flushTool(pendingTool);
+  closeReasoning();
   closeText();
   for (const s of toolSlots.values()) if (!s.closed) { s.closed = true; closeTool(s); }
 
-  if (sawReasoning) {
+  if (sawReasoning && !forwardReasoning) {
     log('responses: upstream sent reasoning_content; it is not forwarded '
-      + '(Codex requires an active output item before reasoning deltas)');
+      + '(set WORKBUDDY_FORWARD_REASONING=1 to try forwarding it as a reasoning item; '
+      + 'see docs/TROUBLESHOOTING.md)');
   }
 
   const finalOutput = output.filter(Boolean);
@@ -4480,6 +4555,14 @@ server.listen(PORT, HOST, () => {
   console.log(`auth file  : ${AUTH_PATH}`);
   console.log(`client exe : ${atRestUsedExe || resolveWorkBuddyExe() || '未找到（设置 WORKBUDDY_APP_EXECUTABLE 指向 WorkBuddy.exe）'}`);
   console.log(`models     : ${FEATURED.map((m) => m.id).join(', ')}  (all models: /v1/models?all=1)`);
+  /*
+   * 只在**开了**的时候说一句：默认行为（丢弃思维链）不需要每次都提醒，
+   * 但既然有人开了这个开关，就要让他一眼看到"确实生效了"——
+   * 否则他会去猜"是不是没读到我设的环境变量"。
+   */
+  if (process.env.WORKBUDDY_FORWARD_REASONING === '1') {
+    console.log('reasoning  : forwarded as a `reasoning` output item (WORKBUDDY_FORWARD_REASONING=1)');
+  }
   console.log(`keep-alive : ${KEEPALIVE_MS > 0 ? `${Math.round(KEEPALIVE_MS / 1000)}s idle pool` : 'off'}`);
   /*
    * 未显式配置令牌时把自动生成的值打印出来。

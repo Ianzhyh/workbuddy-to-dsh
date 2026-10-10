@@ -33,10 +33,12 @@ import {
   findClient,
   modelOptions,
   planClient,
+  recordedConnect,
   resolveBackupRoot,
   resolveModelChoice,
   resolveSelection,
   assertModelsKnown,
+  switchClientMode,
   undoClient,
   verifyAgainstBridge,
   verifyWritten,
@@ -920,11 +922,35 @@ const server = createServer(async (req, res) => {
      * 响应它读不到，但副作用已经发生（实测：外部页面 POST /api/checkin/settings
      * 真的改动了 .state.json）。要求一个自定义头会强制 CORS 预检，而本服务不解答
      * 预检 → 跨站请求根本发不出来。与插件侧数据面（lib/routes.mjs）同一套做法。
-     *
-     * 读操作（GET/HEAD）不拦：只暴露非敏感元数据，且插件/脚本要能直接读。
      */
-    if (req.method !== 'GET' && req.method !== 'HEAD' && req.headers['x-workbuddy-panel'] !== '1') {
-      return sendJson(res, 403, { ok: false, error: 'missing x-workbuddy-panel header' });
+    const panelHeader = req.headers['x-workbuddy-panel'] === '1';
+    const isRead = req.method === 'GET' || req.method === 'HEAD';
+    /**
+     * 读接口里也有需要这道门槛的（审计 R2 / R4，2026-10-10）：
+     *
+     *   1. **会回令牌的** —— `/api/connect`（面板要显示与复制令牌）、
+     *      `/api/clients`（复制片段那一页）。控制台本身没有身份认证，而 Windows 上
+     *      127.0.0.1 **不按用户隔离**：同机任何用户/进程一句 curl 就能拿到令牌，
+     *      再拿去调桥、消耗账号额度。`Origin` 白名单挡的是浏览器，挡不住本机进程。
+     *   2. **会真的干活的** —— `/api/diagnose`（跑一轮诊断）、
+     *      `/api/models?refresh=1`（强制桥去上游重取目录）。浏览器发
+     *      `<img src="http://127.0.0.1:8792/…">` 时**不带 Origin**，而
+     *      `originAllowed` 对无 Origin 的请求是放行的 → 任意网页都能反复触发它们。
+     *
+     * 代价（写出来，别让人踩）：命令行/脚本调这几个接口要自己加
+     * `-H "x-workbuddy-panel: 1"`。控制台页面走 `api()` 封装，**每个请求都带**这个头，
+     * 所以界面不受影响。
+     */
+    const PANEL_ONLY_GET = new Set(['/api/connect', '/api/clients', '/api/diagnose']);
+    const needsPanel = !isRead
+      || PANEL_ONLY_GET.has(route)
+      || (route === '/api/models' && url.searchParams.get('refresh') === '1');
+    if (needsPanel && !panelHeader) {
+      return sendJson(res, 403, {
+        ok: false,
+        error: 'missing x-workbuddy-panel header',
+        hint: '这个接口会回令牌或触发真实动作，需要带自定义头 x-workbuddy-panel: 1（控制台页面会自动带）。',
+      });
     }
 
     if (route === '/api/overview') {
@@ -1077,7 +1103,7 @@ const server = createServer(async (req, res) => {
        * （`resolveModelChoice`）：模型是用户的选择，重新打开页面就把它当漂移、
        * 报一句「需重新写入」，等于界面在制造一件不存在的事，还会顺手覆盖掉它。
        */
-      const clients = CONNECT_CLIENTS.map((c) => {
+      const planOne = (c) => {
         const raw = url.searchParams.get(`model.${c.id}`);
         const explicit = typeof raw === 'string' && raw.trim() ? raw.trim() : null;
         const chosen = resolveModelChoice(base, c, explicit);
@@ -1094,7 +1120,36 @@ const server = createServer(async (req, res) => {
         return bad
           ? { ...plan, error: bad, changes: [], effectiveModel: null }
           : { ...plan, effectiveModel: ctx.model, effectiveModels: ctx.models.map((m) => m.id) };
-      });
+      };
+      /*
+       * 行 = 真正的客户端。**Codex 的 profile 通道不作为独立一行** ——
+       * 它和"改基础配置"是同一个决策的两个选项，所以挂在 Codex 那一行的详情里。
+       * 状态要单独算一次：它有自己的文件、自己的记录（见 CONNECT_CLIENTS 的说明）。
+       */
+      const clients = CONNECT_CLIENTS.filter((c) => !c.profileFor).map(planOne);
+      const codexRow = clients.find((c) => c.id === 'codex');
+      const profileDef = CONNECT_CLIENTS.find((c) => c.profileFor === 'codex');
+      if (codexRow && profileDef) {
+        const p = planOne(profileDef);
+        codexRow.profile = {
+          id: profileDef.id,
+          label: profileDef.label,
+          path: p.path,
+          exists: p.exists,
+          applied: p.applied,
+          changed: p.changed,
+          canSwitchBack: p.canSwitchBack,
+          error: p.error || null,
+          catalogSkipped: p.catalogSkipped || null,
+          /** 用户要照着敲的那一句 —— 界面直接显示它，别让他自己拼 */
+          launch: `codex -p ${profileDef.profileName}`,
+          /**
+           * **桌面应用不接受命令行开关**（`-p` / `-c` 都是 CLI 的参数），
+           * 这条必须让用户知道，否则他会以为 profile 对 app 也生效。
+           */
+          appSupported: false,
+        };
+      }
       sendJson(res, 200, {
         clients,
         /** 配置里该出现的值，供界面在出错时对照 */
@@ -1104,6 +1159,12 @@ const server = createServer(async (req, res) => {
         model: base.defaultModel,
         /** 界面模型下拉的候选（完整目录，桥没起时退回精选集） */
         modelOptions: modelOptions(base),
+        /**
+         * 目录是不是"上次抓到的"（桥没起时的兜底校验用，审计 R5）。
+         * 界面据此把话说全：候选可能已过期，**不能**保证那些模型现在还存在。
+         */
+        catalogStale: base.catalogStale === true,
+        catalogAt: base.catalogAt || null,
         running: base.running,
         /**
          * 桥的进程级状态：`up` 有人应答、`authRejected` 回的是 401（两边令牌不一致）。
@@ -1145,6 +1206,60 @@ const server = createServer(async (req, res) => {
        * 失败不影响写入结果，如实回报即可。
        */
       if (result.changed) {
+        result.auth = await verifyAgainstBridge(findClient(id), {
+          baseUrl: context.baseUrlOpenAI, tokenOverride: context.token,
+        });
+      }
+      sendJson(res, result.ok ? 200 : 400, result);
+      return;
+    }
+
+    /*
+     * ── 模式切换：走桥 / 走客户端自己的模型 ──────────────────────────────
+     *
+     * 与「撤销」的区别（用户最容易问的一点）：
+     *   - 撤销 = **拆掉**：记录改名归档、我们建的目录文件删掉，再想用桥得重新接入；
+     *   - 切模式 = **换挡**：记录与目录都留着（只是不再被引用），随时一键切回来。
+     *
+     * 切回原始模型**不需要网络也不需要令牌** —— 它只把我们接管过的键按记录还原；
+     * 切回桥则一定要重新取令牌（可能已轮换），所以走 `buildConnectBase()`。
+     */
+    if (route === '/api/connect/mode' && req.method === 'POST') {
+      let body;
+      try {
+        body = JSON.parse(await readBody(req));
+      } catch (err) {
+        if (err.code === 'BODY_TOO_LARGE') return bodyTooLarge(req, res);
+        return sendJson(res, 400, { ok: false, error: `请求体不是合法 JSON：${err.message}` });
+      }
+      const id = String(body?.client || '');
+      if (!findClient(id)) return sendJson(res, 400, { ok: false, error: `不认识的客户端：${id}` });
+      const raw = body?.mode;
+      const target = raw === 'native' || raw === 'bridge' ? raw : null;
+      if (!target) return sendJson(res, 400, { ok: false, error: `不认识的目标模式：${String(raw)}（只能是 native / bridge）` });
+
+      if (target === 'native') {
+        const result = switchClientMode(id, 'native');
+        sendJson(res, result.ok ? 200 : 400, result);
+        return;
+      }
+
+      /*
+       * 切回桥：模型集合优先用**记录里上次接的那批**（用户不必重新勾一遍），
+       * 显式传了就以显式为准。令牌一律重新取。
+       */
+      const base = await buildConnectBase();
+      const client = findClient(id);
+      const rec = recordedConnect(id);
+      const rawModel = typeof body?.model === 'string' && body.model.trim() ? body.model.trim() : null;
+      const explicitModels = normalizeModelList(body?.models);
+      const chosen = resolveModelChoice(base, client, rawModel || rec.model);
+      const selection = resolveSelection(base, client, explicitModels || rec.models);
+      const bad = assertModelKnown(chosen, base) || assertModelsKnown(selection, base);
+      if (bad) return sendJson(res, 400, { ok: false, error: bad });
+      const context = contextForClient(base, id, chosen, selection);
+      const result = switchClientMode(id, 'bridge', context);
+      if (result.ok && result.changed) {
         result.auth = await verifyAgainstBridge(findClient(id), {
           baseUrl: context.baseUrlOpenAI, tokenOverride: context.token,
         });

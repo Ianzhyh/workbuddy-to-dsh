@@ -221,7 +221,12 @@ export function diagnoseFixture({ items = null } = {}) {
       },
     ],
     summary: { fail: 0, warn: 2, ok: 2 },
-    bridge: { running: true, ok: true, body: { ok: true, models: CATALOG.map((m) => m.id), catalogSize: CATALOG.length } },
+    /**
+     * `authRejected` / `status` 同样是真实接口一直有、夹具一直缺的字段
+     * （2026-10-10 重捕形状时才暴露）。`authRejected` 是「桥在跑但不认这把令牌」
+     * 那一档 —— 诊断面板要靠它把「桥没起」与「令牌不一致」分开说。
+     */
+    bridge: { running: true, ok: true, authRejected: false, status: 200, body: { ok: true, models: CATALOG.map((m) => m.id), catalogSize: CATALOG.length } },
     credentials: credentialsFixture(),
     dsh: {
       home: 'C:\\path\\to\\.dsh', settingsPath: 'C:\\path\\to\\.dsh\\settings.yaml',
@@ -289,6 +294,13 @@ export function clientsFixture({ running = true } = {}) {
     token: 'stub-token-not-a-real-value-9f3a2b1c',
     anthropicModel: 'glm-5.3',
     anthropicFastModel: 'glm-5.3-flash',
+    /**
+     * Responses 那条协议的默认模型。真实接口一直有这两个字段（`/api/clients`
+     * 就是「复制片段」那一页用的），只是形状表重捕之前没人发现夹具漏了它们 ——
+     * 漏了不会报错，只会让页面少渲染一行，属于形状表专门要防的那类静默缺口。
+     */
+    responsesModel: 'glm-5.3',
+    responsesFastModel: 'glm-5.3-flash',
     models: CATALOG.map((m) => m.id),
     modelDetails: CATALOG.map((m) => ({
       id: m.id, name: m.name, context: m.context_window, maxOutput: m.max_output_tokens,
@@ -384,6 +396,12 @@ export function connectFixture({ clients = null } = {}) {
     baseUrlOpenAI: 'http://127.0.0.1:8790/v1',
     baseUrlAnthropic: 'http://127.0.0.1:8790',
     model: 'deepseek-v4.1-flash',
+    /**
+     * 目录是不是"上次抓到的"（桥没起时的兜底校验，审计 R5）。
+     * 形状表里它是顶层字段 → 夹具**必须**有，否则 openPage 的形状校验会拦下来。
+     */
+    catalogStale: false,
+    catalogAt: null,
     backupDir: 'C:\\path\\to\\.backup\\client-configs',
     clients: clients || [
       {
@@ -412,6 +430,24 @@ export function connectFixture({ clients = null } = {}) {
           from: 'C:\\Users\\you\\.codex\\cc-switch-model-catalog.json',
         },
         catalogSkipped: null,
+        /**
+         * 现在走哪条路。**判据是文件本身**（不是我们记的账）—— 用户可能手工改回去过。
+         * 夹具里 Codex 是「已接入」→ bridge；另两个没接入 → native。
+         * 与 mode/canSwitchBack 一起进形状表（tools/dev/api-shape.json）。
+         */
+        mode: 'bridge', recordedMode: 'bridge', canSwitchBack: true,
+        /**
+         * Codex 的 profile 通道（零写入接入）：**挂在 Codex 这一行上，不单开一行** ——
+         * 它和"改基础配置"是同一个决策的两个选项，不是第四个客户端。
+         * 字段与真实接口一致（形状表里有 `$.clients[].profile.*`）。
+         */
+        profile: {
+          id: 'codex-profile', label: 'Codex · profile',
+          path: 'C:\\Users\\you\\.codex\\workbuddy.config.toml',
+          exists: false, applied: false, changed: true, canSwitchBack: false,
+          error: null, catalogSkipped: null,
+          launch: 'codex -p workbuddy', appSupported: false,
+        },
         models: ['deepseek-v4.1-flash', 'glm-5.3'],
         changes: [
           { path: 'model', kind: 'value', from: 'glm-5.2', to: 'deepseek-v4.1-flash' },
@@ -441,6 +477,7 @@ export function connectFixture({ clients = null } = {}) {
         effectiveModels: ['deepseek-v4.1-flash', 'glm-5.3'],
         catalog: null,
         catalogSkipped: null,
+        mode: 'native', recordedMode: null, canSwitchBack: false,
         models: ['deepseek-v4.1-flash', 'glm-5.3'],
         changes: [
           { path: 'env.ANTHROPIC_BASE_URL', kind: 'value', from: null, to: 'http://127.0.0.1:8790' },
@@ -461,6 +498,7 @@ export function connectFixture({ clients = null } = {}) {
         effectiveModels: ['deepseek-v4.1-flash', 'glm-5.3'],
         catalog: null,
         catalogSkipped: null,
+        mode: 'native', recordedMode: null, canSwitchBack: false,
         models: ['deepseek-v4.1-flash', 'glm-5.3'],
         changes: [
           { path: '$schema', kind: 'value', from: null, to: 'https://opencode.ai/config.json' },

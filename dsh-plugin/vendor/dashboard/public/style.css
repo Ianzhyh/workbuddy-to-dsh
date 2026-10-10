@@ -1,7 +1,8 @@
 /* ==========================================================================
    WorkBuddy 中转控制台 — 精致工程设计规范 (Blue Precision Design System)
    核心规范：
-   1. 色彩基调：经典纯粹皇家蓝 (#2563eb / #3b82f6) 为核心主调，杜绝浮夸杂乱渐变
+   1. 色彩基调：Claude / Anthropic 的暖色语言 —— 暖纸底（Lotion / Salt）+ 冷调强调色
+      （Windstorm #6a9bcc），细边框分隔、不用渐变、不用投影做层次
    2. 统一圆角：严格遵守 4px / 8px / 12px / 16px / 9999px 层级规范（包含抽屉与容器）
    3. 间距节奏：统一基于 4px / 8px 网格，舒适呼吸感与高信息密度并存
    4. 适度动效：微交互、抽屉旋转、淡入平移、脉冲状态均采用优雅物理缓动
@@ -20,85 +21,103 @@
   color-scheme: light;
 
   /* ── 1. 颜色规范 (Color Tokens) ─────────────────────────────────────── */
-  /* 主题色系：纯粹、深邃、高质感的皇家蓝 (Solid Royal Blue) */
-  --primary: #2563eb;
-  --primary-hover: #1d4ed8;
-  --primary-active: #1e40af;
-  --primary-subtle: #eff6ff;
-  --primary-border: #bfdbfe;
-  --primary-text: #1d4ed8;
-  --accent: #2563eb; /* 兼容 SVG 图表引用 */
+  /*
+   * 整套配色采用 **Claude / Anthropic 的视觉语言**：暖纸底 + 冷调强调色。
+   *
+   * 基准色直接取自官方色板，不做主观改动：
+   *   Lotion #faf9f5（页面底） Salt #f0eee6（卡片） Last Straw #e3dacc（边框）
+   *   Sooty #141414（正文 / 深色底） Noir #2c2b26（次级文字）
+   *   Windstorm #6a9bcc（招牌冷蓝） Emerald Oasis #629887（青绿）
+   *
+   * **为什么强调色是蓝而不是陶土**：官方色板里 Peachy Feeling（陶土）是"招牌色"，
+   * 但它是暖的，压在暖纸底上整页会糊成一片橙调 —— 而且它**根本不能当文字**
+   * （实测压 Salt 只有 2.69:1、配白字 3.12:1）。Windstorm 是同一套色板里
+   * 那个**偏灰的冷蓝**，本来就是为暖中性色配的：冷暖对比让强调色真的"跳"出来，
+   * 而不是和底融在一起。
+   *
+   * 三条与常见做法**相反**、但正是 Claude 风格所在的规矩：
+   *
+   *   1. **暖纸底，不用纯白**。页面是 Lotion，卡片是**比页面更深的** Salt ——
+   *      不是"白卡浮在灰底上"，而是"纸叠在纸上"。层次靠明度差与 1px 边框，
+   *      不靠"白得发亮"。
+   *   2. **1px 细边框分隔，不用投影**。整个浅色主题**取消了卡片投影**：
+   *      暖色底上投影会发灰发脏，而且"纸"本来就不该有浮起来的物理暗示。
+   *      投影只留给**真正浮在内容之上**的层（下拉 / 抽屉 / 气泡）。
+   *   3. **主按钮是深色，不是彩色**。实心按钮用 Sooty（配浅字 18.4:1），
+   *      强调色只用于边框 / 图标 / 选中态。彩色填充按钮配浅字很难过 AA ——
+   *      实测 Windstorm 原色 #6a9bcc 配白字只有 2.52:1，所以这里用的是**压暗版**。
+   *
+   * 强调色**不能直接当文字**：Windstorm 原色压 Salt 只有 2.52:1。
+   * 文字侧单独推导了一个保持色相的压暗变体，见 --primary-text。
+   */
+  --primary: #5982ab;          /* Windstorm 蓝（边框 / 图标 / 选中态，非文字） */
+  --primary-hover: #48698b;
+  --primary-active: #3e5b78;
+  --primary-subtle: #edf1f7;   /* 极淡的冷调蓝底 */
+  --primary-border: #c8d7e5;
+  --primary-text: #48698b;     /* 压 --primary-subtle 5.05:1、压 --panel 4.93:1 */
+  --accent: #5982ab; /* 兼容 SVG 图表引用 */
 
-  /* 背景与面板（浅色：纯净平整纸质感） */
-  --bg: #f8fafc;
-  --panel: #ffffff;
-  --panel-hover: #fafbfc;
-  --panel-muted: #f1f5f9;
-  --panel-subtle: #f8fafc;
+  /*
+   * 实心填充侧：**深色**。Claude 的主按钮是 Sooty 而不是品牌色 ——
+   * 一个页面上最该显眼的动作，靠"最深"而不是"最彩"来显眼，反而更安静也更好读。
+   * --on-solid 是压在上面的文字色，深色主题下会跟着反转。
+   */
+  --primary-solid: #141414;
+  --primary-solid-hover: #2c2b26;
+  --primary-solid-active: #000000;
+  --on-solid: #faf9f5;   /* 压在实色填充上的文字色（深色主题下反转） */
 
-  /* 边框体系（精致极细 1px 发丝线） */
-  --border: #e2e8f0;
-  --border-subtle: #edf2f7;
-  --border-strong: #cbd5e1;
-  --border-focus: #2563eb;
+  /*
+   * 背景与面板（暖纸：页面 Lotion，卡片 Salt —— 卡片比页面**深**一档）。
+   *
+   * 阶梯必须是**单调**的，方向是「越靠内越深」：
+   *   页面 #faf9f5 → 面板 #f0eee6 → 内嵌面 #eae7dd → 悬停 #e6e3d8 → 次级块 #e3dacc
+   *
+   * 为什么强调这件事：第一版把 `--panel-subtle` 写成比 `--panel` **更亮**的值
+   * （照搬浅冷色主题里"内层更白"的习惯）。结果嵌在面板里的行（诊断行、对话轮次、
+   * 可展开的说明条）看起来是**凸起来**的 —— 在暖纸底上那读作"这里被高亮了"，
+   * 而它们的真实语义是"这是嵌进去的一块"。深浅方向反了，语义就反了。
+   */
+  --bg: #faf9f5;
+  --panel: #f0eee6;
+  --panel-subtle: #eae7dd;
+  --panel-hover: #e6e3d8;
+  --panel-muted: #e3dacc;
+
+  /* 边框（Last Straw 系的暖米色） */
+  --border: #e3dacc;
+  --border-subtle: #e5e1d6;
+  --border-strong: #d3c8b2;
+  --border-focus: #5982ab;
 
   /* 文字阶梯 */
-  --text: #0f172a;           /* 900: 主要标题、重要数字 */
-  --text-secondary: #334155; /* 700: 正文、表头、按钮 */
-  --muted: #64748b;          /* 500: 说明副文本、辅助标签 */
-  --faint: #94a3b8;          /* 400: 时间戳、占位符、边框辅助 */
-  /*
-   * 需要在浅色卡片底上**承载信息**的说明文字专用。
-   *
-   * 为什么不直接用 --faint：实测 --faint (#94a3b8) 在 --panel-subtle (#f8fafc) 上
-   * 只有 **2.45:1**，远低于 WCAG AA 要求的 4.5:1 —— 而这类文字写的往往是
-   * 「必须带 /v1 结尾」「留空会显示上下文 0」这种**不看就会填错**的提示。
-   * --muted (#64748b) 在 --panel-subtle 上是 4.55:1（勉强过），但在
-   * --panel-muted (#f1f5f9) 上掉到 4.34:1 又不及格。
-   * 这个色值在两种底色上分别是 5.26:1 / 5.02:1，都留有余量。
-   */
-  --hint: #5b6a80;
-
-  /* 语义色彩 (纯实色配合柔和底色，无任何杂乱渐变) */
-  --ok: #059669;
-  --ok-hover: #047857;
-  --ok-soft: #ecfdf5;
-  --ok-border: #a7f3d0;
-
-  --warn: #d97706;
-  --warn-hover: #b45309;
-  --warn-soft: #fffbeb;
-  --warn-border: #fde68a;
-
-  --fail: #dc2626;
-  --fail-hover: #b91c1c;
-  --fail-soft: #fef2f2;
-  --fail-border: #fecaca;
-
-  --promo: #be185d;
-  --promo-soft: #fdf2f8;
-  --promo-border: #fbcfe8;
+  --text: #141414;           /* Sooty：主标题、重要数字 */
+  --text-secondary: #2c2b26; /* Noir：正文、表头、按钮 */
+  --muted: #5e5748;          /* 压 --panel 6.16:1、压 --panel-muted 5.17:1（两处都要过 AA） */
+  --faint: #a09884;          /* 装饰档：分隔线、占位符、禁用态 */
+  --hint: #5c5549;           /* 要承载信息的说明文字；压 --panel-muted 5.32:1，三种底都够 */
 
   /*
-   * Info / 信息（青）—— 第四种语义色，专门给「远端 / 网络」这一类指标。
+   * 语义色换成 Claude 那套**土色系**（Moss Gardens / Windstorm / Magic Carpet …）。
    *
-   * 为什么需要它：状态卡原先 8 个图标**全是同一个皇家蓝**，一眼扫过去分不出
-   * 「桥进程」（本机进程）和「上游端点」（远端网络）—— 而这两件事出问题时的
-   * 排查方向完全不同。多这一档青之后，「本地 = 蓝色系 / 远端 = 青色系」在色彩上
-   * 就分开了。青与 ok 绿、warn 琥珀、fail 红都不撞，语义不重叠。
-   *
-   * 对比度：浅色下 #0891b2 在 --panel(#fff) 上是 4.87:1，在白卡上做图标色够用。
+   * 每个值都是**两档通吃**的：既当 1px 边框 / 16px 图标，也当 12–13px 正文 ——
+   * 推导时就按"压在自己那层 soft 底上 ≥4.5:1"卡的，所以不需要再分文字档。
+   * （唯一够不着 4.5:1 的是主色陶土，它才单独有一个 --primary-text。）
    */
-  --info: #0891b2;
-  --info-hover: #0e7490;
-  --info-soft: #ecfeff;
-  --info-border: #a5f3fc;
+  --ok: #5e6f49;    --ok-soft: #eef0e6;   --ok-border: #ccd5bd;   --ok-hover: #4c5b3b;
+  --warn: #8b652c;  --warn-soft: #f7f0e2; --warn-border: #e2cea6; --warn-hover: #715222;
+  --fail: #b0442f;  --fail-soft: #f8ece8; --fail-border: #e6c3b8; --fail-hover: #8f3625;
+  --info: #497165;  --info-soft: #e6efec; --info-border: #a9c9c0; --info-hover: #3d5f54;
+  --promo: #6a6699; --promo-soft: #efedf5; --promo-border: #d3d0e4;
+
 
   /* ── 2. 统一圆角规范 (Radius Hierarchy) ──────────────────────────────── */
   --radius-xs: 4px;          /* 微小元素、内嵌代码标签、滚动条滑块 */
   --radius-sm: 8px;          /* 按钮、输入框、下拉框、状态标签、小卡片、表格内嵌单元 */
   --radius: 12px;            /* 指标卡、抽屉栏、工具条、警告条、展开面板容器 */
   --radius-lg: 16px;         /* 主面板容器、顶层包裹框 */
+  --radius-xl: 20px;         /* 只给最外层的包裹容器（比 lg 再大一档，交代"这是一整块"） */
   --radius-full: 9999px;     /* 胶囊按钮、圆形图标、状态点、进度条 */
 
   /* ── 3. 间距规范 (Spacing System) ────────────────────────────────────── */
@@ -112,43 +131,84 @@
 
   /* ── 4. 阴影与质感 (Depth & Shadows) ─────────────────────────────────── */
   /*
-   * 分层投影（key + ambient）取代原来的单层淡影。
+   * **静态卡片没有投影 —— 分隔靠 1px 细边框。**
    *
-   * 为什么必须改：原值 `0 1px 3px rgba(15,23,42,.04)` 在 1x 屏上几乎看不见 ——
-   * 整个页面的「层次」于是全靠那圈 1px 边框在撑，卡片看起来是**画在纸上的方框**，
-   * 而不是**浮在背景上的一层**。这正是界面显得平的根本原因，也是最值得修的一处。
+   * 这一条是 Claude 视觉语言的硬规矩，也推翻了我上一轮的做法（那时把"分层投影"
+   * 当成治"界面显平"的头号解药）。实测下来在**暖色纸底**上它是错的：
    *
-   * 现在每条都拆成两层：一层短距、小模糊的「接触影」（key，交代元素贴在哪），
-   * 一层长距、大扩散的「环境影」（ambient，交代元素浮多高）。两层都用**负扩散**
-   * 压住四角，避免大卡片周围糊出一圈脏边。
+   *   · 暖米色底上的灰投影会显脏 —— 冷灰影压在暖米色上，交界处是一圈发青的脏边，
+   *     不像浅冷色底上那样自然。
+   *   · "纸"这种东西本来就不该有"浮起来"的物理暗示。卡片与页面的关系是
+   *     **一张纸叠在另一张纸上**，交代这件事的是明度差 + 一条 1px 边框，不是影子。
    *
-   * 阴影里**不再叠 `0 0 0 1px` 的描边环**：描边交给元素自己的 border（hover 时
-   * 要改颜色），阴影只管投影。两件事分工明确，也不会和 border 叠成双线。
+   * 所以：
+   *   --shadow-card / --shadow-panel → **none**（静态容器一律无影）
+   *   投影只留给**真正浮在内容之上**的层（下拉 / 抽屉 / 气泡）—— 那些确实需要
+   *   "离开纸面"的暗示，而且它们下面压着的是内容而不是空白。
+   *   悬停抬升保留一条极淡的暖影：它是**交互反馈**，不是静态层次。
    */
-  --shadow-xs: 0 1px 2px rgba(15, 23, 42, 0.05);
-  --shadow-sm: 0 1px 2px rgba(15, 23, 42, 0.05), 0 2px 6px -2px rgba(15, 23, 42, 0.08);
-  --shadow-card: 0 1px 2px rgba(15, 23, 42, 0.04), 0 4px 12px -4px rgba(15, 23, 42, 0.08);
-  --shadow-panel: 0 1px 2px rgba(15, 23, 42, 0.03), 0 10px 28px -16px rgba(15, 23, 42, 0.12);
-  --shadow-drawer: 0 4px 10px -2px rgba(15, 23, 42, 0.08), 0 22px 44px -16px rgba(15, 23, 42, 0.22);
+  --shadow-xs: 0 1px 2px rgba(60, 50, 38, 0.05);
+  --shadow-sm: 0 1px 2px rgba(60, 50, 38, 0.06), 0 2px 6px -2px rgba(60, 50, 38, 0.08);
+  --shadow-card: none;
+  --shadow-panel: none;
+  --shadow-drawer: 0 4px 10px -2px rgba(60, 50, 38, 0.08), 0 18px 38px -14px rgba(60, 50, 38, 0.18);
   /*
    * 悬停抬升：**只给可点/可聚焦的卡片用**（指标卡、客户端卡）。
    * 日常容器（.panel）不用 —— 整页几十个面板一起浮会变成噪声，而且它们本来也不可点。
    */
-  --shadow-lift: 0 2px 4px rgba(15, 23, 42, 0.05), 0 16px 32px -12px rgba(15, 23, 42, 0.18);
-  --shadow-primary-sm: 0 1px 2px rgba(37, 99, 235, 0.18), 0 3px 10px -2px rgba(37, 99, 235, 0.28);
-  --shadow-primary-md: 0 2px 4px rgba(37, 99, 235, 0.2), 0 10px 22px -6px rgba(37, 99, 235, 0.38);
+  --shadow-lift: 0 1px 2px rgba(60, 50, 38, 0.06), 0 8px 20px -10px rgba(60, 50, 38, 0.16);
+  --shadow-primary-sm: 0 1px 2px rgba(20, 20, 20, 0.18), 0 3px 10px -2px rgba(20, 20, 20, 0.22);
+  --shadow-primary-md: 0 2px 4px rgba(20, 20, 20, 0.2), 0 10px 22px -6px rgba(20, 20, 20, 0.28);
 
   /* ── 6. 浮层提示 (Tooltip) ───────────────────────────────────────────── */
   /* 提示气泡用「反色面板」：浅色主题下是深底浅字，与系统自带的那只小框
-     拉开距离 —— 一眼就能看出是本页画的。 */
-  --tip-bg: #0f172a;
-  --tip-fg: #f8fafc;
+     拉开距离 —— 一眼就能看出是本页画的。底色取 Noir，与暖色系同源。 */
+  --tip-bg: #2c2b26;
+  --tip-fg: #faf9f5;
   --tip-border: transparent;
 
   /* ── 5. 动效曲线 (Transitions & Curves) ──────────────────────────────── */
   --ease: cubic-bezier(0.16, 1, 0.3, 1);
-  --transition-fast: all 0.16s var(--ease);
-  --transition-normal: all 0.24s var(--ease);
+
+  /*
+   * 过渡**显式列出属性，不用 `all`**。
+   *
+   * 理由（按重要性排序）：
+   *
+   * 1) **`all` 会让不该动的属性也做动画。** 它把布局属性（padding / width /
+   *    height / grid-template-rows …）一并纳入监听：哪天有人给某个控件加一条
+   *    `padding` 变化，它会跟着做补间 —— 掉帧，而且不是设计意图。
+   *    `.quick-pill` 早就为此单独绕开了 `all`，这里把它变成默认。
+   *
+   * 2) 收窄后行为**更可预测**：新增一条属性变化时，要么显式加进来，要么它就
+   *    瞬时生效，不会"悄悄地也做了个动画"。
+   *
+   * 这一批是各组件交互里**实际会变**的属性（背景、文字、边框、投影、透明度、位移）。
+   * 少列一个的后果是"某个交互突然不动了"，所以增删属性和改交互样式时**要成对看**。
+   *
+   * ⚠️ 一条踩过的坑，别误读：在无头环境里量对比度时，**视口外**的元素
+   * （例如展开后才渲染、且不在当前滚动位置的模型芯片）其 CSS 过渡的
+   * `startTime` 恒为 `null` —— Chrome 不为视口外的元素启动合成，过渡永不推进，
+   * 于是 `getComputedStyle` 一直返回**过渡起始帧的旧值**。
+   * 这**不是渲染缺陷**：把该元素滚进视口后截图，像素色其实是正确的
+   * （实测 light/blue → #edf1f7、light/terracotta → #f7ece5，与令牌一致）。
+   * 所以对比度类用例要么先 `scrollIntoView`，要么以**渲染像素**为准，
+   * 不要直接信视口外元素的 `getComputedStyle`。
+   */
+  --transition-fast:
+    background-color 0.16s var(--ease),
+    border-color 0.16s var(--ease),
+    color 0.16s var(--ease),
+    box-shadow 0.16s var(--ease),
+    opacity 0.16s var(--ease),
+    transform 0.16s var(--ease);
+  --transition-normal:
+    background-color 0.24s var(--ease),
+    border-color 0.24s var(--ease),
+    color 0.24s var(--ease),
+    box-shadow 0.24s var(--ease),
+    opacity 0.24s var(--ease),
+    transform 0.24s var(--ease);
 
   /*
    * 焦点环（Focus Ring）：键盘 Tab 走到哪，那一圈光就出现在哪。
@@ -158,35 +218,48 @@
    * 统一成「主色 22% 透明 + 3px 环」，配 `:focus-visible` 只在键盘导航时出现，
    * 鼠标点击不弹（不然每次点按钮都闪一圈，很吵）。
    */
-  --ring: 0 0 0 3px rgba(37, 99, 235, 0.22);
-  --ring-tight: 0 0 0 2px rgba(37, 99, 235, 0.26);
+  --ring: 0 0 0 3px rgba(89, 130, 171, 0.30);
+  --ring-tight: 0 0 0 2px rgba(89, 130, 171, 0.38);
 
   /*
-   * 单色系微渐变（Monochrome Micro-Gradient）。
+   * 实心色块的「受光边」。
    *
-   * 与设计规范里禁掉的「多彩杂乱渐变」不是一回事：这里只有**同一个色相**上的
-   * 明度变化，作用只是给实心色块一个「受光方向」，让按钮和品牌图标从
-   * 「一张色纸」变成「一块材质」。约束写死三条：只用于实心主色块、
-   * 不用于页面背景、不跨色相。浅色主题下这一层是**加白**（提亮顶部），
-   * 深色主题下换成**加亮**（见 [data-theme="dark"]），因为深色下提白会发灰。
+   * 早先这里是两条渐变（纵向微渐变 + 152° 品牌色渐变）。**已全部移除** ——
+   * 这个界面里不用渐变：渐变让"这个按钮是什么颜色"变成一个没法回答的问题，
+   * 而按钮底色是要和对比度一起被校验的。
+   *
+   * 现在只保留这一条 1px 发丝高光，且**只给品牌标用**。主按钮不再用它 ——
+   * Claude 的主按钮是一块**平的**深色，加高光反而像在模仿拟物按钮。
    */
-  --sheen-top: linear-gradient(180deg, rgba(255, 255, 255, 0.16) 0%, rgba(255, 255, 255, 0) 56%);
-  --grad-primary: linear-gradient(152deg, #3b82f6 0%, #2563eb 54%, #1e4fc4 100%);
+  --edge-top: rgba(255, 255, 255, 0.14);
 
   /* ── 7. 排版规范 (Typography) ────────────────────────────────────────── */
   /*
-   * 字体栈：全部走系统自带字体，不引外部 webfont。
+   * **三层字体，各司其职** —— 这是 Claude 的排版骨架（衬线负责"阅读"、
+   * 无衬线负责"界面"、等宽负责"数据/代码"）。
    *
    * 为什么不引 webfont：控制台是**本地工具**（127.0.0.1），断网时也要照常打开；
    * 而这个页面的定位是「凭据不出机器」，为了排版好看去请求第三方字体服务并不划算。
+   * 所以这里用的是**系统里必然存在的**、观感最接近 Claude 那三套的替代：
+   *   Anthropic Serif（Tiempos/Copernicus 血脉） → Georgia（+ 中文宋体）
+   *   Anthropic Sans                            → 系统 UI 无衬线（Windows 上 Segoe UI）
+   *   Anthropic Mono                            → Consolas
+   * 官方文档给的对外替代也正是 "Lora → Georgia" 这条链，所以 Georgia 不是将就。
    *
-   * 三层各司其职：拉丁与正文走 sans（Windows 上 Segoe UI、macOS 上 SF），
-   * 中文由 CJK 回落接管（雅黑 UI / 苹方），数据、id 与代码走 mono。
-   * 两边都只列**必然存在**的字体，候选顺序按「本机实测宽度与观感」定，不用 CDN。
+   * 衬线的**用法**和 Claude 一致：只用于**阅读性/展示性**文字（品牌名、面板标题、
+   * 长段说明），**不用于界面控件**（按钮、标签、表头、表格）。混用会让"这是标题
+   * 还是这是按钮"变得含糊。
    */
   --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
                "Hiragino Sans GB", "Microsoft YaHei UI", "Microsoft YaHei",
                "Noto Sans SC", Roboto, "Helvetica Neue", Arial, sans-serif;
+  /*
+   * 衬线栈：Georgia 没有中文字形 → 中文逐字回落到**宋体**（SimSun）。
+   * 拉丁衬线 + 中文衬线，两边都是"衬线"，观感是一致的；若只写 Georgia，
+   * 中文会掉回默认无衬线，一行里两种笔法就打架了。
+   */
+  --font-serif: Georgia, "Times New Roman", "Songti SC", "Source Han Serif SC",
+                "Noto Serif SC", SimSun, serif;
   /*
    * 等宽这条栈**不加 Cascadia Mono**，虽然它比 Consolas 更现代：实测它整体宽约 7%，
    * 而模型表 9 列的宽度预算本来就紧（见 6.11：多出来的宽度会直接变成折行、
@@ -208,7 +281,7 @@
   --fs-body: 13px;     /* 正文、表格、说明、按钮：默认字号 */
   --fs-lead: 16px;     /* 面板标题、条目名、无数字的读数 */
   --fs-title: 18px;    /* 品牌标题 */
-  --fs-display: 20px;  /* 指标大数字：一排读数的锚点 */
+  --fs-display: 22px;  /* 指标大数字：一排读数的锚点（等宽字形 x-height 小，比常规字号补一档） */
   /*
    * 密排档：表头、等宽数据列、终端日志。
    *
@@ -231,6 +304,34 @@
    */
   --track-label: 0.01em;   /* 小字中文给一点字距：密排时更透气，也更容易逐字扫读 */
   --track-title: -0.012em; /* 标题与大数字收紧一点，避免大字看起来松散 */
+
+  /*
+   * ── z 轴分层（z-index ladder）──────────────────────────────────────────
+   *
+   * **只准用这几个令牌，不要再写裸数字。**
+   *
+   * 为什么要有这个梯子：原先 5 处 z-index 是随手写的（2 / 80 / 99 / 100 / 200），
+   * 而它们之间的**顺序是错的** —— 下拉菜单 80 低于吸顶工具条 100。
+   * 现在恰好没有"从顶栏里展开的下拉"，所以还没暴露；但顶栏里加一个下拉就会中招，
+   * 而且那种覆盖错**读代码看不出来**（两个数字隔了 600 行）。
+   * 这一条是借鉴自另一个项目（melodix）的分层体系：把"它可能出现在谁的上面"
+   * 显式写成一个阶梯，而不是让每个组件各写一个数字。
+   *
+   * 分层依据（每一档都比前一档"更靠近用户"）：
+   *   表头   2   —— 只在自己那个滚动容器里压住表体，不出容器
+   *   浮动钮 90  —— 压在滚动内容上，但要被下拉/提示盖住
+   *   吸顶条 100 —— 压在滚动内容上
+   *   下拉   300 —— **必须高于吸顶条**（下拉可能从顶栏里展开）
+   *   提示   400 —— 高于下拉（气泡可能出现在下拉里）
+   *   遮罩/吐司  —— 预留：当前用原生 confirm 与行内消息，没有自绘层
+   */
+  --z-table-head: 2;
+  --z-float: 90;
+  --z-sticky: 100;
+  --z-dropdown: 300;
+  --z-tooltip: 400;
+  --z-overlay: 500;
+  --z-toast: 600;
 }
 
 /* ── 深色主题 (Dark Theme) ────────────────────────────────────────────── */
@@ -238,83 +339,83 @@
   /* 与 :root 的 color-scheme 配对：深色下让原生控件也走深色渲染（见 :root 的注释） */
   color-scheme: dark;
 
-  --primary: #3b82f6;
-  --primary-hover: #60a5fa;
-  --primary-active: #2563eb;
-  --primary-subtle: rgba(59, 130, 246, 0.12);
-  --primary-border: rgba(59, 130, 246, 0.3);
-  --primary-text: #60a5fa;
-  --accent: #3b82f6;
+  /*
+   * 深色也是**暖色**的 —— 底色取 Sooty #141414（Anthropic 的中性近黑），
+   * 表面阶梯往上加的是**暖**而不是蓝。深色若偏冷，和浅色主题就成了两套配色，
+   * 切换主题像换了个产品。
+   *
+   * 深度同样**不靠投影**：黑压黑本来就看不清，靠的是
+   *   底 #141414 → 面板 #1e1d1a → 悬停 #26251f
+   * 这一条明度阶梯。静态卡片一律无影，投影只给浮层。
+   */
+  --bg: #141414;
+  --panel: #1e1d1a;
+  --panel-hover: #26251f;
+  --panel-muted: #2a2823;
+  --panel-subtle: #191816;
 
-  --bg: #090c13;
-  --panel: #111622;
-  --panel-hover: #161c2b;
-  --panel-muted: #171e2e;
-  --panel-subtle: #0f141f;
-
-  --border: rgba(255, 255, 255, 0.08);
-  --border-subtle: rgba(255, 255, 255, 0.04);
-  --border-strong: rgba(255, 255, 255, 0.18);
-  --border-focus: #3b82f6;
-
-  --text: #f8fafc;
-  --text-secondary: #cbd5e1;
-  --muted: #94a3b8;
-  --faint: #64748b;
-  /* 深色下 --muted (#94a3b8) 在两种卡片底上分别是 7.18:1 / 6.49:1，够用，直接复用 */
-  --hint: #94a3b8;
-
-  --ok: #10b981;
-  --ok-hover: #34d399;
-  --ok-soft: rgba(16, 185, 129, 0.12);
-  --ok-border: rgba(16, 185, 129, 0.28);
-
-  --warn: #f59e0b;
-  --warn-hover: #fbbf24;
-  --warn-soft: rgba(245, 158, 11, 0.12);
-  --warn-border: rgba(245, 158, 11, 0.28);
-
-  --fail: #ef4444;
-  --fail-hover: #f87171;
-  --fail-soft: rgba(239, 68, 68, 0.12);
-
-  /* 深色主题下不用反色（浅底会晃眼），改用比面板再抬一层的深灰 */
-  --tip-bg: #263041;
-  --tip-fg: #f8fafc;
-  --tip-border: rgba(255, 255, 255, 0.14);
-  --fail-border: rgba(239, 68, 68, 0.28);
-
-  --promo: #f43f5e;
-  --promo-soft: rgba(244, 63, 94, 0.12);
-  --promo-border: rgba(244, 63, 94, 0.28);
-
-  /* 深色下的青要提亮到 400 档，否则压在 #111622 上会发闷 */
-  --info: #22d3ee;
-  --info-hover: #67e8f9;
-  --info-soft: rgba(34, 211, 238, 0.12);
-  --info-border: rgba(34, 211, 238, 0.28);
+  --border: #2c2b26;
+  --border-subtle: #232220;
+  --border-strong: #3d3b34;
+  --border-focus: #8fb4d9;
 
   /*
-   * 深色下的投影要**更重**才看得见（黑底吃影），同时**保留一圈 1px 亮环** ——
-   * 深色主题里卡片边缘本来就靠边框分辨，去掉环会让面板糊成一片。
-   * 所以这里和浅色相反：投影 + ring 一起上。
+   * 主色在深色下**反转角色**：
+   *   --primary       陶土色压 #1e1d1a 有 5.40:1，可以直接当强调文字
+   *   --primary-solid 实心按钮取**浅色**（Lotion 底 + Sooty 字 17.5:1）
+   * 浅色主题是"深按钮配浅字"，深色主题就反过来。两边的共同点是
+   * **按钮永远是页面上最"实"的那一块**，而不是"永远是某个颜色"。
    */
-  --shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.35);
-  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.35), 0 2px 6px -2px rgba(0, 0, 0, 0.5);
-  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.3), 0 4px 12px -4px rgba(0, 0, 0, 0.55), 0 0 0 1px var(--border);
-  --shadow-panel: 0 1px 2px rgba(0, 0, 0, 0.25), 0 10px 28px -16px rgba(0, 0, 0, 0.65), 0 0 0 1px var(--border);
-  --shadow-drawer: 0 4px 10px -2px rgba(0, 0, 0, 0.45), 0 22px 44px -16px rgba(0, 0, 0, 0.75), 0 0 0 1px var(--border);
-  --shadow-lift: 0 2px 4px rgba(0, 0, 0, 0.4), 0 16px 32px -12px rgba(0, 0, 0, 0.7), 0 0 0 1px var(--border-strong);
-  --shadow-primary-sm: 0 1px 2px rgba(0, 0, 0, 0.3), 0 3px 12px -2px rgba(59, 130, 246, 0.4);
-  --shadow-primary-md: 0 2px 4px rgba(0, 0, 0, 0.35), 0 12px 26px -6px rgba(59, 130, 246, 0.55);
+  --primary: #8fb4d9;
+  --primary-hover: #a8c6e4;
+  --primary-active: #6a9bcc;
+  --primary-subtle: #1b2330;
+  --primary-border: #2c3a4c;
+  --primary-text: #a8c6e4;
+  --accent: #8fb4d9;
 
-  /* 深色下焦点环换成亮蓝，压在主色块上才看得见 */
-  --ring: 0 0 0 3px rgba(96, 165, 250, 0.3);
-  --ring-tight: 0 0 0 2px rgba(96, 165, 250, 0.35);
+  --primary-solid: #faf9f5;
+  --primary-solid-hover: #ffffff;
+  --primary-solid-active: #e8e5da;
+  --on-solid: #141414;
 
-  /* 深色下「加白」会发灰，改成「加亮」——同样只有明度变化，不跨色相 */
-  --sheen-top: linear-gradient(180deg, rgba(255, 255, 255, 0.1) 0%, rgba(255, 255, 255, 0) 56%);
-  --grad-primary: linear-gradient(152deg, #60a5fa 0%, #3b82f6 52%, #2f6fe0 100%);
+  /* 文字阶梯：不用纯白（近黑底上纯白会"发光"），弱化档给足余量 */
+  --text: #faf9f5;           /* Lotion：压面板 16.0:1 */
+  --text-secondary: #d5d0c4;
+  --muted: #b0a99a;          /* 压面板 7.21:1 */
+  --faint: #7d776b;          /* 装饰档：分隔线、占位符、禁用态 */
+  --hint: #b0a99a;           /* 要承载信息的说明文字；压 --panel-muted 6.30:1 */
+
+  /*
+   * 语义色：同一套土色系，但在近黑底上要**提亮**才不发闷。
+   * 深色下边框档与文字档的对比度都够，所以两档取同一批值。
+   */
+  --ok: #8fa372;    --ok-soft: #20251c;   --ok-border: #3a4430;   --ok-hover: #a8bb8e;
+  --warn: #d0a054;  --warn-soft: #2a2418; --warn-border: #4a3d22; --warn-hover: #e0b87c;
+  --fail: #d97a63;  --fail-soft: #2b1f1b; --fail-border: #4d322a; --fail-hover: #e79d8a;
+  --info: #7fb3a3;  --info-soft: #1a2422; --info-border: #2c3f3a; --info-hover: #8fc0b0;
+  --promo: #a49fd0; --promo-soft: #232232; --promo-border: #3d3a58;
+
+  --tip-bg: #2c2b26;
+  --tip-fg: #faf9f5;
+  --tip-border: rgba(255, 255, 255, 0.12);
+
+  /* 深色同样不用投影做层次；只有浮层保留一圈影 + 1px 环 */
+  --shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.45);
+  --shadow-sm: 0 2px 6px -2px rgba(0, 0, 0, 0.55);
+  --shadow-card: none;
+  --shadow-panel: none;
+  --shadow-drawer: 0 10px 30px -12px rgba(0, 0, 0, 0.75), 0 0 0 1px var(--border);
+  --shadow-lift: 0 0 0 1px var(--border-strong);
+  --shadow-primary-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow-primary-md: 0 4px 14px -4px rgba(0, 0, 0, 0.5);
+
+  /* 焦点环在深色下用陶土色，压深底才看得见 */
+  --ring: 0 0 0 3px rgba(143, 180, 217, 0.35);
+  --ring-tight: 0 0 0 2px rgba(143, 180, 217, 0.44);
+
+  /* 深色下"加白"会发灰，改成"加亮"：只有明度变化、不跨色相 */
+  --edge-top: rgba(255, 255, 255, 0.1);
 }
 
 /* 基础重置 */
@@ -378,7 +479,7 @@ body {
 .top-bar-sticky {
   position: sticky;
   top: 0;
-  z-index: 100;
+  z-index: var(--z-sticky);
   padding: 16px 0 10px;
   margin-bottom: var(--space-4);
   background: var(--bg);
@@ -395,18 +496,26 @@ body {
   to { opacity: 1; transform: translateY(0); }
 }
 
+/*
+ * 吸顶工具条：滚起来之后变半透明 + 背景模糊。
+ *
+ * 这是全页**唯一**保留 `backdrop-filter` 的地方，也是它真正挣得来的一处：
+ * 内容会从它下面**滚过去**，模糊能让人看出"下面还有东西"，而一块不透明的
+ * 条子会像在页面顶部贴了块板。别处不再加 —— 没有东西从下面过的地方加模糊，
+ * 只是白付一层合成开销。
+ */
 .top-bar-sticky.is-scrolled {
-  background: rgba(248, 250, 252, 0.88);
+  background: rgba(250, 249, 245, 0.88);
   -webkit-backdrop-filter: blur(16px);
   backdrop-filter: blur(16px);
   border-bottom-color: var(--border);
-  box-shadow: 0 4px 20px rgba(15, 23, 42, 0.06);
+  box-shadow: 0 4px 20px rgba(60, 50, 38, 0.06);
   padding: 8px 0 6px;
   margin-bottom: var(--space-3);
 }
 
 [data-theme="dark"] .top-bar-sticky.is-scrolled {
-  background: rgba(9, 12, 19, 0.88);
+  background: rgba(20, 20, 20, 0.88);
   border-bottom-color: var(--border);
   box-shadow: 0 4px 20px rgba(0, 0, 0, 0.45);
 }
@@ -433,22 +542,20 @@ header {
   height: 40px;
   border-radius: var(--radius);
   /*
-   * 品牌块是全页唯一的「材质」锚点：给它单色系微渐变 + 顶部内高光。
-   * 它一有受光方向，下面那一排纯色卡片才读得出是「同一套语言里的平」，
-   * 而不是「这里缺了点什么」。
+   * 品牌标：**强调色实底 + 浅色标**。
+   *
+   * 一块实色 + 一枚记号，没有渐变也没有投影。底色用强调色（而不是主按钮那种
+   * 近黑）是有意的 —— 品牌标是**唯一**一处可以大方用满强调色的地方，
+   * 用在这里它才像"品牌"，而不是像"又一个按钮"。
+   * 深色主题下强调色是浅蓝，`--on-solid` 会自动翻成深色，两边都读得清。
    */
   background-color: var(--primary);
-  background-image: var(--grad-primary);
   display: flex;
   align-items: center;
   justify-content: center;
-  color: #ffffff;
+  color: var(--on-solid);
   flex-shrink: 0;
-  box-shadow: 0 2px 6px -1px rgba(37, 99, 235, 0.35),
-              0 8px 20px -8px rgba(37, 99, 235, 0.45),
-              inset 0 1px 0 rgba(255, 255, 255, 0.28);
-  transition: box-shadow 0.16s var(--ease),
-              transform 0.16s var(--ease),
+  transition: transform 0.16s var(--ease),
               filter 0.16s var(--ease),
               width 0.26s var(--ease),
               height 0.26s var(--ease),
@@ -456,11 +563,7 @@ header {
 }
 .brand-icon:hover {
   transform: translateY(-1px) scale(1.03);
-  /* 不再改 background-color —— 那会把渐变盖掉；改用 filter 提亮整块 */
   filter: brightness(1.06);
-  box-shadow: 0 3px 8px -1px rgba(37, 99, 235, 0.4),
-              0 12px 26px -10px rgba(37, 99, 235, 0.55),
-              inset 0 1px 0 rgba(255, 255, 255, 0.3);
 }
 .brand-icon svg {
   width: 20px;
@@ -477,6 +580,13 @@ header {
   height: 17px;
 }
 .brand-text h1 {
+  /*
+   * 品牌名用**衬线**（--font-serif）。这是全页唯一"展示性"的文字 ——
+   * 它不需要被扫读、不需要对齐、也不需要和数字比大小，它的任务只是
+   * 交代"这是什么产品"。衬线在这里给的是一点编辑感，正是 Claude 那套
+   * 排版骨架里"衬线负责阅读/展示、无衬线负责界面"的分工。
+   */
+  font-family: var(--font-serif);
   font-size: var(--fs-title);
   font-weight: 700;
   margin: 0 0 3px;
@@ -578,13 +688,13 @@ header {
 }
 .badge.ok .dot {
   background: var(--ok);
-  box-shadow: 0 0 0 0 rgba(5, 150, 105, 0.5);
+  box-shadow: 0 0 0 0 rgba(94, 111, 73, 0.5);
   animation: elegant-pulse 2.2s infinite;
 }
 @keyframes elegant-pulse {
-  0% { box-shadow: 0 0 0 0 rgba(5, 150, 105, 0.5); }
-  70% { box-shadow: 0 0 0 5px rgba(5, 150, 105, 0); }
-  100% { box-shadow: 0 0 0 0 rgba(5, 150, 105, 0); }
+  0% { box-shadow: 0 0 0 0 rgba(94, 111, 73, 0.5); }
+  70% { box-shadow: 0 0 0 5px rgba(94, 111, 73, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(94, 111, 73, 0); }
 }
 .badge.fail {
   background: var(--fail-soft);
@@ -638,9 +748,8 @@ header {
   transform: scale(0.96);
 }
 .nav-tab.active {
-  color: #ffffff;
-  background-color: var(--primary);
-  background-image: var(--grad-primary);
+  color: var(--on-solid);
+  background-color: var(--primary-solid);
   font-weight: 600;
   box-shadow: var(--shadow-primary-sm);
   animation: tabPillPop 0.2s var(--ease);
@@ -649,9 +758,6 @@ header {
   0% { transform: scale(0.96); }
   50% { transform: scale(1.02); }
   100% { transform: scale(1); }
-}
-[data-theme="dark"] .nav-tab.active {
-  box-shadow: 0 2px 8px rgba(59, 130, 246, 0.35);
 }
 
 /* ── 3. 操作条 Actions Bar ───────────────────────────────────────────── */
@@ -771,28 +877,36 @@ button:disabled {
   background: var(--panel-muted) !important;
 }
 
-/* 主操作按钮：纯正皇家蓝，白字，无渐变，精细阴影 */
+/*
+ * 主操作按钮：靛蓝实心，白字，无渐变，精细阴影。
+ *
+ * 填充走 `--primary-solid` 而不是 `--primary` —— 深色下这两者**必须分开**
+ * （`--primary` 在深色里被提亮到 indigo-400 供文字用，拿它当填充会让白字
+ * 掉到 2.98:1）。浅色下两者同值，所以这条改动在浅色里是零视觉差异。
+ */
 button.primary {
-  background-color: var(--primary);
-  /* 顶部 sheen：实心主按钮有受光面，与品牌块共用同一套材质语言 */
-  background-image: var(--sheen-top);
-  border-color: var(--primary);
-  color: #ffffff !important;
+  background-color: var(--primary-solid);
+  border-color: var(--primary-solid);
+  /*
+   * 文字色走 --on-solid 而不是写死白色：深色主题下填充会**反转成浅色**
+   * （Claude 的做法：按钮永远是页面上最"实"的那块），写死白字会在浅底上消失。
+   */
+  color: var(--on-solid) !important;
   font-weight: 600;
   box-shadow: var(--shadow-primary-sm);
 }
 button.primary:hover {
-  background-color: var(--primary-hover);
-  border-color: var(--primary-hover);
+  background-color: var(--primary-solid-hover);
+  border-color: var(--primary-solid-hover);
   box-shadow: var(--shadow-primary-md);
-  color: #ffffff !important;
+  color: var(--on-solid) !important;
   transform: translateY(-1.5px);
 }
 button.primary:active {
-  background-color: var(--primary-active);
+  background-color: var(--primary-solid-active);
   transform: translateY(0.5px) scale(0.97);
 }
-button.primary svg { color: #ffffff !important; }
+button.primary svg { color: var(--on-solid) !important; }
 
 /*
  * 主按钮的禁用态**必须单独写**。
@@ -820,7 +934,7 @@ button.danger {
 }
 button.danger:hover {
   background: var(--fail);
-  color: #ffffff;
+  color: var(--on-solid);
   border-color: var(--fail);
   box-shadow: 0 3px 10px rgba(220, 38, 38, 0.25);
   transform: translateY(-1.5px);
@@ -866,6 +980,79 @@ button.icon-btn {
 }
 #themeToggle:active svg.ic-on {
   transform: rotate(-15deg) scale(0.95);
+}
+
+/*
+ * 配色方案选择器。
+ *
+ * 用「一枚色点 + 一个小浮层」而不是下拉文字：选颜色这件事，色块本身比颜色名
+ * 直观得多，而且颜色名要翻译五遍。按钮上那枚色点**就是**当前方案的指示器 ——
+ * 不用打开菜单就知道现在是什么颜色。
+ */
+.accentpick {
+  position: relative;
+  display: inline-flex;
+}
+#accentToggle {
+  width: 34px; /* 和主题开关同宽，顶栏一排按钮才对得齐 */
+  padding: 0;
+}
+.accentdot {
+  width: 14px;
+  height: 14px;
+  border-radius: var(--radius-full);
+  flex: none;
+  /* 极淡的内描边：色点压在浅底上时，浅色方案（苔绿）需要一圈边界才不糊 */
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.14);
+  transition: transform 0.2s var(--ease);
+}
+#accentToggle:hover .accentdot {
+  transform: scale(1.15);
+}
+.accentmenu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: var(--z-dropdown);
+  min-width: 168px;
+  padding: var(--space-1);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  background: var(--panel);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-drawer);
+  animation: dd-pop 0.16s var(--ease) both;
+  transform-origin: top right;
+}
+.accentmenu[hidden] { display: none; }
+.accentitem {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+  padding: 7px 9px;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: var(--fs-body);
+  text-align: left;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: background-color 0.16s var(--ease);
+}
+.accentitem:hover { background: var(--panel-muted); }
+/* 当前项右侧一个勾，和自绘下拉的选中标记同一套语言 */
+.accentitem.on::after {
+  content: '✓';
+  margin-left: auto;
+  color: var(--primary);
+  font-weight: 700;
+}
+@media (prefers-reduced-motion: reduce) {
+  .accentmenu { animation: none; }
 }
 #refreshBtn svg {
   transition: transform 0.24s var(--ease);
@@ -929,15 +1116,18 @@ button.mini {
   flex-wrap: wrap;
   padding: var(--space-3) var(--space-4);
   border-radius: var(--radius);
-  border: 1px solid;
   /*
-   * 左侧 3px 实色条：让「出事了」在滚动的页面里一眼可辨。
-   * 原来四条边同宽同色，告警条看起来只是「一个带底色的面板」，
-   * 而它其实是要用户**立刻处理**的东西。色条的颜色由 .fail / .warn 各自指定。
+   * **四边同宽同色的 1px 边框，没有左侧色条。**
+   *
+   * 原先这里有一条 3px 的左侧实色条（"让出事了一眼可辨"）。去掉了：
+   * 那条竖条是**仪表盘模板的套路**，而且它和圆角是打架的 —— 圆角矩形上贴一条
+   * 直边色条，左端的圆角处会露出一小截对不齐的直线，越看越像没对齐。
+   *
+   * 现在「这是告警」由**三件事**交代，不靠装饰：整块暖色底、语义色的 1px 边框、
+   * 以及文案本身的颜色。少一样装饰，多一样信息。
    */
-  border-left-width: 3px;
+  border: 1px solid;
   font-size: var(--fs-body);
-  box-shadow: var(--shadow-card);
   animation: slideDown 0.22s var(--ease);
 }
 @keyframes slideDown {
@@ -952,13 +1142,11 @@ button.mini {
 .alert.fail {
   background: var(--fail-soft);
   border-color: var(--fail-border);
-  border-left-color: var(--fail);
   color: var(--fail);
 }
 .alert.warn {
   background: var(--warn-soft);
   border-color: var(--warn-border);
-  border-left-color: var(--warn);
   color: var(--warn);
 }
 .alert .mini { flex: 0 0 auto; }
@@ -970,11 +1158,41 @@ button.mini {
   grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
   gap: var(--space-4);
   margin-bottom: var(--space-5);
-  animation: cardsSlideIn 0.28s var(--ease);
 }
-@keyframes cardsSlideIn {
-  from { opacity: 0; transform: translateY(8px); }
+/*
+ * 入场：**一次编排好的依次浮现**，不是八个各自为政的小动画。
+ *
+ * 整排卡一张比一张晚 45ms 升起，铺满八张约 0.3s。这比"每张卡自己淡入"多出来的
+ * 那点信息是：**顺序**。人眼会顺着这个顺序把八张卡读成"一屏数据在铺开"，
+ * 而不是"八个东西同时闪了一下"。
+ *
+ * 两个容易踩的点：
+ *
+ *   1. 用 `backwards` 而**不是** `both`。`both` 会把动画的结束帧（transform: none）
+ *      永久留在元素上，而动画的优先级高于普通声明 —— 结果 `.card:hover` 的
+ *      `translateY(-2px)` 会被永久压住，悬停抬升**静默失效**。`backwards` 只在
+ *      延迟期间预置起始帧，动画一结束就把属性还给常规层叠。
+ *
+ *   2. 延迟写在 nth-child 上，而不是往 DOM 里塞 `style="--i:n"`。
+ *      卡片是 innerHTML 拼出来的，多一个内联属性就多一处要保证转义的地方；
+ *      而这张网格的张数是固定的，nth-child 足够且零风险。
+ */
+.cards > .card { animation: cardRise 0.34s var(--ease) backwards; }
+.cards > .card:nth-child(1) { animation-delay: 0ms; }
+.cards > .card:nth-child(2) { animation-delay: 45ms; }
+.cards > .card:nth-child(3) { animation-delay: 90ms; }
+.cards > .card:nth-child(4) { animation-delay: 135ms; }
+.cards > .card:nth-child(5) { animation-delay: 180ms; }
+.cards > .card:nth-child(6) { animation-delay: 225ms; }
+.cards > .card:nth-child(7) { animation-delay: 270ms; }
+.cards > .card:nth-child(8) { animation-delay: 315ms; }
+@keyframes cardRise {
+  from { opacity: 0; transform: translateY(6px); }
   to { opacity: 1; transform: translateY(0); }
+}
+/* 动效不是信息：晕动症用户不该被迫看它 */
+@media (prefers-reduced-motion: reduce) {
+  .cards > .card { animation: none; }
 }
 .card {
   background: var(--panel);
@@ -1048,7 +1266,26 @@ button.mini {
 .card.tone-info    { --tone: var(--info);    --tone-soft: var(--info-soft);       --tone-border: var(--info-border); }
 .card.tone-primary { --tone: var(--primary); --tone-soft: var(--primary-subtle); --tone-border: var(--primary-border); }
 .card.tone-muted   { --tone: var(--muted);   --tone-soft: var(--panel-muted);     --tone-border: var(--border); }
+/*
+ * 读数（卡片大数字）—— 这一页的**主角**。
+ *
+ * 三个决定，合起来就是"精密仪器"这个基调：
+ *
+ * 1. **走等宽字体**。`--font-mono` 的字体栈里没有中文字形，所以浏览器会对
+ *    中文**逐字回退**到系统 CJK 字体 —— 结果是**数字落在等宽字形上、中文仍是
+ *    正常中文字**，一行里两种字形各归各位。这正是想要的：读数的位数对齐、
+ *    不会随数值变化横向抖动；而"运行/小时/分"这些字仍然好认。
+ *    （没有改 DOM 把数字拆成 span —— 那会打断 i18n 的整串匹配，
+ *      "运行 1 小时 30 分" 这类规则是按**整个文本节点**匹配的。）
+ *
+ * 2. **字号拉开**。20 → 22px。等宽字形的 x-height 比西文正体小，
+ *    同字号看着会"缩水"，所以往上补一档，让它真正压得住旁边的 12px 标签。
+ *
+ * 3. **字距收紧**。大字收字距（--track-title）是排版常识：字号越大，
+ *    字与字之间的空隙在视觉上越松，不收紧会显得散。
+ */
 .card .v {
+  font-family: var(--font-mono);
   font-size: var(--fs-display);
   font-weight: 700;
   letter-spacing: var(--track-title);
@@ -1072,7 +1309,13 @@ button.mini {
 .panel {
   background: var(--panel);
   border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
+  /*
+   * 最外层容器用 --radius-xl，里面的卡片用 --radius(12)。
+   * 圆角**从外到内递减**是一条容易忽略的规矩：外层和内层一样圆时，
+   * 两者之间的那道边看起来会"不平行"（内圆角的弧和外圆角的弧不同心）。
+   * 外大内小之后，嵌套关系才读得出来。
+   */
+  border-radius: var(--radius-xl);
   padding: var(--space-5) var(--space-6);
   margin-bottom: var(--space-5);
   box-shadow: var(--shadow-panel);
@@ -1099,6 +1342,12 @@ button.mini {
   to { opacity: 1; transform: translateX(0); }
 }
 .panel h2 {
+  /*
+   * 面板标题也用衬线 —— 它是这一块的"名字"，和品牌名同一层级语义。
+   * 16px 是衬线在屏幕上还读得舒服的下限；再小就该换回无衬线了
+   * （所以下面的标签、表头、按钮一律不用衬线）。
+   */
+  font-family: var(--font-serif);
   font-size: var(--fs-lead);
   font-weight: 600;
   margin: 0 0 6px;
@@ -1194,7 +1443,7 @@ button.tag {
 }
 button.tag.fail:hover {
   background: var(--fail);
-  color: #ffffff;
+  color: var(--on-solid);
   border-color: var(--fail);
 }
 
@@ -1245,13 +1494,16 @@ table {
 th {
   position: sticky;
   top: 0;
-  background-color: var(--panel-muted);
   /*
-   * 极淡的纵向渐变：给表头一条「上沿」。sticky 表头滚到表体上方时，
-   * 两者底色本来就很接近，加这一层之后「哪一行是表头」一眼可辨。浅色加白、深色加亮。
+   * 表头用**实色**和表体分开，不用渐变。
+   *
+   * 原先这里叠了一层极淡的纵向白色渐变当「上沿」。去掉之后反而更清楚：
+   * `--panel-muted` 与表体底色 `--panel` 本身就差着一档明度，再加一条
+   * `--border-strong` 的底线，"哪一行是表头"是**结构**交代的，不靠一层薄雾。
+   * （深色下不需要单独覆盖 —— 表面阶梯在两种主题里都成立。）
    */
-  background-image: linear-gradient(180deg, rgba(255, 255, 255, 0.55) 0%, rgba(255, 255, 255, 0) 100%);
-  z-index: 2;
+  background-color: var(--panel-muted);
+  z-index: var(--z-table-head);
   font-weight: 600;
   color: var(--muted);
   font-size: var(--fs-dense);
@@ -1259,9 +1511,6 @@ th {
   padding: 10px 14px;
   border-bottom: 1px solid var(--border-strong);
   white-space: nowrap;
-}
-[data-theme="dark"] th {
-  background-image: linear-gradient(180deg, rgba(255, 255, 255, 0.045) 0%, rgba(255, 255, 255, 0) 100%);
 }
 td {
   padding: 10px 14px;
@@ -1283,23 +1532,23 @@ td {
  */
 td.num, th.num { text-align: right; }
 /*
- * 行悬停：浅色下 --panel-hover(#fafbfc) 与白底几乎无差，扫读时看不出鼠标停在哪一行。
- * 改成一抹极淡的主色 —— 有指示性，又明显轻于「选中态」（0.035 的那层）。
+ * 行悬停：暖纸底上 --panel-hover 与表体底色差得不明显，扫读时看不出鼠标停在哪一行。
+ * 用一抹极淡的**陶土色**（主色 5% 透明）—— 有指示性，又明显轻于"选中态"那层。
  */
 tr:hover td {
-  background: rgba(37, 99, 235, 0.05);
+  background: rgba(89, 130, 171, 0.07);
 }
 [data-theme="dark"] tr:hover td {
-  background: rgba(59, 130, 246, 0.09);
+  background: rgba(143, 180, 217, 0.10);
 }
 tr:last-child td { border-bottom: none; }
 
-/* 勾选行轻微底色高亮 (Royal Blue tint) */
+/* 勾选行轻微底色高亮（陶土 tint） */
 tr:has(input[type="checkbox"]:checked) td {
-  background: rgba(37, 99, 235, 0.035);
+  background: rgba(89, 130, 171, 0.05);
 }
 [data-theme="dark"] tr:has(input[type="checkbox"]:checked) td {
-  background: rgba(59, 130, 246, 0.06);
+  background: rgba(143, 180, 217, 0.08);
 }
 
 td.mono, .mono {
@@ -1479,7 +1728,7 @@ select option {
 .dd.open .dd-arrow { transform: rotate(180deg); }
 
 .dd-menu {
-  position: absolute; top: calc(100% + 4px); left: 0; z-index: 80;
+  position: absolute; top: calc(100% + 4px); left: 0; z-index: var(--z-dropdown);
   min-width: 100%; max-width: 340px; max-height: 264px; overflow-y: auto;
   background: var(--panel);
   border: 1px solid var(--border-strong);
@@ -1515,6 +1764,55 @@ select option {
 .dd-menu::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: var(--radius-full); }
 .dd-menu::-webkit-scrollbar-track { background: transparent; }
 
+/* ── 加载态骨架屏 Skeleton ────────────────────────────────────────────── */
+
+/*
+ * 借鉴自另一个项目（melodix）的一条规矩：**永远不要给用户一块空白**。
+ *
+ * 原先这些位置是一行「正在读取…」。它的问题是：用户看不出**将要出现什么**
+ * （一张表？几张卡？），也分不出"还在读"和"卡住了"—— 文字是静态的。
+ * 骨架屏给的是**结构预览**：几根长短不一的条，正好等于"这里会有一张表"。
+ *
+ * 只用两根元素：
+ *   .skeleton      容器，管间距
+ *   .skeleton > i  一根条（宽度用 inline style 给，模拟真实内容的长度差异 ——
+ *                  等宽的几根条看起来像"加载条"，长短不一才像"内容")
+ * 动画走 background-position（不触发重排/重绘布局），1.5s 线性循环。
+ * `prefers-reduced-motion` 下换成静态淡色：动效不是信息，晕动症用户不该被迫看它。
+ */
+.skeleton {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 4px 0;
+}
+
+.skeleton > i {
+  display: block;
+  height: 12px;
+  border-radius: 6px;
+  background: linear-gradient(90deg, var(--panel-muted) 25%, var(--panel-hover) 50%, var(--panel-muted) 75%);
+  background-size: 200% 100%;
+  animation: sk-shimmer 1.5s linear infinite;
+}
+
+/* 偶尔粗一档：像一行标题，让"结构"更有层次 */
+.skeleton > i:nth-child(3n) {
+  height: 16px;
+}
+
+@keyframes sk-shimmer {
+  from { background-position: 200% 0; }
+  to   { background-position: -200% 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .skeleton > i {
+    animation: none;
+    background: var(--panel-muted);
+  }
+}
+
 /* ── 10c. 自绘提示气泡 Tooltip ───────────────────────────────────────── */
 /*
  * 替代浏览器自带的 `title` 提示框。那只框由**操作系统**绘制：直角、系统字体、
@@ -1524,7 +1822,7 @@ select option {
  * 把它摘下来存进内存，原生提示框因此永远不会弹（见 initTips）。
  */
 .tip {
-  position: fixed; z-index: 200; top: 0; left: 0;
+  position: fixed; z-index: var(--z-tooltip); top: 0; left: 0;
   max-width: min(340px, calc(100vw - 24px));
   padding: 6px 9px;
   background: var(--tip-bg);
@@ -1640,29 +1938,28 @@ input[type="checkbox"]:active {
   border-radius: var(--radius-sm);
   background: var(--panel-subtle);
   border: 1px solid var(--border-subtle);
-  /*
-   * 左侧留一条 3px 的状态位。
-   *
-   * 平时透明（占位，所以状态变化时不会有 2px 的横向跳动），只在 fail / warn 时点亮。
-   * 为什么需要它：这个面板的核心语义是「红色项不解决，模型在选择器里就不会出现」，
-   * 而这条信息原先只由第一列一枚 10px 的小圆点承担 —— 8 行平铺时扫读很容易漏掉。
-   * 用的是与顶部告警条同一套「左侧实色条」语言。
-   */
-  border-left: 3px solid transparent;
   align-items: center;
   transition: var(--transition-fast);
 }
-.diag-row:has(.s-fail) { border-left-color: var(--fail); }
-.diag-row:has(.s-warn) { border-left-color: var(--warn); }
 /*
- * 悬停时**逐边**改色，不能用 `border-color` 简写 —— 简写会把上面点亮的左边条
- * 一起重置成灰，hover 一下状态就没了。
+ * 状态由**整行的底色 + 边框色**交代，不再用左侧一条 3px 竖条。
+ *
+ * 原先那套是「左侧实色条」语言（和顶部告警条同源）。它的问题：圆角矩形的左边贴
+ * 一条直边色条，在圆角处会露出一小截对不齐的直线；而且这条竖条**只在左边**，
+ * 8 行平铺时视线从右往左扫，容易漏掉。
+ * 改成整行染色之后，状态是"整块"的，扫一眼就分得出，也不用再为它留占位宽度
+ * （原先那条透明占位边框就是防状态切换时横向跳 2px 的）。
  */
+.diag-row:has(.s-fail) {
+  background: var(--fail-soft);
+  border-color: var(--fail-border);
+}
+.diag-row:has(.s-warn) {
+  background: var(--warn-soft);
+  border-color: var(--warn-border);
+}
 .diag-row:hover {
-  background: var(--panel);
-  border-top-color: var(--border);
-  border-right-color: var(--border);
-  border-bottom-color: var(--border);
+  border-color: var(--border-strong);
   transform: translateY(-1px);
 }
 .diag-row .label {
@@ -1856,7 +2153,16 @@ tr.detail-row td {
 }
 
 /* 日志抽屉栏规范 (Unified Details & Drawer) */
-details {
+/*
+ * 下面这一组是**日志抽屉**（#logDrawer）专用的整块可折叠卡片样式。
+ *
+ * 为什么必须限定到它：页面里另有三个 <details> 是**行内折叠开关**
+ * （.manualconnect / .connecthow / .connectpre），它们只想要一行可点的文字。
+ * 原先这组规则用的是**裸的 details / summary 选择器**，于是那三个把整块卡片样式
+ * 全继承了 —— 实测后果是「多模型怎么接？」那一行**有底色却没有内边距**
+ * （它自己把 padding 的横向部分覆盖成了 0），变成一条字贴着左边缘的白条。
+ */
+#logDrawer {
   margin-top: var(--space-5);
   border: 1px solid var(--border);
   border-radius: var(--radius);
@@ -1866,11 +2172,11 @@ details {
   transition: var(--transition-normal);
   overflow: hidden;
 }
-details[open] {
+#logDrawer[open] {
   border-color: var(--primary-border);
   box-shadow: var(--shadow-drawer);
 }
-summary {
+#logDrawer > summary {
   cursor: pointer;
   color: var(--text-secondary);
   font-size: var(--fs-body);
@@ -1890,21 +2196,21 @@ summary::marker {
   display: none !important;
   content: "";
 }
-summary:hover {
+#logDrawer > summary:hover {
   background: var(--panel-hover);
   color: var(--primary);
 }
-summary svg {
+#logDrawer > summary svg {
   color: var(--primary);
   transition: transform 0.24s var(--ease);
   flex-shrink: 0;
 }
-details[open] summary {
+#logDrawer[open] > summary {
   border-bottom: 1px solid var(--border);
   background: var(--panel);
   color: var(--primary);
 }
-details[open] summary svg {
+#logDrawer[open] > summary svg {
   transform: rotate(90deg);
 }
 .logctl {
@@ -2002,9 +2308,12 @@ pre.log {
 .rank-fill {
   display: block;
   height: 100%;
+  /*
+   * 实色。原先这里叠了一条"越往右越深"的横向渐变给长度一个方向感 ——
+   * 但**方向感应该由长度本身给**，而不是由颜色。渐变反而让"这条到底多长"
+   * 变得不好读：右端颜色变深，看起来像另一个含义的色块。
+   */
   background-color: var(--primary);
-  /* 横向单色渐变：条越往右越深，给「长度」一个方向感 */
-  background-image: linear-gradient(90deg, var(--primary) 0%, var(--primary-hover) 100%);
   border-radius: var(--radius-full);
   transition: width 0.3s var(--ease);
 }
@@ -2060,21 +2369,26 @@ pre.log {
   box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.02);
 }
 #chatOut .meta { color: var(--faint); }
+/*
+ * 每一轮对话是一张**整边圆角**的小卡片：用户轮与助手轮靠**底色**区分，不靠左侧竖条。
+ * 原先的 `border-left: 3px` + `border-radius: 0 8px 8px 0` 是"侧边标签"的老套路，
+ * 而且它让每一轮只有右半边是圆的 —— 在整页圆角语言里显得像是从别的设计里搬来的。
+ */
 #chatOut .turn {
-  border-left: 3px solid var(--border-strong);
-  padding: 8px 0 8px 14px;
+  padding: 10px 14px;
   margin: 0 0 12px;
   background: var(--panel);
-  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
-  box-shadow: var(--shadow-xs);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
   transition: var(--transition-fast);
 }
 #chatOut .turn:last-child { margin-bottom: 0; }
 #chatOut .turn.user {
-  border-left-color: var(--primary);
+  background: var(--primary-subtle);
+  border-color: var(--primary-border);
 }
 #chatOut .turn.assistant {
-  border-left-color: var(--ok);
+  background: var(--panel);
 }
 #chatOut .turn-role {
   display: flex;
@@ -2114,13 +2428,26 @@ pre.log {
   border: 1px solid var(--border);
   color: var(--muted);
   cursor: pointer;
-  transition: all 0.16s var(--ease);
+  /*
+   * 显式列出要动的属性，**不要写 `transition: all`**。
+   *
+   * `all` 会把布局属性（padding / width / height）也纳入监听：哪天有人给
+   * `.quick-pill` 加一条 `padding` 变化，它会跟着做动画（掉帧、而且不是设计意图）。
+   * 这里按实际会变的东西列全 —— 少列一个的后果是"某个交互突然不动了"，
+   * 所以 hover/active 里出现的每一项都要在这儿有对应（transform 与 box-shadow 别漏）。
+   */
+  transition:
+    background-color 0.16s var(--ease),
+    color 0.16s var(--ease),
+    border-color 0.16s var(--ease),
+    transform 0.16s var(--ease),
+    box-shadow 0.16s var(--ease);
   user-select: none;
 }
 .quick-pill:hover {
-  background: var(--primary);
-  color: #ffffff;
-  border-color: var(--primary);
+  background: var(--primary-solid);
+  color: var(--on-solid);
+  border-color: var(--primary-solid);
   transform: translateY(-1.5px);
   box-shadow: var(--shadow-primary-sm);
 }
@@ -2424,9 +2751,9 @@ pre.log {
 }
 
 .clientpicker button.clientchip.active {
-  color: #fff;
-  background: var(--primary);
-  border-color: var(--primary);
+  color: var(--on-solid);
+  background: var(--primary-solid);
+  border-color: var(--primary-solid);
   font-weight: 600;
 }
 
@@ -2434,11 +2761,10 @@ pre.log {
  *
  * 这是「客户端接入」面板里**唯一会动到仓库之外文件**的地方，所以视觉上要和
  * 下面的「复制片段」明确分开：让用户一眼看出"这块是真动手的，下面那块只是给你抄"。
- * 用左侧一道主色竖条 + 略深的底色做区分，不靠文字解释。
+ * 用**略深的底色 + 更实的一圈边框**做区分（而不是左侧竖条），不靠文字解释。
  */
 .connectbox {
   border: 1px solid var(--border-strong);
-  border-left: 3px solid var(--primary);
   border-radius: var(--radius);
   padding: var(--space-4);
   margin-bottom: var(--space-4);
@@ -2657,7 +2983,7 @@ pre.log {
 }
 
 .connectml-row:last-child { border-bottom: none; }
-.connectml-row.on { background: var(--primary-soft, rgba(59, 130, 246, 0.08)); }
+.connectml-row.on { background: var(--primary-soft, rgba(89, 130, 171, 0.08)); }
 
 .connectml-box { flex: none; margin: 0; cursor: pointer; width: 13px; height: 13px; }
 
@@ -2803,10 +3129,16 @@ pre.log {
 .connectresult.ok { border-color: var(--ok-border, var(--primary)); color: var(--text-secondary); }
 .connectresult.bad { border-color: var(--fail-border, var(--border-strong)); color: var(--text-secondary); }
 
-/* 验证结论与「刚才那次写入的结果」区分开：左侧一道细线，不抢写入结果的注意力 */
-.connectresult.verify { border-left: 3px solid var(--border-strong); }
-.connectresult.verify.ok { border-left-color: var(--ok-border, var(--primary)); }
-.connectresult.verify.bad { border-left-color: var(--fail-border, var(--border-strong)); }
+/*
+ * 验证结论与「刚才那次写入的结果」区分开。
+ *
+ * 原先靠左侧一道 3px 细线。改成**虚线边框**：同样一眼可辨，但不抢写入结果的
+ * 注意力（虚线天然读作"辅助/参考"，实线读作"结果"），而且四边一致，
+ * 不会在圆角处出现对不齐的直边。
+ */
+.connectresult.verify { border-style: dashed; border-color: var(--border-strong); }
+.connectresult.verify.ok { border-color: var(--ok-border, var(--primary)); }
+.connectresult.verify.bad { border-color: var(--fail-border, var(--border-strong)); }
 
 /* 「重新读取」推到头行右侧：它是这块的刷新入口，不该跟标题挤在一起 */
 .connecthead .mini { margin-left: auto; }
@@ -2963,8 +3295,21 @@ pre.log {
 
 .modelpick-chip:hover { border-color: var(--primary); color: var(--primary); }
 
+/*
+ * 选中态的芯片：**底色与文字要用不同档位的令牌**。
+ *
+ * 文字走 `--primary-text` 而不是 `--primary`。原因是这两个令牌的角色不同：
+ *   --primary       给边框、图标、1px 描边用（压 --panel ≥3.4:1 即可）
+ *   --primary-text  专给 12–13px 正文用（压 --primary-subtle ≥4.9:1）
+ * 芯片是 11.5px、weight 600 —— 按 WCAG 属正文档，要 4.5:1。原先用 --primary，
+ * 五套配色在浅色下**全部不达标**（实测 3.39–3.56:1，肉眼就是"字发虚"）。
+ * 换成 --primary-text 后十种组合全过：浅色 4.88–5.05、深色 7.78–8.92（有余量）。
+ *
+ * 这个缺陷靠读代码看不出来 —— `color: var(--primary)` 字面上完全合理。
+ * 抓住它的是 `tools/dev/test-accent-schemes.mjs` 的逐控件体检。
+ */
 .modelpick-chip.on {
-  color: var(--primary);
+  color: var(--primary-text);
   background: var(--primary-subtle);
   border-color: var(--primary);
   font-weight: 600;
@@ -3172,7 +3517,7 @@ pre.log {
   position: fixed;
   right: 28px;
   bottom: 28px;
-  z-index: 99;
+  z-index: var(--z-float);
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -3203,15 +3548,15 @@ pre.log {
   pointer-events: auto;
 }
 .back-to-top:hover {
-  background-color: var(--primary);
-  color: #ffffff !important;
-  border-color: var(--primary);
+  background-color: var(--primary-solid);
+  color: var(--on-solid) !important;
+  border-color: var(--primary-solid);
   transform: translateY(-2px) scale(1.02);
   box-shadow: var(--shadow-primary-md);
 }
 .back-to-top:hover svg {
   transform: translateY(-1.5px);
-  color: #ffffff !important;
+  color: var(--on-solid) !important;
 }
 .back-to-top:active {
   transform: translateY(0) scale(0.96);
@@ -3461,4 +3806,127 @@ pre.log {
 /* 同上：呼吸点纯装饰，动态偏好为 reduced 时停掉 */
 @media (prefers-reduced-motion: reduce) {
   .reqactive .dots { animation: none; }
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * 强调色方案 (Accent Schemes)
+ *
+ * 默认方案（Windstorm 蓝）写在 :root 与 [data-theme="dark"] 里；
+ * 其余四套通过 html[data-accent="…"] 覆盖**同一批令牌**，所以切换方案
+ * 不需要任何组件改样式 —— 所有用 var(--primary*) 的地方自动跟着走。
+ *
+ * 五个方案全部取自 Claude / Anthropic 官方色板，不另造色：
+ *   blue Windstorm · terracotta Peachy Feeling · moss Moss Gardens
+ *   violet Magic Carpet · teal Emerald Oasis
+ *
+ * 每套的每一级都是**按对比度推导**出来的，不是手挑的：
+ *   浅色 --primary 压 --panel ≥3.4:1（当边框/图标）
+ *   浅色 --primary-text 压 --panel ≥4.9:1（当 12–13px 文字，留了余量）
+ *   深色 --primary 压 --panel ≥6.5:1（提亮后才在黑底上读得出）
+ * 换方案时**必须**重跑 tools/dev/test-solid-contrast.mjs —— 它会逐个体检
+ * 所有实色填充控件，任何一套方案掉线都会红。
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+/* ── Peachy Feeling 陶土（#d97757）──────────────────────────────────────────────── */
+html[data-accent="terracotta"] {
+  --primary: #be684c;
+  --primary-hover: #92503b;
+  --primary-active: #794231;
+  --primary-subtle: #f7ece5;
+  --primary-border: #efcfc2;
+  --primary-text: #98543d;
+  --accent: #be684c;
+  --border-focus: #be684c;
+  --ring: 0 0 0 3px rgba(190, 104, 76, 0.30);
+  --ring-tight: 0 0 0 2px rgba(190, 104, 76, 0.38);
+}
+html[data-theme="dark"][data-accent="terracotta"] {
+  --primary: #df8c71;
+  --primary-hover: #e7ab97;
+  --primary-active: #d97757;
+  --primary-subtle: #30221d;
+  --primary-border: #4f3228;
+  --primary-text: #e7ab97;
+  --accent: #df8c71;
+  --border-focus: #df8c71;
+  --ring: 0 0 0 3px rgba(223, 140, 113, 0.35);
+  --ring-tight: 0 0 0 2px rgba(223, 140, 113, 0.44);
+}
+
+/* ── Moss Gardens 苔绿（#788c5d）──────────────────────────────────────────────── */
+html[data-accent="moss"] {
+  --primary: #738659;
+  --primary-hover: #586744;
+  --primary-active: #495538;
+  --primary-subtle: #edeee6;
+  --primary-border: #d0d6c4;
+  --primary-text: #5c6b47;
+  --accent: #738659;
+  --border-focus: #738659;
+  --ring: 0 0 0 3px rgba(115, 134, 89, 0.30);
+  --ring-tight: 0 0 0 2px rgba(115, 134, 89, 0.38);
+}
+html[data-theme="dark"][data-accent="moss"] {
+  --primary: #97a783;
+  --primary-hover: #b1bda1;
+  --primary-active: #809366;
+  --primary-subtle: #22251e;
+  --primary-border: #32382a;
+  --primary-text: #b1bda1;
+  --accent: #97a783;
+  --border-focus: #97a783;
+  --ring: 0 0 0 3px rgba(151, 167, 131, 0.35);
+  --ring-tight: 0 0 0 2px rgba(151, 167, 131, 0.44);
+}
+
+/* ── Magic Carpet 雾紫（#827dbd）──────────────────────────────────────────────── */
+html[data-accent="violet"] {
+  --primary: #7e79b8;
+  --primary-hover: #615d8d;
+  --primary-active: #504d74;
+  --primary-subtle: #eeedef;
+  --primary-border: #d4d1e3;
+  --primary-text: #656193;
+  --accent: #7e79b8;
+  --border-focus: #7e79b8;
+  --ring: 0 0 0 3px rgba(126, 121, 184, 0.30);
+  --ring-tight: 0 0 0 2px rgba(126, 121, 184, 0.38);
+}
+html[data-theme="dark"][data-accent="violet"] {
+  --primary: #a09ccd;
+  --primary-hover: #b7b5d9;
+  --primary-active: #8a86c1;
+  --primary-subtle: #23232c;
+  --primary-border: #353447;
+  --primary-text: #b7b5d9;
+  --accent: #a09ccd;
+  --border-focus: #a09ccd;
+  --ring: 0 0 0 3px rgba(160, 156, 205, 0.35);
+  --ring-tight: 0 0 0 2px rgba(160, 156, 205, 0.44);
+}
+
+/* ── Emerald Oasis 青绿（#629887）──────────────────────────────────────────────── */
+html[data-accent="teal"] {
+  --primary: #59897a;
+  --primary-hover: #446a5e;
+  --primary-active: #38574d;
+  --primary-subtle: #ebefea;
+  --primary-border: #c9dad2;
+  --primary-text: #476e62;
+  --accent: #59897a;
+  --border-focus: #59897a;
+  --ring: 0 0 0 3px rgba(89, 137, 122, 0.30);
+  --ring-tight: 0 0 0 2px rgba(89, 137, 122, 0.38);
+}
+html[data-theme="dark"][data-accent="teal"] {
+  --primary: #7daa9c;
+  --primary-hover: #9ec0b5;
+  --primary-active: #629887;
+  --primary-subtle: #1f2624;
+  --primary-border: #2b3c37;
+  --primary-text: #9ec0b5;
+  --accent: #7daa9c;
+  --border-focus: #7daa9c;
+  --ring: 0 0 0 3px rgba(125, 170, 156, 0.35);
+  --ring-tight: 0 0 0 2px rgba(125, 170, 156, 0.44);
 }
