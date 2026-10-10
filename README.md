@@ -3,9 +3,10 @@
 > 🌏 English summary: [README.en.md](README.en.md)
 
 把本机 **WorkBuddy 桌面端**已登录的模型能力（DeepSeek / GLM / Kimi / MiniMax 等），
-经一个本地桥变成本机的 **OpenAI 兼容**与 **Anthropic 兼容**两套接口 ——
-**Claude Code**、**opencode**、**Cursor**、**Trae**、**Cherry Studio**、**NextChat**、
-**LobeChat**、**Open WebUI** 等任何支持自定义 Base URL 的客户端都能直连。
+经一个本地桥变成本机的 **OpenAI 兼容**、**Anthropic 兼容**与 **OpenAI Responses**
+三套接口 —— **Claude Code**、**Codex**、**opencode**、**Cursor**、**Trae**、
+**Cherry Studio**、**NextChat**、**LobeChat**、**Open WebUI** 等任何支持自定义
+Base URL 的客户端都能直连。
 
 另附一个网页控制台（状态 / 启停 / 诊断 / 模型注册 / 用量 / 体检 / 对话测试），
 **中 / 英双语**（右上角切换，选择记在本机），
@@ -25,7 +26,7 @@
 | 你在找什么 | 相关词 |
 |---|---|
 | 把 WorkBuddy 用起来 | WorkBuddy · WorkBuddy 本地 API · WorkBuddy 模型桥 · WorkBuddy 中转 · WorkBuddy 插件 |
-| 接某个客户端 | **WorkBuddy 接入 Claude Code** · WorkBuddy OpenAI 兼容 API · WorkBuddy Anthropic Messages 兼容 · Claude Code 自定义 API · opencode / Cursor / Trae / Cherry Studio / NextChat / LobeChat / ChatBox / Open WebUI 接入 |
+| 接某个客户端 | **WorkBuddy 接入 Claude Code** · **WorkBuddy 接入 Codex** · WorkBuddy OpenAI 兼容 API · WorkBuddy Anthropic Messages 兼容 · WorkBuddy Responses 兼容 · Claude Code 自定义 API · opencode / Cursor / Trae / Cherry Studio / NextChat / LobeChat / ChatBox / Open WebUI 接入 |
 | 接 DeepSeek Harness | DeepSeek Harness 插件 · dsh 插件 · dsh 模型路由 · provider workbuddy |
 | 技术特性 | openai-compatible · anthropic-compatible · llm proxy · local model bridge · 零依赖 Node.js · 仅监听 127.0.0.1 · 本机凭据自用 |
 
@@ -197,15 +198,80 @@ Claude Code、opencode…），它会替你完成判定 → 安装 → 验证，
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/clients-panel-dark.png">
   <img src="docs/clients-panel-light.png" width="100%"
-       alt="控制台的「客户端接入」面板：顶部是两套协议的 Base URL 与本地令牌，下面是客户端选择器（opencode / Claude Code / 图形表单 / 其它客户端），选中后展开该客户端的完整配置片段，每段都有独立复制按钮">
+       alt="控制台的「客户端接入」面板：顶部是三套协议的 Base URL 与本地令牌，下面是客户端选择器（opencode / Claude Code / Codex / 图形表单 / 其它客户端），选中后展开该客户端的完整配置片段，每段都有独立复制按钮">
 </picture>
 
-桥同时讲**两套协议**，填哪个地址取决于客户端讲哪套：
+桥同时讲**三套协议**，填哪个地址取决于客户端讲哪套：
 
 | 协议 | Base URL | API Key |
 |---|---|---|
 | OpenAI 兼容 | `http://127.0.0.1:8790/v1` | 本地令牌（见下方说明） |
 | Anthropic Messages | `http://127.0.0.1:8790`（**不带 `/v1`**） | 同上 |
+| OpenAI Responses（Codex） | `http://127.0.0.1:8790/v1` | 同上（写在 `~/.codex/config.toml` 的 `experimental_bearer_token`） |
+
+> **Codex 为什么不能只改 Base URL？** 它说的是 **Responses 协议**，而桥的 `/v1` 那套
+> 是 chat/completions；两者的事件流与请求体都不同，所以桥里做了一层真正的协议转换
+> （CC Switch 靠一个本地路由进程做的事，这里内置了，不用再装中间人）。
+> 注意网上仍在流传 `wire_api = "chat"`，**上游已经把它移除**，照抄会直接报错 ——
+> `"responses"` 是现在唯一还能用的值。
+
+**不想手抄配置？控制台面板最上面有「一键接入」**：它检测本机装了哪些客户端
+（Codex / Claude Code / opencode），把 Base URL 与令牌**直接写进**它们的配置文件 ——
+只动它自己的键（cc-switch 写过的节一字不动）、写入前整份备份、支持一键撤销、
+写完拿配置里的令牌真打一次桥验证。不想开控制台也可以用命令行：
+
+```cmd
+npm run connect status          :: 三个客户端各自的状态与将要改动什么
+npm run connect apply codex     :: 写入（codex / claude / opencode）
+npm run connect apply codex --models glm-5.3,kimi-k3-1   :: 一次接多个模型
+npm run connect verify codex    :: 静态读回 + 端到端验证
+npm run connect undo codex      :: 撤销
+```
+
+**多模型**：勾选几个就接几个，其中一个作为主模型（客户端打开时用的那个）。
+三个客户端的机制不同，写进去的形状也不同 —— 但都是客户端**自己认**的写法：
+
+| 客户端 | 写什么 | 在客户端里怎么切 |
+|---|---|---|
+| opencode | provider 下的**模型表**（`models`） | TUI 里直接选 |
+| Claude Code | **`modelPicker`** 列出勾选的模型（替换掉内置列表） | `/model` 选择器 |
+| Codex | **模型目录文件**（`model_catalog_json`） | `-m <模型>` 或模型选择器 |
+
+> Codex 的目录是**合并**的：`model_catalog_json` 已经指向别人的目录时（cc-switch 就是
+> 常见的一种），原条目一条不动，只补桥这边缺的；撤销连那份文件一起还原。
+> 本机找不到可用的目录模板时**不生成**，界面会直说"只能接一个模型"，不硬编造。
+
+**这块面板的纪律**（都是"界面不说假话"的具体做法，踩过坑才有的）：
+
+- **读不到状态就说读不到**：接口 404 / 超时 / 返回形状不对时给出原因 + 「重试」，
+  绝不挂着一句「正在读取接入状态…」永远转圈（实测踩过：控制台进程还在跑改动前的
+  旧代码，`/api/connect` 回 404，面板从头到尾一个字都没渲染出来）；
+- **「已接入」不是一个文件的存在性**：配置被手改过、桥换过端口/令牌，标签会变成
+  「已接入，需重新写入」；反过来，你自己照片段抄进去的配置会被认成
+  「已接入（非本控制台写入）」。已接入的行可以随时点**「验证接入」**——
+  静态读回 + 拿配置里的令牌真打一次桥，失败结论直接落在标签上
+  （「已接入，验证未通过」）；
+- **「桥没起」与「桥在跑但不认这把令牌」分开说**：前者去点「启动桥服务」，
+  后者去点「重启桥」。混成一句时用户会按错的按钮，然后卡住
+  （见 [TROUBLESHOOTING](docs/TROUBLESHOOTING.md)）；
+- **布局按"一年看几次"排序**：主路径只有三行客户端（状态 · 名称 · 路径 · 操作），
+  说明、三个接入值、各家配置片段、兼容性清单都收进折叠区 ——
+  自己抄配置那条路照样完整，只是不再天天占着屏幕。
+
+> 标了「本机未实测」的客户端：写入逻辑有往返单测，但本机没装它，
+> 所以「它是否认这份配置」没法替你保证 —— 其余客户端仍走复制片段。
+
+**指定接入模型**：一键接入默认为每个客户端写入桥对应的默认模型（Codex / Claude Code 用
+`glm-5.3`，opencode 用精选集首个）。控制台面板里每个客户端都带一个「接入模型」下拉，写入前
+可直接改；命令行用 `--model`：
+
+```cmd
+node tools\connect.mjs apply codex --model glm-5.3
+```
+
+所选模型会写进各客户端配置（Codex `config.toml` 的 `model`、opencode 的 `model`、Claude Code 的
+`env.ANTHROPIC_MODEL`），桥收到后精确命中目录即原样使用 —— 选什么就跑什么。写入前会校验该 id
+在当前目录里，避免写错导致桥静默回退到别的模型。
 
 > **本地令牌从哪来？** 首次启动时随机生成，控制台的「客户端接入」面板里直接显示并
 > 可一键复制（页面上的值就是准的，不用去翻文件）。需要手动读时它在
@@ -219,6 +285,7 @@ Claude Code、opencode…），它会替你完成判定 → 安装 → 验证，
 |---|---|---|
 | opencode | OpenAI | ✅ 已实测 —— 用其底层 AI SDK（`@ai-sdk/openai-compatible`）跑通生成 / 工具调用 / 流式 |
 | Claude Code | Anthropic | ✅ 已实测 —— 流式事件序列、`tool_use`、多轮 `tool_result` 往返均正确 |
+| Codex | Responses | ⚪ 未在 Codex 内实跑 —— 但协议层是照 Codex 的**解析器源码**逐条对齐的（SSE 事件顺序、工具名分片重组、usage 三总数），并有单测覆盖 |
 | Cursor / Trae | OpenAI | ⚪ 协议兼容，未在客户端内实测（Agent 模式依赖的工具调用桥侧可用） |
 | Cherry Studio / NextChat / LobeChat / ChatBox / Open WebUI | OpenAI | ⚪ 协议兼容，未在客户端内实测 |
 
@@ -226,7 +293,8 @@ Claude Code、opencode…），它会替你完成判定 → 安装 → 验证，
 > 桥侧已验证；但**没有真的装一遍跑通**，所以不写成「支持」。
 
 **Claude Code 的模型名会被映射。** 它发的是 `claude-sonnet-4-…`，上游没有这些 id，
-桥会映射到真实模型（默认 `glm-5.3`）。想指定就用 `WORKBUDDY_ANTHROPIC_MODEL=<上游真实模型 id>`。
+桥会映射到真实模型（默认 `glm-5.3`）。想指定就用 `WORKBUDDY_ANTHROPIC_MODEL=<上游真实模型 id>`；
+走「一键接入」时会把你选的模型直接写进 `settings.json` 的 `env.ANTHROPIC_MODEL`，无需再设环境变量。
 
 **已知限制：知识库 / RAG 用不了。** 上游只提供对话模型，没有任何 embedding 模型，
 `POST /v1/embeddings` 会明确返回 **501**。需要 RAG 的客户端请另配一个 embedding

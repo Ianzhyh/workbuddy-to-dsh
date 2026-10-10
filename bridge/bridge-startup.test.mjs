@@ -155,6 +155,55 @@ test('桥 smoke：端口写成非数值时不再抛 ERR_SOCKET_BAD_PORT', { time
 
 // ── 顺带钉住"桥确实用了这条规则" ─────────────────────────────────────────
 
+/**
+ * 登录文件目录必须在**真实环境变量缺失**时仍然给出绝对路径。
+ *
+ * 现场（子进程实测）：Windows 默认**只有 `USERPROFILE`、没有 `HOME`**，而桥的
+ * `AUTH_DIRS` 只认 `LOCALAPPDATA` / `HOME` / `XDG_DATA_HOME`。一旦 `LOCALAPPDATA`
+ * 也没了（精简过的环境、从计划任务启动、CI），三个都为空 → 最后那行
+ * `join(AUTH_DIRS[0] || '.', 'workbuddy-desktop.info')` 拼出**相对路径**
+ * `workbuddy-desktop.info`。相对路径按 cwd 解析 → 桥找不到登录文件，
+ * 而用户看到的是"没登录"，跟环境变量毫无关系，根本猜不到。
+ * （同一份实现在 config.mjs 里有 `USERPROFILE` 兜底，桥这边漏了 —— 两套实现必然漂移。）
+ */
+test('登录文件目录：LOCALAPPDATA / HOME 都缺时也必须给出绝对路径', async () => {
+  const child = spawn(process.execPath, [BRIDGE], {
+    cwd: HERE,
+    env: {
+      ...process.env,
+      WORKBUDDY_PORT: String(20000 + Math.floor(Math.random() * 20000)),
+      WORKBUDDY_LOCAL_TOKEN: TOKEN,
+      // 模拟"精简过 / 非交互式"的 Windows 环境：三者全空，只剩 USERPROFILE
+      LOCALAPPDATA: '', HOME: '', XDG_DATA_HOME: '',
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+
+  let output = '';
+  child.stdout.on('data', (d) => { output += d; });
+  child.stderr.on('data', (d) => { output += d; });
+  try {
+    const deadline = Date.now() + 10_000;
+    while (Date.now() < deadline && !/auth file/iu.test(output) && child.exitCode === null) {
+      await new Promise((r) => setTimeout(r, 200));
+    }
+    const m = output.match(/auth file\s*:\s*(.+)/iu);
+    assert.ok(m, `桥没打印 auth file 行，输出：\n${output.slice(-400)}`);
+    const authPath = m[1].trim();
+    assert.ok(
+      /^[A-Za-z]:[\\/]|^\//u.test(authPath),
+      `登录文件路径是**相对路径**（${authPath}）—— 它会按启动目录解析，`
+      + '于是"桥找不到登录文件"会表现成"用户没登录"，而真凶是环境变量缺失。',
+    );
+  } finally {
+    await new Promise((resolve) => {
+      child.once('exit', resolve);
+      child.kill();
+      setTimeout(resolve, 3000);
+    });
+  }
+});
+
 test('桥源码里不再有裸 Number(process.env.*) 的数值读取（防止回退）', () => {
   /*
    * 规则写对了、但某处忘了改，是这个 bug 最可能的复发方式（本轮就是

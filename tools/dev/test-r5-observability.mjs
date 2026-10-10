@@ -266,7 +266,14 @@ try {
 
   // ── R5.4 日志过滤 ───────────────────────────────────────────────────
   {
-    await q(cdp, `(document.querySelector('details').open = true, true)`);
+    /*
+     * 按 **id** 打开日志抽屉，不要用 `document.querySelector('details')`。
+     *
+     * 后者取的是全文档第一个 `<details>`，而页面上现在不止一个（「客户端接入」里
+     * 新增了折叠区）—— 取错了对象，抽屉一直是关的，日志永远不加载，
+     * 表现为一个 8 秒超时。这个选择器从一开始就脆，只是以前恰好只有一个 details。
+     */
+    await q(cdp, `(document.getElementById('logDrawer').open = true, true)`);
     await waitFor(cdp, `document.querySelector('#logOut').textContent.includes('heartbeat')`, 8000, '日志加载');
     await sleep(200);
 

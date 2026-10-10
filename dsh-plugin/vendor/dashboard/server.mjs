@@ -24,6 +24,23 @@ import {
   readBridgeLog,
 } from '../lib/diagnostics.mjs';
 import { readDshStatus, writeRegistration } from '../lib/dsh.mjs';
+import {
+  CONNECT_CLIENTS,
+  applyClient,
+  assertModelKnown,
+  buildConnectBase,
+  contextForClient,
+  findClient,
+  modelOptions,
+  planClient,
+  resolveBackupRoot,
+  resolveModelChoice,
+  resolveSelection,
+  assertModelsKnown,
+  undoClient,
+  verifyAgainstBridge,
+  verifyWritten,
+} from '../lib/client-connect.mjs';
 import { effectiveAuthFile, readState, writeState } from '../lib/state.mjs';
 
 // ── 基础工具 ────────────────────────────────────────────────────────────
@@ -867,6 +884,22 @@ function serveStatic(res, pathname) {
 
 // ── 路由 ────────────────────────────────────────────────────────────────
 
+/**
+ * 归一化「要接入哪些模型」这个入参：数组或逗号分隔串都收。
+ *
+ * 查询串里用逗号串（少一层序列化）、POST 体里用数组，两种都得认 ——
+ * 各写一套解析必然漂移，而"少勾了一个模型"这种错用户很难发现。
+ */
+function normalizeModelList(value) {
+  if (Array.isArray(value)) return value.filter((x) => typeof x === 'string' && x.trim()).map((x) => x.trim());
+  if (typeof value === 'string' && value.trim()) return value.split(',').map((s) => s.trim()).filter(Boolean);
+  return null;
+}
+
+// 「一键接入」的上下文构造（桥地址、令牌、模型清单、各客户端默认模型）已收口到
+// `lib/client-connect.mjs` 的 buildConnectBase / contextForClient —— 命令行
+// `tools/connect.mjs` 与本控制台共用同一份口径，两边不会各写一套而漂移。
+
 const server = createServer(async (req, res) => {
   const url = new URL(req.url, config.dashboard.url);
   const route = url.pathname;
@@ -1008,6 +1041,12 @@ const server = createServer(async (req, res) => {
          */
         anthropicModel: config.bridge.anthropicModel,
         anthropicFastModel: config.bridge.anthropicFastModel,
+        /**
+         * Responses 层（Codex）的模型映射，同样如实展示 —— 用户在 Codex 里配的是
+         * `gpt-5.1-codex`、实际跑的是 glm-5.3，不说清楚他会以为桥选错了模型。
+         */
+        responsesModel: config.bridge.responsesModel,
+        responsesFastModel: config.bridge.responsesFastModel,
         models: details.map((m) => m.id),
         modelDetails: details,
       });
@@ -1016,6 +1055,143 @@ const server = createServer(async (req, res) => {
 
     if (route === '/api/diagnose') {
       sendJson(res, 200, await diagnose());
+      return;
+    }
+
+    /*
+     * ── 一键接入 ────────────────────────────────────────────────────────
+     *
+     * 把 Base URL 与令牌**写进**客户端的配置文件（`lib/client-connect.mjs`）。
+     * 这是控制台里少见的"会动到仓库之外的文件"的接口，所以：
+     *   - 全部走 POST（写操作准入检查已经要求 `x-workbuddy-panel: 1`）；
+     *   - 真正动手之前，界面会先用 GET 拿到「将要改成什么样」给用户确认；
+     *   - 每次写入都先整份备份，撤销按记录逐键还原（不是拿备份整份盖回去）。
+     */
+    if (route === '/api/connect' && req.method === 'GET') {
+      const base = await buildConnectBase();
+      /*
+       * 每个客户端可带 `?model.<id>=<模型>` 覆盖默认；预览与写入用同一次派生，
+       * 守住 planClient 注释里的「所见即所写」。非法 id 只让该项报错，不牵连其余。
+       *
+       * 没带参数时**不是**直接用桥的默认，而是先认配置文件里现在写着的那个模型
+       * （`resolveModelChoice`）：模型是用户的选择，重新打开页面就把它当漂移、
+       * 报一句「需重新写入」，等于界面在制造一件不存在的事，还会顺手覆盖掉它。
+       */
+      const clients = CONNECT_CLIENTS.map((c) => {
+        const raw = url.searchParams.get(`model.${c.id}`);
+        const explicit = typeof raw === 'string' && raw.trim() ? raw.trim() : null;
+        const chosen = resolveModelChoice(base, c, explicit);
+        /**
+         * 模型**集合**：`?models.<id>=a,b,c`。没给就认配置文件里现在声明的那批
+         * （`resolveSelection`），同样是为了不把用户自己的选择当成"漂移"。
+         */
+        const rawList = url.searchParams.get(`models.${c.id}`);
+        const explicitList = normalizeModelList(rawList);
+        const selection = resolveSelection(base, c, explicitList);
+        const bad = assertModelKnown(chosen, base) || assertModelsKnown(selection, base);
+        const ctx = contextForClient(base, c.id, bad ? null : chosen, bad ? null : selection);
+        const plan = planClient(c.id, ctx);
+        return bad
+          ? { ...plan, error: bad, changes: [], effectiveModel: null }
+          : { ...plan, effectiveModel: ctx.model, effectiveModels: ctx.models.map((m) => m.id) };
+      });
+      sendJson(res, 200, {
+        clients,
+        /** 配置里该出现的值，供界面在出错时对照 */
+        token: base.token,
+        baseUrlOpenAI: base.baseUrlOpenAI,
+        baseUrlAnthropic: base.baseUrlAnthropic,
+        model: base.defaultModel,
+        /** 界面模型下拉的候选（完整目录，桥没起时退回精选集） */
+        modelOptions: modelOptions(base),
+        running: base.running,
+        /**
+         * 桥的进程级状态：`up` 有人应答、`authRejected` 回的是 401（两边令牌不一致）。
+         * 界面据此把「桥未运行」与「桥在跑但令牌被拒」分开说 —— 这两种情况的处置
+         * 完全不同（启动桥 / 重启桥），含糊成一句会让用户按错的按钮。
+         */
+        bridge: base.bridge,
+        /** 备份落在哪个目录（界面要如实告诉用户去哪找） */
+        backupDir: resolveBackupRoot(),
+      });
+      return;
+    }
+
+    if (route === '/api/connect/apply' && req.method === 'POST') {
+      let body;
+      try {
+        body = JSON.parse(await readBody(req));
+      } catch (err) {
+        if (err.code === 'BODY_TOO_LARGE') return bodyTooLarge(req, res);
+        return sendJson(res, 400, { ok: false, error: `请求体不是合法 JSON：${err.message}` });
+      }
+      const id = String(body?.client || '');
+      if (!findClient(id)) return sendJson(res, 400, { ok: false, error: `不认识的客户端：${id}` });
+      const rawModel = typeof body?.model === 'string' && body.model.trim() ? body.model.trim() : null;
+      const base = await buildConnectBase();
+      const client = findClient(id);
+      // 没显式选就沿用文件里那个模型 / 那批模型：否则「重新写入」会把用户自己的选择改掉
+      const chosen = resolveModelChoice(base, client, rawModel);
+      const selection = resolveSelection(base, client, normalizeModelList(body?.models));
+      const bad = assertModelKnown(chosen, base) || assertModelsKnown(selection, base);
+      if (bad) return sendJson(res, 400, { ok: false, error: bad });
+      const context = contextForClient(base, id, chosen, selection);
+      const result = applyClient(id, context);
+      /**
+       * 端到端验证：拿**刚写进文件里**的令牌真的打一次桥。
+       *
+       * 静态读回只能证明"文件里写对了"；这一步才能证明"这个令牌真的能用"
+       * ——比如桥重启后换了新令牌而旧文件没更新，静态读回是发现不了的。
+       * 失败不影响写入结果，如实回报即可。
+       */
+      if (result.changed) {
+        result.auth = await verifyAgainstBridge(findClient(id), {
+          baseUrl: context.baseUrlOpenAI, tokenOverride: context.token,
+        });
+      }
+      sendJson(res, result.ok ? 200 : 400, result);
+      return;
+    }
+
+    if (route === '/api/connect/undo' && req.method === 'POST') {
+      let body;
+      try {
+        body = JSON.parse(await readBody(req));
+      } catch (err) {
+        if (err.code === 'BODY_TOO_LARGE') return bodyTooLarge(req, res);
+        return sendJson(res, 400, { ok: false, error: `请求体不是合法 JSON：${err.message}` });
+      }
+      const id = String(body?.client || '');
+      if (!findClient(id)) return sendJson(res, 400, { ok: false, error: `不认识的客户端：${id}` });
+      const result = undoClient(id);
+      sendJson(res, result.ok ? 200 : 400, result);
+      return;
+    }
+
+    if (route === '/api/connect/verify' && req.method === 'POST') {
+      let body;
+      try {
+        body = JSON.parse(await readBody(req));
+      } catch (err) {
+        if (err.code === 'BODY_TOO_LARGE') return bodyTooLarge(req, res);
+        return sendJson(res, 400, { ok: false, error: `请求体不是合法 JSON：${err.message}` });
+      }
+      const id = String(body?.client || '');
+      const client = findClient(id);
+      if (!client) return sendJson(res, 400, { ok: false, error: `不认识的客户端：${id}` });
+      const rawModel = typeof body?.model === 'string' && body.model.trim() ? body.model.trim() : null;
+      const base = await buildConnectBase();
+      // 验证要用与写入同一个模型 / 同一批模型：否则静态读回会拿别的集合去比，报出假的"未通过"
+      const chosen = resolveModelChoice(base, client, rawModel);
+      const selection = resolveSelection(base, client, normalizeModelList(body?.models));
+      const bad = assertModelKnown(chosen, base) || assertModelsKnown(selection, base);
+      if (bad) return sendJson(res, 400, { ok: false, error: bad });
+      const context = contextForClient(base, id, chosen, selection);
+      const written = verifyWritten(client, context);
+      const auth = written.ok
+        ? await verifyAgainstBridge(client, { baseUrl: context.baseUrlOpenAI, tokenOverride: context.token })
+        : null;
+      sendJson(res, 200, { ok: written.ok && (auth?.ok ?? false), written, auth });
       return;
     }
 

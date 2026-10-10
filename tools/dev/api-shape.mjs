@@ -37,6 +37,12 @@ export const CAPTURED_ROUTES = [
   '/api/overview',
   '/api/models',
   '/api/clients',
+  /**
+   * 一键接入的状态。**必须纳入形状表**：这块的桩（`connectFixture`）漏了
+   * `modelOptions` 时，页面渲染出的是**空的下拉**（宽度接近 0），于是 320px 视口下
+   * 真实的横向溢出被掩盖了整整一轮 —— 验收全绿而产品有问题，正是形状表要防的那类。
+   */
+  '/api/connect',
   '/api/diagnose',
   '/api/usage',
   '/api/requests',

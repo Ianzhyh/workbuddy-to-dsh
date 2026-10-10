@@ -309,6 +309,44 @@ WORKBUDDY_AUTH_FILE=C:\Users\<you>\AppData\Local\CodeBuddyExtension\Data\Public\
 
 用「最近修改时间」判断哪个是当前活跃的：在客户端里登录一次，看哪个文件的 `mtime` 变了。
 
+### Codex 里模型把工具调用写成正文（一串 `<||DSML||invoke …>`），一个回合就此结束
+
+**症状**：Codex 走桥时，回答里出现 `exec_command` 之类的**文本标记**而不是真的执行工具，
+然后这一轮就结束了 —— 看起来像"话说一半断了"。
+
+**根因**：Codex 用了 **code mode 的工具协议**。这套协议下工具不在请求顶层的 `tools`，
+而是塞在 `input[]` 的 `additional_tools` 条目里，并且 shell / apply_patch 全被收进
+一个 **freeform 的 `exec`**（模型得写 JavaScript 去编排工具）。桥的上游是
+chat/completions，**接不了这套**：上游一个工具都收不到，模型只能把调用写进正文。
+
+**谁把它打开的**：Codex 的模型目录里 `use_responses_lite: true` +
+`tool_mode: "code_mode_only"`。Codex 官方模型（gpt-5.6-*）就是这么配的 ——
+如果目录条目是照着官方模型克隆出来的，这两个开关会被一起抄过来。
+
+**怎么修**：让该模型的目录条目回到经典 function tools：
+
+```jsonc
+{ "slug": "glm-5.3", "use_responses_lite": false, "tool_mode": 不存在 }
+```
+
+本项目的一键接入**已经显式写死这两个开关**（`use_responses_lite: false`、删掉
+`tool_mode`），并且会**重算自己写过的旧条目** —— 所以修好之后重跑一次即可：
+
+```cmd
+npm run connect apply codex     :: 会打印「只重写模型目录（纠正旧条目 N 个）」
+```
+
+**怎么自证**：桥的日志里出现下面这条，就说明确实在走 code mode：
+
+```
+code-mode 工具协议：客户端把工具放在 input[].additional_tools 里，
+其中 exec 是 freeform 工具（模型要写 JS 去编排），桥这层不翻译
+—— 只转发了 N 个 classic function 工具。
+```
+
+（桥会尽量把 `additional_tools` 里的 `function` 工具救回来，但 `exec` 这种 freeform
+的翻不了，所以**必须**从目录那一侧修。）
+
 ### 桥在跑，页面却说「桥未运行」
 
 **先确认是页面误报还是桥真的没起来：**
@@ -318,12 +356,28 @@ curl -H "Authorization: Bearer $WB_TOKEN" http://127.0.0.1:8790/health
 ```
 
 - 有 JSON 返回、`"ok":true` → 桥是好的，是探测超时
+- **`401`** → 桥在跑，但**不认控制台这把令牌**（见下面「令牌不一致」）
 - 连接被拒 → 桥确实没起来，看下面的「桥起不来」
 
 探测超时只出现在**旧版**：旧 `/health` 会同步等一次上游模型目录抓取，而目录要
 串行打两个上游端点，冷缓存时超过控制台的 4 秒探测超时，于是被误判成未运行。
 现在的 `/health` 只读内存缓存、过期只在后台刷新，因此**恒为毫秒级**，且额外汇报
 `pid` / `uptimeMs` / `catalogSize`。页面「桥进程」卡片就是这几个字段。
+
+#### 令牌不一致（控制台与桥各拿一把）
+
+**症状**：端口有人应答（`curl` 回 401 而不是连接被拒），桥的日志显示它在正常服务；
+「一键接入」写进去的客户端配置**立刻 401**。旧版页面只会写一句「桥未运行」，
+用户去点「启动桥服务」得到的是"已经在跑了"，无从下手。
+
+**成因**：桥**独立启动**时（没配 `WORKBUDDY_LOCAL_TOKEN`）会自己 `randomBytes` 生成
+一把随机令牌，只打印在启动日志里、不落盘；而控制台与 dsh 插件读的是
+`dsh-plugin/.bridge-token`。两边不是同一把 —— 谁也没错，就是没对上。
+
+**怎么修**：点控制台上方的**「重启桥」**（控制台启动桥时会显式注入它那把令牌）。
+现在控制台会自己识别这种情况并直说「令牌不一致……点上方「重启桥」」，
+`/api/connect` 里也能看到区分：`bridge.up: true` + `bridge.authRejected: true`
+（`running: false` 只表示"当前用不了"）。
 
 ### 桥日志无限增长
 

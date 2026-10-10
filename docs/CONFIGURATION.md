@@ -29,6 +29,8 @@ copy .env.example .env
 | `WORKBUDDY_LOG` | `1` | `1` 时打印每次请求的模型、消息数、工具数（**不含对话内容**） |
 | `WORKBUDDY_ANTHROPIC_MODEL` | `glm-5.3` | Claude Code 的模型名映射到哪个上游真实模型。可填任意 `/v1/models` 里的 id |
 | `WORKBUDDY_ANTHROPIC_FAST_MODEL` | `glm-5.3-flash` | Claude Code 后台任务（标题生成、文件摘要）用的小快模型 |
+| `WORKBUDDY_RESPONSES_MODEL` | `glm-5.3` | Codex（`/v1/responses`）的模型名映射。Codex 发的是它 config.toml 里的 `model`（如 `gpt-5.1-codex`），上游没有这些 id，必须映射到真实模型 |
+| `WORKBUDDY_RESPONSES_FAST_MODEL` | `glm-5.3-flash` | Codex 的后台小快模型。**只有名字里带 mini / nano / flash 这类字样才会用到它** —— `gpt-5.1-codex` 是主力模型，刻意不匹配 "codex"，否则会把主任务降级 |
 
 ### 控制台
 
@@ -45,6 +47,96 @@ copy .env.example .env
 | `WORKBUDDY_APP_EXECUTABLE` | 自动探测 | 客户端可执行文件。探测顺序见下 |
 | `WORKBUDDY_AUTH_FILE` | 自动定位 | 登录文件绝对路径。**多账号时务必显式指定** |
 | `WORKBUDDY_AUTH_DIR` | 平台默认 | 登录文件所在目录，仅在目录被移动时需要 |
+
+### 一键接入
+
+「客户端接入」面板的「一键接入」与 `npm run connect` 会**写**客户端的配置文件。
+这三个路径都有默认值（`~/.codex/config.toml`、`~/.claude/settings.json`、
+`~/.config/opencode/opencode.json`），只在客户端装到非常规位置时才需要覆盖。
+测试也是靠它们把目标挪到临时目录，**不会碰真实配置**。
+
+**它对你的文件做了什么、不做什么**（这几条是踩过坑之后定下来的）：
+
+| 情况 | 行为 |
+|---|---|
+| 别人的键 / 节 / 注释 / 顺序 | **一字不动**（TOML 走行级改写；`cc-switch` 那种 provider 节实测未动） |
+| 带注释的 JSONC（opencode 官方支持） | **能接**：先试严格 JSON，再试剥注释的版本。注释会在重写后消失，界面提前提示"会重新排版" |
+| 尾逗号 | **如实报错并停手**（不在 JSONC 规范里，不猜 —— 猜错就是改坏文件） |
+| 字符串里的 `//`（如 URL） | 不会被当成注释（逐字符扫描 + 转义处理） |
+| BOM / CRLF / 缩进风格 | 写入时会被规范化为 2 空格 + `\n`（JSON）或原样保留（TOML）；**BOM 保留** |
+| 空文件 | 当成"还没有配置"，**能一键接上**（不是"格式不对"） |
+| 中间层是数组 / null（如 `"env": []`） | **不覆盖你的数据**，并把没写进去的键**列出来**告诉你怎么修（把它改成对象后重试） |
+| 语法确实坏了 | 报错并**绝不动文件** |
+
+撤销的承诺是「还原到接入之前」：逐键还原**首次写入时记录的原值**（而不是拿备份整份盖回去
+—— 那会连带丢掉用户在写入之后自己做的改动），BOM 一并还原，Codex 的模型目录文件
+要么按备份还原、要么（我们建的）删掉。
+
+**多模型（每个客户端可接多个，其中一个作主模型）各写在哪：**
+
+| 客户端 | 写什么 | 怎么切换 |
+|---|---|---|
+| opencode | `provider.workbuddy.models` 里声明**勾选的每一个**；`model` 指向主模型 | TUI 里直接选 |
+| Claude Code | `modelPicker.options` 列出勾选的模型（`replaceBuiltInOptions: true`）+ `env.ANTHROPIC_MODEL` 指主模型 | `/model` 选择器 |
+| Codex | `model` 指主模型；勾选的模型写进 `model_catalog_json` 指向的**目录文件** | `-m <模型>` 或 Codex 的模型选择器 |
+
+> Codex 的那份目录是**第二个文件**：默认写在 `config.toml` 同目录下的
+> `workbuddy-model-catalog.json`。它**合并**而不是覆盖 —— 如果 `model_catalog_json`
+> 已经指向别人的目录（本机 cc-switch 就是），原来那些条目一条不动地保留，
+> 只补桥这边缺的。撤销时配置文件里的键还原、我们建的目录文件删掉、
+> 改过的目录文件按备份还原。
+>
+> 目录条目是**克隆**现成模板再改 slug/名字/上下文（模板取自现有目录，或 Codex 自己
+> 抓的 `models_cache.json`）—— 条目的字段有三十来个，少一个 Codex 可能整份解析失败。
+> 两处模板都没有时**不生成目录**，界面与命令行都会如实说明「只能接一个模型」，
+> 不硬编造条目。
+
+**换一台电脑也能用**：目标路径**不写死**，而是按各家官方的约定现算。
+别人的机器上如果改过这些（很常见 —— 同步盘、多账号、公司策略都会改），我们跟着走：
+
+| 客户端 | 认哪个变量 | 依据 |
+|---|---|---|
+| Codex | `CODEX_HOME` | Codex 官方约定（本机用 `codex doctor` 实测：设了它，它自述的 config 路径就变成 `<CODEX_HOME>/config.toml`） |
+| Claude Code | `CLAUDE_CONFIG_DIR` | [官方文档](https://code.claude.com/docs/en/settings)：*To keep the home-directory files somewhere else, set `CLAUDE_CONFIG_DIR`* |
+| opencode | `XDG_CONFIG_HOME` | 全局层固定在 `~/.config/opencode/`（[官方文档](https://opencode.ai/docs/config/)，Windows 也走 `%USERPROFILE%\.config\`）。`OPENCODE_CONFIG` 是**另一层**（指定别的配置文件、优先级更高），不是同一件事，故不冒充 |
+
+> 路径是怎么定下来的会**显示出来**（面板上标「按客户端的设置写入：CODEX_HOME」、
+> 命令行标「路径来源: 跟随客户端的 CODEX_HOME」）—— 只给一个最终路径，
+> 用户没法确认"它认没认对地方"，而认错的后果是把配置写进客户端根本不读的位置。
+
+| 变量 | 默认值 | 说明 |
+|---|---|---|
+| `WORKBUDDY_CODEX_CONFIG` | `$CODEX_HOME/config.toml`，未设则 `~/.codex/config.toml` | Codex 的配置文件路径（目录文件写在它旁边）。**优先级高于** `CODEX_HOME` |
+| `WORKBUDDY_CLAUDE_SETTINGS` | `$CLAUDE_CONFIG_DIR/settings.json`，未设则 `~/.claude/settings.json` | Claude Code 的设置文件路径。**优先级高于** `CLAUDE_CONFIG_DIR` |
+| `WORKBUDDY_OPENCODE_CONFIG` | `$XDG_CONFIG_HOME/opencode/opencode.json`，未设则 `~/.config/opencode/opencode.json` | opencode 的**全局**配置路径 |
+| `WORKBUDDY_CONNECT_BACKUP` | `<仓库>\.backup\client-configs\` | 写入前的备份与撤销记录放哪。仓库只读（如 vendor 分发）时退回 `~/.workbuddy-bridge\client-configs\` |
+
+`WORKBUDDY_*` 三个是**本产品自己的**覆盖（测试、运维、非常规安装用），
+优先级最高；没设时才看客户端自己的变量。
+
+### 路径类配置都是「读取那一刻生效」
+
+`DSH_HOME`、`CODEX_HOME`、`CLAUDE_CONFIG_DIR`、`XDG_CONFIG_HOME` 以及本产品的
+`WORKBUDDY_*` 覆盖变量，全部**在读到它们的那一刻求值**，不是进程启动时就定死。
+所以这几种写法都成立：
+
+```js
+import { config } from './config.mjs';
+process.env.DSH_HOME = 'X:\\my-dsh';     // 之后再设，一样生效
+config.dsh.settingsPath;                  // → X:\my-dsh\settings.yaml
+```
+
+> 为什么值得一提：`config.dsh` 的四个路径是 getter（不是普通属性）。
+> 早期版本在 `import` 那一刻就把它们算成常量了，于是"先 import 再设 `DSH_HOME`"
+> 这种最自然的写法会**静默失效** —— 用户以为 dsh 配置改到了别处，实际还在 `~/.dsh`，
+> 而写 dsh 配置是会**动用户文件**的（往里加模型路由）。有单测钉住这条。
+>
+> 空白值（`DSH_HOME="   "`）不会被当成路径，会回落家目录 —— 否则会拼出一个
+> 名字是空格的目录。
+
+**备份目录**（`WORKBUDDY_CONNECT_BACKUP`，默认 `<仓库>\.backup\client-configs\`）
+跟着**代码位置**走，不跟启动目录走 —— 换个启动方式（快捷方式、计划任务、
+从别处 `node dashboard/server.mjs`）不会让上次的备份与撤销记录"消失"。
 
 **可执行文件探测顺序**（客户端重装到任意目录后都会自动重新定位，无需配置）：
 

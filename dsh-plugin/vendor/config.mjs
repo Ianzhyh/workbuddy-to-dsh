@@ -212,7 +212,15 @@ const BRIDGE_TOKEN_PATH = bridgeTokenPath();
  * 防护意义。24 字节 base64url ≈ 192 位熵。
  */
 function resolveLocalToken() {
-  if (env.WORKBUDDY_LOCAL_TOKEN) return env.WORKBUDDY_LOCAL_TOKEN;
+  if (env.WORKBUDDY_LOCAL_TOKEN) {
+    /*
+     * 令牌是环境变量给的 → 根本没落到磁盘上，也就没有「文件同机可读」这回事。
+     * 必须**显式复位**这个状态：不复位的话它会是上一次调用的残留值，
+     * `doctor` 就会报一个与当前配置不符的结论。
+     */
+    tokenHardenResult = { ok: true, code: 'skipped', reason: '令牌由环境变量给定，未落盘，无需加固' };
+    return env.WORKBUDDY_LOCAL_TOKEN;
+  }
   try {
     const stored = readFileSync(BRIDGE_TOKEN_PATH, 'utf8').trim();
     /*
@@ -221,17 +229,24 @@ function resolveLocalToken() {
      * 否则会出现「桥认、插件不认」的怪现象。
      */
     if (/^[A-Za-z0-9._-]{16,}$/.test(stored)) {
-      hardenTokenFile(); // 旧版本创建的文件权限是继承来的，这里补一次
+      tokenHardenResult = hardenTokenFile(); // 旧版本创建的文件权限是继承来的，这里补一次
       return stored;
     }
   } catch { /* 首次运行：文件还不存在 */ }
   const token = randomBytes(24).toString('base64url');
   try {
     writeFileSync(BRIDGE_TOKEN_PATH, `${token}\n`, { mode: 0o600 });
-    hardenTokenFile();
+    tokenHardenResult = hardenTokenFile();
   } catch { /* 只读介质：本次运行有效，下次会换新（用户需重填客户端密钥） */ }
   return token;
 }
+
+/**
+ * 令牌文件加固的结果。`reason` 只在失败时有值，所以是可选 —— `check:types`
+ * 会照着这个形状校；返回 `{ok:true}` 时不带 reason 是**故意**的。
+ *
+ * @typedef {{ ok: boolean, code: string, reason?: string }} TokenHardenResult
+ */
 
 /**
  * 把令牌文件收成「只有当前用户能读」。
@@ -242,25 +257,59 @@ function resolveLocalToken() {
  * 也就是**同机任何用户都能读到令牌**。而令牌改成随机的**理由**恰恰是
  * 「本机任何程序都能拿公开默认值调用桥」—— 权限不收，那个理由就被抵消了一半。
  *
- * 尽力而为：拿不到就保持默认，绝不因此让启动失败。
+ * 尽力而为：拿不到就保持默认，绝不因此让启动失败 —— **但失败必须报出来**，
+ * 见下面的返回值。原先写成 `try { spawnSync(...) } catch {}`，等于没看结果：
+ * `spawnSync` 失败**不抛异常**，它把失败放进 `r.error` / `r.status`。
+ * 于是「icacls 没跑成」与「跑成了」在调用方看来一模一样，文件权限其实没收紧
+ * 也没有任何地方会提到 —— 这正是本项目最该避免的那类「静默失效」。
  *
  * **同样的实现还有一份**在 `dsh-plugin/lib/index.js` 的 `hardenBridgeTokenFile()` ——
  * 插件包不引用仓库根的 config，所以只能各持一份。改动时**两处一起看**。
+ *
+ * @returns {{ ok: boolean, code: 'ok'|'no-user'|'spawn-failed'|'icacls-failed'|'exception', reason?: string }}
+ *   `code` 让调用方能**区分**「本机压根起不来 icacls」（环境问题，可跳过验证）
+ *   和「icacls 跑起来了但配置失败」（真实故障，必须报错）。
  */
 export function hardenTokenFile(path = BRIDGE_TOKEN_PATH) {
   try {
     if (process.platform !== 'win32') {
       chmodSync(path, 0o600);
-      return;
+      return { ok: true, code: 'ok' };
     }
     const user = env.USERNAME || env.USER;
-    if (!user) return;
+    if (!user) {
+      return { ok: false, code: 'no-user', reason: 'USERNAME / USER 都为空，无法指定 ACL 主体' };
+    }
     // 去掉继承、只留给当前用户。用 spawnSync 而不是 execSync：
     // 后者经 cmd.exe 且默认给 stdin 开管道，在 Windows 上必抛 EBUSY。
-    spawnSync('icacls', [path, '/inheritance:r', '/grant:r', `${user}:F`],
+    const r = spawnSync('icacls', [path, '/inheritance:r', '/grant:r', `${user}:F`],
       { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
-  } catch { /* 尽力而为 */ }
+    if (r.error) {
+      const err = /** @type {NodeJS.ErrnoException} */ (r.error);
+      return { ok: false, code: 'spawn-failed', reason: `icacls 起不来：${err.code || err.message}` };
+    }
+    if (r.status !== 0) {
+      const first = String(r.stderr || '').trim().split('\n')[0];
+      return {
+        ok: false,
+        code: 'icacls-failed',
+        reason: `icacls 退出码 ${r.status}${first ? `：${first}` : ''}`,
+      };
+    }
+    return { ok: true, code: 'ok' };
+  } catch (e) {
+    return { ok: false, code: 'exception', reason: e?.message || String(e) };
+  }
 }
+
+/**
+ * 最近一次令牌文件加固的结果。`resolveLocalToken()` 在模块初始化时就会跑，
+ * 所以 `config` 建好之后这个值已经有了 —— `tools/doctor.mjs` 直接读它来告诉
+ * 用户「令牌文件到底有没有收紧」。
+ *
+ * @type {TokenHardenResult}
+ */
+let tokenHardenResult = { ok: false, code: 'exception', reason: '尚未执行（令牌取自环境变量时会跳过）' };
 
 export const config = {
   bridge: {
@@ -273,6 +322,17 @@ export const config = {
      * 从前的固定串 `wb-local-bridge` —— 那个值是公开的，等于没有防护。
      */
     token: resolveLocalToken(),
+    /**
+     * 令牌文件权限加固的结果（`{ok, code, reason}`）。
+     *
+     * 加固是「尽力而为、不阻断启动」—— 但**失败必须能被看见**，否则
+     * 「文件其实同机可读」这件事在整条链路上没有任何地方会提到。
+     * `tools/doctor.mjs` 读这个值把它讲给用户。
+     *
+     * 用 getter 而不是快照：`resolveLocalToken()` 的赋值时机在对象字面量求值
+     * 过程里，写成快照就得依赖字段顺序，Getter 不依赖。
+     */
+    get tokenHarden() { return tokenHardenResult; },
     upstreamTimeoutMs: numEnv('WORKBUDDY_TIMEOUT_MS', 0, { min: 0 }),
     /**
      * 积分余额的缓存时长（毫秒）。
@@ -298,6 +358,20 @@ export const config = {
      */
     anthropicModel: env.WORKBUDDY_ANTHROPIC_MODEL || 'glm-5.3',
     anthropicFastModel: env.WORKBUDDY_ANTHROPIC_FAST_MODEL || 'glm-5.3-flash',
+    /**
+     * Responses 兼容层（`POST /v1/responses`，供 **Codex** 使用）的模型映射。
+     *
+     * 与 Anthropic 那条同源：Codex 发的是它 config.toml 里的 `model`
+     * （默认 `gpt-5.1-codex` 这类名字），上游没有这些 id，必须映射到真实模型。
+     * 上游已经把 `wire_api = "chat"` 移除了，所以 Codex 只能走 Responses 协议，
+     * 没法靠"把 Base URL 指过来"接上。
+     *
+     * 主模型同样取 `glm-5.3`（Codex 是 Agent，整轮依赖工具调用）。
+     * fast 只有名字里带 mini/nano/flash 这类字样时才用 —— **刻意不匹配 "codex"**，
+     * `gpt-5.1-codex` 是主力模型，拿它当 fast 会把主任务降级。
+     */
+    responsesModel: env.WORKBUDDY_RESPONSES_MODEL || 'glm-5.3',
+    responsesFastModel: env.WORKBUDDY_RESPONSES_FAST_MODEL || 'glm-5.3-flash',
     /**
      * 本地限流（保护账号配额）。**默认全关**（0），关着时行为与没有本机制
      * 完全一致。RPM=每分钟上限、MIN_INTERVAL=两条最小间隔、MODE=queue|reject。
@@ -346,15 +420,37 @@ export const config = {
     exe: resolveWorkBuddyExe(),
     authFile: resolveAuthFile(),
   },
+  /**
+   * dsh 的路径切面。
+   *
+   * ⚠️ 这四个都是 **getter**，不是普通属性 —— 刻意如此。
+   * 原先它们在 import 那一刻就算成常量，于是「先 import 再设 `DSH_HOME`」
+   * （最自然的写法：测试这么做，`启动.cmd` 这类脚本也可能先加载再补环境）
+   * 会**静默失效**：用户以为 dsh 配置改到了别处，实际还在 `~/.dsh`。
+   * 而写 dsh 配置是**会动用户文件的**（往里加模型路由），认错地方就可能
+   * 往真实 profile 里写东西。
+   *
+   * 用 getter 而不是把 44 处消费点全改成函数调用：消费点全是普通属性读取，
+   * getter 让它们一行都不用动，也不会漏掉某一处。
+   */
   dsh: {
-    home: env.DSH_HOME || join(homedir(), '.dsh'),
+    get home() {
+      const explicit = env.DSH_HOME;
+      // 空白值不能当成路径（`DSH_HOME="   "` 会拼出一个叫 "   " 的目录）
+      if (typeof explicit === 'string' && explicit.trim()) return explicit.trim();
+      return join(homedir(), '.dsh');
+    },
     runtime: resolveDshRuntime(),
     desktopVersion: dshDesktopVersion(),
+    get settingsPath() { return join(config.dsh.home, 'settings.yaml'); },
+    get credentialsPath() { return join(config.dsh.home, '.credentials.yaml'); },
+    get profileDir() { return join(config.dsh.home, 'profiles', 'desktop'); },
   },
   paths: {
     root: ROOT,
     bridgeScript: join(ROOT, 'bridge', 'workbuddy-bridge.mjs'),
     bridgeLog: join(ROOT, 'bridge', 'bridge.log'),
+    bridgeToken: BRIDGE_TOKEN_PATH,
     dashboardPublic: join(ROOT, 'dashboard', 'public'),
   },
 };
@@ -365,9 +461,11 @@ config.bridge.modelsUrl = `${config.bridge.url}/v1/models`;
 config.bridge.healthUrl = `${config.bridge.url}/health`;
 config.dashboard.url = `http://${config.dashboard.host}:${config.dashboard.port}`;
 
-config.dsh.settingsPath = join(config.dsh.home, 'settings.yaml');
-config.dsh.credentialsPath = join(config.dsh.home, '.credentials.yaml');
-config.dsh.profileDir = join(config.dsh.home, 'profiles', 'desktop');
+/*
+ * `config.dsh` 的 settingsPath / credentialsPath / profileDir 是**在对象里声明的 getter**
+ * —— 不在这里赋值。早先的写法是在这里 `= join(config.dsh.home, …)` 一次性算好，
+ * 那样 `DSH_HOME` 在 import 之后再改就失效了（见 dsh getter 上的注释）。
+ */
 
 /**
  * 生成给桥进程用的环境变量（保持与桥读取的变量名一致）。
@@ -384,6 +482,8 @@ export function bridgeEnv(overrides = {}) {
     WORKBUDDY_LOCAL_TOKEN: config.bridge.token,
     WORKBUDDY_ANTHROPIC_MODEL: config.bridge.anthropicModel,
     WORKBUDDY_ANTHROPIC_FAST_MODEL: config.bridge.anthropicFastModel,
+    WORKBUDDY_RESPONSES_MODEL: config.bridge.responsesModel,
+    WORKBUDDY_RESPONSES_FAST_MODEL: config.bridge.responsesFastModel,
     WORKBUDDY_APP_VERSION: config.bridge.appVersion,
     WORKBUDDY_IDE_VERSION: config.bridge.ideVersion,
     WORKBUDDY_IDE_NAME: config.bridge.ideName,

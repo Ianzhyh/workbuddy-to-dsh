@@ -47,14 +47,33 @@ async function bridgeFetch(path, timeoutMs = 5000) {
   });
 }
 
-/** 桥是否在跑，以及它的自述状态。 */
+/**
+ * 桥是否在跑，以及它的自述状态。
+ *
+ * **`running` 与 `ok` 是两个问题，不能互相顶替**：
+ *   - `running`：端口有人应答吗（进程级事实）；
+ *   - `ok`：这个桥**认我们这把令牌**并且自述健康吗（可用性）。
+ *
+ * 实测踩到：桥独立启动时（没配 `WORKBUDDY_LOCAL_TOKEN`）会自己生成一把随机令牌，
+ * 与控制台读的 `.bridge-token` 不是同一把 —— 于是桥对控制台**每次请求都回 401**。
+ * 只看 `ok` 的调用方（「一键接入」原先就是）会把这种状态说成「桥未运行」，
+ * 而用户按提示点「启动桥服务」只会得到"已经在跑了"：一句假话，且无从下手。
+ * 所以 401 必须单独标出来（`authRejected`），让界面能说「两边令牌不一致，
+ * 点「重启桥」让桥按控制台这份令牌重启」。
+ */
 export async function bridgeHealth(timeoutMs = 4000) {
   try {
     const res = await bridgeFetch('/health', timeoutMs);
     const body = await res.json();
-    return { running: true, ok: res.ok && body.ok === true, body };
+    return {
+      running: true,
+      ok: res.ok && body.ok === true,
+      authRejected: res.status === 401,
+      status: res.status,
+      body,
+    };
   } catch (err) {
-    return { running: false, ok: false, error: String(err.message || err) };
+    return { running: false, ok: false, authRejected: false, status: 0, error: String(err.message || err) };
   }
 }
 
@@ -443,7 +462,7 @@ export async function credentialStatus() {
 // ── 汇总诊断 ────────────────────────────────────────────────────────────
 
 /**
- * 8 项诊断，按 fail > warn > ok 排序。
+ * 9 项诊断，按 fail > warn > ok 排序。
  * 返回 { items, summary, bridge, credentials, dsh }，供页面与 CLI 各自渲染。
  */
 export async function diagnose() {
@@ -482,11 +501,28 @@ export async function diagnose() {
       expired ? '令牌已过期，请在桌面端重新登录' : '');
   }
 
+  /*
+   * 令牌文件权限。**这一项存在的理由就是「静默失效」**：加固是尽力而为的
+   * （拿不到就保持默认，不阻断启动），但如果没人把它讲出来，用户看到的就是
+   * 一个「随机令牌、很安全」的表象 —— 而文件在 Windows 上其实继承了目录权限，
+   * 同机任何用户都能读到那个令牌。`hardenTokenFile()` 现在会如实返回结果，
+   * 这里负责把它讲给用户。
+   */
+  const th = config.bridge.tokenHarden;
+  const thOk = th?.ok === true;
+  const thPath = String(config.paths.bridgeToken).replace(config.paths.root, '.');
+  push('tokenfile', '令牌文件权限', thOk ? 'ok' : 'warn',
+    thOk
+      ? (th.code === 'skipped' ? `${thPath}（令牌未落盘，无需收紧）` : `${thPath}（已收紧为仅本人可读）`)
+      : `${thPath} 未能收紧：${th.reason || '原因未知'}`,
+    thOk
+      ? ''
+      : '同机其它用户可能读到本地令牌并调用桥、消耗账号额度。常见原因：组策略禁用 icacls、受限沙箱、或 USERNAME 环境变量缺失。手动修复：icacls "<令牌文件>" /inheritance:r /grant:r "%USERNAME%:F"');
+
   const health = await bridgeHealth();
   push('bridge', '桥服务', health.ok ? 'ok' : health.running ? 'warn' : 'fail',
     health.running ? `${config.bridge.host}:${config.bridge.port} 已响应` : `${config.bridge.host}:${config.bridge.port} 未监听`,
     health.ok ? '' : '点「启动桥服务」');
-
   const dsh = readDshStatus();
   push('settings', 'dsh 模型路由', dsh.routeLive ? 'ok' : 'fail',
     dsh.routeLive

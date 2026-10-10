@@ -9,7 +9,7 @@
  * 不启真控制台、不消耗上游额度：静态服务 + 无头 Chromium，`/api/*` 全打桩。
  */
 import { startStaticServer, openPage, waitFor, q, sleep } from './ui-harness.mjs';
-import { baseRoutes, clientsFixture, CATALOG } from './fixtures.mjs';
+import { baseRoutes, clientsFixture, connectFixture, CATALOG } from './fixtures.mjs';
 
 const PORT = 8788;
 const URL_ = `http://127.0.0.1:${PORT}/`;
@@ -111,6 +111,20 @@ async function selectClient(id) {
   await sleep(150);
 }
 
+/**
+ * 展开「手动接入（复制片段）」折叠区。
+ *
+ * 这一整块（三个接入值 + 页签 + 配置片段 + 兼容性清单）现在**默认折叠**：
+ * 它是"自己抄配置"那条路，却占着 3000px 纵向空间，把主路径挤到屏幕外。
+ * 下面这些断言量的都是折叠区里的东西 —— 不展开的话它们的高度恒为 0，
+ * 对比度、命中区、代码块展开这些几何断言会成片假失败（实测踩到：
+ * 「展开没恢复（高度 0px）」）。
+ */
+async function openManual() {
+  await q(cdp, `document.querySelectorAll('#clientsBox details').forEach((d) => { d.open = true; })`);
+  await sleep(250);
+}
+
 /** 读当前页签里的卡片（先选后展开，所以每次切换后都要重读）。 */
 async function readCards() {
   return q(cdp, `[...document.querySelectorAll('#clientsBox .clientcard')].map(c => ({
@@ -140,6 +154,8 @@ if (vis.on >= 1 && vis.off >= 1) pass(`切到页签后只显示 clients 区块�
 else fail(`页签切换异常：${JSON.stringify(vis)}`);
 
 // ── 2. 三个接入值 ────────────────────────────────────────────────────────
+// 它们现在在「手动接入」折叠区里 —— 后面的几何断言都要求它是展开的
+await openManual();
 await waitFor(cdp, `document.querySelectorAll('#clientsBox .valuerow').length >= 3`, 8000, '三个接入值');
 
 const vals = await q(cdp, `[...document.querySelectorAll('#clientsBox .valuerow')].map(r => ({
@@ -587,6 +603,59 @@ for (const w of [320, 390, 768, 1024, 1440]) {
   else fail(`视口 ${w}px：doc=${ov.doc}px 溢出元素=${JSON.stringify(ov.bad)} 需横向滚动的代码块=${ov.scrollers}`);
 }
 await cdp.send('Emulation.clearDeviceMetricsOverride');
+
+// ── 7b. 一键接入：检测、状态、预览、按钮 ─────────────────────────────────
+/*
+ * 这一块是面板里**唯一会动到仓库之外文件**的功能。它曾经因为桩数据里
+ * 没有 `/api/connect` 而整块渲染失败、且没有任何用例发现 —— 
+ * 「客户端页签只找到 0 个」那种失败很容易被当成环境问题忽略掉。
+ * 所以这里的断言对着桩数据逐项写死，渲染不出来就是红。
+ */
+{
+  const CONNECT = connectFixture();
+  await waitFor(cdp, `document.querySelectorAll('#clientsBox .connectrow').length === 3`, 8000, '一键接入区块');
+  const rows = await q(cdp, `[...document.querySelectorAll('#clientsBox .connectrow')].map((r) => ({
+    label: (r.querySelector('.connectmeta b') || {}).textContent || '',
+    path: (r.querySelector('.connectpath') || {}).textContent || '',
+    tags: [...r.querySelectorAll('.connectmeta .tag')].map((t) => t.textContent.trim()),
+    buttons: [...r.querySelectorAll('button')].map((b) => b.textContent.trim()),
+  }))`);
+  eq(rows.length, 3, '一键接入行数');
+
+  const byLabel = Object.fromEntries(rows.map((r) => [r.label, r]));
+  for (const def of CONNECT.clients) {
+    const row = byLabel[def.label];
+    if (!row) { fail(`一键接入缺少 ${def.label}`); continue; }
+    eq(row.path, def.path, `${def.label} 显示的配置路径`);
+    // 状态必须**如实**：没实测过就标出来，不许写成"已验证"
+    const hasE2e = def.e2e;
+    const markedUnverified = row.tags.includes('本机未实测');
+    if (hasE2e && markedUnverified) fail(`${def.label} 本机实测过却标了「本机未实测」`);
+    if (!hasE2e && !markedUnverified) fail(`${def.label} 未实测却没有标注`);
+    // 默认态每行只该有「写入」与「详情」：撤销/验证/改动都在详情里
+    if (!row.buttons.includes('写入')) fail(`${def.label} 缺少「写入」按钮`);
+    if (!row.buttons.includes('详情')) fail(`${def.label} 缺少「详情」按钮`);
+    if (row.buttons.includes('撤销')) fail(`${def.label} 还没接入却有「撤销」按钮`);
+  }
+
+  // 展开「详情」：逐行列出将改动的键，并且**预览必须带跳过翻译的标记**
+  await q(cdp, `[...document.querySelectorAll('#clientsBox .connectrow button')]
+    .find((b) => b.textContent.trim() === '详情').click()`);
+  await sleep(300);
+  const detail = await q(cdp, `(() => {
+    const r = [...document.querySelectorAll('#clientsBox .connectrow')][0];
+    const changes = [...r.querySelectorAll('.connectchange')].map((x) => x.textContent.trim());
+    const pre = r.querySelector('.connectpreview pre');
+    return { changes, hasPre: !!pre, skipped: pre ? pre.hasAttribute('data-i18n-skip') : false };
+  })()`);
+  eq(detail.changes.length, 3, 'Codex 计划的改动条数');
+  if (detail.hasPre && detail.skipped) pass('预览块带 data-i18n-skip（配置是数据不是界面文案）');
+  else fail('预览块没有跳过翻译，英文模式下会被当成界面文案去翻');
+  // 收起
+  await q(cdp, `[...document.querySelectorAll('#clientsBox .connectrow button')]
+    .find((b) => b.textContent.trim() === '收起详情').click()`);
+  await sleep(200);
+}
 
 // ── 8. 深色模式渲染不报错 ───────────────────────────────────────────────
 await q(cdp, `document.documentElement.setAttribute('data-theme','dark')`);

@@ -444,6 +444,236 @@
         "type": "boolean"
       }
     },
+    "/api/connect": {
+      "$": {
+        "type": "object"
+      },
+      "$.clients": {
+        "type": "array"
+      },
+      "$.clients[]": {
+        "type": "object"
+      },
+      "$.clients[].id": {
+        "type": "string"
+      },
+      "$.clients[].label": {
+        "type": "string"
+      },
+      "$.clients[].path": {
+        "type": "string"
+      },
+      "$.clients[].e2e": {
+        "type": "boolean"
+      },
+      "$.clients[].installed": {
+        "type": "boolean"
+      },
+      "$.clients[].exists": {
+        "type": "boolean"
+      },
+      "$.clients[].changed": {
+        "type": "boolean"
+      },
+      "$.clients[].changes": {
+        "type": "array"
+      },
+      "$.clients[].preview": {
+        "type": "string"
+      },
+      "$.clients[].reformats": {
+        "type": "boolean"
+      },
+      "$.clients[].applied": {
+        "type": "boolean"
+      },
+      "$.clients[].appliedAt": {
+        "type": "mixed"
+      },
+      "$.clients[].pathSource": {
+        "type": "object"
+      },
+      "$.clients[].pathSource.source": {
+        "type": "string"
+      },
+      "$.clients[].pathSource.envName": {
+        "type": "null"
+      },
+      "$.clients[].models": {
+        "type": "array"
+      },
+      "$.clients[].models[]": {
+        "type": "string"
+      },
+      "$.clients[].catalog": {
+        "type": "mixed"
+      },
+      "$.clients[].catalog.path": {
+        "type": "string"
+      },
+      "$.clients[].catalog.name": {
+        "type": "string"
+      },
+      "$.clients[].catalog.added": {
+        "type": "array"
+      },
+      "$.clients[].catalog.refreshed": {
+        "type": "array"
+      },
+      "$.clients[].catalog.refreshed[]": {
+        "type": "string"
+      },
+      "$.clients[].catalog.kept": {
+        "type": "number"
+      },
+      "$.clients[].catalog.from": {
+        "type": "string"
+      },
+      "$.clients[].catalogSkipped": {
+        "type": "null"
+      },
+      "$.clients[].effectiveModel": {
+        "type": "string"
+      },
+      "$.clients[].effectiveModels": {
+        "type": "array"
+      },
+      "$.clients[].effectiveModels[]": {
+        "type": "string"
+      },
+      "$.clients[].changes[]": {
+        "type": "object"
+      },
+      "$.clients[].changes[].path": {
+        "type": "string"
+      },
+      "$.clients[].changes[].kind": {
+        "type": "string"
+      },
+      "$.clients[].changes[].from": {
+        "type": "null"
+      },
+      "$.clients[].changes[].to": {
+        "type": "mixed"
+      },
+      "$.clients[].changes[].to.options": {
+        "type": "mixed"
+      },
+      "$.clients[].changes[].to.options[]": {
+        "type": "object"
+      },
+      "$.clients[].changes[].to.options[].model": {
+        "type": "string"
+      },
+      "$.clients[].changes[].to.options[].label": {
+        "type": "string"
+      },
+      "$.clients[].changes[].to.options[].description": {
+        "type": "string"
+      },
+      "$.clients[].changes[].to.replaceBuiltInOptions": {
+        "type": "boolean"
+      },
+      "$.clients[].changes[].to.npm": {
+        "type": "string"
+      },
+      "$.clients[].changes[].to.name": {
+        "type": "string"
+      },
+      "$.clients[].changes[].to.options.baseURL": {
+        "type": "string"
+      },
+      "$.clients[].changes[].to.options.apiKey": {
+        "type": "string"
+      },
+      "$.clients[].changes[].to.models": {
+        "type": "object"
+      },
+      "$.clients[].changes[].to.models.glm-5.3": {
+        "type": "object"
+      },
+      "$.clients[].changes[].to.models.glm-5.3.name": {
+        "type": "string"
+      },
+      "$.clients[].changes[].to.models.glm-5.3.limit": {
+        "type": "object"
+      },
+      "$.clients[].changes[].to.models.glm-5.3.limit.context": {
+        "type": "number"
+      },
+      "$.clients[].changes[].to.models.glm-5.3.limit.output": {
+        "type": "number"
+      },
+      "$.clients[].changes[].to.models.deepseek-v4.1-flash": {
+        "type": "object"
+      },
+      "$.clients[].changes[].to.models.deepseek-v4.1-flash.name": {
+        "type": "string"
+      },
+      "$.clients[].changes[].to.models.deepseek-v4.1-flash.limit": {
+        "type": "object"
+      },
+      "$.clients[].changes[].to.models.deepseek-v4.1-flash.limit.context": {
+        "type": "number"
+      },
+      "$.clients[].changes[].to.models.deepseek-v4.1-flash.limit.output": {
+        "type": "number"
+      },
+      "$.clients[].changes[].to.models.deepseek-v4-pro": {
+        "type": "object"
+      },
+      "$.clients[].changes[].to.models.deepseek-v4-pro.name": {
+        "type": "string"
+      },
+      "$.clients[].changes[].to.models.deepseek-v4-pro.limit": {
+        "type": "object"
+      },
+      "$.clients[].changes[].to.models.deepseek-v4-pro.limit.context": {
+        "type": "number"
+      },
+      "$.clients[].changes[].to.models.deepseek-v4-pro.limit.output": {
+        "type": "number"
+      },
+      "$.token": {
+        "type": "string"
+      },
+      "$.baseUrlOpenAI": {
+        "type": "string"
+      },
+      "$.baseUrlAnthropic": {
+        "type": "string"
+      },
+      "$.model": {
+        "type": "string"
+      },
+      "$.modelOptions": {
+        "type": "array"
+      },
+      "$.modelOptions[]": {
+        "type": "object"
+      },
+      "$.modelOptions[].id": {
+        "type": "string"
+      },
+      "$.modelOptions[].name": {
+        "type": "string"
+      },
+      "$.running": {
+        "type": "boolean"
+      },
+      "$.bridge": {
+        "type": "object"
+      },
+      "$.bridge.up": {
+        "type": "boolean"
+      },
+      "$.bridge.authRejected": {
+        "type": "boolean"
+      },
+      "$.backupDir": {
+        "type": "string"
+      }
+    },
     "/api/diagnose": {
       "$": {
         "type": "object"

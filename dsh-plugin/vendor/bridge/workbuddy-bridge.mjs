@@ -27,6 +27,7 @@ import { request as httpsRequest } from 'node:https';
 import { Agent as HttpAgent } from 'node:http';
 import { Agent as HttpsAgent } from 'node:https';
 import { join, dirname } from 'node:path';
+import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { createDecipheriv, createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
@@ -166,9 +167,19 @@ function creditsOf(model) {
 
 // Locate the CodeBuddy / WorkBuddy desktop login file across platforms.
 // Override with WORKBUDDY_AUTH_FILE when the desktop app stores it elsewhere.
+//
+// ⚠️ 这里必须与 `config.mjs` 的 `authDir()` **同一套口径**（两处实现，只能靠这条注释
+// 与用例守住）。原先桥这边少两样，实测都出真故障：
+//   1. **没有 `USERPROFILE` 兜底** —— 而 Windows 默认只有 `USERPROFILE`、没有 `HOME`；
+//   2. 三个变量全空时会拼出 `join('.', 'workbuddy-desktop.info')` = **相对路径**，
+//      按 cwd 解析 → 桥找不到登录文件，表现却是"用户没登录"，真凶完全看不出来。
+// Windows 上优先用 LOCALAPPDATA，缺失时退回 `<home>/AppData/Local`（与 config.mjs 一致）。
+const HOME_FOR_AUTH = process.env.USERPROFILE || process.env.HOME || homedir();
+const WIN_LOCAL_APPDATA = process.env.LOCALAPPDATA
+  || (process.platform === 'win32' ? join(HOME_FOR_AUTH, 'AppData', 'Local') : '');
 const AUTH_DIRS = [
   process.env.WORKBUDDY_AUTH_DIR,
-  process.env.LOCALAPPDATA && join(process.env.LOCALAPPDATA, 'CodeBuddyExtension', 'Data', 'Public', 'auth'),
+  WIN_LOCAL_APPDATA && join(WIN_LOCAL_APPDATA, 'CodeBuddyExtension', 'Data', 'Public', 'auth'),
   process.env.HOME && join(process.env.HOME, 'Library', 'Application Support', 'CodeBuddyExtension', 'Data', 'Public', 'auth'),
   process.env.HOME && join(process.env.HOME, '.local', 'share', 'CodeBuddyExtension', 'Data', 'Public', 'auth'),
   process.env.XDG_DATA_HOME && join(process.env.XDG_DATA_HOME, 'CodeBuddyExtension', 'Data', 'Public', 'auth'),
@@ -1801,6 +1812,615 @@ async function relayAnthropicStream(up, res, model, estInputTokens) {
     },
   });
   write('message_stop', { type: 'message_stop' });
+  res.end();
+  return { finishReason, usage, streamError };
+}
+
+// ── OpenAI Responses API 兼容层（POST /v1/responses，Codex 走这条）─────────
+/**
+ * 为什么需要这一层
+ * ----------------
+ * Codex 说的是 OpenAI 的 **Responses 协议**（`/v1/responses`），不是
+ * chat/completions。而且上游已经把 `wire_api = "chat"` **彻底移除**了 ——
+ * 配置里写 `chat` 会直接报「`chat` is no longer supported」
+ * （见 codex-rs/model-provider-info 的 CHAT_WIRE_API_REMOVED_ERROR，0.162.0
+ * 稳定版里已经是这样）。所以「把 Base URL 指过去就行」这条路对 Codex 关死了，
+ * 必须由桥来转换协议。
+ *
+ * 职责与 Anthropic 那层完全对称：把 Responses 请求翻译成上游认的
+ * chat/completions，再把上游的流翻译回 Responses 的事件流。
+ * CC Switch 走的也是这个思路（Codex Responses → 本地路由 → 第三方
+ * Chat Completions → 转换回 Responses 响应）。
+ *
+ * ## 这些约束是**从 Codex 自己的解析器读出来的**，不是猜的
+ *
+ * 事件名与字段对照 `codex-rs/codex-api/src/sse/responses.rs` 的
+ * `process_responses_event` 逐条核过：
+ *
+ * 1. **Codex 只在 `response.output_item.done` 里取内容**（文本与工具调用都是）。
+ *    `response.function_call_arguments.done` 它直接忽略 —— 所以每个 item 的
+ *    `done` 必须带**完整**数据，光发 delta 是不够的。
+ * 2. `response.output_text.delta` 与工具参数 delta 到达时，Codex 要求
+ *    `active_item` 已存在（否则 `error_or_panic`）—— 所以
+ *    `response.output_item.added` 必须**先于**第一个 delta 发出。
+ * 3. `response.completed.response.usage` 只要出现，`input_tokens` /
+ *    `output_tokens` / `total_tokens` 就都是**必填**（`ResponseCompletedUsage`
+ *    里这三个没有 Option）。漏一个会让 Codex 判「流损坏」并中断整轮。
+ * 4. 未知事件与任何 `*.delta` 都是安全忽略的，所以多发的噪音事件不会炸。
+ */
+
+/**
+ * 模型名解析。Codex 发的是它 config.toml 里的 `model`（默认 `gpt-5.1-codex`
+ * 这类名字），上游没有这些 id。
+ *
+ * 顺序：① 精确命中上游目录就原样用（允许用户在 config.toml 里直接写真实模型）；
+ * ② 带 mini/nano/flash/haiku 这类「小快」字样的走 fast 模型；
+ * ③ 其余走默认。
+ *
+ * 默认取 `glm-5.3` 而不是桥的通用默认 `deepseek-v4.1-flash`：Codex 是 Agent，
+ * 整轮依赖工具调用，`glm-5.3` 是实测 tool_calls 最稳的一个（与 Anthropic 层同理）。
+ * **刻意不匹配 "codex" 这个词** —— `gpt-5.1-codex` 是它的主力模型，不是小快模型，
+ * 拿它去当 fast 会把主任务降级。
+ */
+const RESPONSES_MODEL = process.env.WORKBUDDY_RESPONSES_MODEL || 'glm-5.3';
+const RESPONSES_FAST_MODEL = process.env.WORKBUDDY_RESPONSES_FAST_MODEL || 'glm-5.3-flash';
+
+function resolveResponsesModel(requested) {
+  const name = typeof requested === 'string' ? requested : '';
+  if (name && catalogCache.models.some((m) => m.id === name)) return name;
+  if (name && /mini|nano|small|fast|flash|haiku/i.test(name)) return RESPONSES_FAST_MODEL;
+  return RESPONSES_MODEL;
+}
+
+/** Responses 的 id 形如 `resp_…` / `msg_…` / `fc_…`；统一在这里生成。 */
+const responsesId = (prefix) => `${prefix}_${trace().slice(0, 32)}`;
+
+/**
+ * Responses 的 `content` 归一成 chat/completions 的 content。
+ *
+ * 允许三种形态（真实客户端三种都会发）：
+ *   - 纯字符串
+ *   - `[{type:'input_text'|'output_text'|'text', text}]`
+ *   - 带图片：`{type:'input_image', image_url}`（Responses 里 image_url 是**字符串**，
+ *     与 chat 的 `{image_url:{url}}` 不同，要转一层）
+ * `file_id` 形态的图片上游不支持，**显式丢弃并在日志里说一声**，不静默丢。
+ */
+function responsesPartsToOpenAI(content) {
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content)) return '';
+  const parts = [];
+  for (const p of content) {
+    if (!p || typeof p !== 'object') continue;
+    if (typeof p.text === 'string') {
+      parts.push({ type: 'text', text: p.text });
+      continue;
+    }
+    if (p.type === 'input_image' || p.type === 'image_url') {
+      const url = typeof p.image_url === 'string' ? p.image_url : p.image_url?.url;
+      if (typeof url === 'string' && url) {
+        parts.push({ type: 'image_url', image_url: { url } });
+      } else if (p.file_id) {
+        // 上游没有文件 API，引用式图片接不了 —— 说清楚，别让模型凭空猜
+        parts.push({ type: 'text', text: '[image omitted: file_id references are not supported by this bridge]' });
+      }
+      continue;
+    }
+  }
+  if (!parts.length) return '';
+  if (parts.length === 1 && parts[0].type === 'text') return parts[0].text;
+  return parts;
+}
+
+/** `function_call_output.output` 在线上是字符串**或**内容块数组，统一成字符串。 */
+function responsesOutputText(output) {
+  if (typeof output === 'string') return output;
+  if (Array.isArray(output)) {
+    return output
+      .map((p) => {
+        if (typeof p === 'string') return p;
+        if (p && typeof p === 'object') {
+          if (typeof p.text === 'string') return p.text;
+          return JSON.stringify(p);
+        }
+        return String(p);
+      })
+      .join('\n');
+  }
+  if (output == null) return '';
+  return JSON.stringify(output);
+}
+
+/**
+ * Responses 的 `input` → OpenAI messages。
+ *
+ * 与 Anthropic 那层同源的几处结构性差异：
+ * 1. 系统提示在这里可能出现在**两个地方**：顶层的 `instructions`，或 `input`
+ *    第一条 `role:"system"|"developer"` 的 message（**Codex 用的是后者** ——
+ *    它的请求结构里根本没有 `instructions` 字段）。两处都收，合并成一条 system。
+ * 2. 工具调用与结果在 Responses 里是**平铺的独立 item**
+ *    （`function_call` / `function_call_output`），而 chat 要求前者嵌在
+ *    assistant.tool_calls、后者是独立的 `role:"tool"` 消息。
+ * 3. 连续多个 `function_call` 必须**合成同一条** assistant 消息（chat 的语义就是
+ *    "一次 assistant 回合发出多个调用"），否则上游会看到多条只带 tool_calls 的
+ *    assistant 消息，与随后的 tool 结果对不上号。
+ */
+function responsesToOpenAIMessages(body) {
+  const out = [];
+  let systemText = typeof body?.instructions === 'string' ? body.instructions : '';
+
+  const rawInput = body?.input;
+  const items = typeof rawInput === 'string'
+    ? [{ type: 'message', role: 'user', content: rawInput }]
+    : (Array.isArray(rawInput) ? rawInput : []);
+
+  /** 收集中的连续 function_call，攒够一段再合成一条 assistant 消息。 */
+  let pendingCalls = [];
+  const flushCalls = () => {
+    if (!pendingCalls.length) return;
+    out.push({ role: 'assistant', content: null, tool_calls: pendingCalls });
+    pendingCalls = [];
+  };
+
+  for (const item of items) {
+    if (!item || typeof item !== 'object') continue;
+    const type = typeof item.type === 'string' ? item.type : (item.role ? 'message' : '');
+
+    if (type === 'message') {
+      const role = item.role === 'assistant' ? 'assistant'
+        : (item.role === 'system' || item.role === 'developer') ? 'system' : 'user';
+      const content = responsesPartsToOpenAI(item.content);
+      if (role === 'system') {
+        const text = typeof content === 'string' ? content : '';
+        systemText = systemText ? `${systemText}\n${text}` : text;
+        continue;
+      }
+      flushCalls();
+      out.push({ role, content });
+    } else if (type === 'function_call') {
+      pendingCalls.push({
+        id: item.call_id || item.id || `call_${trace().slice(0, 20)}`,
+        type: 'function',
+        function: {
+          name: typeof item.name === 'string' ? item.name : '',
+          arguments: typeof item.arguments === 'string'
+            ? item.arguments
+            : JSON.stringify(item.arguments ?? {}),
+        },
+      });
+    } else if (type === 'function_call_output') {
+      flushCalls();
+      out.push({
+        role: 'tool',
+        tool_call_id: typeof item.call_id === 'string' ? item.call_id : '',
+        content: responsesOutputText(item.output),
+      });
+    }
+    // reasoning / 其它 item：丢弃。思维链不回传给上游（拿不到加密的
+    // reasoning content，回传一个空壳反而会污染上下文）。
+  }
+  flushCalls();
+
+  out.unshift({ role: 'system', content: systemText || 'You are a helpful assistant.' });
+  return out;
+}
+
+/**
+ * Responses tools → OpenAI tools。
+ *
+ * 两种写法都收：Responses 是**扁平**的 `{type:'function',name,parameters}`，
+ * chat 是**嵌套**的 `{type:'function',function:{name,parameters}}`。
+ * 只认一种的话，客户端换个写法就在桥这里静默变成「没有工具」——
+ * 那会让 Agent 直接失去动手能力，且不报错。
+ *
+ * 非 `function` 类型的内置工具（web_search / file_search 等）上游没有，丢掉。
+ */
+function responsesToolsToOpenAI(tools) {
+  if (!Array.isArray(tools)) return null;
+  const out = [];
+  for (const t of tools) {
+    if (!t || typeof t !== 'object') continue;
+    if (typeof t.type === 'string' && t.type !== 'function') continue;
+    const fn = t.function && typeof t.function === 'object' ? t.function : t;
+    const name = typeof fn.name === 'string' ? fn.name : '';
+    if (!name) continue;
+    out.push({
+      type: 'function',
+      function: {
+        name,
+        description: typeof fn.description === 'string' ? fn.description : '',
+        parameters: fn.parameters && typeof fn.parameters === 'object'
+          ? fn.parameters
+          : { type: 'object', properties: {} },
+      },
+    });
+  }
+  return out.length ? out : null;
+}
+
+/**
+ * 新版 Codex 的 **code mode** 把工具定义塞在 `input[]` 的 `additional_tools` 条目里
+ * （顶层**没有** `tools`），形状是 `namespace` 套 `function`，外加一个 freeform 的
+ * `custom` 工具（`exec`：让模型写 JavaScript 去编排工具调用，shell / apply_patch
+ * 都收在它后面）。
+ *
+ * 桥的上游是 chat/completions，**接不了 freeform 那套**。这里把能翻的
+ * `function` 工具翻出来（至少 collaboration 那几个还能用），并在碰到 `custom` 时
+ * **说清楚**：否则用户看到的是"模型把工具调用写进正文"（一串
+ * `<||DSML||invoke name="exec_command">` 标记），完全不知道问题出在哪。
+ * 正解是让客户端的模型目录里 `use_responses_lite: false`（见 lib/client-connect.mjs
+ * 的 makeCatalogEntry）——那会走经典 function tools，也就是这条兜底路径没被触发的状态。
+ */
+function responsesToolsFromAdditional(body) {
+  const items = Array.isArray(body?.input)
+    ? body.input.filter((x) => x && x.type === 'additional_tools')
+    : [];
+  if (!items.length) return null;
+
+  const flat = [];
+  const freeform = [];
+  const walk = (list) => {
+    for (const t of list || []) {
+      if (!t || typeof t !== 'object') continue;
+      if (Array.isArray(t.tools)) { walk(t.tools); continue; }        // namespace
+      if (t.type === 'custom') { freeform.push(t.name || '(未命名)'); continue; }
+      if (t.type === 'function' || (!t.type && typeof t.name === 'string')) flat.push(t);
+    }
+  };
+  for (const it of items) walk(it.tools);
+
+  if (freeform.length) {
+    log(
+      `code-mode 工具协议：客户端把工具放在 input[].additional_tools 里，其中 `
+      + `${freeform.join('/')} 是 freeform 工具（模型要写 JS 去编排），桥这层不翻译 `
+      + `—— 只转发了 ${flat.length} 个 classic function 工具。`
+      + `解决办法：让该客户端的模型目录里 use_responses_lite=false（回到经典 function tools）。`,
+    );
+  }
+  return responsesToolsToOpenAI(flat);
+}
+
+/**
+ * Responses 的 tool_choice：字符串（`auto`/`none`/`required`）或对象
+ * （`{type:'function',name}` / `{type:'allowed_tools',...}`）。
+ * 对象形式统一落到 `required`（上游只认字符串，见 normalizePayload 的同类处理）。
+ */
+function responsesToolChoiceToOpenAI(tc) {
+  if (typeof tc === 'string') return ['auto', 'none', 'required'].includes(tc) ? tc : null;
+  if (tc && typeof tc === 'object') return 'required';
+  return null;
+}
+
+/** 上游 usage → Responses 的 usage。三个总数是 Codex 的必填项，一律补齐。 */
+function responsesUsage(u) {
+  const input = Number(u?.prompt_tokens) || 0;
+  const output = Number(u?.completion_tokens) || 0;
+  const total = Number(u?.total_tokens) || input + output;
+  return {
+    input_tokens: input,
+    input_tokens_details: { cached_tokens: 0 },
+    output_tokens: output,
+    output_tokens_details: { reasoning_tokens: 0 },
+    total_tokens: total,
+  };
+}
+
+/** 聚合后的 assistant 消息 → Responses 的 `output` 数组。 */
+function openAIToResponsesOutput(message) {
+  const items = [];
+  const text = typeof message?.content === 'string' ? message.content : '';
+  if (text) {
+    items.push({
+      id: responsesId('msg'),
+      type: 'message',
+      status: 'completed',
+      role: 'assistant',
+      content: [{ type: 'output_text', text, annotations: [] }],
+    });
+  }
+  for (const tc of message?.tool_calls || []) {
+    if (!tc) continue;
+    items.push({
+      id: responsesId('fc'),
+      type: 'function_call',
+      status: 'completed',
+      call_id: tc.id || `call_${trace().slice(0, 20)}`,
+      name: tc.function?.name || '',
+      arguments: typeof tc.function?.arguments === 'string'
+        ? tc.function.arguments
+        : JSON.stringify(tc.function?.arguments ?? {}),
+    });
+  }
+  // 空回答也要给一条 message：output 是空数组时 Codex 会当成「没有任何输出」，
+  // 用户看到的是卡住而不是「模型返回了空内容」，两者处置方式完全不同。
+  if (!items.length) {
+    items.push({
+      id: responsesId('msg'),
+      type: 'message',
+      status: 'completed',
+      role: 'assistant',
+      content: [{ type: 'output_text', text: '', annotations: [] }],
+    });
+  }
+  return items;
+}
+
+/** output 数组 → 顶层的 `output_text`（真实 API 会带这个便利字段）。 */
+const responsesTextOf = (output) => output
+  .filter((i) => i.type === 'message')
+  .flatMap((i) => i.content || [])
+  .map((c) => c.text || '')
+  .join('');
+
+/** 聚合结果 → 完整的 Responses 对象（非流式）。 */
+function openAIToResponsesResponse(agg, model) {
+  const choice = (agg.choices || [])[0] || {};
+  const output = openAIToResponsesOutput(choice.message);
+  const truncated = choice.finish_reason === 'length';
+  return {
+    id: responsesId('resp'),
+    object: 'response',
+    created_at: Number(agg.created) || Math.floor(Date.now() / 1000),
+    status: truncated ? 'incomplete' : 'completed',
+    model,
+    output,
+    output_text: responsesTextOf(output),
+    parallel_tool_calls: true,
+    tool_choice: 'auto',
+    tools: [],
+    usage: responsesUsage(agg.usage),
+    error: null,
+    incomplete_details: truncated ? { reason: 'max_output_tokens' } : null,
+    instructions: null,
+    metadata: {},
+    temperature: null,
+    top_p: null,
+    max_output_tokens: null,
+  };
+}
+
+/**
+ * 把上游的 OpenAI SSE 流翻译成 Responses 的 SSE 事件流，直接写进 `res`。
+ *
+ * 事件顺序（照真实 Responses API 的形状，见本层顶部那四条实测约束）：
+ *
+ *   text : created → in_progress → output_item.added → content_part.added
+ *          → output_text.delta× → output_text.done → content_part.done
+ *          → output_item.done
+ *   tool : output_item.added → function_call_arguments.delta×
+ *          → function_call_arguments.done → output_item.done
+ *   收尾 : response.completed（带完整 output 与 usage）
+ *
+ * 文本块与工具块共用一个 **单调递增的 output_index**，且每开新块前必须先把
+ * 上一个块关掉（`closeText()`）—— 顺序乱了 Codex 会判流损坏。
+ *
+ * 返回 `{ finishReason, usage, streamError }` 供调用方记账。
+ */
+async function relayResponsesStream(up, res, model) {
+  let backpressured = false;
+  const send = (type, obj) => {
+    backpressured = !res.write(`event: ${type}\ndata: ${JSON.stringify({ type, ...obj })}\n\n`);
+  };
+
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream; charset=utf-8',
+    'Cache-Control': 'no-cache, no-transform',
+    Connection: 'keep-alive',
+    'X-Accel-Buffering': 'no',
+    ...SECURITY_HEADERS,
+  });
+
+  const responseId = responsesId('resp');
+  const createdAt = Math.floor(Date.now() / 1000);
+  const envelope = (status) => ({
+    id: responseId,
+    object: 'response',
+    created_at: createdAt,
+    status,
+    model,
+    output: [],
+    output_text: '',
+    parallel_tool_calls: true,
+    tool_choice: 'auto',
+    tools: [],
+    usage: null,
+    error: null,
+    incomplete_details: null,
+    instructions: null,
+    metadata: {},
+  });
+
+  send('response.created', { response: envelope('in_progress') });
+  send('response.in_progress', { response: envelope('in_progress') });
+
+  let outputIndex = -1;
+  const output = [];          // 按顺序攒完整 item，最后一次给 response.completed
+  let textSlot = null;        // 打开中的 message 项
+  const toolSlots = new Map(); // 上游 tool_calls 的 index → slot
+  let pendingTool = null;     // 已分配索引但还没发 output_item.added 的工具块
+
+  /** 关闭打开中的文本项（幂等）。 */
+  const closeText = () => {
+    if (!textSlot) return;
+    send('response.output_text.done', {
+      item_id: textSlot.id, output_index: textSlot.outputIndex, content_index: 0, text: textSlot.text,
+    });
+    send('response.content_part.done', {
+      item_id: textSlot.id,
+      output_index: textSlot.outputIndex,
+      content_index: 0,
+      part: { type: 'output_text', text: textSlot.text, annotations: [] },
+    });
+    const item = {
+      id: textSlot.id,
+      type: 'message',
+      status: 'completed',
+      role: 'assistant',
+      content: [{ type: 'output_text', text: textSlot.text, annotations: [] }],
+    };
+    send('response.output_item.done', { output_index: textSlot.outputIndex, item });
+    output[textSlot.outputIndex] = item;
+    textSlot = null;
+  };
+
+  /**
+   * 补发工具块的 `output_item.added`（幂等）。
+   *
+   * 为什么要拖后发：`function.name` 与 Anthropic 那条流一样**可能分片到达**，
+   * 而 `added` 一旦发出，里面的 name 就定死了 —— 先发会把半截名字（`get_`）
+   * 交给客户端。等第一个 arguments 分片来了再发（chat 协议里名字总在参数之前
+   * 到齐），没有参数的在收尾时补发。
+   *
+   * 注意 `added` 里 arguments 给空串（真实 API 就是这么发的），
+   * 完整参数靠 `output_item.done` —— Codex 只认后者。
+   */
+  const flushTool = (slot) => {
+    if (!slot || slot.started) return;
+    slot.started = true;
+    pendingTool = null;
+    send('response.output_item.added', {
+      output_index: slot.outputIndex,
+      item: {
+        id: slot.id,
+        type: 'function_call',
+        status: 'in_progress',
+        call_id: slot.callId,
+        name: slot.name,
+        arguments: '',
+      },
+    });
+  };
+
+  const closeTool = (slot) => {
+    flushTool(slot);
+    send('response.function_call_arguments.done', {
+      item_id: slot.id, output_index: slot.outputIndex, arguments: slot.arguments,
+    });
+    const item = {
+      id: slot.id,
+      type: 'function_call',
+      status: 'completed',
+      call_id: slot.callId,
+      name: slot.name,
+      arguments: slot.arguments,
+    };
+    send('response.output_item.done', { output_index: slot.outputIndex, item });
+    output[slot.outputIndex] = item;
+  };
+
+  let finishReason = null;
+  let usage = null;
+  let streamError = null;
+  let sawReasoning = false;
+  const reader = up.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+
+  try {
+    for (;;) {
+      if (backpressured) { await waitDrain(res); backpressured = false; }
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() ?? '';
+      for (const line of lines) {
+        if (!line.startsWith('data:')) continue;
+        const raw = line.slice(5).trim();
+        if (!raw || raw === '[DONE]') continue;
+        let j; try { j = JSON.parse(raw); } catch { continue; }
+        if (j.usage) usage = j.usage;
+        const choice = (j.choices || [])[0];
+        if (!choice) continue;
+        if (choice.finish_reason) finishReason = choice.finish_reason;
+        const d = choice.delta || {};
+
+        // 上游给的思维链**刻意不往 Codex 发**：Codex 要求
+        // response.reasoning_summary_text.delta 到达时已有 active_item，
+        // 而思维链总是先于任何 output item 到达 —— 发出去只会让它
+        // error_or_panic 中断整轮。这里改为记一笔日志，不静默吞掉。
+        if (typeof d.reasoning_content === 'string' && d.reasoning_content) sawReasoning = true;
+
+        if (typeof d.content === 'string' && d.content) {
+          if (!textSlot) {
+            // 工具块先关掉，output_index 才能安全前进
+            for (const s of toolSlots.values()) if (!s.closed) { s.closed = true; closeTool(s); }
+            outputIndex += 1;
+            textSlot = { id: responsesId('msg'), outputIndex, text: '' };
+            send('response.output_item.added', {
+              output_index: outputIndex,
+              item: { id: textSlot.id, type: 'message', status: 'in_progress', role: 'assistant', content: [] },
+            });
+            send('response.content_part.added', {
+              item_id: textSlot.id,
+              output_index: outputIndex,
+              content_index: 0,
+              part: { type: 'output_text', text: '', annotations: [] },
+            });
+          }
+          textSlot.text += d.content;
+          send('response.output_text.delta', {
+            item_id: textSlot.id, output_index: textSlot.outputIndex, content_index: 0, delta: d.content,
+          });
+        }
+
+        for (const tc of d.tool_calls || []) {
+          if (!tc) continue;
+          const upIdx = typeof tc.index === 'number' ? tc.index : 0;
+          let slot = toolSlots.get(upIdx);
+          if (!slot) {
+            closeText(); // 文本块必须先关，索引才能前进
+            outputIndex += 1;
+            slot = {
+              id: responsesId('fc'),
+              outputIndex,
+              callId: tc.id || `call_${trace().slice(0, 20)}`,
+              name: '',
+              arguments: '',
+              started: false,
+              closed: false,
+            };
+            toolSlots.set(upIdx, slot);
+            pendingTool = slot; // 先不发 added，等名字收齐
+          }
+          // 名字**累加**（与 Anthropic 层同款修复：首片写入 + `!slot.name` 守卫
+          // 会让后续分片全被丢掉）
+          if (tc.function?.name) slot.name += tc.function.name;
+          if (typeof tc.function?.arguments === 'string' && tc.function.arguments) {
+            flushTool(slot);
+            slot.arguments += tc.function.arguments;
+            send('response.function_call_arguments.delta', {
+              item_id: slot.id, output_index: slot.outputIndex, delta: tc.function.arguments,
+            });
+          }
+        }
+      }
+    }
+  } catch (e) {
+    streamError = e;
+    log('responses stream interrupted', e.message);
+  }
+
+  // 收尾：先补发漏掉的工具块，再关文本块，顺序不能反
+  if (pendingTool && !pendingTool.started) flushTool(pendingTool);
+  closeText();
+  for (const s of toolSlots.values()) if (!s.closed) { s.closed = true; closeTool(s); }
+
+  if (sawReasoning) {
+    log('responses: upstream sent reasoning_content; it is not forwarded '
+      + '(Codex requires an active output item before reasoning deltas)');
+  }
+
+  const finalOutput = output.filter(Boolean);
+  const truncated = finishReason === 'length';
+  send(truncated ? 'response.incomplete' : 'response.completed', {
+    response: {
+      ...envelope(truncated ? 'incomplete' : 'completed'),
+      output: finalOutput,
+      output_text: responsesTextOf(finalOutput),
+      usage: responsesUsage(usage),
+      ...(truncated ? { incomplete_details: { reason: 'max_output_tokens' } } : {}),
+    },
+  });
   res.end();
   return { finishReason, usage, streamError };
 }
@@ -3611,6 +4231,152 @@ async function handleRequest(req, res) {
       }
     }
 
+    // ── OpenAI Responses API（Codex 等）────────────────────────────────────
+    // 形状与 /v1/messages 那条保持一致：同样的读体、同样的限流/记账/中断处理，
+    // 只换翻译层。Codex 只认这条协议（`wire_api="chat"` 已被上游移除）。
+    if (url.pathname === '/v1/responses' && req.method === 'POST') {
+      let raw;
+      try {
+        raw = await readBody(req);
+      } catch (e) {
+        if (e.code === 'BODY_TOO_LARGE') {
+          return json(res, 413, {
+            error: { type: 'payload_too_large', message: `request body too large (limit ${MAX_BODY_BYTES} bytes)` },
+          });
+        }
+        throw e;
+      }
+      let body;
+      try { body = JSON.parse(raw); }
+      catch { return json(res, 400, { error: { type: 'invalid_request', message: 'invalid JSON body' } }); }
+
+      const wantStream = body.stream === true;
+      const model = resolveResponsesModel(body.model);
+      const messages = responsesToOpenAIMessages(body);
+      /*
+       * 工具可能在两个地方：顶层的 `tools`（经典），或 `input[].additional_tools`
+       * （新版 Codex 的 code mode）。两处都收 —— 只看顶层的话，code mode 下
+       * 上游一个工具都收不到，模型会把调用写进正文，用户看到一串 DSML 标记。
+       */
+      const tools = responsesToolsToOpenAI(body.tools) || responsesToolsFromAdditional(body);
+      const toolChoice = responsesToolChoiceToOpenAI(body.tool_choice);
+
+      const oai = { model, messages, stream: true, stream_options: { include_usage: true } };
+      if (tools) oai.tools = tools;
+      if (toolChoice) oai.tool_choice = toolChoice;
+      // Responses 的 `max_output_tokens` 对应 chat 的 `max_tokens`
+      if (typeof body.max_output_tokens === 'number') oai.max_tokens = body.max_output_tokens;
+      if (typeof body.temperature === 'number') oai.temperature = body.temperature;
+      if (typeof body.top_p === 'number') oai.top_p = body.top_p;
+
+      maybeAutoCheckin();
+      log(`→ [responses] ${body.model || '(no model)'} => ${model} stream=${wantStream} msgs=${messages.length} tools=${tools?.length ?? 0}`);
+
+      const startedAt = Date.now();
+      trackInflight(req, res, model, wantStream);
+      const ac = new AbortController();
+      req.on('aborted', () => ac.abort());
+      res.on('close', () => { if (!res.writableEnded) ac.abort(); });
+
+      try {
+        const { res: up, bodyText, upstreamStartedAt } = await callUpstream(
+          JSON.stringify(normalizePayload(oai)),
+          model,
+          req.headers['x-conversation-id'] || trace(),
+          ac.signal,
+        );
+        if (!up.ok) {
+          const text = bodyText ?? await up.text().catch(() => '');
+          let parsed; try { parsed = JSON.parse(text); } catch {}
+          log('upstream error (responses)', up.status, text.slice(0, 300));
+          const message = parsed?.msg || parsed?.message || parsed?.error?.message || text || `upstream HTTP ${up.status}`;
+          recordRequest({
+            model,
+            stream: wantStream,
+            ms: Date.now() - startedAt,
+            ok: false,
+            status: up.status,
+            code: typeof parsed?.code === 'number' ? parsed.code : null,
+            error: message,
+          });
+          // 非流式：按 Responses 的错误形状回
+          if (!wantStream) {
+            return json(res, up.status === 200 ? 502 : up.status, {
+              error: { type: 'upstream_error', code: String(up.status), message },
+            });
+          }
+          // 已经答应过客户端「这是事件流」，就不能中途改回 JSON —— 用 SSE 发
+          // response.failed（Codex 认这个事件并会把它转成可读的 API 错误）。
+          res.writeHead(200, {
+            'Content-Type': 'text/event-stream; charset=utf-8',
+            'Cache-Control': 'no-cache, no-transform',
+            Connection: 'keep-alive',
+            'X-Accel-Buffering': 'no',
+            ...SECURITY_HEADERS,
+          });
+          const failed = JSON.stringify({
+            type: 'response.failed',
+            response: {
+              id: responsesId('resp'),
+              object: 'response',
+              status: 'failed',
+              model,
+              output: [],
+              usage: null,
+              error: { code: String(up.status), message },
+            },
+          });
+          res.write(`event: response.failed\ndata: ${failed}\n\n`);
+          return res.end();
+        }
+
+        if (wantStream) {
+          res.__overheadMs = Math.max(0, upstreamStartedAt - startedAt);
+          const r = await relayResponsesStream(up, res, model);
+          if (r.streamError && !ac.signal.aborted) {
+            recordRequest({ model, stream: true, ms: Date.now() - startedAt, ok: false, status: 0, code: null, error: r.streamError.message });
+          } else {
+            recordRequest({ model, stream: true, ok: true, ms: Date.now() - startedAt, ...usageOf(r.usage) });
+          }
+          return;
+        }
+
+        const aggregated = await aggregateStream(up);
+        res.__overheadMs = Math.max(0, upstreamStartedAt - startedAt);
+        // 同另两条路径：上游 200 但解析不出任何 SSE 块 = 失败，不是「空回答」
+        if (!aggregated.parsed) {
+          recordRequest({
+            model,
+            stream: false,
+            ms: Date.now() - startedAt,
+            ok: false,
+            status: up.status,
+            code: null,
+            error: 'upstream returned 200 but no parseable SSE data',
+          });
+          return json(res, 502, {
+            error: {
+              type: 'upstream_error',
+              message: 'workbuddy-bridge: upstream returned 200 but no parseable SSE data',
+            },
+          });
+        }
+        recordRequest({ model, stream: false, ok: true, ms: Date.now() - startedAt, ...usageOf(aggregated.usage) });
+        return json(res, 200, openAIToResponsesResponse(aggregated, model));
+      } catch (e) {
+        if (e?.code === 'RATE_LIMITED') {
+          const retryAfter = Math.max(1, Math.ceil((e.retryAfterMs || 1000) / 1000));
+          recordRequest({ model, stream: wantStream, ms: Date.now() - startedAt, ok: false, status: 429, code: null, error: `rate_limited (retry in ${retryAfter}s)` });
+          return json(res, 429, { error: { type: 'rate_limit_error', message: e.message } }, { 'Retry-After': String(retryAfter) });
+        }
+        if (e?.code === 'RATE_LIMIT_ABORTED') {
+          return; // 客户端等待时断开：无上游副作用，不记账
+        }
+        recordRequest({ model, stream: wantStream, ms: Date.now() - startedAt, ok: false, status: 0, code: null, error: e.message });
+        throw e;
+      }
+    }
+
     // ── 上游没有的能力：明确 501，不做假的 ────────────────────────────────
     // 上游 30 个模型全是对话类，**没有任何 embedding 模型**。这里若返回一堆
     // 无意义的向量，客户端的知识库会"看起来建成了、实际全是噪声"，用户要等
@@ -3629,7 +4395,7 @@ async function handleRequest(req, res) {
     if (url.pathname === '/' ) {
       return json(res, 200, {
         service: 'workbuddy-bridge',
-        usage: 'POST /v1/chat/completions · POST /v1/messages (Anthropic) · GET /v1/models · GET /v1/usage · GET /v1/requests · GET /v1/quota · GET /v1/checkin · GET /health',
+        usage: 'POST /v1/chat/completions · POST /v1/messages (Anthropic) · POST /v1/responses (Codex) · GET /v1/models · GET /v1/usage · GET /v1/requests · GET /v1/quota · GET /v1/checkin · GET /health',
         featured: FEATURED.map((m) => m.id),
       });
     }

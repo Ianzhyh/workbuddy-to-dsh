@@ -202,8 +202,25 @@ export function diagnoseFixture({ items = null } = {}) {
     items: items || [
       { id: 'bridge', label: '桥服务', status: 'ok', detail: '127.0.0.1:8790 已响应', hint: '' },
       { id: 'settings', label: 'dsh 模型路由', status: 'warn', detail: '尚未配置 workbuddy 路由', hint: '在「可用模型」里勾选后保存' },
+      /*
+       * 令牌文件权限。**两种形态都放进桩**（成功 / 未能收紧）：
+       *
+       * 这段文案不在 index.html 里，而是由 `lib/diagnostics.mjs` 拼出来的 ——
+       * 也就是说「英文模式下扫可见中文」是它唯一的验收手段，而那条验收只扫
+       * **渲染出来的**东西：桩数据里没有它，它就等于没测。detail 是
+       * 「路径 + 结论」的动态串（靠规则分流），hint 是一长段（靠整串查表），
+       * 两个分支的翻法不一样，所以两种都要覆盖。
+       */
+      { id: 'tokenfile', label: '令牌文件权限', status: 'ok', detail: '.\\dsh-plugin\\.bridge-token（已收紧为仅本人可读）', hint: '' },
+      {
+        id: 'tokenfile-warn',
+        label: '令牌文件权限',
+        status: 'warn',
+        detail: '.\\dsh-plugin\\.bridge-token 未能收紧：icacls 起不来：EBUSY',
+        hint: '同机其它用户可能读到本地令牌并调用桥、消耗账号额度。常见原因：组策略禁用 icacls、受限沙箱、或 USERNAME 环境变量缺失。手动修复：icacls "<令牌文件>" /inheritance:r /grant:r "%USERNAME%:F"',
+      },
     ],
-    summary: { fail: 0, warn: 1, ok: 1 },
+    summary: { fail: 0, warn: 2, ok: 2 },
     bridge: { running: true, ok: true, body: { ok: true, models: CATALOG.map((m) => m.id), catalogSize: CATALOG.length } },
     credentials: credentialsFixture(),
     dsh: {
@@ -263,7 +280,13 @@ export function clientsFixture({ running = true } = {}) {
     running, host: '127.0.0.1', port: 8790,
     baseUrlOpenAI: 'http://127.0.0.1:8790/v1',
     baseUrlAnthropic: 'http://127.0.0.1:8790',
-    token: 'wb-local-bridge',
+    /*
+     * 桩令牌**故意不像真的**，也**不能沿用 `wb-local-bridge`** ——
+     * 那是令牌随机化之前的公开默认值，而这个夹具会出现在 README 与
+     * 客户端面板截图里：截图里写着公开旧口令，等于自打「令牌已改为随机」的脸。
+     * 保持 base64url + 长度够（页面按真令牌原样展示，太短会看不出形状）。
+     */
+    token: 'stub-token-not-a-real-value-9f3a2b1c',
     anthropicModel: 'glm-5.3',
     anthropicFastModel: 'glm-5.3-flash',
     models: CATALOG.map((m) => m.id),
@@ -328,11 +351,147 @@ export function probeResultsFixture({
  * 汇总（字段是 `model`/`calls`/`promptTokens`…）。早先把同一个 `models` 选项
  * 串给了两边，直接触发形状校验失败 —— 参数名必须能区分开。
  */
+/**
+ * 一键接入的状态（`/api/connect`）。
+ *
+ * **这段文案不在 index.html 里，而是由 `lib/client-connect.mjs` 算出来再送到界面上**
+ * —— 所以「英文模式下扫可见中文」是它唯一的验收，而那条验收只扫**渲染出来的**东西：
+ * 桩数据里没有它，整块「一键接入」就等于没测（和上面 `diagnoseFixture` 是同一个坑，
+ * 这次是先栽过一次才补的）。
+ */
+export function connectFixture({ clients = null } = {}) {
+  return {
+    running: true,
+    /**
+     * 桥的进程级状态。`authRejected` 是实测踩到的那一种：桥独立启动时自己生成
+     * 一把随机令牌，与控制台读的 `.bridge-token` 不一致 → 桥在跑但对控制台
+     * 每次请求都回 401。界面必须能把它和「桥没起」分开说（处置不同：
+     * 启动桥 / 重启桥），所以桩里也得有这个字段。
+     */
+    bridge: { up: true, authRejected: false },
+    token: clientsFixture().token,
+    /**
+     * 模型下拉的候选。**真实接口一定给**（完整目录，桥没起时退回精选集），
+     * 漏了它页面就会渲染出**空的下拉**：`connectModelPicker` 的候选来自这里，
+     * `effectiveModel` 只负责选中哪一项 —— 两者都缺时 `.dd-label` 是空白，
+     * `test-ui-kit` 的「所有触发器都有文案」正是被这个夹具缺口搞红的。
+     * 形状取自真实响应：`[{ id, name }]`。
+     */
+    modelOptions: [
+      { id: 'deepseek-v4.1-flash', name: 'DeepSeek-V4.1-Flash' },
+      { id: 'glm-5.3', name: 'GLM-5.3' },
+    ],
+    baseUrlOpenAI: 'http://127.0.0.1:8790/v1',
+    baseUrlAnthropic: 'http://127.0.0.1:8790',
+    model: 'deepseek-v4.1-flash',
+    backupDir: 'C:\\path\\to\\.backup\\client-configs',
+    clients: clients || [
+      {
+        id: 'codex', label: 'Codex', e2e: true, installed: true, exists: true,
+        path: 'C:\\Users\\you\\.codex\\config.toml',
+        changed: true, applied: false, appliedAt: null, reformats: false,
+        /**
+         * 路径是怎么定下来的。别人的机器上可能设着 `CODEX_HOME` /
+         * `CLAUDE_CONFIG_DIR`（各家官方支持的重定位）—— 界面要把这件事说出来，
+         * 否则用户没法确认"它认没认对地方"。
+         * 夹具里给成"跟随客户端的 CODEX_HOME"，好让 UI 断言覆盖到这条分支。
+         */
+        pathSource: { source: 'client', envName: 'CODEX_HOME' },
+        effectiveModel: 'glm-5.3',
+        effectiveModels: ['deepseek-v4.1-flash', 'glm-5.3'],
+        /**
+         * Codex 的多模型靠一份**单独的目录文件**（`model_catalog_json`）。
+         * 桩里要有它，界面才会渲染「另外会写一份模型目录：<路径>」那一行 ——
+         * 那是用户唯一能知道"它还动了第二个文件"的地方。
+         */
+        catalog: {
+          path: 'C:\\Users\\you\\.codex\\workbuddy-model-catalog.json',
+          name: 'workbuddy-model-catalog.json',
+          added: ['kimi-k3'],
+          kept: 2,
+          from: 'C:\\Users\\you\\.codex\\cc-switch-model-catalog.json',
+        },
+        catalogSkipped: null,
+        models: ['deepseek-v4.1-flash', 'glm-5.3'],
+        changes: [
+          { path: 'model', kind: 'value', from: 'glm-5.2', to: 'deepseek-v4.1-flash' },
+          { path: 'model_provider', kind: 'value', from: 'custom', to: 'workbuddy' },
+          { path: 'model_providers.workbuddy', kind: 'section', from: null, to: 'written' },
+        ],
+        preview: [
+          'model_provider = "workbuddy"',
+          'model = "deepseek-v4.1-flash"',
+          '',
+          '[model_providers.custom]',
+          'name = "opencode_go"',
+          '',
+          '[model_providers.workbuddy]',
+          'name = "WorkBuddy (local bridge)"',
+          'base_url = "http://127.0.0.1:8790/v1"',
+          'wire_api = "responses"',
+          'experimental_bearer_token = "stub-token-not-a-real-value-9f3a2b1c"',
+          '',
+        ].join('\n'),
+      },
+      {
+        id: 'claude', label: 'Claude Code', e2e: false, installed: false, exists: false,
+        path: 'C:\\Users\\you\\.claude\\settings.json',
+        changed: true, applied: false, appliedAt: null, reformats: false,
+        effectiveModel: 'glm-5.3',
+        effectiveModels: ['deepseek-v4.1-flash', 'glm-5.3'],
+        catalog: null,
+        catalogSkipped: null,
+        models: ['deepseek-v4.1-flash', 'glm-5.3'],
+        changes: [
+          { path: 'env.ANTHROPIC_BASE_URL', kind: 'value', from: null, to: 'http://127.0.0.1:8790' },
+          { path: 'env.ANTHROPIC_API_KEY', kind: 'value', from: null, to: 'stub-token-not-a-real-value-9f3a2b1c' },
+        ],
+        preview: JSON.stringify({
+          env: {
+            ANTHROPIC_BASE_URL: 'http://127.0.0.1:8790',
+            ANTHROPIC_API_KEY: 'stub-token-not-a-real-value-9f3a2b1c',
+          },
+        }, null, 2) + '\n',
+      },
+      {
+        id: 'opencode', label: 'opencode', e2e: false, installed: true, exists: false,
+        path: 'C:\\Users\\you\\.config\\opencode\\opencode.json',
+        changed: true, applied: false, appliedAt: null, reformats: false,
+        effectiveModel: 'deepseek-v4.1-flash',
+        effectiveModels: ['deepseek-v4.1-flash', 'glm-5.3'],
+        catalog: null,
+        catalogSkipped: null,
+        models: ['deepseek-v4.1-flash', 'glm-5.3'],
+        changes: [
+          { path: '$schema', kind: 'value', from: null, to: 'https://opencode.ai/config.json' },
+          { path: 'provider.workbuddy', kind: 'value', from: null, to: '{…}' },
+          { path: 'model', kind: 'value', from: null, to: 'workbuddy/deepseek-v4.1-flash' },
+        ],
+        preview: JSON.stringify({
+          $schema: 'https://opencode.ai/config.json',
+          model: 'workbuddy/deepseek-v4.1-flash',
+          provider: {
+            workbuddy: {
+              npm: '@ai-sdk/openai-compatible',
+              name: 'WorkBuddy (local bridge)',
+              options: { baseURL: 'http://127.0.0.1:8790/v1', apiKey: 'stub-token-not-a-real-value-9f3a2b1c' },
+              models: {
+                'deepseek-v4.1-flash': { name: 'DeepSeek-V4.1-Flash', limit: { context: 1000000, output: 128000 } },
+              },
+            },
+          },
+        }, null, 2) + '\n',
+      },
+    ],
+  };
+}
+
 export function baseRoutes({ catalog = CATALOG, usage, probeResults, ...rest } = {}) {
   return {
     '/api/overview': { body: overviewFixture(rest) },
     '/api/models': { body: { models: catalog } },
     '/api/clients': { body: clientsFixture(rest) },
+    '/api/connect': { body: connectFixture(rest) },
     '/api/diagnose': { body: diagnoseFixture(rest) },
     '/api/usage': { body: usageFixture(usage || {}) },
     '/api/requests': { body: requestsFixture(rest) },

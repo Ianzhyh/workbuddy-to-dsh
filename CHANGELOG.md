@@ -19,6 +19,372 @@
 
 ## [Unreleased]
 
+### Added
+
+- **一键接入：把 Base URL 与令牌直接写进客户端的配置文件。** 控制台的「客户端接入」
+  面板最上面多了一块：检测本机装了哪些客户端（Codex / Claude Code / opencode），
+  点「写入」就把配置写进去，不用再手工对着 JSON / TOML 抄。
+  命令行同款：`npm run connect status | apply <客户端> | verify <客户端> | undo <客户端>`。
+
+  改别人的配置文件是高危操作，安全网是四条铁律：
+
+  1. **只动自己的键 / 节**，其余内容原样保留（注释、顺序、缩进、别的工具写的节）。
+     实测对本机那份带 **cc-switch** 痕迹的 `~/.codex/config.toml`：
+     `[model_providers.custom]` 一字未动。
+  2. **每次先整份备份**，备份目录会显示给用户。
+  3. **可撤销**，且按记录的**原始值逐键还原**，不是拿备份整份盖回去 ——
+     用户可能在写入后又手改过别的地方，整份还原会连带丢掉他自己的改动。
+  4. **幂等**：重复写入结果一致，也不会把撤销要用的原值覆盖成中间态。
+
+  写完做两层验证：静态读回（键都在）+ **端到端**（拿刚写进文件里的令牌真打一次桥）。
+  后者能抓到"文件写对了但令牌已过期"这种静态读回发现不了的情况，
+  报错是「桥可能重启后换了令牌，重新点一次写入」而不是含糊的失败。
+
+  如实标注：Codex 在本机做了真实读写验证；Claude Code / opencode 按官方 schema
+  实现并有往返单测，但本机没装，界面上标「本机未实测」—— 不写成"支持"。
+
+  配置 schema 全部查自官方文档（Claude Code 的 `settings.json` `env` 块、
+  opencode 的全局配置路径与 provider 结构），Codex 对照的是本机真实文件。
+
+### Fixed（对抗式排查：静默丢数据的三个真 bug + JSONC 能力缺口）
+
+这轮换了打法：不再看代码顺不顺眼，而是**构造刁钻输入主动撞** —— 拿一批真实的
+畸形/边角配置（CRLF、无末尾换行、tab 缩进、行内注释、BOM、空文件、数组/null
+中间层、JSONC……），逐个跑 `apply → verify → undo`，断言"撤销后语义与原始一致"。
+39 个用例撞出 23 个不一致，按"语义变化 vs 仅排版"分类后，**3 个是真丢数据**：
+
+- **`setPath` 会把用户的中间层静默替换成 `{}`。**
+  `settings.json` 里 `"env": []`、`opencode.json` 里 `"provider": null`（用户或别的
+  工具写坏了，但文件本身合法），写入时中间层被替换成 `{}`，撤销也只还原成 `{}` ——
+  **apply 报 ok、undo 报 ok，文件却不是原来那份了**。这是最难发现的一类：
+  两次操作都"成功"。
+  现在 `setPath` 遇到非对象中间层**停下返回 false**，不覆盖用户数据。
+- **空配置文件被当成"格式不对"拒掉。**
+  长度为 0 的文件（客户端自己建的空文件、或 `touch` 出来的）走到
+  `JSON.parse('')` 直接抛，用户看到"不是合法 JSON（Unexpected end of JSON input）"
+  以及"你是不是写了注释"的提示 —— 方向全错，而空文件恰恰是**最该能一键接上**的状态。
+- **撤销会丢掉 BOM。** `stripBom` 是为了能解析，但撤销的承诺是"还原到接入之前"，
+  那三个字节也该还原。附带把一条**把丢字节当正确行为**的老断言改了过来
+  （原断言写着"BOM 被写回去了"，等于把 bug 固化成预期）。
+
+以及一个**能力缺口**（官方文档实证，不是猜）：
+
+- **带注释的 JSONC 被拒**。官方文档原话：*OpenCode supports both JSON and JSONC
+  (JSON with Comments) formats.* 而用户手写配置加注释极常见。原先直接 `JSON.parse`
+  → 报"不是合法 JSON"并提示"请手工编辑" —— 把**本可一键接上**的场景变成手工活。
+  现在会先试严格 JSON、再试**剥掉注释**的版本；
+  剥注释是逐字符扫的（处理字符串态与 `\\` 转义），**字符串里的 `//` 不会被当注释**
+  （`"baseURL": "http://127.0.0.1:8790/v1"` 被截断的话，写进去的地址就是废的，
+  而且解析照样通过、写入还报成功）。
+  **尾逗号不处理**（不在 JSONC 规范里）：真遇到了如实报错，不猜 —— 猜错就是改坏文件。
+
+还有一条"不能装作写成功"：
+
+- **被跳过的键要如实报出来。** 中间层是用户数据而没写进去时，只说"已写入"等于骗人：
+  `ANTHROPIC_*` 根本没进去，下次请求失败时用户完全想不到是这里。
+  现在 `plan`/`apply` 都带 `skippedKeys`，命令行逐条打印并给出修法
+  （"把 `env` 改成对象后重试"），面板也在结果里说清楚。
+
+修完重跑同一套 harness：**23 → 0**，所有 JSON 用例都变成"等价（仅排版）"。
+Codex 那几个"文本有差异"是行级重写的固有取舍（注释、顺序、别人的节都保住，
+但等号空格/缩进会被规范化），已在文档里写明。
+
+### Fixed（`DSH_HOME` 在 import 之后改也生效）
+
+上一条排查的收尾：`config.dsh` 的四个路径（`home` / `settingsPath` / `credentialsPath` /
+`profileDir`）原先在 **`import` 那一刻**就算成常量，于是「先 import 再设 `DSH_HOME`」
+（最自然的写法 —— 测试就是这么写的，`启动.cmd` 这类脚本也可能先加载再补环境）
+会**静默失效**：用户以为 dsh 配置改到了别处，实际还在 `~/.dsh`。
+而写 dsh 配置是**会动用户文件**的（往里加模型路由），认错地方就可能往真实 profile 里写东西。
+
+- 改成 **getter**（而不是把 44 处消费点全改成函数调用）：消费点都是普通属性读取，
+  getter 让它们一行都不用动，也不会漏掉某一处。
+- 顺带修一个边界：`DSH_HOME="   "`（空白值）原先会被当成路径，
+  拼出一个**名字是空格的目录**；现在回落家目录。
+- 用例：新增 2 条（子进程里 import 之后再设 `DSH_HOME`，断言四个路径全跟着变；
+  空 / 纯空白 / 未设三种值都回落到绝对路径 `~/.dsh`）。
+
+### Fixed（把"只在我这台机器上成立"的假设清一遍）
+
+顺着上一问（路径能不能自动识别）把**同类问题**系统查了一遍 —— 结论：生产代码里没有
+写死的用户名/绝对路径，但有三处"环境一变就出问题"的地方，都实测复现并修了：
+
+- **备份根跟着启动目录跑。** `REPO_BACKUP_ROOT` 用 `process.cwd()` 且在模块加载时算。
+  子进程实测：从仓库根起 = `E:\...\workbuddy-to-dsh\.backup\client-configs`，
+  从别处起 = `<那个目录>\.backup\client-configs`。后果是用户换个启动方式
+  （快捷方式、计划任务、从别处 `node dashboard/server.mjs`）就**找不到上次的备份与撤销记录**；
+  更糟的是 `planClient`（读 manifest 判"已接入"）与 `applyClient`（写 manifest）
+  落在不同根下时，会出现「刚写入成功、界面却显示还没接入」。改成跟 `config.ROOT`
+  （代码位置）走 —— 备份是本产品自己产生的东西，位置只该由代码在哪决定。
+- **桥在环境变量缺失时把登录文件定位成相对路径。** 桥的 `AUTH_DIRS` 只认
+  `LOCALAPPDATA` / `HOME` / `XDG_DATA_HOME`，而 Windows **默认只有 `USERPROFILE`、
+  没有 `HOME`**；三者全空时最后一行拼出 `workbuddy-desktop.info`（相对路径，按 cwd 解析）。
+  于是"桥找不到登录文件"表现成"用户没登录"，真凶（环境变量缺失）完全看不出来。
+  现在与 `config.mjs` 的 `authDir()` 同口径：加 `USERPROFILE` 兜底、
+  Windows 上 `LOCALAPPDATA` 缺失就退回 `<home>/AppData/Local`。四种环境实测都落到同一个绝对路径。
+- **`HOME` 在模块加载时读走。** `lib/client-connect.mjs` 里 `HOME` / `DEFAULT_BACKUP_ROOT`
+  都是 import 那一刻定死的常量，"先 import 再设 env"（测试与 `启动.cmd` 都可能这么做）
+  会静默失效。全部改成调用时求值。
+
+两处**看着像问题、其实不是**（记下来免得以后重复怀疑）：`dsh-plugin/scripts/preflight.mjs`
+已经做过 `LOCALAPPDATA` 兜底（注释里记着同一个坑）；`find-dsh.mjs` / `find-workbuddy.mjs`
+里的 `E:\App\WorkBuddy` 等是**候选列表**而非唯一路径，且外面还有扫描与注册表兜底。
+
+用例：新增子进程级用例 3 条（**必须用子进程** —— 同进程 `process.chdir()` 是假绿，
+`process.cwd()` 在模块加载时已被读走）、桥启动用例 1 条（真起桥，断言 auth 路径是绝对路径）、
+面板断言 1 条（重定位的行要标出来、默认路径的行不啰嗦）、搜索展示名匹配 1 条。
+
+### Fixed（换台电脑也能用：路径按各家官方约定现算）
+
+用户问「你改的文件位置是不是可以自动识别用在别人电脑的话」——查下来：**路径没有写死**
+（`grep` 过，生产代码里没有任何用户名/绝对路径，三个路径都从家目录推），
+但**只认自己的覆盖变量**，别人的机器上如果改过客户端自己的重定位变量就会写错地方。
+
+- **认各家的官方约定**（都有出处，不是猜的）：
+
+  | 客户端 | 变量 | 依据 |
+  |---|---|---|
+  | Codex | `CODEX_HOME` | 本机 `codex doctor` 实测：设了它，它自述的 config 路径就变成 `<CODEX_HOME>/config.toml` |
+  | Claude Code | `CLAUDE_CONFIG_DIR` | [官方文档](https://code.claude.com/docs/en/settings)：*To keep the home-directory files somewhere else, set `CLAUDE_CONFIG_DIR`* |
+  | opencode | `XDG_CONFIG_HOME` | [官方文档](https://opencode.ai/docs/config/)；`OPENCODE_CONFIG` 是**另一层**（优先级更高的另一份配置），不冒充 |
+
+  优先级：`WORKBUDDY_*`（本产品自己的覆盖，测试/运维用）> 客户端自己的变量 > 家目录默认。
+
+- **路径来源会显示出来**：面板标「按客户端的设置写入：`CODEX_HOME`」，命令行标
+  「路径来源: 跟随客户端的 `CODEX_HOME`」。只给最终路径的话，用户没法确认"它认没认对地方"
+  —— 而认错的后果是把配置写进客户端根本不读的位置。
+- 三处路径全部改成**调用时求值**（原先 `HOME` 是模块加载时的常量）：否则
+  "先 import 再设 env" 这种最自然的写法会失效。
+
+用例：新增 3 条路径解析用例（含"清掉自己的覆盖变量再断言"，那是原来那批用例的盲区 ——
+带着 `WORKBUDDY_CODEX_CONFIG` 测，默认路径算错也看不出来）、
+1 条面板断言（重定位的行要标出来、默认路径的行不许啰嗦）。
+
+### Fixed（Codex 的工具调用被写成正文：code mode 踩坑）
+
+用户反馈「Codex 接入后一个对话没说完就截断了」——查下来不是上下文/输出没配，
+是**工具协议选错了**，而且错在目录生成那一层。
+
+**现场证据**：Codex 的回答里出现 `<||DSML||invoke name="exec_command">` 这种
+**文本标记**。用一个桩上游截下 Codex 真正发出的请求，形状是：
+
+```
+顶层字段: model, stream, input, tool_choice, parallel_tool_calls,
+          reasoning, store, include, prompt_cache_key, text, client_metadata
+          → 没有 tools（工具在 input[] 的 additional_tools 里）
+input[0]: type=additional_tools  →  namespace functions → custom exec (freeform/Lark)
+```
+
+**根因链**（三步，缺一不成立）：
+
+1. 新版 Codex 的工具协议由模型目录里的 **`use_responses_lite` / `tool_mode`** 决定。
+   官方模型（gpt-5.6-*）都是 `use_responses_lite: true` + `tool_mode: "code_mode_only"`
+   —— 也就是 **code mode**：shell / apply_patch 全收进一个 freeform 的 `exec`，
+   让模型写 JavaScript 去编排工具。
+2. cc-switch 切走时删掉了 `model_catalog_json`，我重新接入时**没有现成目录可当模板**，
+   于是退回用 Codex 自己的 `models_cache.json` 当模板 —— 把这两个行为开关一起抄了过来。
+3. 桥的上游是 chat/completions，**接不了 freeform 那套** → 上游一个工具都收不到 →
+   模型只能把工具调用写进正文（那串 DSML），Codex 无工具可执行 → 回合结束。
+   用户看到的正是"话说一半断了"。
+
+**修复**（三层，都有用例）：
+
+- `lib/client-connect.mjs`：目录条目**显式定死**行为开关
+  （`use_responses_lite: false`、删掉 `tool_mode` / `multi_agent_version`），
+  模板只用来继承结构字段；模板优先取**别人的**条目（cc-switch 那种面向第三方
+  chat/completions 上游写的，比官方模型更接近我们要的形状）。
+- 我们自己写过的旧条目会**被重算**（按 `description` 里的标记识别），
+  别人的条目一字不动 —— 否则已经写坏的那些永远纠正不过来。
+- `bridge/workbuddy-bridge.mjs`：`input[].additional_tools` 里的 **function 工具要救回来**
+  （code mode 下顶层确实没有 `tools`），freeform 的 `exec` 翻不了但**必须写进日志**，
+  否则用户只看到一串 DSML 标记、完全不知道问题在哪。
+
+**一个自己踩出来的坑**：`model_catalog_json` 早就写对时，config.toml 一个字都不用改，
+`applyClient` 于是按 `changes.length === 0` 提前返回 —— **那份写坏的目录根本没被重写**，
+面板还显示「已接入」，用户没有任何入口触发纠正。判断"要不要动手"必须**连目录一起看**
+（CLI 那条路也漏了同一处，一起补上）。
+
+**验证**：用真实机器的 `~/.codex` 目录（纠正后）让 Codex 打桩上游，请求回到
+`顶层 tools: 10 个`、`input 里没有 additional_tools`（经典模式）。
+回答"是不是没配输出/上下文"也一并查了：Codex 的请求里**根本没有 `max_output_tokens`**
+（上游按默认走），本地账本近期最大输出 85 token、无 `response.incomplete` 痕迹；
+那次真正的失败是上游 `429 code 6004`（"使用量已超出频率限制…也可以切换其他模型"）
+与 `400 code 11128`（"Illegal API invocation from an unapproved channel"）。
+
+顺带把 `bridge-responses.test.mjs` 收尾时的 **EPERM 假红**修了：Windows 上桥进程刚被
+kill、文件句柄未释放就 `rmSync`，导致**全部断言通过、整个文件仍报错**并卡住
+`release:check`；现在先等进程退出、带重试地删，仍失败只警告。
+
+### Added（多模型接入 + 面板改版）
+
+用户反馈「只接入一个模型很奇怪吧，多模型接入不行吗？面板很杂没有美感」——
+两件事都做了，做法按**每个客户端自己的能力**来，不搞统一的假接口：
+
+- **多模型**：勾选几个就接几个，其中一个作为主模型。三家的机制不同、写法也不同：
+
+  | 客户端 | 写什么 | 在客户端里怎么切 |
+  |---|---|---|
+  | opencode | provider 下的模型表（`models`） | TUI 里直接选 |
+  | Claude Code | `modelPicker.options`（并 `replaceBuiltInOptions: true`） | `/model` 选择器 |
+  | Codex | `model_catalog_json` 指向的**目录文件** | `-m <模型>` 或模型选择器 |
+
+  两处刻意设计：
+
+  1. **Claude Code 替换内置列表**。Base URL 指向桥之后，内置的 Sonnet/Opus/Haiku
+     会被桥的 Anthropic 层映射到**别的**模型 —— 留着它们就是"选了 Sonnet 实际跑
+     glm-5.3"。宁可只列真实可用的那些，撤销即还原。
+  2. **Codex 的目录是合并的**。`model_catalog_json` 是全局键，本机已被 cc-switch
+     占用（里面是用户别的隧道模型）：读进来**一条不动**，只补桥这边缺的 slug，
+     条目则**克隆**现成模板再改 slug/名字/上下文（字段有三十来个，少一个 Codex 可能
+     整份解析失败）。目录是**第二个被写的文件**，所以备份/撤销同样覆盖它：
+     键还原、我们建的删掉、改过的按备份还原。实测（隔离目录）：6 条原有 + 2 条新增，
+     撤销后 `model_catalog_json` 回到 cc-switch 那份、我们的文件消失。
+     本机两处模板都没有时**不生成目录**，界面如实说"只能接一个模型"。
+
+  命令行同款：`npm run connect apply codex --models glm-5.3,kimi-k3-1`。
+
+- **面板改版：一行一个客户端 + 一个详情展开器 + 可搜索的模型清单。**
+  改版前的实测数据（就是"没有美感"的来源）：
+
+  | 症状 | 实测 | 现在 |
+  |---|---|---|
+  | 三行客户端高矮不一 | 已接入那行 **113px**（挂着绿色验证框），另两行 41px | 三行**都是 41px** |
+  | 每行按钮数不一 | 5 个 vs 3 个，右边缘参差 | 默认态**只有 2 个**：写入 / 详情 |
+  | 30 个候选模型铺成 chip 云 | **269px、4 行**，目录越长越长 | 两列**可滚动窗口 224px** + 搜索框（纯前端过滤） |
+  | 展开详情撑爆页面宽度 | 详情 **1588px**（面板只有 1050px），整页横向溢出 365px | 0 溢出（`min-width: 0` 那条） |
+  | 展开详情一开就 895px | 里面塞着一整份配置 `<pre>` | 配置预览**默认折叠**，详情 595px |
+
+  细节：模型清单每行一个复选框 + 一颗 ★（设为主模型，不用再单独给个下拉）；
+  「验证 / 将改动什么 / 撤销接入」都收进那个客户端的详情里；说明、
+  三个接入值、各家片段、兼容性清单收进「手动接入」折叠区，**折叠状态归用户**
+  （`manualOpen`），20 秒轮询重渲染不会把它收回去。
+
+### Fixed（一键接入的"半成品"部分）
+
+用户反馈「这块很不行、一直是那个界面」——复现出来的根因不是一个 bug，是**三类界面在说假话**：
+
+- **读不到状态时永远转圈。** 控制台进程还在跑改动前的旧代码，`/api/connect` 回
+  404；前端把失败吞掉（`lastConnect = null`）后只渲染「正在读取接入状态…」这一句
+  —— 没有原因、没有重试入口，用户无从判断是"慢"还是"坏了"。现在读失败会给出
+  HTTP 状态与原因（404 那条直接说「多半是控制台进程还在跑旧代码，重启控制台后刷新」），
+  带「重试」，并**保留上次读到的行**；读取加了 15 秒超时（原先没有超时，
+  接口挂住就是永远转圈）。验证方式：新增 `tools/dev/test-connect-panel.mjs`
+  （打桩型 UI 用例，31 条断言）对 404 / 恢复 / 从未读到 三条路逐条断言。
+- **「已接入」只是 manifest 文件在不在。** 配置被手改过、桥换过端口或令牌，它照样
+  挂绿色的「已接入」。现在配置与当前值不一致 → 「已接入，需重新写入」；
+  用户自己照「复制片段」抄进配置文件的（没有 manifest）→ 「已接入（非本控制台写入）」
+  —— 不再诱导他多点一次写入。
+- **服务端有 `/api/connect/verify`（静态读回 + 端到端），命令行也在用，控制台却没有入口。**
+  现在每行已接入的客户端都有「验证接入」，并且**打开面板时自动验一遍**（只验"配置
+  与当前值一致"的行：已经漂移的行必然报失败，那是已知状态，不该再刷一条红字）。
+  验证没过时状态标签从绿色的「已接入」变成「已接入，验证未通过」。
+
+顺带修掉的三处（都是"界面在说假话"的同类）：
+
+- **用户自己选的模型被当成"配置漂移"。** 上次把 Codex 选成 `deepseek-v4.1-flash`
+  写进去，重新打开面板时按桥的默认（glm-5.3）重算 → 明明刚写好的配置被报成
+  「已接入，需重新写入」；用户照着点一次「重新写入」，反而把他自己的选择改掉。
+  现在控制台三个接口与命令行共用一个 `resolveModelChoice()`：**显式选择 > 配置文件里
+  现在那个模型（且确实在当前目录里）> 桥的默认**。模型是用户的偏好，不是我们的默认值。
+  （本机实测就是这个状态，是修好之后才敢说"已接入"。）
+- **「桥在跑但拒绝本控制台的令牌」被说成「桥未运行」。** 桥独立启动时会自己生成一把
+  随机令牌（只打印在启动日志里），与控制台读的 `.bridge-token` 不是同一把 ——
+  桥对控制台每次请求都回 401。此时页面写「桥未运行」，用户去点「启动桥服务」得到的是
+  "已经在跑了"。现在 `bridgeHealth()` 明确给出 `authRejected`，`/api/connect` 透出
+  `bridge: { up, authRejected }`，界面直说「两边令牌不一致，点上方「重启桥」」。
+  用例：`lib/diagnostics.auth.test.mjs`（桩一个永远 401 的桥）。
+- **320px 视口下接入模型下拉撑破整行（实测溢出 18px）。** 根因是宽度封顶封在了原生
+  `select` 上（`max-width: 220px`），而它决定外层 `.dd` 的宽度 → 溢出。封顶移到
+  可收缩的 `.dd` 上。这个缺陷长期没被发现，是因为**桩数据里缺 `modelOptions`**：
+  下拉是空的、宽度接近 0，撑不破任何东西（`test-ui-kit` 的「所有触发器都有文案」
+  一直在红，就是同一个夹具缺口）。夹具已按真实响应补齐 `modelOptions` /
+  `effectiveModel`，并把 `/api/connect` 纳入了 `api-shape.json` 的形状校验
+  —— 下次再漏字段，桩会在渲染前就被拦下。
+
+### Added（上一轮：Codex 协议层）
+
+- **支持 Codex（`POST /v1/responses`）。** Codex 说的是 OpenAI 的 **Responses 协议**，
+  而桥原先只讲 chat/completions 与 Anthropic Messages 两套 —— 也就是说「把 Base URL
+  指过来」接不上，必须真的做一层协议转换。这正是 CC Switch 靠一个本地路由进程做的事，
+  区别是这层转换**内置在桥里**，用户不用再装一个中间人。
+
+  做法上有一处不能想当然：网上（以及不少整合包）仍在教
+  `wire_api = "chat"`，但上游已经把它**删掉**了 —— 见
+  `codex-rs/model-provider-info/src/lib.rs`（tag `rust-v0.162.0`）里 `WireApi` 只剩
+  `Responses`，写 `"chat"` 会反序列化成 `CHAT_WIRE_API_REMOVED_ERROR` 直接报错。
+  所以 `/v1/responses` 是唯一可行的一条路。
+
+  协议转换按要求对齐 Codex 的解析器（`codex-rs/codex-api/src/sse/responses.rs`、
+  `codex-rs/core/src/session/turn.rs`），四条硬约束：
+
+  1. 正文**只从 `response.output_item.done` 取**；`response.function_call_arguments.done`
+     被显式忽略。所以每个条目必须发完整的收尾事件，不能只发 delta。
+  2. 任何 `*.delta` 之前必须已有 `response.output_item.added` ——
+     否则 Codex 走 `error_or_panic` 直接中断（`active_item` 还不存在）。
+  3. `response.completed` 里的 `usage` 必须是**三个总数都有**
+     （`input_tokens` / `output_tokens` / `total_tokens`，`ResponseCompletedUsage` 里没有 `Option`）。
+  4. 不认识的事件与任何 `*.delta` 会被安全忽略 —— 所以可以只发必要的那几种。
+
+  另外两处与 Anthropic 那层同源、但更容易写错的：
+
+  - 请求里**没有 `instructions` 字段**。Codex 把系统提示作为 `input` 里一条
+    `role: "developer"` 的 message 发过来，得并进 system。
+  - 连续的 `function_call` 必须**合成同一条** assistant 消息，否则上游会看到多条
+    只带 `tool_calls` 的 assistant 消息，与随后的 `function_call_output` 对不上号。
+
+  控制台的「客户端接入」面板新增 **Codex 页签**：`~/.codex/config.toml` 片段、
+  模型映射说明、以及「令牌写 `experimental_bearer_token`，不要去动 `auth.json`」
+  的提醒（后者是官方登录缓存，改它会影响 Codex 自己的插件与远程控制）。
+  模型映射与 Anthropic 那条同源（`WORKBUDDY_RESPONSES_MODEL` /
+  `WORKBUDDY_RESPONSES_FAST_MODEL`，默认 `glm-5.3` / `glm-5.3-flash`）；
+  fast 档**刻意不匹配 `codex` 字样** —— `gpt-5.1-codex` 是主力模型，当 fast 用会把主任务降级。
+
+### Fixed
+
+- **控制台切到英文时，顶部副标题被横腰切断**（实测溢出 11px，且没有省略号，
+  看起来像渲染坏了）。根因是 `.sub` 写死 `max-height: 48px` ——
+  按 13px / 1.5 行高算那只够 **2.46 行**：中文译文恰好 2 行没事，英文译文 3 行
+  共 59px 就被切掉。现在 `max-height` 按行数算（`calc(var(--fs-body) * 1.5 * 3 + 2px)`），
+  **真正的上限交给 `-webkit-line-clamp`** —— 将来文案再变长，截断处会有省略号。
+
+- **诊断报告的整行翻译在 detail 含全角冒号时失效**（潜伏已久的规则 bug）。
+  报告行的规则写的是 `^- \[(.)\] (.+)：(.+)（建议：(.+)）$`，label 那一组用了
+  **贪婪**的 `(.+)`。平时 detail 里没有 `：`，所以它一直是隐性的；
+  一旦有（本次新增的「令牌文件权限」detail 就带 `未能收紧：`），贪婪匹配会把
+  label 吃成「令牌文件权限：…未能收紧」，查表当然查不到 —— 结果是**标签留在中文、
+  detail 只剩尾巴被当成 hint 翻**，半句中文半句英文，比不翻还糟。
+  标签里本来不可能有 `：`，改成 `([^：]+)` 即可。
+
+- **令牌文件加固失败不再静默。** `spawnSync` 失败**不抛异常** —— 它把失败放进
+  `r.error` / `r.status` 返回；而原先的写法是 `try { spawnSync(...) } catch {}`，
+  **没看返回值**。于是「icacls 没跑成」和「跑成了」在调用方看来一模一样：
+  文件权限其实没收紧（同机任何用户仍能读到本地令牌），而整条链路上没有任何地方会提到它。
+
+  现在 `hardenTokenFile()`（`config.mjs`）与 `hardenBridgeTokenFile()`
+  （`dsh-plugin/lib/index.js`，两份实现）都返回
+  `{ ok, code, reason }`，`code` 让调用方能**区分**「本机压根起不来 icacls」
+  （环境问题，验证可跳过）与「icacls 跑起来了但配置失败」（真实故障，必须报错）；
+  `config.bridge.tokenHarden` / `resolveConfig().localTokenHarden` 把结果带出来，
+  `doctor` 与环境诊断多了一项「令牌文件权限」（失败时给出手动修复命令）。
+
+### Changed
+
+- **`tools/dev/check-i18n-coverage.mjs`：拼接片段改为按 `+` 链判（可跨行），
+  并支持 `--why`。** 原先只在**同一行**内拼接，于是
+  `'…前半句'` 换行 `+ '后半句…'` 这种最常见的断行写法永远拼不上，
+  控制台里 6 条 Codex 文案全部被报成「片段翻不动」。现在按源码位置切 `+` 链，
+  并做括号深度跟踪 —— 否则 `('已切换到 ' + file) : ('切换失败：' + err)`
+  这两个**三元不同分支**上的字面量会被错误地拼成一句。
+
+  名单从 71 条降到 36 条（消除 35、新增 0），漏报没变多。`--why <行号|字面量>`
+  用来回答「这一条为什么在/不在名单里」——`--check` 只能问「这串翻不翻」。
+
+### Docs
+
+- `README.md` / `README.en.md` 的客户端列表补上 Codex。
+- `docs/DESIGN_SYSTEM.md` 补第 4·6 节「字体与字号」（三层字体栈 + 六级字号阶梯 +
+  400/600/700 三档字重），并记录「字重 500 与 600 落在同一个字体文件」这条实测结论。
+
 ## [1.4.9] - 2026-10-09
 
 ### Security

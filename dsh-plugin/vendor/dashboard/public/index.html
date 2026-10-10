@@ -186,8 +186,10 @@
   <section class="panel" data-section="clients">
     <h2>客户端接入 <span class="spacer"></span><span class="stamp" id="clientsStamp"></span>
       <button class="mini" id="clientsCopyAllBtn">复制全部</button></h2>
-    <p class="hint">桥同时讲两套协议：<b>OpenAI</b>（<code>/v1/chat/completions</code>，绝大多数客户端走这条）
-      与 <b>Anthropic</b>（<code>/v1/messages</code>，Claude Code 走这条）。下面三个值填进客户端即可，点一下就能复制。</p>
+    <p class="hint">桥同时讲三套协议：<b>OpenAI</b>（<code>/v1/chat/completions</code>，绝大多数客户端走这条）、
+      <b>Anthropic</b>（<code>/v1/messages</code>，Claude Code 走这条）与
+      <b>Responses</b>（<code>/v1/responses</code>，Codex 走这条，协议由桥转换）。
+      下面三个值填进客户端即可，点一下就能复制。</p>
     <div id="clientsBox"><div class="empty">正在读取…</div></div>
   </section>
 
@@ -1197,11 +1199,119 @@ const I18N_EN = {
 
   // ---- 客户端接入 ----
   '复制全部': 'Copy all',
-  '桥同时讲两套协议：': 'The bridge speaks two protocols: ',
+  // ---- 一键接入（把配置直接写进客户端的配置文件）----
+  '一键接入': 'One-click setup',
+  '自动备份 · 可撤销': 'auto-backup · undoable',
+  '把 Base URL 与令牌直接写进客户端的配置文件 —— 不用手工对着 JSON / TOML 抄。只动它自己的键，写入前整份备份。':
+    'Writes the Base URL and token straight into the client\'s config file — no hand-editing JSON/TOML. Only its own keys are touched, and the original file is backed up first.',
+  '正在读取接入状态…': 'Reading setup status…',
+  '已接入': 'connected',
+  '已安装，尚未接入': 'installed, not connected yet',
+  '未检测到该客户端': 'client not detected',
+  '本机未实测': 'not verified locally',
+  '处理中…': 'working…',
+  '写入': 'Write',
+  '重新写入': 'Write again',
+  '撤销': 'Undo',
+  '将改动什么': 'What will change',
+  '收起预览': 'Hide preview',
+  '新增': 'added',
+  '新增节': 'new section',
+  '替换已有的节': 'replaces an existing section',
+  '已经是接入状态，写入不会改动任何内容。': 'Already connected — writing would change nothing.',
+  '写入后的完整内容：': 'Full content after writing:',
+  '写入后的完整内容': 'Full content after writing',
+  '备份目录：': 'Backup folder: ',
+  '确定把 Base URL 与本地令牌写进这个客户端的配置文件？': 'Write the Base URL and local token into this client\'s config file?',
+  '注意：该文件会被重新排版为 2 空格缩进。': 'Note: this file will be re-formatted with 2-space indentation.',
+  '写入前会整份备份原文件，之后可以点「撤销」还原。':
+    'The original file is backed up first; you can undo afterwards with the Undo button.',
+  '撤销失败：': 'Undo failed: ',
+  '已撤销，配置文件还原到接入之前。': 'Undone — the config file is back to how it was before connecting.',
+  '已写入。': 'Written.',
+  '没有改动 —— 已经是接入状态。': 'No change — already connected.',
+  '原文件已备份到：': 'Original file backed up to: ',
+  '该文件被重新排版为 2 空格缩进。': 'That file was re-formatted with 2-space indentation.',
+  '令牌文件的权限没能收紧：': 'Could not tighten the token file\'s permissions: ',
+  '静态自检通过：配置里的键都在。': 'Static check passed: all expected keys are present.',
+  '静态自检未通过：': 'Static check failed: ',
+  '端到端验证通过：拿配置里的令牌连上了桥。': 'End-to-end check passed: the token from the config file reaches the bridge.',
+  '端到端验证没通过：': 'End-to-end check failed: ',
+  // 读取失败 / 重试（这块以前只会永远显示「正在读取接入状态…」）
+  '重新读取': 'Reload',
+  '重试': 'Retry',
+  '读取接入状态失败。': 'Could not read the setup status.',
+  'HTTP 状态：': 'HTTP status: ',
+  '接口 15 秒没响应。': 'The endpoint did not respond within 15 seconds.',
+  '请求没能发出去（浏览器报错）。': 'The request could not be sent (browser error).',
+  '控制台后端没有这个接口 —— 多半是控制台进程还在跑改动前的旧代码，重启控制台后刷新本页。':
+    'The console backend has no such endpoint — most likely the console process is still running pre-change code. Restart the console, then reload this page.',
+  '接口拒绝了这次读取。': 'The endpoint refused this read.',
+  '接口返回的内容不是接入状态（缺少客户端列表）。': 'The response was not setup status (no client list).',
+  '读取接入状态时出错。': 'Something went wrong while reading the setup status.',
+  '这次没能重新读取接入状态，下面显示的是上次读到的结果。':
+    'Could not re-read the setup status this time; the rows below are from the last successful read.',
+  // 状态与验证
+  '已接入，需重新写入': 'connected, needs a re-write',
+  '已接入（非本控制台写入）': 'connected (not written by this console)',
+  '已接入，验证未通过': 'connected, check failed',
+  '验证接入': 'Verify',
+  '正在验证…': 'checking…',
+  '没有得到静态自检的结论。': 'No static-check result was returned.',
+  '只做了静态自检，没做端到端验证（桥没在跑？）。':
+    'Only the static check ran; the end-to-end check was skipped (is the bridge running?).',
+  '静态自检没过，没有做端到端验证。': 'The static check failed, so the end-to-end check was skipped.',
+  '验证请求没能完成（接口没响应或返回了错误）。':
+    'The verification request did not complete (no response, or an error came back).',
+  '「验证接入」会重新读一遍配置文件，并拿里面的令牌真打一次桥 —— 静态读回只能证明文件里写对了，证明不了这个令牌现在还能用。':
+    '"Verify" re-reads the config file and uses the token inside it to call the bridge for real — a static read-back only proves the file looks right, not that the token still works.',
+  '标了「本机未实测」的客户端：写入逻辑有往返单测，但本机没装它，所以「它是否认这份配置」没法替你保证。':
+    'Clients marked "not verified locally": the write logic has round-trip tests, but this machine does not have that client installed, so there is no way to promise the client accepts this config.',
+  '桥未运行：写入照样能做，但写完的「验证」一定失败。先点上方「启动桥服务」。':
+    'The bridge is not running: writing still works, but the check afterwards will fail. Start the bridge first (button above).',
+  '桥在运行，但拒绝了控制台持有的令牌（两边令牌不一致）：照现在写进客户端的配置会连不上。点上方「重启桥」让桥按控制台这份令牌重启，再点「重新读取」。':
+    'The bridge is running but rejected the token this console holds (the two tokens differ): clients written now would not connect. Use "Restart bridge" above so the bridge comes back up with this console\'s token, then hit "Reload".',
+  '接入模型：': 'Model: ',
+  // 多模型接入（紧凑行 + 折叠区）
+  '主模型：': 'Default model: ',
+  '选择模型': 'Models',
+  '收起模型': 'Hide models',
+  '详情': 'Details',
+  '收起详情': 'Hide details',
+  '验证': 'Check',
+  '撤销接入': 'Disconnect',
+  '用精选集': 'Featured set',
+  '接入哪些模型？': 'Which models to connect?',
+  '搜索模型…': 'Search models…',
+  '没有匹配的模型': 'No model matches',
+  '设为主模型': 'Set as default model',
+  '★ 是主模型（客户端打开时用的那个）；勾选几个就接几个，上游所有可用模型都能加。':
+    '★ marks the default model (the one the client opens with). Tick as many as you like — every model the upstream offers can be added.',
+  '接入之后可以在这里验证：静态读回 + 拿配置里的令牌真打一次桥。':
+    'Once connected you can check it here: a static read-back plus a real call to the bridge using the token in the config.',
+  '要接入哪些模型？': 'Which models should be connected?',
+  '上游所有可用模型都能加，不限桥默认精选的那几个。勾选几个就接几个，其中一个作为主模型。':
+    'Any model the upstream offers can be added — not just the bridge\'s featured few. Connect as many as you like; one of them is the default model.',
+  '多模型怎么接？注意事项': 'How multi-model works · notes',
+  '每个客户端可以接多个模型：勾选的那批会写进客户端，其中一个作为主模型（默认为该客户端打开时用的那个）。opencode 的模型表、Claude Code 的 /model 选择器、Codex 的模型目录，各按自己认的写法落盘。':
+    'Each client can connect several models: the ones you tick are written into the client, and one of them becomes the default model it opens with. opencode writes a model table, Claude Code writes its /model picker lineup, and Codex writes a model catalog — each in the form that client understands.',
+  '另外会写一份模型目录：': 'A model catalog file will also be written: ',
+  '模型目录不写 —— ': 'Model catalog not written — ',
+  '手动接入（复制片段）': 'Manual setup (copy snippets)',
+  '三个接入值 · 各家片段 · 兼容性清单': 'three values · per-client snippets · compatibility list',
+  // 路径来源标注（别人的机器上可能设了 CODEX_HOME / CLAUDE_CONFIG_DIR）
+  '按设置写入：': 'Written to the path set by: ',
+  '按客户端的设置写入：': 'Written to the path from the client setting: ',
+  '每个客户端都能在写入前选择要接入的模型；不选则用该客户端的默认模型（与桥的映射一致）。':
+    'Pick a model per client before writing; leave it as-is to use that client\'s default (aligned with the bridge mapping).',
+  // ---- 客户端接入 ----
+
+  '桥同时讲三套协议：': 'The bridge speaks three protocols: ',
   '（': ' (',
-  '，绝大多数客户端走这条） 与': ', which most clients use) and ',
-  '，Claude Code 走这条）。下面三个值填进客户端即可，点一下就能复制。':
-    ', which Claude Code uses). Fill these three values into your client — one click copies each.',
+  '，绝大多数客户端走这条）、': ', which most clients use), ',
+  '，Claude Code 走这条）与': ', which Claude Code uses) and ',
+  '，Codex 走这条，协议由桥转换）。 下面三个值填进客户端即可，点一下就能复制。':
+    ', which Codex uses — the bridge converts the protocol). Fill these three values into your client — one click copies each.',
   '全部接入信息': 'All setup information',
   '图形表单': 'Form',
   '其它客户端': 'Other clients',
@@ -1282,6 +1392,21 @@ const I18N_EN = {
   '（Claude Code 用，注意不带 /v1）': '(for Claude Code; note there is no /v1)',
   'API Key / 令牌 :': 'API key / token :',
   '--- 图形界面「自定义提供商」表单，逐格填 ---': '--- GUI "custom provider" form, field by field ---',
+  'Codex 说的是 Responses 协议（/v1/responses），桥会把它转成上游认的 chat/completions —— 这正是 CC Switch 那套「本地路由」做的事，只是桥自带、不用再装一个中间人。':
+    'Codex speaks the Responses protocol (/v1/responses); the bridge converts it into the chat/completions your upstream accepts — exactly what CC Switch\'s "local routing" does, except the bridge does it itself, so there is no extra middleman to install.',
+  '注意：Codex 已移除 wire_api = "chat"，网上旧教程里那种写法会直接报错，下面这段用的是唯一还能用的 responses。':
+    'Note: Codex has removed wire_api = "chat" — the older tutorials online still show it, and it will fail outright. The snippet below uses responses, the only value still accepted.',
+  '模型名照常填 gpt-5.1-codex，桥会映射到真实模型（当前':
+    'Keep using gpt-5.1-codex as the model name; the bridge maps it to the real model (currently ',
+  '把下面这段写进 ~/.codex/config.toml（没有就新建；已存在就在 [model_providers.*] 里加一节，别覆盖别的内容）':
+    'Paste the block below into ~/.codex/config.toml (create the file if missing; if it already exists, add a [model_providers.*] section rather than overwriting anything)',
+  '令牌写在 config.toml 的 experimental_bearer_token，不要去动 auth.json —— 那是官方登录缓存，改它会影响 Codex 的官方插件与远程控制':
+    'The token goes into experimental_bearer_token in config.toml — leave auth.json alone; that is the official login cache, and changing it affects Codex\'s official plugins and remote control',
+  '改完要重启 Codex（它在启动时读 config.toml），然后在 codex 里直接提问即可':
+    'Restart Codex afterwards (it reads config.toml at startup), then just ask it something',
+  '--- Codex（~/.codex/config.toml）---': '--- Codex (~/.codex/config.toml) ---',
+  '协议转换: Codex（Responses 协议 → 桥转成 chat/completions）':
+    'Protocol shim: Codex (Responses protocol → the bridge converts it to chat/completions)',
   '--- opencode（opencode.json）---': '--- opencode (opencode.json) ---',
   '--- Claude Code（环境变量）---': '--- Claude Code (environment variables) ---',
   '--- 兼容性 ---': '--- compatibility ---',
@@ -1373,6 +1498,22 @@ const I18N_EN = {
   'dsh 模型路由': 'dsh model routing',
   '凭据引用': 'Credential reference',
   'profile bundles': 'profile bundles',
+  '令牌文件权限': 'Token file permissions',
+  '（已收紧为仅本人可读）': ' (owner-only)',
+  '（令牌未落盘，无需收紧）': ' (token not written to disk — nothing to tighten)',
+  '原因未知': 'unknown reason',
+  /*
+   * 加固失败的**原因串**（`config.mjs` / `dsh-plugin/lib/index.js` 里生成）。
+   * 它们会作为 detail 的一部分送到界面上，而且是中文 —— 不收词条就是漏翻。
+   * 枚举得出有限几种，所以直接查表；`icacls` 自己那两行输出是 OEM 编码的
+   * 本地化文本，翻不动也不该翻，原样带过。
+   */
+  'USERNAME / USER 都为空，无法指定 ACL 主体': 'USERNAME / USER is empty — cannot name an ACL principal',
+  '尚未执行（令牌由配置显式给定时会跳过）': 'not run yet (skipped when the token is given explicitly by config)',
+  '令牌由环境变量给定，未落盘，无需加固': 'token comes from an environment variable — not on disk, nothing to harden',
+  '令牌由配置显式给定，未落盘，无需加固': 'token is given explicitly by config — not on disk, nothing to harden',
+  '同机其它用户可能读到本地令牌并调用桥、消耗账号额度。常见原因：组策略禁用 icacls、受限沙箱、或 USERNAME 环境变量缺失。手动修复：icacls "<令牌文件>" /inheritance:r /grant:r "%USERNAME%:F"':
+    'Other users on this machine may be able to read the local token and call the bridge, burning your account quota. Common causes: icacls disabled by group policy, a restricted sandbox, or a missing USERNAME environment variable. Manual fix: icacls "<token file>" /inheritance:r /grant:r "%USERNAME%:F"',
   '未找到 WorkBuddy 客户端（已探测默认位置并扫描常见安装目录）':
     'WorkBuddy client not found (probed the default location and scanned common install dirs)',
   '未取得密钥，跳过': 'no key obtained, skipped',
@@ -1511,10 +1652,18 @@ const I18N_RULES_EN = [
   [/^- 令牌剩余：(.+)$/, (m, d) => '- Token TTL: ' + translateText(d)],
   [/^- 未取到有效凭据：(.+)$/, '- No valid credentials: $1'],
   [/^- AtRest：(.+)$/, (m, d) => '- AtRest: ' + translateText(d)],
-  [/^- \[(.)\] (.+)：(.+)（建议：(.+)）$/, (m, mark, label, detail, hint) =>
+  /*
+   * label 用 `([^：]+)` 而不是 `(.+)` —— **标签里不可能有全角冒号**，
+   * 用贪婪的 `(.+)` 会让它在 detail 含 `：` 时把前半截一起吞掉：
+   *   `- [!] 令牌文件权限：.\…bridge-token 未能收紧：icacls 起不来：EBUSY（建议：…）`
+   * 贪婪匹配下 label 变成「令牌文件权限：.\…bridge-token 未能收紧」，查表当然查不到，
+   * 于是标签留在中文、detail 只剩 `EBUSY` 被当成 hint 翻 —— 半句中文半句英文。
+   * 这个坑在 detail 出现之前一直是隐性的（既有 detail 都不含 `：`）。
+   */
+  [/^- \[(.)\] ([^：]+)：(.+)（建议：(.+)）$/, (m, mark, label, detail, hint) =>
     '- [' + mark + '] ' + translateText(label) + ': ' + translateText(detail)
       + ' (suggestion: ' + translateText(hint) + ')'],
-  [/^- \[(.)\] (.+)：(.+)$/, (m, mark, label, detail) =>
+  [/^- \[(.)\] ([^：]+)：(.+)$/, (m, mark, label, detail) =>
     '- [' + mark + '] ' + translateText(label) + ': ' + translateText(detail)],
   [/^- （未取到诊断结果）$/, '- (no diagnostics result available)'],
   [/^- 目录模型数：(.+)$/, '- Models in catalog: $1'],
@@ -1634,6 +1783,14 @@ const I18N_RULES_EN = [
   [/^点击复制 (.+)$/, (m, rest) => 'Click to copy ' + translateText(rest)],
   [/^复制 (.+)$/, (m, rest) => 'Copy ' + translateText(rest)],
   [/^已复制 (.+)$/, (m, rest) => 'Copied ' + translateText(rest)],
+  // 一键接入的模型下拉：aria-label 是「客户端名 + 空格 + 接入模型 / 主模型」拼出来的
+  [/^(.+) 接入模型$/, (m, label) => translateText(label) + ' model'],
+  [/^(.+) 主模型$/, (m, label) => translateText(label) + ' default model'],
+  // 「N 个模型」是拼出来的计数，词条表只能命中完整节点，靠规则兜
+  [/^(\d+) 个模型$/, '$1 models'],
+  // 模型清单里的两处 aria-label（客户端名 + 模型 id + 动作）
+  [/^(.+) 搜索模型$/, (m, label) => translateText(label) + ' search models'],
+  [/^(.+) 设为主模型$/, (m, label) => translateText(label) + ' set as default model'],
   // 模型选择器的徽章 title：GLM-5.3（点击移除）
   [/^(.+)（点击移除）$/, (m, rest) => rest + ' (click to remove)'],
   [/^(.+)（点击加入）$/, (m, rest) => rest + ' (click to add)'],
@@ -1713,6 +1870,14 @@ const I18N_RULES_EN = [
   // 总览卡片 / 面板 note（都是拼出来的）
   [/^模型 (\d+)$/, 'Model $1'],
   [/^(模型 \d+) · (.+)$/, (m, g, k) => translateText(g) + ' · ' + translateText(k)],
+  /*
+   * 形如 `模型 1 model-id` —— 图形表单里复制按钮的 **title / aria-label**。
+   * 与上一行的区别只是分隔符：表单逐格那一版用的是空格（`formGuideBox` 的
+   * `g.title + ' ' + f.k`），速查表那一版用 ` · `（`providerFormFields`）。
+   * 少这一条，英文模式下悬停复制按钮会看到「Click to copy 模型 1 model-id」——
+   * 半句英文半句中文。tooltip 也算用户可见文案（TreeWalker 扫不到，靠属性扫描兜）。
+   */
+  [/^(模型 \d+) (.+)$/, (m, g, k) => translateText(g) + ' ' + translateText(k)],
   [/^至 (.+)$/, 'until $1'],
   [/^本地 (.+)$/, 'Local $1'],
   [/^运行 (.+)$/, (m, d) => 'up ' + translateText(d)],
@@ -1762,6 +1927,16 @@ const I18N_RULES_EN = [
     'multiple account snapshots exist; pinned to $1 to avoid picking the wrong account'],
   [/^缺失：(.+)；在 profile 目录执行 pnpm add <包名>@<与 DSH 一致的版本>。注意版本必须对齐——装错代次会连 peer 依赖一起错$/,
     'Missing: $1; in the profile directory run pnpm add <package>@<same version as DSH>. Versions must line up — installing the wrong generation breaks peer dependencies too.'],
+  /*
+   * 令牌文件权限项。detail 是「路径 + 结论」，路径是变量 ——
+   * 整串查表查不到，只能按后缀分流（与上面「账号 … · 剩余 …」同一套做法）。
+   */
+  [/^(.+)（已收紧为仅本人可读）$/, '$1 (owner-only)'],
+  [/^(.+)（令牌未落盘，无需收紧）$/, '$1 (token not written to disk — nothing to tighten)'],
+  [/^(.+) 未能收紧：(.+)$/, (m, p, r) => p + ' could not be tightened: ' + translateText(r)],
+  // 上面那条会把 reason 丢回 translateText —— 这两个是 reason 里唯一动态的部分
+  [/^icacls 起不来：(.+)$/, 'icacls could not be started: $1'],
+  [/^icacls 退出码 (.+)$/, 'icacls exited with code $1'],
 
   // 图表 tooltip / 无障碍标签
   [/^(.+)：调用次数 (\d+)$/, '$1: $2 calls'],
@@ -2040,7 +2215,18 @@ const CARD_ICONS = {
 /** 上一次渲染的读数，按指标名存：用来判断「这一格刚才是不是变了」。 */
 const lastCardVals = {};
 
-function card(key, value, note, small) {
+/**
+ * 一张状态卡。
+ *
+ * @param {string} key   指标名（同时是 CARD_ICONS 的查表键）
+ * @param {string} value 读数（大字号那一行）
+ * @param {string} note  脚注（可空）
+ * @param {boolean} small 读数是否用小号（长文本，如「运行 1 小时 30 分」）
+ * @param {string} [tone] 图标的语义色档位：ok / warn / fail / info / primary / muted。
+ *                        它**只决定右上角那枚图标的颜色**，不参与任何判断，
+ *                        也不改变读数与脚注的渲染。不传则退回主色。
+ */
+function card(key, value, note, small, tone) {
   const icon = CARD_ICONS[key] || '';
   /*
    * 值变了要留痕：轮询每 20 秒静默换掉数字（积分、模型数、令牌剩余），
@@ -2049,7 +2235,8 @@ function card(key, value, note, small) {
    */
   const changed = Object.prototype.hasOwnProperty.call(lastCardVals, key) && lastCardVals[key] !== value;
   lastCardVals[key] = value;
-  return '<div class="card"><div class="k"><span>' + escapeAttr(key) + '</span>' + icon + '</div>' +
+  return '<div class="card' + (tone ? ' tone-' + tone : '') + '">' +
+    '<div class="k"><span>' + escapeAttr(key) + '</span>' + icon + '</div>' +
     '<div class="v' + (small ? ' small' : '') + (changed ? ' bump' : '') + '">' + escapeAttr(value) + '</div>' +
     (note ? '<div class="note">' + escapeAttr(note) + '</div>' : '') + '</div>';
 }
@@ -4046,7 +4233,8 @@ function renderCards() {
     b.pid
       ? ('PID ' + b.pid + (b.catalogSize != null ? '　目录 ' + b.catalogSize + ' 个模型' : ''))
       : (b.running ? '该桥未汇报进程信息（版本较旧）' : ''),
-    true));
+    true,
+    b.running ? 'ok' : 'fail'));
 
   const models = lastModels;
   cards.push(card('可用模型',
@@ -4055,20 +4243,31 @@ function renderCards() {
       ? (lastModelsError ? '模型目录读取失败：' + lastModelsError : '正在读取模型目录…')
       : (models.length
         ? models.slice(0, 2).map(m => m.id).join(' · ') + (models.length > 2 ? ' 等 ' + models.length + ' 个' : '')
-        : '桥未运行或目录为空')));
+        : '桥未运行或目录为空'),
+    false,
+    'primary'));
 
+  /*
+   * 令牌剩余按**剩余时长**给图标上色：< 7 天红、< 30 天琥珀、否则绿。
+   * 这样「还剩 5 天」不用读文字就能被一眼看见 —— 而这正是这张卡存在的全部意义。
+   * 纯视觉映射，不参与任何判断。
+   */
+  const tokenTone = !a ? 'muted'
+    : (a.remainingMs < 7 * 86400000 ? 'fail'
+      : (a.remainingMs < 30 * 86400000 ? 'warn' : 'ok'));
   cards.push(card('令牌剩余',
     a ? fmtDuration(a.remainingMs) : '—',
     a ? '至 ' + new Date(a.expiresAt).toLocaleString('zh-CN', { hour12: false }) : '',
-    true));
+    true,
+    tokenTone));
 
   if (d.quota) {
     const pkgs = d.quota.packages || [];
     const detail = pkgs.slice(0, 2).map(p => p.name + ' ' + p.remain + '/' + p.size).join(' · ')
       + (pkgs.length > 2 ? ' 等 ' + pkgs.length + ' 个套餐' : '');
-    cards.push(card('积分余额', String(d.quota.total), detail || '无套餐'));
+    cards.push(card('积分余额', String(d.quota.total), detail || '无套餐', false, 'warn'));
   } else {
-    cards.push(card('积分余额', '—', '桥未运行或查询失败', true));
+    cards.push(card('积分余额', '—', '桥未运行或查询失败', true, 'muted'));
   }
 
   const cfgOk = d.dsh.routeLive && d.dsh.hasBridgeKey;
@@ -4077,19 +4276,24 @@ function renderCards() {
     (d.dsh.routeLive ? '路由 ✓' : '路由 ✗') + '　' +
     (d.dsh.hasBridgeKey ? '凭据 ✓' : '凭据 ✗') + '　' +
     (d.dsh.bundlesOk ? 'bundle ✓' : 'bundle ✗'),
-    true));
+    true,
+    cfgOk ? 'ok' : 'muted'));
 
   cards.push(card('账号',
     a ? (a.account || '—') : '—',
-    a ? 'uid ' + (a.userId || '').slice(0, 8) + '…' : (d.credentials.error || '未取到')));
+    a ? 'uid ' + (a.userId || '').slice(0, 8) + '…' : (d.credentials.error || '未取到'),
+    false,
+    'muted'));
 
   cards.push(card('凭据加密',
     a ? (a.encrypted ? 'AtRest 信封' : '明文') : '—',
-    a && a.keyIdMatches ? 'keyId ' + a.keyId : (a ? 'keyId 不匹配' : '')));
+    a && a.keyIdMatches ? 'keyId ' + a.keyId : (a ? 'keyId 不匹配' : ''),
+    false,
+    a && a.encrypted ? 'ok' : 'muted'));
 
   cards.push(card('上游端点',
     b.upstream ? b.upstream.replace('https://', '') : '—',
-    '本地 ' + b.endpoint, true));
+    '本地 ' + b.endpoint, true, 'info'));
 
   $('cards').innerHTML = cards.join('');
 }
@@ -5207,6 +5411,49 @@ function claudeCodeConfigText(d) {
 }
 
 /**
+ * Codex 的 `~/.codex/config.toml` 片段。
+ *
+ * ## 为什么必须写 `wire_api = "responses"`
+ *
+ * Codex **已经移除了** `wire_api = "chat"` —— 配里写 `chat` 会直接报
+ * 「`chat` is no longer supported」（见它的 model-provider-info 源码，
+ * 0.162 稳定版就是这样）。网上大量教程还停在 `chat` 时代，照抄必然撞墙，
+ * 所以这里把原因直接写在卡片里，而不是让用户去猜为什么报错。
+ *
+ * 好消息是 Codex 只会说这一种协议，而桥正好把它转成上游认的
+ * chat/completions —— 所以「Base URL 指过来」之外不需要用户做任何事。
+ *
+ * ## 令牌为什么写在 config.toml，而不是 auth.json
+ *
+ * `auth.json` 是**官方 ChatGPT 登录缓存**的专用文件。第三方供应商的 key 塞进去
+ * 会让 Codex 认不出官方账号，连带影响它的官方插件与远程控制。
+ * CC Switch 的做法也是把第三方的 key 写进 config.toml 的
+ * `experimental_bearer_token`（保持 auth.json 干净）——这里照抄这个做法。
+ * 想改成从环境变量取，把最后一行换成 `env_key = "WORKBUDDY_TOKEN"` 即可。
+ */
+function codexConfigText(d) {
+  const base = (d && d.baseUrlOpenAI) || 'http://127.0.0.1:8790/v1';
+  const key = (d && d.token) || 'wb-local-bridge';
+  const model = (d && d.responsesModel) || 'glm-5.3';
+  return [
+    '# ~/.codex/config.toml',
+    `model = "${model}"`,
+    'model_provider = "workbuddy"',
+    '',
+    '[model_providers.workbuddy]',
+    'name = "WorkBuddy (local bridge)"',
+    `base_url = "${base}"`,
+    // 配置片段里的注释按既有约定用英文（见 claudeCodeConfigText 的
+    // '# macOS / Linux'）：这是**机器产物**里的一行，不是界面文案。
+    // 而且 pre.textContent 是**一整块多行文本节点**，i18n 按节点匹配必然漏掉它 ——
+    // 塞中文进去就是英文模式下一块永远翻不掉的中文。
+    '# responses is the only wire_api Codex still accepts (chat was removed upstream)',
+    'wire_api = "responses"',
+    `experimental_bearer_token = "${key}"`,
+  ].join('\n');
+}
+
+/**
  * 图形界面「自定义 OpenAI 兼容提供商」表单的**逐字段取值**。
  *
  * 为什么返回结构化数组而不是一段文本：GUI 表单是**一格一格填**的，
@@ -5423,6 +5670,28 @@ function clientValueRow(label, value, hint) {
   return row;
 }
 
+/**
+ * 把「一个字符串」或「分段数组」写进元素。
+ *
+ * 数组时**逐段 append 成独立的文本节点**，各段单独参与 i18n。
+ *
+ * 为什么必须这样：词条表是**按完整文本节点**匹配的。把分段的文案用 `+` 拼成
+ * 一根字符串后，整条既不在表里、也匹配不到规则 —— 英文模式下整段保持中文。
+ * 实测：客户端接入面板里「Claude Code / 图形表单 / 其它客户端 / Codex」四块说明
+ * 全部因此漏翻，而词条表里对应的**分段条目早就写好了**
+ * （如「模型名照常填 claude-*，桥会映射到真实模型（当前」）—— 只是永远匹配不到。
+ *
+ * 分段之后：静态段各自命中词条表；插值（模型 id 这类**数据**）单独成节点、
+ * 不参与翻译 —— 这正是想要的，模型 id 不是界面文案，翻它反而错。
+ */
+function appendParts(el, parts) {
+  for (const part of (Array.isArray(parts) ? parts : [parts])) {
+    if (part == null || part === '') continue;
+    el.append(document.createTextNode(String(part)));
+  }
+  return el;
+}
+
 /** 一个客户端卡片：名称 + 状态标签 + 说明 + 步骤 + 代码块。 */
 function clientCard(name, status, note, steps, blocks, blockOpts = {}) {
   const card = clientEl('div', 'clientcard');
@@ -5432,14 +5701,801 @@ function clientCard(name, status, note, steps, blocks, blockOpts = {}) {
   const cls = status === 'ok' ? ' ok' : (status === 'no' ? ' fail' : '');
   head.append(clientEl('span', 'tag' + cls, label));
   card.append(head);
-  card.append(clientEl('p', 'clientcard-note', note));
+  card.append(appendParts(clientEl('p', 'clientcard-note'), note));
   if (steps && steps.length) {
     const ol = clientEl('ol', 'clientsteps');
-    for (const s of steps) ol.append(clientEl('li', null, s));
+    for (const s of steps) ol.append(appendParts(clientEl('li'), s));
     card.append(ol);
   }
   for (const pair of blocks || []) card.append(clientCodeBlock(pair[0], pair[1], blockOpts));
   return card;
+}
+
+// ── 一键接入（把 Base URL 与令牌直接写进客户端配置文件）──────────────────
+/**
+ * 这是控制台里**唯一会动到仓库之外文件**的功能，所以三条底线写死在实现里：
+ *
+ *   1. **动手前把「将改动什么」摆出来**（原生 confirm 逐行可读），不搞"点一下
+ *      悄悄就改了"；
+ *   2. **只动自己的键 / 节**，写入前整份备份，撤销按原始值逐键还原；
+ *   3. **结果如实回报** —— "没写进去"、"静态自检没过"、"验证连不上"都要说出来，
+ *      不能只报个"成功"。
+ *
+ * 「本机实测过没有」由服务端给（`e2e`），界面**照实显示**：没实测过就标
+ * 「本机未实测」，绝不写成"支持"—— 用户装完发现不对，会连带怀疑整个项目。
+ */
+let lastConnect = null;
+let connectBusy = null;   // 正在操作的客户端 id（此期间所有按钮禁用）
+let connectOpen = null;   // 展开看「将改动什么」的客户端 id
+let connectResult = null; // { id, ok, lines: [...] } 上一次操作的结果
+let connectModel = {};    // { [客户端 id]: 模型 id } —— 用户为各客户端显式选择的**主模型**
+/**
+ * `{ [客户端 id]: string[] }` —— 用户显式勾选要接入的**模型集合**。
+ *
+ * 没勾过就不发这个参数，服务端会认配置文件里现在声明的那批（`resolveSelection`）——
+ * 与主模型同一个道理：这是用户的选择，重新打开页面不该被精选集覆盖掉。
+ */
+let connectModels = {};
+
+/**
+ * 读取接入状态的失败原因（`{ status, detail }`），`null` = 这次读到了。
+ *
+ * **为什么必须单独记一个变量**：`lastConnect === null` 同时表示「还没读完」和
+ * 「读失败了」两件事，于是界面只剩「正在读取接入状态…」一个分支 —— 接口 404 时
+ * 面板**永远转圈**，既不报错也没有重试入口。实测踩到：控制台进程还在跑改动前的
+ * 旧代码（路由是后加的），`/api/connect` 回 404，用户盯着一块永远不动的占位文案，
+ * 无从判断是"慢"还是"坏了"。
+ */
+let connectReadError = null;
+
+/** 每个已接入客户端的验证结论：`{ state: 'busy'|'done', ok, lines: [...] }`。 */
+let connectVerify = {};
+
+/** 读接口的超时。**没有超时，一个挂住的接口就是一块永远转圈的面板。** */
+const CONNECT_TIMEOUT_MS = 15000;
+
+/**
+ * 带超时的 JSON 读取。
+ *
+ * 不用通用的 `api()`：那个既没有超时，也不把 HTTP 状态码告诉调用方 —— 而这里
+ * 两样都要。「接口不存在（404）」与「接口 15 秒没响应」对用户是两条不同的处置
+ * 路径（前者重启控制台、后者重试），含糊成一句"失败了"等于什么都没说。
+ */
+async function connectRead(path, options = {}) {
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), CONNECT_TIMEOUT_MS);
+  try {
+    const res = await fetch(path, {
+      ...options,
+      headers: { 'x-workbuddy-panel': '1', ...((options && options.headers) || {}) },
+      signal: ac.signal,
+    });
+    const text = await res.text();
+    let body = null;
+    try { body = JSON.parse(text); } catch { body = null; }
+    return { status: res.status, ok: res.ok, body };
+  } catch (err) {
+    return { status: 0, ok: false, body: null, netError: err };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * 把读失败翻成「给用户看的东西」：`{ status, detail }`；读成功返回 `null`。
+ *
+ * `detail` 一律是**整句固定文案**（不是拼出来的），这样英文模式下每个文本节点
+ * 都能命中词条表 —— 拼出来的句子查不到表，英文界面里会留下一截中文。
+ */
+function connectReadFailure(r) {
+  if (r.netError) {
+    return r.netError.name === 'AbortError'
+      ? { status: null, detail: '接口 15 秒没响应。' }
+      : { status: null, detail: '请求没能发出去（浏览器报错）。' };
+  }
+  if (r.status === 404) {
+    /*
+     * 这是本次用户实际遇到的那种：控制台的**后端进程**比页面旧。
+     * 只说"404"用户无从下手，得把处置办法（重启控制台）一并说了。
+     */
+    return { status: 404, detail: '控制台后端没有这个接口 —— 多半是控制台进程还在跑改动前的旧代码，重启控制台后刷新本页。' };
+  }
+  if (!r.ok) return { status: r.status, detail: '接口拒绝了这次读取。' };
+  if (!r.body || !Array.isArray(r.body.clients)) {
+    // 形状不对（比如桩环境里没有这条路由）不能往下用：renderClients 会抛 TypeError，把面板拖死
+    return { status: r.status, detail: '接口返回的内容不是接入状态（缺少客户端列表）。' };
+  }
+  return null;
+}
+
+/**
+ * 拉一次接入状态。
+ *
+ * 读失败**不清空**已有的数据：上次读到的行比一片空白更有用，顶部另给提示条。
+ * `autoVerify: false` 用于「刚写完」的场景 —— 那时写入结果里已经带了验证结论，
+ * 再自动验一遍是重复动作。
+ */
+async function loadConnect(opts = {}) {
+  try {
+    // 把各客户端已选的模型带上去，服务端据此重算 changes/preview —— 预览与写入同源
+    const qs = new URLSearchParams();
+    for (const [id, m] of Object.entries(connectModel)) {
+      if (m) qs.set(`model.${id}`, m);
+    }
+    for (const [id, list] of Object.entries(connectModels)) {
+      if (Array.isArray(list) && list.length) qs.set(`models.${id}`, list.join(','));
+    }
+    const q = qs.toString();
+    const r = await connectRead('/api/connect' + (q ? '?' + q : ''));
+    const bad = connectReadFailure(r);
+    if (bad) {
+      connectReadError = bad;
+      return;
+    }
+    connectReadError = null;
+    lastConnect = r.body;
+    if (opts.autoVerify !== false) verifyAppliedClients();
+  } catch (err) {
+    // connectRead 已经吞掉了网络异常；这里兜的是"我们自己写错了"这类意外，
+    // 兜住是为了不让整块面板陪葬（下面「复制片段」那条路仍然可用）
+    connectReadError = { status: null, detail: '读取接入状态时出错。' };
+    void err;
+  }
+}
+
+/**
+ * 已接入且**配置与当前值一致**的行，自动验一遍（静态读回 + 端到端）。
+ *
+ * 为什么只有"一致"的行才自动验：配置已经漂移的行（比如桥换过令牌）验了必然
+ * 报「静态自检未通过」—— 那不是问题，那是**已知且界面已经提示过**的状态
+ * （标签写着「需重新写入」）。自动验它只会制造一条看着吓人的红字。
+ * 想验的可以点那行的「验证接入」，结论一样会如实给出来。
+ *
+ * 不 `await`：验证要打一个来回，面板不该等它 —— 结论到了自己会重渲染。
+ */
+function verifyAppliedClients() {
+  const rows = (lastConnect && lastConnect.clients) || [];
+  for (const c of rows) {
+    if (!connectConnected(c) || connectVerify[c.id]) continue;
+    runVerify(c.id, { quiet: true });
+  }
+}
+
+/** 「前缀（可翻）+ 服务端原文（不翻）」组成的一行 —— 原文是数据，不是界面文案。 */
+function connectLine(prefix, data) {
+  const line = clientEl('div', null, prefix);
+  if (data) {
+    const span = clientEl('span', null, String(data));
+    span.setAttribute('data-i18n-skip', '');
+    line.append(span);
+  }
+  return line;
+}
+
+/**
+ * 把 `/api/connect/apply` 返回里「有哪几个键没能写入」翻成几行。
+ *
+ * 这类情况是**真话不能省**的典型：用户点了写入、上面的结论写着"已写入"，
+ * 但有几个键其实没进去（它们所在的上级不是对象，是用户自己的数据，我们不敢覆盖）。
+ * 不单独说出来的话，用户下次请求失败时完全想不到是这里 ——
+ * 而且它会以"客户端没生效"的形式出现，排查看起来跟这次操作毫无关系。
+ */
+function connectSkippedLines(skipped) {
+  const out = [];
+  if (!Array.isArray(skipped) || !skipped.length) return out;
+  out.push({ prefix: '以下键没能写入（它们的上一级不是对象，属于你自己的数据，没有覆盖）：', data: '' });
+  for (const k of skipped) out.push({ prefix: '· ', data: k });
+  out.push('把上面提到的那个字段改成对象（例如 "env": {}）后再点一次「写入」即可。');
+  return out;
+}
+
+/**
+ * 把 `/api/connect/verify` 的返回翻成几行结论。
+ *
+ * 返回数组的元素要么是整句文案（可翻），要么是 `{ prefix, data }`
+ * （前缀可翻 + 服务端原因原样展示）。
+ */
+function connectVerifyLines(r) {
+  const out = [];
+  const written = r.written || null;
+  if (!written) {
+    out.push('没有得到静态自检的结论。');
+  } else if (written.ok) {
+    out.push('静态自检通过：配置里的键都在。');
+  } else {
+    out.push({ prefix: '静态自检未通过：', data: written.reason || '' });
+  }
+  if (r.auth) {
+    out.push(r.auth.ok
+      ? '端到端验证通过：拿配置里的令牌连上了桥。'
+      : { prefix: '端到端验证没通过：', data: r.auth.reason || '' });
+  } else if (written && written.ok) {
+    out.push('只做了静态自检，没做端到端验证（桥没在跑？）。');
+  } else {
+    out.push('静态自检没过，没有做端到端验证。');
+  }
+  return out;
+}
+
+/**
+ * 验证一个客户端：静态读回（文件里的键对不对）+ 端到端（拿文件里的令牌真打一次桥）。
+ *
+ * 服务端 `/api/connect/verify` 与命令行 `npm run connect verify` 是同一套实现，
+ * 这里只是把控制台接上去 —— 在此之前它只能"写入时顺带验一次"，
+ * 写入之后配置有没有被改坏、令牌还有没有效，界面上没有任何入口能问。
+ */
+async function runVerify(id, opts = {}) {
+  const prev = connectVerify[id];
+  if (prev && prev.state === 'busy') return;
+  connectVerify[id] = { state: 'busy', ok: false, lines: [] };
+  if (!opts.quiet) renderClients();
+  const failed = { state: 'done', ok: false, lines: ['验证请求没能完成（接口没响应或返回了错误）。'] };
+  try {
+    const payload = { client: id };
+    if (connectModel[id]) payload.model = connectModel[id];
+    const r = await connectRead('/api/connect/verify', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const body = (r.ok && r.body && typeof r.body === 'object') ? r.body : null;
+    connectVerify[id] = body
+      ? { state: 'done', ok: body.ok === true, lines: connectVerifyLines(body) }
+      : failed;
+  } catch {
+    /*
+     * 兜住"我们自己写错了"这类意外。自动验证是**不 await 的**（面板不等它），
+     * 漏出去的 rejection 只会进控制台、界面上什么都不显示 —— 那就成了静默失效，
+     * 正是这块最不该有的东西。失败也要落成一行结论。
+     */
+    connectVerify[id] = failed;
+  }
+  renderClients();
+}
+
+/** 一行「改动」：键名、新旧值。中文只出现在**独立节点**里，不和动态值拼串。 */
+function connectChangeRow(c) {
+  const row = clientEl('div', 'connectchange');
+  row.append(clientEl('code', null, c.path));
+  if (c.kind === 'section') {
+    row.append(clientEl('span', 'connectarrow', c.from ? '替换已有的节' : '新增节'));
+    return row;
+  }
+  if (c.from === null || c.from === undefined) {
+    row.append(clientEl('span', 'connectarrow', '新增'));
+  } else {
+    row.append(clientEl('code', 'connectarrow', String(c.from)));
+    row.append(clientEl('span', 'connectarrow', '→'));
+  }
+  row.append(clientEl('code', null, String(c.to == null ? '' : c.to)));
+  return row;
+}
+
+/** 同一份改动，给原生 confirm 用的纯文本形式（`t()` 只能整行翻，所以要重组一遍）。 */
+function connectChangeText(c) {
+  if (c.kind === 'section') return `${c.path}  (${t(c.from ? '替换已有的节' : '新增节')})`;
+  if (c.from === null || c.from === undefined) return `${c.path}  (${t('新增')} ${c.to})`;
+  return `${c.path}: ${c.from} → ${c.to}`;
+}
+
+async function runConnect(action, id) {
+  const c = (lastConnect && lastConnect.clients || []).find((x) => x.id === id);
+  if (!c) return;
+
+  if (action === 'apply') {
+    const ok = confirm([
+      t('确定把 Base URL 与本地令牌写进这个客户端的配置文件？'),
+      '',
+      c.path,
+      ...c.changes.map(connectChangeText),
+      ...(c.reformats ? ['', t('注意：该文件会被重新排版为 2 空格缩进。')] : []),
+      '',
+      t('写入前会整份备份原文件，之后可以点「撤销」还原。'),
+    ].join('\n'));
+    if (!ok) return;
+  }
+
+  connectBusy = id;
+  connectResult = null;
+  renderClients();
+  try {
+    // 撤销按记录逐键还原，与模型无关；只有写入才带上所选模型
+    const payload = { client: id };
+    if (action === 'apply' && connectModel[id]) payload.model = connectModel[id];
+    const r = await api('/api/connect/' + (action === 'apply' ? 'apply' : 'undo'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    connectResult = { id, ok: r && r.ok === true, lines: connectResultLines(action, r || {}) };
+    /*
+     * 写入的返回里已经带了静态自检 + 端到端结论，直接记成这一行的验证结果
+     * —— 否则下面 `loadConnect` 的自动验证会再打一遍，同一份结论显示两遍。
+     */
+    if (action === 'apply' && r && r.ok && r.changed) {
+      connectVerify[id] = {
+        state: 'done',
+        ok: r.verify?.ok === true && r.auth?.ok === true,
+        lines: connectVerifyLines({ written: r.verify || null, auth: r.auth || null }),
+      };
+    }
+    if (action === 'undo') delete connectVerify[id];
+  } catch (err) {
+    connectResult = { id, ok: false, lines: [(err && err.message) || String(err)] };
+  } finally {
+    connectBusy = null;
+    await loadConnect({ autoVerify: action !== 'apply' });
+    renderClients();
+  }
+}
+
+/** 把接口返回翻成人话。每条都是**独立整句**，拼给界面时逐条成节点。 */
+function connectResultLines(action, r) {
+  if (action === 'undo') {
+    if (!r.ok) return [t('撤销失败：') + (r.error || '')];
+    return [t('已撤销，配置文件还原到接入之前。')];
+  }
+  if (!r.ok) return [t('写入失败：') + (r.error || '')];
+  const out = [];
+  out.push(r.changed ? t('已写入。') : t('没有改动 —— 已经是接入状态。'));
+  if (r.backup) out.push(t('原文件已备份到：') + r.backup);
+  if (r.reformats) out.push(t('该文件被重新排版为 2 空格缩进。'));
+  if (r.hardened && r.hardened.ok === false) {
+    out.push(t('令牌文件的权限没能收紧：') + (r.hardened.reason || ''));
+  }
+  if (r.verify) {
+    out.push(r.verify.ok ? t('静态自检通过：配置里的键都在。') : t('静态自检未通过：') + (r.verify.reason || ''));
+  }
+  if (r.auth) {
+    out.push(r.auth.ok
+      ? t('端到端验证通过：拿配置里的令牌连上了桥。')
+      : t('端到端验证没通过：') + (r.auth.reason || ''));
+  }
+  if (r.warning) out.push(r.warning);
+  // 有键没能写入时必须说 —— 「已写入」+ 静默跳过 = 用户下次请求失败时无从归因
+  if (r.skippedKeys && r.skippedKeys.length) {
+    for (const line of connectSkippedLines(r.skippedKeys)) {
+      out.push(line.prefix + (line.data || ''));
+    }
+  }
+  return out;
+}
+
+/**
+ * 「接入哪些模型」——**可搜索的清单**，不是 chip 云。
+ *
+ * 上一版把 30 个候选铺成一堆 chip：实测 269px、4 行，而且目录越长越长。
+ * 用户的真实动作是"从 30 个里挑几个"，所以这里给清单：搜索框 + 可滚动的行，
+ * 每行一个复选框，右边一颗 ★ 把它设为主模型（默认只露 7 行左右，不再撑高面板）。
+ *
+ * 搜索是**纯前端过滤**（不重新拉状态）：每敲一个字都往服务端跑一趟，输入框会卡。
+ * 勾选 / 设主模型才重新拉 —— `changes` 与 `preview` 必须跟着变，守住「所见即所写」。
+ */
+function connectModelList(c) {
+  const wrap = clientEl('div', 'connectmodels');
+  const selected = new Set(c.effectiveModels || (c.effectiveModel ? [c.effectiveModel] : []));
+  const mainOf = () => connectModel[c.id] || c.effectiveModel || '';
+  const all = (lastConnect && lastConnect.modelOptions) || [];
+  const busy = connectBusy !== null;
+
+  /** 勾选变了就重拉状态；主模型必须落在勾选里，否则客户端里选不到它。 */
+  const apply = async (next, mainNext) => {
+    const list = all.filter((m) => next.includes(m.id)).map((m) => m.id);
+    if (!list.length) return;                        // 至少留一个：空集合没法接入
+    connectModels[c.id] = list;
+    connectModel[c.id] = (mainNext && list.includes(mainNext)) ? mainNext : list[0];
+    delete connectVerify[c.id];
+    await loadConnect();
+    renderClients();
+  };
+
+  const head = clientEl('div', 'connectmodels-head');
+  head.append(clientEl('b', null, '接入哪些模型？'));
+  head.append(clientEl('span', 'modelpick-count', '已选 ' + selected.size + ' / ' + all.length));
+  const mk = (label, fn) => {
+    const b = clientEl('button', 'mini', label);
+    b.type = 'button';
+    b.disabled = busy;
+    b.onclick = fn;
+    return b;
+  };
+  head.append(mk('全选', () => apply(all.map((m) => m.id), mainOf())));
+  // 「用精选集」= 清掉显式选择，回到桥推荐的那几个（0 个模型不是一个可接入的状态）
+  head.append(mk('用精选集', () => {
+    delete connectModels[c.id];
+    delete connectModel[c.id];
+    delete connectVerify[c.id];
+    loadConnect().then(renderClients);
+  }));
+  wrap.append(head);
+
+  const search = clientEl('input', 'connectml-search');
+  search.type = 'search';
+  search.placeholder = '搜索模型…';
+  search.setAttribute('aria-label', c.label + ' 搜索模型');
+  search.disabled = busy;
+  wrap.append(search);
+
+  const list = clientEl('div', 'connectml-list');
+  wrap.append(list);
+
+  const renderList = () => {
+    const q = search.value.trim().toLowerCase();
+    const rows = all.filter((m) => !q
+      || m.id.toLowerCase().includes(q)
+      || String(m.name || '').toLowerCase().includes(q));
+    list.textContent = '';
+    if (!rows.length) {
+      list.append(clientEl('div', 'connectml-empty', '没有匹配的模型'));
+      return;
+    }
+    for (const m of rows) {
+      const on = selected.has(m.id);
+      const isMain = mainOf() === m.id;
+      const row = clientEl('div', 'connectml-row' + (on ? ' on' : ''));
+      const box = clientEl('input', 'connectml-box');
+      box.type = 'checkbox';
+      box.checked = on;
+      box.disabled = busy;
+      box.setAttribute('aria-label', m.id);
+      box.onchange = () => {
+        const next = new Set(selected);
+        if (next.has(m.id)) next.delete(m.id); else next.add(m.id);
+        // 取消勾选主模型时，主模型顺位交给下一个（服务端也会兜底）
+        apply([...next], isMain ? null : mainOf());
+      };
+      const id = clientEl('span', 'connectml-id', m.id);
+      if (m.name && m.name !== m.id) {
+        /*
+         * 展示名是**上游数据**（用户可能自己改成中文），不是界面文案：
+         * 标 `data-i18n-skip` 让翻译层别碰它 —— 与配置预览 `<pre>` 同一处理。
+         * 它同时挂在 title 上（供鼠标悬停看全名），属性也在跳过范围内。
+         */
+        id.title = m.name;
+        id.setAttribute('data-i18n-skip', '');
+      }
+      row.append(box, id);
+      const star = clientEl('button', 'connectml-star' + (isMain ? ' on' : ''), isMain ? '★' : '☆');
+      star.type = 'button';
+      star.disabled = busy;
+      star.title = '设为主模型';
+      star.setAttribute('aria-label', c.label + ' ' + m.id + ' 设为主模型');
+      star.setAttribute('aria-pressed', String(isMain));
+      star.onclick = () => {
+        const next = new Set(selected);
+        next.add(m.id);                                // 设主模型顺带把它勾上
+        apply([...next], m.id);
+      };
+      row.append(star);
+      list.append(row);
+    }
+  };
+  search.oninput = renderList;
+  renderList();
+
+  wrap.append(clientEl('p', 'modelpick-note',
+    '★ 是主模型（客户端打开时用的那个）；勾选几个就接几个，上游所有可用模型都能加。'));
+  return wrap;
+}
+
+/**
+ * 一个客户端的详情面板：模型、验证、改动、撤销**都在这里**。
+ *
+ * 为什么收成一个展开器：默认态每行挂 5 个按钮（选择模型/写入/撤销/验证/将改动什么），
+ * 三行凑不出一个整齐的右边缘；而"验证结论 + 改动预览"两块一撑，已接入那行会变成
+ * 另外两行的近三倍高（实测 113px vs 41px）。这些内容一次只关心一个客户端，
+ * 收进它自己的展开器最省地方，也让三行看起来是一个整体。
+ */
+function connectDetail(c) {
+  const d = clientEl('div', 'connectdetail');
+  const busy = connectBusy !== null;
+  const mk = (label, fn, cls) => {
+    const b = clientEl('button', 'mini' + (cls ? ' ' + cls : ''), label);
+    b.type = 'button';
+    b.disabled = busy;
+    b.onclick = fn;
+    return b;
+  };
+
+  d.append(connectModelList(c));
+
+  // ── 验证：结论 + 重新验一次 ────────────────────────────────────────────
+  const vsec = clientEl('div', 'connectsec');
+  const vhead = clientEl('div', 'connectsec-head');
+  vhead.append(clientEl('b', null, '验证'));
+  if (connectConnected(c) || c.applied) {
+    const vb = mk('验证接入', () => runVerify(c.id));
+    if (connectVerify[c.id] && connectVerify[c.id].state === 'busy') {
+      vb.disabled = true;
+      vhead.append(vb, clientEl('span', 'connectbusy', '正在验证…'));
+    } else {
+      vhead.append(vb);
+    }
+  }
+  vsec.append(vhead);
+  const v = connectVerify[c.id];
+  if (v && v.state === 'done') {
+    const res = clientEl('div', 'connectresult ' + (v.ok ? 'ok' : 'bad'));
+    for (const line of v.lines) {
+      res.append(typeof line === 'string' ? clientEl('div', null, line) : connectLine(line.prefix, line.data));
+    }
+    vsec.append(res);
+  } else if (v && v.state === 'busy') {
+    vsec.append(clientEl('div', 'connectresult', '正在验证…'));
+  } else if (!connectConnected(c) && !c.applied) {
+    vsec.append(clientEl('p', 'clientcard-note', '接入之后可以在这里验证：静态读回 + 拿配置里的令牌真打一次桥。'));
+  }
+  d.append(vsec);
+
+  // ── 改动：逐条列出 + 目录 + 写入后的完整内容 ───────────────────────────
+  const dsec = clientEl('div', 'connectsec');
+  const dhead = clientEl('div', 'connectsec-head');
+  dhead.append(clientEl('b', null, '将改动什么'));
+  // 撤销是破坏性动作，放在详情里、不跟「写入」并排
+  if (c.applied) dhead.append(mk('撤销接入', () => runConnect('undo', c.id), 'danger'));
+  dsec.append(dhead);
+  if (c.error) {
+    dsec.append(clientEl('div', null, c.error));
+  } else if (!c.changes.length) {
+    dsec.append(clientEl('div', null, '已经是接入状态，写入不会改动任何内容。'));
+  } else {
+    for (const ch of c.changes) dsec.append(connectChangeRow(ch));
+  }
+  // Codex 的多模型靠一份单独的目录文件：要说清它会被写到哪、加了几条
+  if (!c.error && c.catalog) {
+    const line = clientEl('div', 'connectcatalog', '另外会写一份模型目录：');
+    line.append(clientEl('code', null, c.catalog.path));
+    dsec.append(line);
+  } else if (!c.error && c.catalogSkipped) {
+    dsec.append(clientEl('div', 'connectcatalog', '模型目录不写 —— ' + c.catalogSkipped));
+  }
+  if (!c.error && c.preview) {
+    /*
+     * 预览默认折叠：它是一整份配置文件（几百行），展开器要回答的是
+     * 「这个客户端会改什么」——改动逐条已经在上面了。
+     * 不折的话详情一开就 895px（实测），下面的东西全被推到屏幕外。
+     */
+    const preBox = document.createElement('details');
+    preBox.className = 'connectpre';
+    const sum = document.createElement('summary');
+    sum.textContent = '写入后的完整内容';
+    preBox.append(sum);
+    const pre = clientEl('pre', null, c.preview);
+    /*
+     * 这是**数据不是界面文案**：带 `data-i18n-skip` 让翻译层别碰它。
+     * 不标的话，英文模式下翻译器会去翻整段配置（必然翻不动，还白搭一次扫描）。
+     * 与桥日志 `<pre id="logOut">` 同一处理。
+     */
+    pre.setAttribute('data-i18n-skip', '');
+    const wrapPre = clientEl('div', 'connectpreview');
+    wrapPre.append(pre);
+    preBox.append(wrapPre);
+    dsec.append(preBox);
+  }
+  d.append(dsec);
+
+  if (connectResult && connectResult.id === c.id) {
+    const res = clientEl('div', 'connectresult ' + (connectResult.ok ? 'ok' : 'bad'));
+    for (const line of connectResult.lines) res.append(clientEl('div', null, line));
+    d.append(res);
+  }
+  return d;
+}
+
+/**
+ * 这一行的配置**现在就是接入状态**吗 —— 不管是本控制台写的，还是用户照「复制片段」
+ * 自己抄进去的。两种情况都该能验证、也该显示成已接入（"不是我们写的"不是未接入）。
+ */
+function connectConnected(c) {
+  if (c.error) return false;
+  if (c.applied && c.changed) return false;   // 写进去过，但配置已经漂移了
+  return c.applied === true || (c.exists === true && c.changed === false);
+}
+
+/**
+ * 这一行现在到底算什么状态。
+ *
+ * 比原实现多两档，都是为了**不说假话**：
+ *   - 「已接入」原先只看 manifest 文件在不在。配置后来被手改过、桥换过端口/令牌，
+ *     它照样挂绿色的「已接入」—— 而那份配置其实已经连不上了。现在配置一旦与
+ *     当前值不一致，就明说「需重新写入」。
+ *   - 反过来，用户自己照「复制片段」抄进配置文件的（没走写入按钮，没有 manifest），
+ *     只要文件内容已经与当前值一致，就该认成已接入 —— 不能因为"不是我们写的"
+ *     就显示成未接入，那会诱导用户再点一次写入。
+ *   - 验证结论过期不作数：只有**当前**仍是接入状态的行，失败结论才写进标签。
+ *     否则撤销之后再点一次，标签会挂着一个早已不适用的红色结论。
+ */
+function connectStatus(c) {
+  if (c.error) {
+    if (c.applied) return { text: '已接入', ok: true };
+    return c.installed
+      ? { text: '已安装，尚未接入', ok: false }
+      : { text: '未检测到该客户端', ok: false };
+  }
+  // 漂移优先：这里给出的下一步动作最具体（重新写入），比一句"验证没过"更有用
+  if (c.applied && c.changed) return { text: '已接入，需重新写入', ok: false };
+  const v = connectVerify[c.id];
+  if (connectConnected(c) && v && v.state === 'done' && !v.ok) {
+    return { text: '已接入，验证未通过', ok: false };
+  }
+  if (connectConnected(c)) return { text: c.applied ? '已接入' : '已接入（非本控制台写入）', ok: true };
+  return c.installed
+    ? { text: '已安装，尚未接入', ok: false }
+    : { text: '未检测到该客户端', ok: false };
+}
+
+function connectRow(c) {
+  const row = clientEl('div', 'connectrow');
+  /*
+   * 紧凑行：状态 + 名称 + 路径 + 「N 个模型」+ 写入 + 详情。
+   *
+   * 三行**高矮一致**是刻意的：模型选择、验证结论、改动预览、撤销全都收进各自的
+   * 详情面板，默认态每行只有这一条线。（上一版把验证结论挂在行里，
+   * 已接入那行 113px、另两行 41px，整块看着是歪的。）
+   */
+  const meta = clientEl('div', 'connectmeta');
+  const st = connectStatus(c);
+  meta.append(clientEl('span', 'tag ' + (st.ok ? 'ok' : 'idle'), st.text));
+  meta.append(clientEl('b', 'connectname', c.label));
+  if (!c.e2e) meta.append(clientEl('span', 'tag idle', '本机未实测'));
+  const path = clientEl('code', 'connectpath', c.path);
+  path.title = c.path;          // 路径截断显示，完整值放 title 里
+  meta.append(path);
+  /*
+   * 路径是怎么定下来的 —— 必须让用户看得见。
+   *
+   * 别人的机器上可能设着 `CODEX_HOME` / `CLAUDE_CONFIG_DIR`（各家官方支持的重定位），
+   * 或者用户在 `.env` 里覆盖过 `WORKBUDDY_*`。只显示一个最终路径的话，
+   * 用户没法确认"它认没认对地方" —— 认错了就是把配置写到一个客户端根本不读的位置。
+   * 标签本身可翻；变量名是**数据**，单独成节点不翻译。
+   */
+  const src = c.pathSource || {};
+  if (src.source === 'client' || src.source === 'env') {
+    const tag = clientEl('span', 'tag idle connectpsrc', src.source === 'env' ? '按设置写入：' : '按客户端的设置写入：');
+    tag.append(clientEl('code', null, src.envName || ''));
+    meta.append(tag);
+  }
+  row.append(meta);
+
+  const acts = clientEl('div', 'connectacts');
+  const mkBtn = (label, fn, cls) => {
+    const b = clientEl('button', 'mini' + (cls ? ' ' + cls : ''), label);
+    b.type = 'button';
+    b.disabled = connectBusy !== null;
+    b.onclick = fn;
+    return b;
+  };
+  // 接了几个模型：纯信息，不是按钮（改它要去详情里勾）
+  acts.append(clientEl('span', 'connectmcount', (c.effectiveModels || []).length + ' 个模型'));
+
+  if (connectBusy === c.id) {
+    acts.append(clientEl('span', 'connectbusy', '处理中…'));
+  } else {
+    acts.append(mkBtn(c.applied ? '重新写入' : '写入', () => runConnect('apply', c.id), 'primary'));
+    acts.append(mkBtn(connectOpen === c.id ? '收起详情' : '详情', () => {
+      connectOpen = connectOpen === c.id ? null : c.id;
+      renderClients();
+    }));
+  }
+  row.append(acts);
+
+  if (connectOpen === c.id) row.append(connectDetail(c));
+  return row;
+}
+
+/** 「重试 / 重新读取」按钮：重新拉一次接入状态并重渲染。 */
+function connectReloadButton(label) {
+  const b = clientEl('button', 'mini', label);
+  b.type = 'button';
+  b.disabled = connectBusy !== null;
+  b.onclick = async () => {
+    b.disabled = true;
+    await loadConnect();
+    renderClients();
+  };
+  return b;
+}
+
+/**
+ * 失败的详情：HTTP 状态码 + 原因。
+ *
+ * 两种失败态（从没读到、有旧数据时没读到）**共用**这一段 —— 分开写必然漂移成
+ * 「一种说清了、另一种只说'失败了'」，而后者正是用户最容易遇到的那条路。
+ */
+function connectFailDetail(e) {
+  const out = [];
+  if (e && e.status) {
+    // 「HTTP 状态：」是整句文案（可翻），状态码本身是数据，单独成节点
+    const line = clientEl('div', 'connectfail-s', 'HTTP 状态：');
+    line.append(clientEl('code', null, String(e.status)));
+    out.push(line);
+  }
+  if (e && e.detail) out.push(clientEl('div', 'connectfail-d', e.detail));
+  return out;
+}
+
+/**
+ * 读不到接入状态时的卡片。
+ *
+ * 存在的全部意义：**别让用户对着一个转不完的圈猜**。说什么坏了（接口不存在 /
+ * 超时 / 形状不对）、可能的原因、以及下一步怎么办（重启控制台），再给个重试。
+ */
+function connectFailBox() {
+  const box = clientEl('div', 'connectfail');
+  box.append(clientEl('b', null, '读取接入状态失败。'));
+  for (const node of connectFailDetail(connectReadError || {})) box.append(node);
+  box.append(connectReloadButton('重试'));
+  return box;
+}
+
+function connectBlock() {
+  const box = clientEl('div', 'connectbox');
+  const head = clientEl('div', 'connecthead');
+  head.append(clientEl('b', null, '一键接入'));
+  head.append(clientEl('span', 'tag ok', '自动备份 · 可撤销'));
+  /*
+   * 「重新读取」常驻：这块的状态是**服务端现算的**（配置有没有被改过、桥还在不在），
+   * 页面打开后可能已经过时。原先只有整页刷新一条路，遇到「控制台刚重启完」
+   * 这种正是要重读的场景，用户只能刷新整页。
+   */
+  head.append(connectReloadButton('重新读取'));
+  box.append(head);
+  /* 主路径只留一行说明；其余注意事项收进折叠区 —— 它们一年看一次，却天天占着屏。 */
+  box.append(clientEl('p', 'connectlead',
+    '把 Base URL 与令牌直接写进客户端的配置文件 —— 不用手工对着 JSON / TOML 抄。只动它自己的键，写入前整份备份。'));
+
+  const how = document.createElement('details');
+  how.className = 'connecthow';
+  const sum = document.createElement('summary');
+  sum.textContent = '多模型怎么接？注意事项';
+  how.append(sum);
+  how.append(clientEl('p', 'clientcard-note',
+    '每个客户端可以接多个模型：勾选的那批会写进客户端，其中一个作为主模型（默认为该客户端打开时用的那个）。opencode 的模型表、Claude Code 的 /model 选择器、Codex 的模型目录，各按自己认的写法落盘。'));
+  how.append(clientEl('p', 'clientcard-note',
+    '「验证接入」会重新读一遍配置文件，并拿里面的令牌真打一次桥 —— 静态读回只能证明文件里写对了，证明不了这个令牌现在还能用。'));
+  how.append(clientEl('p', 'clientcard-note',
+    '标了「本机未实测」的客户端：写入逻辑有往返单测，但本机没装它，所以「它是否认这份配置」没法替你保证。'));
+  if (lastConnect && lastConnect.backupDir) {
+    const note = clientEl('p', 'clientcard-note', '备份目录：');
+    note.append(clientEl('code', 'connectpath', lastConnect.backupDir));
+    how.append(note);
+  }
+  box.append(how);
+
+  if (!lastConnect) {
+    // 没读到数据：有错就说错，没错才是"正在读"
+    box.append(connectReadError ? connectFailBox() : clientEl('div', 'empty', '正在读取接入状态…'));
+    return box;
+  }
+  if (connectReadError) {
+    /*
+     * 有旧数据时不清空：把上次读到的行留着，顶部说清"这次没读到"。
+     * 直接清空会让用户以为"配置全没了"，比显示旧数据更吓人。
+     */
+    const warn = clientEl('div', 'notice connectfail-inline');
+    warn.append(clientEl('div', null, '这次没能重新读取接入状态，下面显示的是上次读到的结果。'));
+    for (const node of connectFailDetail(connectReadError)) warn.append(node);
+    warn.append(connectReloadButton('重试'));
+    box.append(warn);
+  }
+  if (!lastConnect.running) {
+    const br = lastConnect.bridge || {};
+    /*
+     * 「桥没起」与「桥在跑但不认我们这把令牌」是两回事，处置也不一样：
+     * 前者去点「启动桥服务」，后者去点「重启桥」（让桥按控制台这份令牌重启）。
+     * 混成一句「桥未运行」时，用户会去点启动、得到"已经在跑了"，然后卡住。
+     */
+    if (br.up && br.authRejected) {
+      box.append(clientEl('div', 'notice',
+        '桥在运行，但拒绝了控制台持有的令牌（两边令牌不一致）：照现在写进客户端的配置会连不上。点上方「重启桥」让桥按控制台这份令牌重启，再点「重新读取」。'));
+    } else {
+      box.append(clientEl('div', 'notice', '桥未运行：写入照样能做，但写完的「验证」一定失败。先点上方「启动桥服务」。'));
+    }
+  }
+  const list = clientEl('div', 'connectlist');
+  for (const c of lastConnect.clients) list.append(connectRow(c));
+  box.append(list);
+  return box;
 }
 
 async function loadClients() {
@@ -5453,6 +6509,8 @@ async function loadClients() {
     box.append(clientEl('div', 'empty', '读取失败：' + ((err && err.message) || err)));
     return;
   }
+  // 一键接入与客户端列表**并行**取：它读的是另一份数据，串行会让面板多等一拍。
+  await loadConnect();
   renderClients();
   const st = $('clientsStamp');
   if (st) st.textContent = fmtTime(Date.now());
@@ -5603,9 +6661,15 @@ function clientModelPicker(d) {
  * 又已实测通过的客户端，留空的话用户还得先做一次选择才能看到任何东西。
  */
 let clientsChoice = 'opencode';
+/**
+ * 「手动接入（复制片段）」那块是否展开。**用户点过就保持** ——
+ * 面板每 20 秒会重渲染一次，每次把用户展开的区块收回去比不折叠还烦人。
+ */
+let manualOpen = false;
 const CLIENT_CHOICES = [
   { id: 'opencode', label: 'opencode' },
   { id: 'claude', label: 'Claude Code' },
+  { id: 'codex', label: 'Codex' },
   { id: 'form', label: '图形表单' },
   { id: 'other', label: '其它客户端' },
 ];
@@ -5628,20 +6692,47 @@ function renderClients() {
   const d = lastClients;
   if (!d) { box.append(clientEl('div', 'empty', '暂无数据')); return; }
 
-  // 三个接入值：接哪个客户端都要填，常驻
+  /*
+   * 一键接入放在**最上面**：它是"什么都不想看、只想接上"的那条路，
+   * 而复制片段那套是为"想自己动手 / 用了我们没覆盖的客户端"的人准备的。
+   * 顺序反过来，前者就被埋在 3000px 的说明文字底下。
+   */
+  box.append(connectBlock());
+
+  /*
+   * 下面这一整块是**手动接入**（自己抄配置）那条路，给"想自己动手 / 用了我们没覆盖的
+   * 客户端"的人。收进折叠区：它不是主路径，却占着 3000px 的纵向空间（实测），
+   * 把「一键接入」下面的东西全挤到屏幕外 —— 而绝大多数人只需要上面那块。
+   *
+   * 折叠状态**用户说了算**（`manualOpen`）：面板每 20 秒刷新一次，
+   * 每次刷新都把用户展开的区块收回去，比不折叠还烦人。
+   */
+  const manual = document.createElement('details');
+  manual.className = 'manualconnect';
+  manual.open = manualOpen;
+  const msum = document.createElement('summary');
+  msum.append(clientEl('b', null, '手动接入（复制片段）'));
+  msum.append(clientEl('span', 'manualhint', '三个接入值 · 各家片段 · 兼容性清单'));
+  manual.append(msum);
+  manual.addEventListener('toggle', () => { manualOpen = manual.open; });
+  box.append(manual);
+  const manualBody = clientEl('div', 'manualbody');
+  manual.append(manualBody);
+
+  // 三个接入值：接哪个客户端都要填
   const vals = clientEl('div', 'clientvalues');
   vals.append(
     clientValueRow('OpenAI Base URL', d.baseUrlOpenAI, 'opencode / Cherry Studio / Cursor / Trae 等填这里'),
     clientValueRow('Anthropic Base URL', d.baseUrlAnthropic, 'Claude Code 的 ANTHROPIC_BASE_URL（注意不带 /v1）'),
     clientValueRow('API Key / 令牌', d.token, '本地回环令牌，不是上游凭据；只用于防止同机其它程序误用端口'),
   );
-  box.append(vals);
+  manualBody.append(vals);
 
-  if (!d.running) box.append(clientEl('div', 'notice', '桥未运行，客户端连不上。先点上方「启动桥服务」。'));
+  if (!d.running) manualBody.append(clientEl('div', 'notice', '桥未运行，客户端连不上。先点上方「启动桥服务」。'));
 
   // ── 选择器 ────────────────────────────────────────────────────────────
   const pickHead = clientEl('h3', 'clienth', '你要接哪个？选一个，只看它');
-  box.append(pickHead);
+  manualBody.append(pickHead);
   const picker = clientEl('div', 'clientpicker');
   picker.setAttribute('role', 'tablist');
   picker.setAttribute('aria-label', '选择要接入的客户端');
@@ -5654,10 +6745,10 @@ function renderClients() {
     b.onclick = () => { clientsChoice = c.id; renderClients(); };
     picker.append(b);
   }
-  box.append(picker);
+  manualBody.append(picker);
 
   const pane = clientEl('div', 'clientpane');
-  box.append(pane);
+  manualBody.append(pane);
 
   if (clientsChoice === 'opencode') {
     pane.append(clientModelPicker(d));
@@ -5674,11 +6765,39 @@ function renderClients() {
   } else if (clientsChoice === 'claude') {
     pane.append(clientCard(
       'Claude Code', 'ok',
-      'Anthropic 协议层全路径实测：流式事件序列、tool_use、多轮 tool_result 往返均正确。'
-        + '模型名照常填 claude-*，桥会映射到真实模型（当前 ' + d.anthropicModel
-        + '，小快模型 ' + d.anthropicFastModel + '）。',
+      // 分段渲染：静态段各自命中词条表，模型 id 作为**数据**单独成节点不翻译
+      [
+        'Anthropic 协议层全路径实测：流式事件序列、tool_use、多轮 tool_result 往返均正确。',
+        '模型名照常填 claude-*，桥会映射到真实模型（当前',
+        ' ' + d.anthropicModel,
+        '，小快模型',
+        ' ' + d.anthropicFastModel,
+        '）。',
+      ],
       ['设好下面两个环境变量后直接启动 claude'],
       [['环境变量', claudeCodeConfigText(d)]],
+    ));
+  } else if (clientsChoice === 'codex') {
+    pane.append(clientCard(
+      'Codex', 'proto',
+      [
+        'Codex 说的是 Responses 协议（/v1/responses），桥会把它转成上游认的 chat/completions'
+          + ' —— 这正是 CC Switch 那套「本地路由」做的事，只是桥自带、不用再装一个中间人。',
+        '注意：Codex 已移除 wire_api = "chat"，网上旧教程里那种写法会直接报错，'
+          + '下面这段用的是唯一还能用的 responses。',
+        '模型名照常填 gpt-5.1-codex，桥会映射到真实模型（当前',
+        ' ' + d.responsesModel,
+        '，小快模型',
+        ' ' + d.responsesFastModel,
+        '）。',
+      ],
+      [
+        ['把下面这段写进 ~/.codex/config.toml（没有就新建；已存在就在 [model_providers.*] 里加一节，别覆盖别的内容）'],
+        ['令牌写在 config.toml 的 experimental_bearer_token，不要去动 auth.json'
+          + ' —— 那是官方登录缓存，改它会影响 Codex 的官方插件与远程控制'],
+        ['改完要重启 Codex（它在启动时读 config.toml），然后在 codex 里直接提问即可'],
+      ],
+      [['~/.codex/config.toml', codexConfigText(d)]],
     ));
   } else if (clientsChoice === 'form') {
     // 图形表单的逐字段填法。多数客户端是表单而不是配置文件，只给 JSON 片段等于没教
@@ -5692,30 +6811,33 @@ function renderClients() {
     fcard.append(clientEl('p', 'clientcard-note',
       '提供商 ID / 显示名称 / 基础 URL / API 密钥 / 模型 / 请求头 —— 每格的值都能单独复制，照着填完点提交。'));
     fcard.append(formGuideBox(d));
-    fcard.append(clientEl('p', 'clientcard-note',
-      '注意：不是每个表单都有「上下文长度 / 输出上限」这两格 —— opencode 的表单就没有，'
-        + '所以填完会看到「上下文 0」。这不是桥的问题，也不是填错了：上下文只能靠**配置文件**声明。'
-        + 'opencode 请切到上面的「opencode」页签，那段 opencode.json 里的 limit 就是干这个的。'));
+    fcard.append(appendParts(clientEl('p', 'clientcard-note'), [
+      '注意：不是每个表单都有「上下文长度 / 输出上限」这两格 —— opencode 的表单就没有，',
+      '所以填完会看到「上下文 0」。这不是桥的问题，也不是填错了：上下文只能靠**配置文件**声明。',
+      'opencode 请切到上面的「opencode」页签，那段 opencode.json 里的 limit 就是干这个的。',
+    ]));
     pane.append(fcard);
   } else {
     const compat = clientEl('div', 'clientcard');
-    compat.append(clientEl('p', 'clientcard-note',
-      '下面这些都只用 /v1/models 与 /v1/chat/completions 两个端点，填同样的 Base URL 和令牌即可。'
-        + '「未实测」是指没有真的装一遍跑通，不是已知有问题——但也没法替你保证。'));
+    compat.append(appendParts(clientEl('p', 'clientcard-note'), [
+      '下面这些都只用 /v1/models 与 /v1/chat/completions 两个端点，填同样的 Base URL 和令牌即可。',
+      '「未实测」是指没有真的装一遍跑通，不是已知有问题——但也没法替你保证。',
+    ]));
     const chips = clientEl('div', 'clientchips');
     for (const n of ['Cherry Studio', 'NextChat', 'LobeChat', 'ChatBox', 'Open WebUI', 'Cursor', 'Trae']) {
       chips.append(clientEl('span', 'clientchip', n));
     }
     compat.append(chips);
-    compat.append(clientEl('p', 'clientcard-note',
-      'Cursor / Trae 这类带 Agent 模式的客户端依赖工具调用。桥已把上游只认字符串的 tool_choice 做了归一化'
-        + '（对象形式会被上游 400），工具调用本身也实测可用；但它们具体发哪种写法没有验证过。'));
+    compat.append(appendParts(clientEl('p', 'clientcard-note'), [
+      'Cursor / Trae 这类带 Agent 模式的客户端依赖工具调用。桥已把上游只认字符串的 tool_choice 做了归一化',
+      '（对象形式会被上游 400），工具调用本身也实测可用；但它们具体发哪种写法没有验证过。',
+    ]));
     pane.append(compat);
   }
 
   // ── 常驻尾注：都是短文本，且与「选哪个客户端」无关 ────────────────────
-  box.append(clientEl('h3', 'clienth', '不支持'));
-  box.append(clientCard(
+  manualBody.append(clientEl('h3', 'clienth', '不支持'));
+  manualBody.append(clientCard(
     '知识库 / RAG 类功能', 'no',
     '上游 30 个模型全是对话类，没有任何 embedding 模型，所以 /v1/embeddings 会明确返回 501。'
       + '这里不做「假的向量」——那会让知识库看起来建成了、实际全是噪声，要等检索结果离谱时才发现。'
@@ -5786,9 +6908,11 @@ function clientsCheatSheet(d) {
   for (const f of providerFormFields(d)) lines.push('  ' + f.k + ' : ' + (f.v || '（留空）'));
   lines.push('', '--- opencode（opencode.json）---', opencodeConfigText(d));
   lines.push('', '--- Claude Code（环境变量）---', claudeCodeConfigText(d));
+  lines.push('', '--- Codex（~/.codex/config.toml）---', codexConfigText(d));
   lines.push('',
     '--- 兼容性 ---',
     '  已实测  : opencode、Claude Code（Anthropic 协议）',
+    '  协议转换: Codex（Responses 协议 → 桥转成 chat/completions）',
     '  协议兼容: Cherry Studio / NextChat / LobeChat / ChatBox / Open WebUI / Cursor / Trae',
     '  不支持  : 知识库 / RAG（上游没有 embedding 模型，/v1/embeddings 返回 501）');
   return lines.join('\n');

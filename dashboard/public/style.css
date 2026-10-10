@@ -5,6 +5,7 @@
    2. 统一圆角：严格遵守 4px / 8px / 12px / 16px / 9999px 层级规范（包含抽屉与容器）
    3. 间距节奏：统一基于 4px / 8px 网格，舒适呼吸感与高信息密度并存
    4. 适度动效：微交互、抽屉旋转、淡入平移、脉冲状态均采用优雅物理缓动
+   5. 字体字号：三层字体栈（正文 / 中文 / 数据）+ 六级字号阶梯 + 400/600/700 三档字重
    ========================================================================== */
 
 :root {
@@ -68,6 +69,21 @@
   --promo-soft: #fdf2f8;
   --promo-border: #fbcfe8;
 
+  /*
+   * Info / 信息（青）—— 第四种语义色，专门给「远端 / 网络」这一类指标。
+   *
+   * 为什么需要它：状态卡原先 8 个图标**全是同一个皇家蓝**，一眼扫过去分不出
+   * 「桥进程」（本机进程）和「上游端点」（远端网络）—— 而这两件事出问题时的
+   * 排查方向完全不同。多这一档青之后，「本地 = 蓝色系 / 远端 = 青色系」在色彩上
+   * 就分开了。青与 ok 绿、warn 琥珀、fail 红都不撞，语义不重叠。
+   *
+   * 对比度：浅色下 #0891b2 在 --panel(#fff) 上是 4.87:1，在白卡上做图标色够用。
+   */
+  --info: #0891b2;
+  --info-hover: #0e7490;
+  --info-soft: #ecfeff;
+  --info-border: #a5f3fc;
+
   /* ── 2. 统一圆角规范 (Radius Hierarchy) ──────────────────────────────── */
   --radius-xs: 4px;          /* 微小元素、内嵌代码标签、滚动条滑块 */
   --radius-sm: 8px;          /* 按钮、输入框、下拉框、状态标签、小卡片、表格内嵌单元 */
@@ -104,6 +120,65 @@
   --ease: cubic-bezier(0.16, 1, 0.3, 1);
   --transition-fast: all 0.16s var(--ease);
   --transition-normal: all 0.24s var(--ease);
+
+  /* ── 7. 排版规范 (Typography) ────────────────────────────────────────── */
+  /*
+   * 字体栈：全部走系统自带字体，不引外部 webfont。
+   *
+   * 为什么不引 webfont：控制台是**本地工具**（127.0.0.1），断网时也要照常打开；
+   * 而这个页面的定位是「凭据不出机器」，为了排版好看去请求第三方字体服务并不划算。
+   *
+   * 三层各司其职：拉丁与正文走 sans（Windows 上 Segoe UI、macOS 上 SF），
+   * 中文由 CJK 回落接管（雅黑 UI / 苹方），数据、id 与代码走 mono。
+   * 两边都只列**必然存在**的字体，候选顺序按「本机实测宽度与观感」定，不用 CDN。
+   */
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+               "Hiragino Sans GB", "Microsoft YaHei UI", "Microsoft YaHei",
+               "Noto Sans SC", Roboto, "Helvetica Neue", Arial, sans-serif;
+  /*
+   * 等宽这条栈**不加 Cascadia Mono**，虽然它比 Consolas 更现代：实测它整体宽约 7%，
+   * 而模型表 9 列的宽度预算本来就紧（见 6.11：多出来的宽度会直接变成折行、
+   * 行高在 53～89px 之间跳）。等宽字体在这里的第一职责是不撑宽表格。
+   */
+  --font-mono: ui-monospace, "SFMono-Regular", Menlo, Consolas, "Courier New", monospace;
+
+  /*
+   * 字号阶梯：六级，相邻两级必须**看得出差别**。
+   *
+   * 上一版是 10 / 10.5 / 11 / 11.5 / 12 / 12.5 / 13 / 13.5 八档挤在 3.5px 里 ——
+   * 相邻两档眼睛分不出来，等于没有层级：标签、说明、正文在页面上一样重，
+   * 读的人只能靠颜色猜哪行是结构、哪行是内容。现在收成：
+   * 三档文字级（11/12/13）+ 两档结构级（16/18）+ 一档读数级（20），
+   * 另有一档**密排档**（11.5，见下），它不参与层级，只解决表格宽度。
+   */
+  --fs-micro: 11px;    /* 脚注、图例、角标：少看一眼也不影响判断 */
+  --fs-label: 12px;    /* 标签、表头、徽章、时间戳、单位：给正文当索引 */
+  --fs-body: 13px;     /* 正文、表格、说明、按钮：默认字号 */
+  --fs-lead: 16px;     /* 面板标题、条目名、无数字的读数 */
+  --fs-title: 18px;    /* 品牌标题 */
+  --fs-display: 20px;  /* 指标大数字：一排读数的锚点 */
+  /*
+   * 密排档：表头、等宽数据列、终端日志。
+   *
+   * 它比 label 还小半档，是为了**宽度**不是为了层级：模型表 9 列（其中 id 与
+   * 时间是等宽）在 1280px 下的宽度预算刚好卡住，实测表头回到 11.5px 才能让
+   * 四行读数的行高一致（13px 表头会把「DeepSeek-V4.1-Flash」和
+   * 「0.0839 / 千 token（55 次）」挤成两行，行高在 53～71px 之间跳）。
+   * 等宽同理：Consolas 的字面比同号的 sans 更满，收半档看起来才是同一个大小。
+   */
+  --fs-dense: 11.5px;
+
+  /*
+   * 字重只用 400 / 600 / 700，**不要用 500**。
+   *
+   * 为什么：实测这台机器上（Chrome + Windows），500 与 600 落在**同一个字体文件**
+   * （渲染宽度逐字相同），而中文侧雅黑只有 Regular / Bold 两档 —— 500 归 Regular、
+   * 600 归 Bold。于是一条 500 的混排字符串会渲染成「拉丁偏粗 + 中文常规」：
+   * 卡片标签「DSH 配置」里的 DSH 明显比中文重，看着像没对齐的两种字体。
+   * 层级只能靠 400（常规）与 600（强调）表达；700 留给大数字与品牌。
+   */
+  --track-label: 0.01em;   /* 小字中文给一点字距：密排时更透气，也更容易逐字扫读 */
+  --track-title: -0.012em; /* 标题与大数字收紧一点，避免大字看起来松散 */
 }
 
 /* ── 深色主题 (Dark Theme) ────────────────────────────────────────────── */
@@ -181,10 +256,13 @@ html, body {
 body {
   background-color: var(--bg);
   color: var(--text);
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC",
-               "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
-  font-size: 13px;
-  line-height: 1.55;
+  font-family: var(--font-sans);
+  font-size: var(--fs-body);
+  /*
+   * 行高 1.6：正文里中文占多数，而中文没有西文那样的上下伸部，行距给不够时
+   * 整段会糊成一块。1.55 在西文里够用，中文长句（面板说明、客户端指引）就偏挤。
+   */
+  line-height: 1.6;
   /*
    * 数字一律等宽（tabular figures）。
    *
@@ -311,10 +389,10 @@ header {
   height: 17px;
 }
 .brand-text h1 {
-  font-size: 18px;
+  font-size: var(--fs-title);
   font-weight: 700;
   margin: 0 0 3px;
-  letter-spacing: -0.02em;
+  letter-spacing: var(--track-title);
   display: flex;
   align-items: center;
   gap: var(--space-2);
@@ -322,11 +400,11 @@ header {
   transition: font-size 0.26s var(--ease), margin 0.26s var(--ease);
 }
 .top-bar-sticky.is-scrolled .brand-text h1 {
-  font-size: 15.5px;
+  font-size: var(--fs-lead);
   margin-bottom: 0;
 }
 .brand-badge {
-  font-size: 11px;
+  font-size: var(--fs-label);
   font-weight: 600;
   padding: 1px 7px;
   border-radius: var(--radius-xs);
@@ -337,16 +415,26 @@ header {
   transition: padding 0.26s var(--ease), font-size 0.26s var(--ease);
 }
 .top-bar-sticky.is-scrolled .brand-badge {
-  font-size: 10.5px;
+  font-size: var(--fs-micro);
   padding: 1px 6px;
 }
 .sub {
   margin: 0;
   color: var(--muted);
-  font-size: 12px;
+  font-size: var(--fs-body);
   max-width: 62ch;
-  line-height: 1.45;
-  max-height: 48px;
+  line-height: 1.5;
+  /* 3 行封顶。原先是写死 `max-height: 48px` —— 那只够 2.46 行，
+     中文译文恰好 2 行没事，**英文译文 3 行共 59px 被横腰切断**
+     （实测溢出 11px，且没有省略号，看起来像渲染坏了）。
+     这里 max-height 的职责只是给折叠动画（.is-scrolled 时归零）一个起点，
+     所以它必须是"装得下"的值；**真正的上限交给 line-clamp** ——
+     万一以后文案再变长，截断处会有省略号，而不是切掉半个字。
+     用 em 相对量而不是写死 px：换字号或字体回退时行高会跟着变。 */
+  max-height: calc(var(--fs-body) * 1.5 * 3 + 2px);
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
   opacity: 1;
   overflow: hidden;
   transition: max-height 0.26s var(--ease),
@@ -374,8 +462,8 @@ header {
   gap: 7px;
   padding: 6px 13px;
   border-radius: var(--radius-full);
-  font-size: 12px;
-  font-weight: 500;
+  font-size: var(--fs-label);
+  font-weight: 600;
   background: var(--panel);
   border: 1px solid var(--border);
   color: var(--muted);
@@ -442,8 +530,8 @@ header {
   gap: 7px;
   padding: 7px 16px;
   border-radius: var(--radius-sm);
-  font-size: 13px;
-  font-weight: 500;
+  font-size: var(--fs-body);
+  font-weight: 400;
   color: var(--muted);
   cursor: pointer;
   background: transparent;
@@ -510,9 +598,9 @@ header {
 }
 .msg {
   color: var(--muted);
-  font-size: 12px;
+  font-size: var(--fs-label);
   margin-left: auto;
-  font-weight: 500;
+  font-weight: 400;
   display: flex;
   align-items: center;
   gap: 6px;
@@ -532,8 +620,8 @@ header {
 /* ── 4. 按钮体系 (Buttons: Clean, Solid Blue primary) ────────────────── */
 button {
   font: inherit;
-  font-size: 12.5px;
-  font-weight: 500;
+  font-size: var(--fs-body);
+  font-weight: 400;
   padding: 6px 14px;
   border-radius: var(--radius-sm);
   cursor: pointer;
@@ -697,7 +785,7 @@ button.icon-btn {
 button.mini {
   height: 24px;
   padding: 2px 9px;
-  font-size: 11.5px;
+  font-size: var(--fs-label);
   /* 与普通按钮同一圆角。原先用 --radius-xs（4px）—— 24px 高的控件只有 4px
      圆角，混在同排的 8px 按钮里一眼就看出「方」，是实拍能看出来的不一致。 */
   border-radius: var(--radius-sm);
@@ -725,7 +813,7 @@ button.mini {
   flex-wrap: wrap;
   margin: 0 0 var(--space-4);
   padding: var(--space-3) var(--space-4);
-  font-size: 12.5px;
+  font-size: var(--fs-body);
   border: 1px solid var(--primary-border);
   border-radius: var(--radius);
   background: var(--primary-subtle);
@@ -751,7 +839,7 @@ button.mini {
   padding: var(--space-3) var(--space-4);
   border-radius: var(--radius);
   border: 1px solid;
-  font-size: 12.5px;
+  font-size: var(--fs-body);
   box-shadow: var(--shadow-xs);
   animation: slideDown 0.22s var(--ease);
 }
@@ -762,7 +850,7 @@ button.mini {
 .alert .alert-text {
   flex: 1 1 auto;
   min-width: 0;
-  font-weight: 500;
+  font-weight: 400;
 }
 .alert.fail {
   background: var(--fail-soft);
@@ -810,8 +898,15 @@ button.mini {
 
 .card .k {
   color: var(--muted);
-  font-size: 11.5px;
-  font-weight: 500;
+  font-size: var(--fs-label);
+  /*
+   * 标签用 400 而不是 500/600：它是**给读数当索引的**，读的人扫一眼就要
+   * 把注意力交给下面那个大数字。加粗标签等于让索引和内容抢同一层级。
+   * 字距（--track-label）是中文小字的补偿 —— 12px 密排时字挨字，
+   * 加一点点字距才扫得动。
+   */
+  font-weight: 400;
+  letter-spacing: var(--track-label);
   margin-bottom: 8px;
   display: flex;
   align-items: center;
@@ -829,21 +924,22 @@ button.mini {
   transform: scale(1.12);
 }
 .card .v {
-  font-size: 19px;
+  font-size: var(--fs-display);
   font-weight: 700;
-  letter-spacing: -0.015em;
+  letter-spacing: var(--track-title);
   color: var(--text);
   line-height: 1.25;
 }
 .card .v.small {
-  font-size: 13.5px;
+  font-size: var(--fs-lead);
   font-weight: 600;
 }
 .card .note {
   color: var(--muted);
-  font-size: 11px;
+  font-size: var(--fs-label);
   margin-top: 8px;
-  line-height: 1.45;
+  line-height: 1.5;
+  text-wrap: pretty;
   word-break: break-word;
 }
 
@@ -878,10 +974,10 @@ button.mini {
   to { opacity: 1; transform: translateX(0); }
 }
 .panel h2 {
-  font-size: 15px;
+  font-size: var(--fs-lead);
   font-weight: 600;
   margin: 0 0 6px;
-  letter-spacing: -0.01em;
+  letter-spacing: var(--track-title);
   display: flex;
   align-items: center;
   gap: var(--space-2);
@@ -892,9 +988,15 @@ button.mini {
 .panel h2 .spacer { flex: 1; }
 .panel .hint {
   color: var(--muted);
-  font-size: 12px;
+  font-size: var(--fs-body);
   margin: 0 0 var(--space-4);
-  line-height: 1.5;
+  /*
+   * 面板说明是**成段的中文**（「体检范围可只测勾选的…」「目录到了才会重建选择器」），
+   * 行距按正文段落给（1.7），不是按控件标签给。text-wrap: pretty 让它别把
+   * 段末最后一个词组单独甩到下一行。
+   */
+  line-height: 1.7;
+  text-wrap: pretty;
 }
 
 /*
@@ -919,8 +1021,12 @@ button.mini {
 .tag {
   display: inline-flex;
   align-items: center;
-  font-size: 11.5px;
-  font-weight: 500;
+  font-size: var(--fs-label);
+  /*
+   * 标签是**成排出现**的（模型表一列排下来十几枚），加粗会让整列变成噪点；
+   * 语义已经由色板（ok / fail / promo）承担，文字保持常规字重即可。
+   */
+  font-weight: 400;
   padding: 1px 8px;
   /* 标签比按钮紧一档（6px 对 22px 高 ≈ 27%，与按钮的 8px/32px 同比例），
      但不再用 --radius-xs 的 4px —— 那样在表格里成排出现时偏方。 */
@@ -951,11 +1057,13 @@ button.tag { border-radius: var(--radius-sm); }
   background: var(--promo-soft);
   color: var(--promo);
   border-color: var(--promo-border);
-  font-weight: 500;
+  /* 促销标记是全页唯一**要求你看一眼**的标签（限时免费），所以它是唯一加粗的。
+     原先写的 500 是个空档位：与 400 同为常规字重，等于没写。 */
+  font-weight: 600;
 }
 button.tag {
   font: inherit;
-  font-size: 11px;
+  font-size: var(--fs-label);
   cursor: pointer;
   transition: var(--transition-fast);
 }
@@ -972,7 +1080,7 @@ button.tag.fail:hover {
  */
 .stamp {
   color: var(--hint);
-  font-size: 11.5px;
+  font-size: var(--fs-label);
   font-weight: 400;
   white-space: nowrap;
 }
@@ -984,10 +1092,11 @@ button.tag.fail:hover {
   color: var(--warn);
   border-radius: var(--radius-sm);
   padding: 9px 13px;
-  font-size: 12px;
+  font-size: var(--fs-body);
   margin-bottom: var(--space-3);
   word-break: break-word;
-  line-height: 1.5;
+  line-height: 1.6;
+  text-wrap: pretty;
   animation: slideDown 0.22s var(--ease);
 }
 .notice.hidden { display: none; }
@@ -1005,7 +1114,7 @@ button.tag.fail:hover {
 table {
   width: 100%;
   border-collapse: collapse;
-  font-size: 12.5px;
+  font-size: var(--fs-body);
   text-align: left;
 }
 th {
@@ -1015,7 +1124,7 @@ th {
   z-index: 2;
   font-weight: 600;
   color: var(--muted);
-  font-size: 11.5px;
+  font-size: var(--fs-dense);
   letter-spacing: 0.02em;
   padding: 10px 14px;
   border-bottom: 1px solid var(--border-strong);
@@ -1054,8 +1163,8 @@ tr:has(input[type="checkbox"]:checked) td {
 }
 
 td.mono, .mono {
-  font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
-  font-size: 11.5px;
+  font-family: var(--font-mono);
+  font-size: var(--fs-dense);
   font-variant-numeric: tabular-nums;
 }
 td.name { font-weight: 600; color: var(--text); }
@@ -1088,14 +1197,14 @@ tr.pickrow.rowactive td {
   border-radius: var(--radius-full);
   background: var(--primary-subtle);
   border: 1px solid var(--primary-border);
-  font-size: 11.5px;
+  font-size: var(--fs-label);
   color: var(--primary-text);
 }
 .filterchip .chipx {
   border: none;
   background: none;
   cursor: pointer;
-  font-size: 13px;
+  font-size: var(--fs-body);
   line-height: 1;
   color: var(--primary-text);
   padding: 0 2px;
@@ -1118,8 +1227,8 @@ tr.pickrow.rowactive td {
 select,
 .dd-trigger {
   font: inherit;
-  font-size: 12px;
-  font-weight: 500;
+  font-size: var(--fs-body);
+  font-weight: 400;
   /*
    * 高度必须和 button 一致（32px）。原先靠 padding 撑出 30px —— 和旁边 32px 的
    * 按钮混在同一排时上下会差 1~2px，看起来像「没对齐」。显式给高度，
@@ -1254,14 +1363,14 @@ select option {
   display: flex; align-items: center; justify-content: space-between; gap: 8px;
   width: 100%; padding: 6px 9px;
   border: 0; background: transparent; color: var(--text);
-  font: inherit; font-size: 12px; font-weight: 500;
+  font: inherit; font-size: var(--fs-body); font-weight: 400;
   text-align: left; border-radius: 6px; cursor: pointer;
   transition: background-color 0.16s var(--ease), color 0.16s var(--ease);
 }
 .dd-item-t { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 .dd-item:hover { background: var(--panel-muted); color: var(--primary); }
 .dd-item.on { color: var(--primary); font-weight: 600; }
-.dd-item.on::after { content: '✓'; flex: none; font-size: 11px; opacity: 0.8; }
+.dd-item.on::after { content: '✓'; flex: none; font-size: var(--fs-micro); opacity: 0.8; }
 .dd-menu::-webkit-scrollbar { width: 6px; }
 .dd-menu::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: var(--radius-full); }
 .dd-menu::-webkit-scrollbar-track { background: transparent; }
@@ -1283,9 +1392,9 @@ select option {
   border: 1px solid var(--tip-border);
   border-radius: var(--radius-sm);
   box-shadow: var(--shadow-drawer);
-  font-size: 11.5px;
-  font-weight: 500;
-  line-height: 1.5;
+  font-size: var(--fs-label);
+  font-weight: 400;
+  line-height: 1.55;
   white-space: pre-line; /* title 里用 \n 也能换行 */
   pointer-events: none;
   animation: tip-in 0.14s var(--ease) both;
@@ -1296,7 +1405,7 @@ select option {
 
 input[type="text"] {
   font: inherit;
-  font-size: 12px;
+  font-size: var(--fs-body);
   /* 同 select：高度与按钮对齐（32px），别靠 padding 撑 */
   height: 32px;
   padding: 0 10px;
@@ -1332,7 +1441,7 @@ input[type="checkbox"]:active {
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  font-size: 12px;
+  font-size: var(--fs-body);
   color: var(--text-secondary);
   cursor: pointer;
   user-select: none;
@@ -1360,7 +1469,7 @@ input[type="checkbox"]:active {
 .acct:last-child { margin-bottom: 0; }
 .acct-name {
   font-weight: 600;
-  font-size: 13px;
+  font-size: var(--fs-body);
   display: flex;
   align-items: center;
   gap: 8px;
@@ -1369,9 +1478,9 @@ input[type="checkbox"]:active {
 }
 .acct-sub {
   color: var(--muted);
-  font-size: 11.5px;
+  font-size: var(--fs-label);
   margin-top: 3px;
-  line-height: 1.45;
+  line-height: 1.5;
 }
 .acct-sub.errline { color: var(--fail); }
 .acct-act {
@@ -1401,18 +1510,18 @@ input[type="checkbox"]:active {
 }
 .diag-row .label {
   font-weight: 600;
-  font-size: 12.5px;
+  font-size: var(--fs-body);
   color: var(--text);
 }
 .diag-row .detail {
   color: var(--muted);
-  font-size: 12px;
+  font-size: var(--fs-body);
   word-break: break-word;
 }
 .diag-row .hint {
   display: block;
   color: var(--warn);
-  font-size: 11px;
+  font-size: var(--fs-label);
   margin-top: 2px;
 }
 .s-dot {
@@ -1445,7 +1554,7 @@ input[type="checkbox"]:active {
   margin: 0 4px;
 }
 .regbar .filterinfo {
-  font-size: 12px;
+  font-size: var(--fs-label);
   color: var(--primary);
   font-weight: 600;
 }
@@ -1456,7 +1565,7 @@ input[type="checkbox"]:active {
   align-items: center;
   gap: var(--space-3);
   margin: 0 0 var(--space-3);
-  font-size: 12px;
+  font-size: var(--fs-label);
   color: var(--muted);
   background: var(--panel-subtle);
   padding: 8px 12px;
@@ -1483,7 +1592,7 @@ input[type="checkbox"]:active {
 /* 模型表头与排序 */
 th.th-probe { cursor: pointer; user-select: none; }
 th.th-probe:hover { color: var(--text); }
-.sortmark { color: var(--primary); font-size: 11px; margin-left: 3px; font-weight: 700; }
+.sortmark { color: var(--primary); font-size: var(--fs-micro); margin-left: 3px; font-weight: 700; }
 
 /* 复制图标与详情按钮 */
 td.copyable { cursor: pointer; }
@@ -1500,7 +1609,7 @@ td.copyable:hover .copyicon { opacity: 1; color: var(--primary); }
   border: none;
   background: none;
   cursor: pointer;
-  font-size: 12.5px;
+  font-size: var(--fs-body);
   line-height: 1;
   padding: 1px 4px;
   margin-left: 3px;
@@ -1553,7 +1662,7 @@ tr.detail-row td {
   grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
   gap: 10px 24px;
   padding: 16px 20px;
-  font-size: 12px;
+  font-size: var(--fs-body);
   background: var(--panel);
   border: 1px solid var(--border);
   border-radius: var(--radius);
@@ -1572,7 +1681,7 @@ tr.detail-row td {
 .detail-body .dlabel {
   flex: 0 0 92px;
   color: var(--muted);
-  font-weight: 500;
+  font-weight: 400;
 }
 .detail-body .dvalue {
   flex: 1 1 auto;
@@ -1582,7 +1691,7 @@ tr.detail-row td {
 .detail-empty {
   padding: 16px 20px;
   color: var(--faint);
-  font-size: 12px;
+  font-size: var(--fs-body);
   background: var(--panel);
   border: 1px solid var(--border);
   border-radius: var(--radius);
@@ -1607,7 +1716,7 @@ details[open] {
 summary {
   cursor: pointer;
   color: var(--text-secondary);
-  font-size: 13px;
+  font-size: var(--fs-body);
   font-weight: 600;
   user-select: none;
   outline: none;
@@ -1660,8 +1769,8 @@ pre.log {
   min-height: 90px;
   max-height: 360px;
   overflow: auto;
-  font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
-  font-size: 11.5px;
+  font-family: var(--font-mono);
+  font-size: var(--fs-dense);
   line-height: 1.6;
   white-space: pre-wrap;
   word-break: break-word;
@@ -1682,7 +1791,7 @@ pre.log {
 .chart-legend {
   display: flex;
   gap: var(--space-4);
-  font-size: 11px;
+  font-size: var(--fs-label);
   color: var(--muted);
   margin: 0 0 4px;
 }
@@ -1698,7 +1807,7 @@ pre.log {
   display: inline-block;
 }
 .sub-h {
-  font-size: 13px;
+  font-size: var(--fs-body);
   font-weight: 600;
   margin: var(--space-5) 0 var(--space-2);
   color: var(--text-secondary);
@@ -1716,7 +1825,7 @@ pre.log {
   grid-template-columns: minmax(120px, 190px) 1fr auto;
   align-items: center;
   gap: var(--space-3);
-  font-size: 12px;
+  font-size: var(--fs-label);
   padding: 4px 6px;
   border-radius: var(--radius-xs);
   transition: var(--transition-fast);
@@ -1740,11 +1849,11 @@ pre.log {
   border-radius: var(--radius-full);
   transition: width 0.3s var(--ease);
 }
-.rank-val { color: var(--muted); white-space: nowrap; font-size: 11.5px; }
+.rank-val { color: var(--muted); white-space: nowrap; font-size: var(--fs-label); }
 .rank-nocredit {
-  font-size: 11.5px;
+  font-size: var(--fs-label);
   color: var(--faint);
-  line-height: 1.55;
+  line-height: 1.6;
   padding: 8px 12px;
   background: var(--panel-subtle);
   border-radius: var(--radius-sm);
@@ -1782,8 +1891,12 @@ pre.log {
   min-height: 120px;
   max-height: 420px;
   overflow: auto;
-  font-size: 12.5px;
-  line-height: 1.65;
+  font-size: var(--fs-body);
+  /*
+   * 对话正文是这个页面里唯一「要逐字读下去」的内容（模型回答），
+   * 行距按长文给足，别按控件密度给。
+   */
+  line-height: 1.7;
   color: var(--text);
   box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.02);
 }
@@ -1808,7 +1921,7 @@ pre.log {
   display: flex;
   align-items: center;
   gap: 7px;
-  font-size: 11.5px;
+  font-size: var(--fs-label);
   font-weight: 600;
   color: var(--muted);
   margin-bottom: 4px;
@@ -1820,7 +1933,7 @@ pre.log {
 }
 #chatOut .chat-sendinfo {
   color: var(--faint);
-  font-size: 11px;
+  font-size: var(--fs-micro);
   margin-top: 10px;
   padding-top: 8px;
   border-top: 1px dashed var(--border);
@@ -1834,8 +1947,8 @@ pre.log {
   flex-wrap: wrap;
 }
 .quick-pill {
-  font-size: 12px;
-  font-weight: 500;
+  font-size: var(--fs-body);
+  font-weight: 400;
   padding: 4px 12px;
   border-radius: var(--radius-full);
   background: var(--panel-subtle);
@@ -1859,7 +1972,7 @@ pre.log {
 /* 空态提示 */
 .empty {
   color: var(--faint);
-  font-size: 12.5px;
+  font-size: var(--fs-body);
   padding: var(--space-3) 0;
   text-align: center;
 }
@@ -1931,8 +2044,8 @@ pre.log {
 
 .valuerow-k,
 .formrow-k {
-  font-size: 12px;
-  font-weight: 500;
+  font-size: var(--fs-label);
+  font-weight: 400;
   color: var(--muted);
   white-space: nowrap;
   overflow: hidden;
@@ -1941,8 +2054,8 @@ pre.log {
 
 .valuerow-v,
 .formrow-v {
-  font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
-  font-size: 12px;
+  font-family: var(--font-mono);
+  font-size: var(--fs-label);
   color: var(--primary-text);
   background: var(--primary-subtle);
   border: 1px solid var(--primary-border);
@@ -1968,14 +2081,14 @@ pre.log {
  */
 .valuerow-h,
 .formrow-h {
-  font-size: 12px;
+  font-size: var(--fs-label);
   color: var(--hint);
-  line-height: 1.45;
+  line-height: 1.55;
 }
 
 /* 分组标题（提供商级 / 模型 N）。上分隔线让长面板有可数的段落 */
 .clienth {
-  font-size: 12.5px;
+  font-size: var(--fs-body);
   font-weight: 600;
   color: var(--muted);
   letter-spacing: 0.02em;
@@ -2002,7 +2115,7 @@ pre.log {
 }
 
 .fggh {
-  font-size: 11.5px;
+  font-size: var(--fs-label);
   font-weight: 600;
   color: var(--primary-text);
   padding: 2px 0 2px 2px;
@@ -2022,7 +2135,7 @@ pre.log {
 }
 
 .formrow-empty {
-  font-size: 12px;
+  font-size: var(--fs-label);
   color: var(--faint);
   justify-self: start;
 }
@@ -2044,14 +2157,16 @@ pre.log {
   align-items: center;
   gap: var(--space-2);
   margin-bottom: var(--space-2);
-  font-size: 13.5px;
+  font-size: var(--fs-lead);
+  font-weight: 600;
   color: var(--text);
 }
 
 .clientcard-note {
-  font-size: 12px;
+  font-size: var(--fs-body);
   color: var(--text-secondary);
-  line-height: 1.65;
+  line-height: 1.7;
+  text-wrap: pretty;
   margin: 0 0 var(--space-3);
 }
 
@@ -2060,7 +2175,7 @@ pre.log {
 .clientsteps {
   margin: 0 0 var(--space-3);
   padding-left: 20px;
-  font-size: 12px;
+  font-size: var(--fs-body);
   color: var(--text-secondary);
   line-height: 1.75;
 }
@@ -2080,7 +2195,7 @@ pre.log {
   padding: 7px 12px;
   background: var(--panel-muted);
   border-bottom: 1px solid var(--border);
-  font-size: 12px;
+  font-size: var(--fs-label);
   /* --muted 在 --panel-muted 上只有 4.34:1，差一点没过 AA */
   color: var(--hint);
 }
@@ -2088,9 +2203,9 @@ pre.log {
 .codeblock pre {
   margin: 0;
   padding: 12px 14px;
-  font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  font-family: var(--font-mono);
   /* 配置片段是**要人核对**的内容（id 有没有填对、/v1 有没有漏），不是装饰 */
-  font-size: 12px;
+  font-size: var(--fs-label);
   line-height: 1.6;
   color: var(--text-secondary);
   overflow-x: auto;
@@ -2105,7 +2220,7 @@ pre.log {
 }
 
 .clientchip {
-  font-size: 12px;
+  font-size: var(--fs-label);
   color: var(--text-secondary);
   background: var(--panel-muted);
   border: 1px solid var(--border);
@@ -2130,7 +2245,7 @@ pre.log {
 /* 限定在 .clientpicker 内：.clientchip 本身是「协议兼容」清单里的静态标签样式 */
 .clientpicker button.clientchip {
   cursor: pointer;
-  font-size: 12.5px;
+  font-size: var(--fs-body);
   padding: 6px 14px;
   color: var(--text-secondary);
   background: var(--panel);
@@ -2149,6 +2264,450 @@ pre.log {
   background: var(--primary);
   border-color: var(--primary);
   font-weight: 600;
+}
+
+/* ── 一键接入 ─────────────────────────────────────────────────────────────
+ *
+ * 这是「客户端接入」面板里**唯一会动到仓库之外文件**的地方，所以视觉上要和
+ * 下面的「复制片段」明确分开：让用户一眼看出"这块是真动手的，下面那块只是给你抄"。
+ * 用左侧一道主色竖条 + 略深的底色做区分，不靠文字解释。
+ */
+.connectbox {
+  border: 1px solid var(--border-strong);
+  border-left: 3px solid var(--primary);
+  border-radius: var(--radius);
+  padding: var(--space-4);
+  margin-bottom: var(--space-4);
+  background: var(--panel-muted);
+}
+
+.connecthead {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-bottom: var(--space-2);
+  font-size: var(--fs-lead);
+  font-weight: 600;
+  color: var(--text);
+}
+
+/* 主路径说明只留一行，别的收进 .connecthow —— 天天占屏的东西要按"一年看几次"排序 */
+.connectlead {
+  margin: 0 0 var(--space-2);
+  font-size: var(--fs-label);
+  color: var(--hint);
+  line-height: 1.6;
+}
+
+.connecthow {
+  margin-bottom: var(--space-2);
+  font-size: var(--fs-label);
+  color: var(--hint);
+}
+
+.connecthow summary {
+  cursor: pointer;
+  color: var(--text-secondary);
+  font-size: var(--fs-label);
+  padding: 2px 0;
+  list-style-position: inside;
+}
+
+/* 折叠开关要看得出来能点：三角给主色，悬停加下划线 */
+.connecthow summary::marker,
+.manualconnect > summary::marker { color: var(--primary); }
+.connecthow summary:hover,
+.manualconnect > summary:hover { color: var(--primary); }
+.connecthow summary:hover { text-decoration: underline; }
+
+.connecthow .clientcard-note { margin: var(--space-2) 0 0; }
+
+/*
+ * 客户端清单：一行一个客户端。
+ *
+ * 行与行之间只留一条分隔线，不画卡片：三个客户端本来就该"一眼扫完"，
+ * 而卡片边框 + 内边距会让三行占掉一整屏（改版前就是这样，实测 3 行各占 120px+）。
+ */
+.connectlist {
+  border-top: 1px solid var(--border);
+}
+
+.connectrow {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-3);
+  padding: var(--space-2) 0;
+  border-bottom: 1px solid var(--border);
+}
+
+/* 状态徽章 + 名称 + 路径都在这一格；路径截断，完整值在 title 里 */
+.connectmeta {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+  flex: 1 1 320px;
+}
+
+.connectname { font-size: var(--fs-body); white-space: nowrap; }
+
+.connectpath {
+  font-family: var(--font-mono);
+  font-size: var(--fs-dense);
+  color: var(--hint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+/* 状态标签与客户端名同排，一眼能扫「哪些已接、哪些没接」 */
+.connectmeta .tag { align-self: center; flex: none; }
+
+/* 路径来源标注：比状态徽章弱一档，不跟状态抢注意力 */
+.connectpsrc { font-size: var(--fs-micro, 10.5px); }
+.connectpsrc code { font-family: var(--font-mono); }
+
+.connectacts {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1, 4px);
+  flex: none;
+  margin-left: auto;
+}
+
+.connectacts .mini { padding: 3px 9px; }
+
+/* 主操作（写入）在按钮组里最靠前，给它一点重量但不喧宾夺主 */
+.connectacts .primary {
+  border-color: var(--primary);
+  color: var(--primary);
+}
+
+.connectmcount {
+  font-size: var(--fs-dense);
+  color: var(--hint);
+  margin-right: var(--space-2);
+  white-space: nowrap;
+}
+
+/* 详情展开器：占满一整行，跟在客户端行下面 —— 三行默认等高，展开才长出来 */
+.connectdetail {
+  flex: 1 1 100%;
+  /*
+   * `min-width: 0` 不能省。展开器是 flex 项，默认 `min-width: auto` 意味着
+   * **内容说了算** —— 里面的配置预览 `<pre>` 是 `white-space: pre`，
+   * 最长那行有多宽它就撑多宽。实测：1050px 的面板里详情撑到 **1588px**，
+   * 整页横向溢出 365px。同类容器都要带上这条。
+   */
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--panel);
+}
+
+.connectsec { display: flex; flex-direction: column; gap: var(--space-2); min-width: 0; }
+
+.connectsec-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--fs-label);
+  color: var(--text-secondary);
+}
+
+.connectsec-head b { font-size: var(--fs-label); }
+
+/* 破坏性动作：只在详情里出现，且不跟主操作并排 */
+.connectsec-head .danger {
+  border-color: var(--fail-border);
+  color: var(--fail);
+}
+.connectsec-head .danger:hover { background: var(--fail-soft); }
+
+/* ── 模型清单（可搜索，取代 30 个 chip 的云）────────────────────────── */
+.connectmodels {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.connectmodels-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.connectml-search {
+  font: inherit;
+  font-size: var(--fs-label);
+  padding: 5px 10px;
+  color: var(--text);
+  background: var(--panel-muted);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  width: 100%;
+  max-width: 280px;
+}
+
+.connectml-search:focus-visible { outline: 2px solid var(--primary); outline-offset: 1px; }
+
+/*
+ * 列表固定高度 + 滚动：30 个模型全铺开是 4 行 chip（实测 269px），
+ * 而这里只是"挑几个" —— 给一个窗口就够，其余靠搜索。
+ *
+ * **两列**：一行 32px 是按钮命中区的下限（可访问性验收盯着这个数），
+ * 单列时 30 个模型要滚 960px；两列把滚动距离砍一半，窄屏再折回单列。
+ */
+.connectml-list {
+  max-height: 224px;
+  overflow: auto;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--panel-muted);
+}
+
+@media (max-width: 720px) {
+  .connectml-list { grid-template-columns: minmax(0, 1fr); }
+}
+
+.connectml-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 1px var(--space-2);
+  font-size: var(--fs-dense);
+  line-height: 1.5;
+  border-bottom: 1px solid var(--border);
+}
+
+.connectml-row:last-child { border-bottom: none; }
+.connectml-row.on { background: var(--primary-soft, rgba(59, 130, 246, 0.08)); }
+
+.connectml-box { flex: none; margin: 0; cursor: pointer; width: 13px; height: 13px; }
+
+.connectml-id {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-family: var(--font-mono);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-secondary);
+}
+
+.connectml-row.on .connectml-id { color: var(--text); }
+
+.connectml-star {
+  flex: none;
+  font: inherit;
+  line-height: 1;
+  padding: 2px 6px;
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--hint);
+  border-radius: var(--radius-sm);
+}
+
+.connectml-star.on { color: var(--warn, #f59e0b); }
+.connectml-star:hover { background: var(--panel); }
+.connectml-star:focus-visible { outline: 2px solid var(--primary); outline-offset: 1px; }
+
+.connectml-empty { padding: var(--space-3); color: var(--hint); font-size: var(--fs-label); }
+
+.connectcatalog {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  align-items: baseline;
+  color: var(--hint);
+}
+
+/* ── 手动接入（复制片段）：折叠区 ─────────────────────────────────────── */
+.manualconnect {
+  margin-top: var(--space-4);
+  border-top: 1px solid var(--border);
+  padding-top: var(--space-3);
+}
+
+.manualconnect > summary {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  cursor: pointer;
+  padding: var(--space-2) 0;
+  font-size: var(--fs-lead);
+  color: var(--text);
+}
+
+.manualhint { font-size: var(--fs-label); color: var(--hint); font-weight: 400; }
+
+.manualbody { padding-top: var(--space-2); }
+
+/*
+ * 窄屏：客户端行拆成两行。
+ *
+ * 320px 实测：状态标签 + 名称 + 路径 + 「本机未实测」标签挤在一行里放不下，
+ * 溢出 20px（`doc=20`）。这些元素都带 `flex: none`（徽章不该被压扁），
+ * 所以只能让**容器**换行 —— 路径独占一行，操作按钮另起一行。
+ */
+@media (max-width: 520px) {
+  .connectmeta { flex: 1 1 100%; flex-wrap: wrap; }
+  .connectpath { flex: 1 1 100%; }
+  .connectacts { margin-left: 0; flex: 1 1 100%; }
+}
+
+/* 接入模型选择器：标签 + 自绘下拉（原生 select 被 enhanceSelect 包成 .dd） */
+.connectmodel {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.connectmodel-k {
+  font-size: var(--fs-label);
+  color: var(--hint);
+  white-space: nowrap;
+}
+
+/*
+ * 下拉宽度会跟着最长模型名走，容易过宽 —— 封顶交给 `.dd`（**可收缩的弹性项**）。
+ *
+ * 封在原生 select 上（`max-width: 220px`）在窄屏是错的：select 决定 `.dd` 的宽度，
+ * `.dd` 又被行宽卡住 → 220px 的 select 直接**溢出到行外**。320px 视口实测溢出 18px，
+ * 溢出元素是 `.connectmodel-sel.dd-native`。而这个问题长期没被发现，是因为桩数据里
+ * 缺 `modelOptions`：下拉是空的、宽度接近 0，撑不破任何东西
+ * （夹具太"干净"会让验收假绿 —— 这条在 CONTRIBUTING 里写过，这次又踩了一遍）。
+ */
+.connectmodel .dd { flex: 1 1 auto; min-width: 0; max-width: 220px; }
+
+.connectmodel-sel { max-width: 100%; }
+
+/* 未接入 / 未检测到 用中性色，只有「已接入」给绿色 —— 避免整片花花绿绿 */
+.tag.idle {
+  color: var(--hint);
+  border-color: var(--border);
+}
+
+.connectdiff {
+  flex: 1 1 100%;
+  margin-top: var(--space-2);
+  padding: var(--space-3);
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--panel);
+  font-size: var(--fs-label);
+}
+
+.connectchange {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  align-items: baseline;
+  padding: 2px 0;
+  font-family: var(--font-mono);
+  font-size: var(--fs-dense);
+}
+
+.connectchange code { color: var(--text-secondary); }
+
+.connectarrow { color: var(--hint); }
+
+.connectresult {
+  flex: 1 1 100%;
+  margin-top: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-sm);
+  font-size: var(--fs-label);
+  border: 1px solid var(--border);
+}
+
+.connectresult.ok { border-color: var(--ok-border, var(--primary)); color: var(--text-secondary); }
+.connectresult.bad { border-color: var(--fail-border, var(--border-strong)); color: var(--text-secondary); }
+
+/* 验证结论与「刚才那次写入的结果」区分开：左侧一道细线，不抢写入结果的注意力 */
+.connectresult.verify { border-left: 3px solid var(--border-strong); }
+.connectresult.verify.ok { border-left-color: var(--ok-border, var(--primary)); }
+.connectresult.verify.bad { border-left-color: var(--fail-border, var(--border-strong)); }
+
+/* 「重新读取」推到头行右侧：它是这块的刷新入口，不该跟标题挤在一起 */
+.connecthead .mini { margin-left: auto; }
+
+/*
+ * 读取失败卡片。
+ *
+ * 用红色（`--fail-*`）而不是 `.notice` 的黄色：这块读不出来时**下面什么都没有**，
+ * 性质和「桥没运行」那种"还能继续操作"的提醒不同，得让用户一眼看到"这里坏了"。
+ */
+.connectfail {
+  margin-top: var(--space-2);
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--fail-border);
+  background: var(--fail-soft);
+  border-radius: var(--radius-sm);
+  font-size: var(--fs-body);
+  color: var(--text-secondary);
+  line-height: 1.65;
+}
+
+.connectfail b { color: var(--fail); }
+.connectfail-s { font-family: var(--font-mono); font-size: var(--fs-dense); color: var(--text-secondary); }
+.connectfail-d { color: var(--text-secondary); word-break: break-word; }
+.connectfail .mini { margin-top: var(--space-2); }
+
+/*
+ * 有旧数据时的失败提示：沿用 `.notice` 的黄，但内容更长（原因 + 重试），
+ * 所以要能按住布局 —— 否则窄屏上按钮会被挤到文字中间。
+ */
+.connectfail-inline { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; }
+.connectfail-inline .mini { margin-top: var(--space-2); }
+
+.connectpreview {
+  flex: 1 1 100%;
+  min-width: 0;
+  margin-top: var(--space-2);
+}
+
+.connectpreview pre {
+  max-width: 100%;
+  max-height: 320px;
+  overflow: auto;
+  margin: 0;
+  padding: var(--space-3);
+  background: var(--panel-muted);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-mono);
+  font-size: var(--fs-dense);
+  color: var(--text-secondary);
+  white-space: pre;
+}
+
+/*
+ * 「写入后的完整内容」是一整份配置文件（几百行），**默认折叠**。
+ * 展开器本身是"看这个客户端到底会改什么"，不是"读一遍配置" ——
+ * 不折叠的话详情一开就是 895px，用户得滚半天才看得到下面的东西。
+ */
+.connectpre { margin-top: var(--space-1, 4px); }
+.connectpre > summary {
+  cursor: pointer;
+  color: var(--text-secondary);
+  font-size: var(--fs-label);
+  padding: 2px 0;
 }
 
 /*
@@ -2201,12 +2760,12 @@ pre.log {
   gap: var(--space-3);
   flex-wrap: wrap;
   margin-bottom: var(--space-1);
-  font-size: 12.5px;
+  font-size: var(--fs-body);
 }
 
 .modelpick-count {
   color: var(--hint);
-  font-size: 12px;
+  font-size: var(--fs-label);
 }
 
 .modelpick-head button.mini { margin-left: 0; }
@@ -2214,9 +2773,10 @@ pre.log {
 
 .modelpick-note {
   margin: 0 0 var(--space-2);
-  font-size: 12px;
+  font-size: var(--fs-label);
   color: var(--hint);
-  line-height: 1.45;
+  line-height: 1.55;
+  text-wrap: pretty;
 }
 
 .modelpick-chips {
@@ -2226,8 +2786,8 @@ pre.log {
 }
 
 .modelpick-chip {
-  font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
-  font-size: 11.5px;
+  font-family: var(--font-mono);
+  font-size: var(--fs-dense);
   padding: 4px 10px;
   cursor: pointer;
   color: var(--text-secondary);
@@ -2456,7 +3016,7 @@ pre.log {
   padding: 8px 14px;
   height: 36px;
   border-radius: var(--radius-full);
-  font-size: 12px;
+  font-size: var(--fs-label);
   font-weight: 600;
   color: var(--text-secondary);
   background: var(--panel);
@@ -2707,7 +3267,7 @@ pre.log {
   border: 1px solid var(--border);
   border-radius: 8px;
   background: var(--panel);
-  font-size: 12px;
+  font-size: var(--fs-label);
   color: var(--muted);
 }
 .reqactive .dots {
