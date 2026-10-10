@@ -26,8 +26,8 @@ import { createServer, request as httpRequest } from 'node:http';
 import { request as httpsRequest } from 'node:https';
 import { Agent as HttpAgent } from 'node:http';
 import { Agent as HttpsAgent } from 'node:https';
-import { join, dirname } from 'node:path';
-import { homedir } from 'node:os';
+import { join, dirname, isAbsolute } from 'node:path';
+import { homedir, userInfo } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { createDecipheriv, createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
@@ -174,19 +174,36 @@ function creditsOf(model) {
 //   2. 三个变量全空时会拼出 `join('.', 'workbuddy-desktop.info')` = **相对路径**，
 //      按 cwd 解析 → 桥找不到登录文件，表现却是"用户没登录"，真凶完全看不出来。
 // Windows 上优先用 LOCALAPPDATA，缺失时退回 `<home>/AppData/Local`（与 config.mjs 一致）。
-const HOME_FOR_AUTH = process.env.USERPROFILE || process.env.HOME || homedir();
+/**
+ * 家目录，**三级兜底**：`USERPROFILE`（Windows）→ `HOME`（POSIX）→ 系统查询。
+ *
+ * 为什么要 `userInfo()` 这一层（实测踩到，CI 矩阵上两个平台同时红）：
+ * `homedir()` 在 `HOME` **存在但为空字符串**时直接返回**空串** ——
+ * libuv 只判断 `getenv("HOME") != NULL`，**不看内容**。
+ * 于是 `USERPROFILE`(无) || `HOME`('') || `homedir()`('') 整条链全落空，
+ * 家目录变成空串，`join('', 'Library', ...)` 拼出相对路径。
+ * `userInfo().homedir` 在 POSIX 上走 `getpwuid`，**不受空 HOME 影响**，
+ * 正是「LOCALAPPDATA / HOME 都缺」这个场景需要的兜底。
+ */
+const HOME_FOR_AUTH = (() => {
+  const fromEnv = process.env.USERPROFILE || process.env.HOME;
+  if (fromEnv && fromEnv.trim()) return fromEnv.trim();
+  const h = homedir();
+  if (h && h.trim()) return h.trim();
+  try { return userInfo().homedir || ''; } catch { return ''; }
+})();
 const WIN_LOCAL_APPDATA = process.env.LOCALAPPDATA
   || (process.platform === 'win32' ? join(HOME_FOR_AUTH, 'AppData', 'Local') : '');
 const AUTH_DIRS = [
   process.env.WORKBUDDY_AUTH_DIR,
   WIN_LOCAL_APPDATA && join(WIN_LOCAL_APPDATA, 'CodeBuddyExtension', 'Data', 'Public', 'auth'),
   /*
-   * macOS / Linux 这两条**必须用 `HOME_FOR_AUTH`（带 `homedir()` 兜底）**，
+   * macOS / Linux 这两条**必须用 `HOME_FOR_AUTH`（三级兜底）**，
    * 不能用裸 `process.env.HOME`。
    *
-   * 现场（CI 矩阵实测，macOS 上红）：`LOCALAPPDATA` / `HOME` / `XDG_DATA_HOME`
-   * 三者全空时（精简环境、计划任务启动、CI），上面第二条在**非 Windows 平台**
-   * 上直接是空串，而这两条又都依赖 `process.env.HOME` —— 于是整个 AUTH_DIRS 为空，
+   * 现场（CI 矩阵实测）：`LOCALAPPDATA` / `HOME` / `XDG_DATA_HOME` 三者全空时
+   * （精简环境、计划任务启动、CI），上面第二条在**非 Windows 平台**上是空串，
+   * 而这两条又都依赖 `process.env.HOME` —— 于是整个 AUTH_DIRS 为空，
    * 末尾 `AUTH_DIRS[0] || '.'` 拼出**相对路径** `workbuddy-desktop.info`。
    * 相对路径按 cwd 解析，于是「桥找不到登录文件」会表现成「用户没登录」，
    * 真凶却是环境变量缺失 —— 极难查。
@@ -198,7 +215,12 @@ const AUTH_DIRS = [
   join(HOME_FOR_AUTH, 'Library', 'Application Support', 'CodeBuddyExtension', 'Data', 'Public', 'auth'),
   join(HOME_FOR_AUTH, '.local', 'share', 'CodeBuddyExtension', 'Data', 'Public', 'auth'),
   process.env.XDG_DATA_HOME && join(process.env.XDG_DATA_HOME, 'CodeBuddyExtension', 'Data', 'Public', 'auth'),
-].filter(Boolean);
+  /*
+   * 最后一道闸：**只放行绝对路径**。
+   * 家目录万一还是解析不出来（极端容器 / 被剥光的 env），宁可让这个候选为空，
+   * 也不能让一个相对路径混进 AUTH_DIRS —— 那正是本 bug 的形态。
+   */
+].filter((d) => d && isAbsolute(d));
 
 /**
  * Explicit override wins; otherwise the default file name, then the first
@@ -223,7 +245,13 @@ function resolveAuthPath() {
       if (hit) return join(dir, hit);
     } catch { /* directory absent on this platform */ }
   }
-  return join(AUTH_DIRS[0] || '.', 'workbuddy-desktop.info');
+  /*
+   * `AUTH_DIRS` 已经滤掉了非绝对路径，正常情况下 `[0]` 必然是绝对的。
+   * 万一全空（家目录与所有 env 都解析不出来），**也不能退回 `'.'`** ——
+   * 那正是「绝对路径悄悄变成相对路径」这个 bug 的形态。
+   * 退到 `HOME_FOR_AUTH`，再不行退到 cwd，两者都是绝对的。
+   */
+  return join(AUTH_DIRS[0] || HOME_FOR_AUTH || process.cwd(), 'workbuddy-desktop.info');
 }
 
 const AUTH_PATH = resolveAuthPath();
