@@ -1224,7 +1224,12 @@ table {
 th {
   position: sticky;
   top: 0;
-  background: var(--panel-muted);
+  background-color: var(--panel-muted);
+  /*
+   * 极淡的纵向渐变：给表头一条「上沿」。sticky 表头滚到表体上方时，
+   * 两者底色本来就很接近，加这一层之后「哪一行是表头」一眼可辨。浅色加白、深色加亮。
+   */
+  background-image: linear-gradient(180deg, rgba(255, 255, 255, 0.55) 0%, rgba(255, 255, 255, 0) 100%);
   z-index: 2;
   font-weight: 600;
   color: var(--muted);
@@ -1233,6 +1238,9 @@ th {
   padding: 10px 14px;
   border-bottom: 1px solid var(--border-strong);
   white-space: nowrap;
+}
+[data-theme="dark"] th {
+  background-image: linear-gradient(180deg, rgba(255, 255, 255, 0.045) 0%, rgba(255, 255, 255, 0) 100%);
 }
 td {
   padding: 10px 14px;
@@ -1949,7 +1957,9 @@ pre.log {
 .rank-fill {
   display: block;
   height: 100%;
-  background: var(--primary);
+  background-color: var(--primary);
+  /* 横向单色渐变：条越往右越深，给「长度」一个方向感 */
+  background-image: linear-gradient(90deg, var(--primary) 0%, var(--primary-hover) 100%);
   border-radius: var(--radius-full);
   transition: width 0.3s var(--ease);
 }

@@ -3135,6 +3135,23 @@ function renderChart(spec) {
   let svg = '<svg width="100%" viewBox="0 0 ' + W + ' ' + H + '" role="img" aria-label="'
     + escapeAttr(opts.ariaLabel || '用量图表') + '" class="chart">';
 
+  /*
+   * 每个系列一枚纵向渐变（顶部实、底部淡），给柱体一个受光方向 ——
+   * 原先的纯色柱在浅底上像几块色板，渐变之后才有「立起来」的体积感。
+   *
+   * id 必须**每次渲染都换**：同一页里趋势图与其它图表共存时，固定 id 会让后渲染的
+   * 那张把前一张的渐变定义顶掉（`fill="url(#x)"` 会解析到别人的定义上）。
+   * stop-color 直接写 CSS 变量 —— 已实测在本机 Chrome 上生效（与 fill 同一套解析）。
+   */
+  const gid = 'chartgrad' + (chartGradSeq += 1);
+  svg += '<defs>' + series.map((s, i) => {
+    const c = colorOf(s, i);
+    return '<linearGradient id="' + gid + '-' + i + '" x1="0" y1="0" x2="0" y2="1">'
+      + '<stop offset="0%" stop-color="' + c + '" stop-opacity="0.96"/>'
+      + '<stop offset="100%" stop-color="' + c + '" stop-opacity="0.58"/>'
+      + '</linearGradient>';
+  }).join('') + '</defs>';
+
   // y 轴 4 条网格线 + 紧凑刻度
   for (let i = 0; i <= 4; i += 1) {
     const v = (top / 4) * i;
@@ -3182,8 +3199,9 @@ function renderChart(spec) {
       svg += '<polyline points="' + pts + '" fill="none" stroke="' + colorOf(s, si) + '" stroke-width="2"'
         + (s.dashed ? ' stroke-dasharray="5 4"' : '') + '/>';
       for (let i = 0; i < s.values.length; i += 1) {
+        // 节点描一圈背景色：让点从折线上「浮」出来，而不是糊成一条更粗的线
         svg += '<circle cx="' + (padL + bandW * (i + 0.5)).toFixed(1) + '" cy="' + yOf(Number(s.values[i]) || 0).toFixed(1)
-          + '" r="3" fill="' + colorOf(s, si) + '"><title>'
+          + '" r="3.2" fill="' + colorOf(s, si) + '" stroke="var(--panel)" stroke-width="1.5"><title>'
           + escapeAttr(xLabels[i] + '：' + s.name + ' ' + fmt(Number(s.values[i]) || 0)) + '</title></circle>';
       }
     }

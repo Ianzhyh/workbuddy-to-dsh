@@ -101,13 +101,32 @@
   --space-8: 32px;
 
   /* ── 4. 阴影与质感 (Depth & Shadows) ─────────────────────────────────── */
-  --shadow-xs: 0 1px 2px rgba(15, 23, 42, 0.04);
-  --shadow-sm: 0 1px 3px rgba(15, 23, 42, 0.06), 0 1px 2px rgba(15, 23, 42, 0.03);
-  --shadow-card: 0 1px 3px rgba(15, 23, 42, 0.04), 0 0 0 1px var(--border);
-  --shadow-panel: 0 2px 4px rgba(15, 23, 42, 0.02), 0 0 0 1px var(--border);
-  --shadow-drawer: 0 4px 14px rgba(15, 23, 42, 0.06), 0 0 0 1px var(--border);
-  --shadow-primary-sm: 0 2px 6px rgba(37, 99, 235, 0.25);
-  --shadow-primary-md: 0 4px 14px rgba(37, 99, 235, 0.35);
+  /*
+   * 分层投影（key + ambient）取代原来的单层淡影。
+   *
+   * 为什么必须改：原值 `0 1px 3px rgba(15,23,42,.04)` 在 1x 屏上几乎看不见 ——
+   * 整个页面的「层次」于是全靠那圈 1px 边框在撑，卡片看起来是**画在纸上的方框**，
+   * 而不是**浮在背景上的一层**。这正是界面显得平的根本原因，也是最值得修的一处。
+   *
+   * 现在每条都拆成两层：一层短距、小模糊的「接触影」（key，交代元素贴在哪），
+   * 一层长距、大扩散的「环境影」（ambient，交代元素浮多高）。两层都用**负扩散**
+   * 压住四角，避免大卡片周围糊出一圈脏边。
+   *
+   * 阴影里**不再叠 `0 0 0 1px` 的描边环**：描边交给元素自己的 border（hover 时
+   * 要改颜色），阴影只管投影。两件事分工明确，也不会和 border 叠成双线。
+   */
+  --shadow-xs: 0 1px 2px rgba(15, 23, 42, 0.05);
+  --shadow-sm: 0 1px 2px rgba(15, 23, 42, 0.05), 0 2px 6px -2px rgba(15, 23, 42, 0.08);
+  --shadow-card: 0 1px 2px rgba(15, 23, 42, 0.04), 0 4px 12px -4px rgba(15, 23, 42, 0.08);
+  --shadow-panel: 0 1px 2px rgba(15, 23, 42, 0.03), 0 10px 28px -16px rgba(15, 23, 42, 0.12);
+  --shadow-drawer: 0 4px 10px -2px rgba(15, 23, 42, 0.08), 0 22px 44px -16px rgba(15, 23, 42, 0.22);
+  /*
+   * 悬停抬升：**只给可点/可聚焦的卡片用**（指标卡、客户端卡）。
+   * 日常容器（.panel）不用 —— 整页几十个面板一起浮会变成噪声，而且它们本来也不可点。
+   */
+  --shadow-lift: 0 2px 4px rgba(15, 23, 42, 0.05), 0 16px 32px -12px rgba(15, 23, 42, 0.18);
+  --shadow-primary-sm: 0 1px 2px rgba(37, 99, 235, 0.18), 0 3px 10px -2px rgba(37, 99, 235, 0.28);
+  --shadow-primary-md: 0 2px 4px rgba(37, 99, 235, 0.2), 0 10px 22px -6px rgba(37, 99, 235, 0.38);
 
   /* ── 6. 浮层提示 (Tooltip) ───────────────────────────────────────────── */
   /* 提示气泡用「反色面板」：浅色主题下是深底浅字，与系统自带的那只小框
@@ -120,6 +139,29 @@
   --ease: cubic-bezier(0.16, 1, 0.3, 1);
   --transition-fast: all 0.16s var(--ease);
   --transition-normal: all 0.24s var(--ease);
+
+  /*
+   * 焦点环（Focus Ring）：键盘 Tab 走到哪，那一圈光就出现在哪。
+   *
+   * 抽成令牌是因为它必须在**所有**可聚焦控件上长得一样 —— 原先按钮写
+   * `rgba(37,99,235,.18)`、select 写 `var(--primary-subtle)`，同一页里深浅不一。
+   * 统一成「主色 22% 透明 + 3px 环」，配 `:focus-visible` 只在键盘导航时出现，
+   * 鼠标点击不弹（不然每次点按钮都闪一圈，很吵）。
+   */
+  --ring: 0 0 0 3px rgba(37, 99, 235, 0.22);
+  --ring-tight: 0 0 0 2px rgba(37, 99, 235, 0.26);
+
+  /*
+   * 单色系微渐变（Monochrome Micro-Gradient）。
+   *
+   * 与设计规范里禁掉的「多彩杂乱渐变」不是一回事：这里只有**同一个色相**上的
+   * 明度变化，作用只是给实心色块一个「受光方向」，让按钮和品牌图标从
+   * 「一张色纸」变成「一块材质」。约束写死三条：只用于实心主色块、
+   * 不用于页面背景、不跨色相。浅色主题下这一层是**加白**（提亮顶部），
+   * 深色主题下换成**加亮**（见 [data-theme="dark"]），因为深色下提白会发灰。
+   */
+  --sheen-top: linear-gradient(180deg, rgba(255, 255, 255, 0.16) 0%, rgba(255, 255, 255, 0) 56%);
+  --grad-primary: linear-gradient(152deg, #3b82f6 0%, #2563eb 54%, #1e4fc4 100%);
 
   /* ── 7. 排版规范 (Typography) ────────────────────────────────────────── */
   /*
@@ -233,13 +275,33 @@
   --promo-soft: rgba(244, 63, 94, 0.12);
   --promo-border: rgba(244, 63, 94, 0.28);
 
-  --shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.3);
-  --shadow-sm: 0 2px 4px rgba(0, 0, 0, 0.4);
-  --shadow-card: 0 0 0 1px var(--border);
-  --shadow-panel: 0 0 0 1px var(--border);
-  --shadow-drawer: 0 6px 20px rgba(0, 0, 0, 0.5), 0 0 0 1px var(--border);
-  --shadow-primary-sm: 0 2px 8px rgba(59, 130, 246, 0.3);
-  --shadow-primary-md: 0 4px 16px rgba(59, 130, 246, 0.45);
+  /* 深色下的青要提亮到 400 档，否则压在 #111622 上会发闷 */
+  --info: #22d3ee;
+  --info-hover: #67e8f9;
+  --info-soft: rgba(34, 211, 238, 0.12);
+  --info-border: rgba(34, 211, 238, 0.28);
+
+  /*
+   * 深色下的投影要**更重**才看得见（黑底吃影），同时**保留一圈 1px 亮环** ——
+   * 深色主题里卡片边缘本来就靠边框分辨，去掉环会让面板糊成一片。
+   * 所以这里和浅色相反：投影 + ring 一起上。
+   */
+  --shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.35);
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.35), 0 2px 6px -2px rgba(0, 0, 0, 0.5);
+  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.3), 0 4px 12px -4px rgba(0, 0, 0, 0.55), 0 0 0 1px var(--border);
+  --shadow-panel: 0 1px 2px rgba(0, 0, 0, 0.25), 0 10px 28px -16px rgba(0, 0, 0, 0.65), 0 0 0 1px var(--border);
+  --shadow-drawer: 0 4px 10px -2px rgba(0, 0, 0, 0.45), 0 22px 44px -16px rgba(0, 0, 0, 0.75), 0 0 0 1px var(--border);
+  --shadow-lift: 0 2px 4px rgba(0, 0, 0, 0.4), 0 16px 32px -12px rgba(0, 0, 0, 0.7), 0 0 0 1px var(--border-strong);
+  --shadow-primary-sm: 0 1px 2px rgba(0, 0, 0, 0.3), 0 3px 12px -2px rgba(59, 130, 246, 0.4);
+  --shadow-primary-md: 0 2px 4px rgba(0, 0, 0, 0.35), 0 12px 26px -6px rgba(59, 130, 246, 0.55);
+
+  /* 深色下焦点环换成亮蓝，压在主色块上才看得见 */
+  --ring: 0 0 0 3px rgba(96, 165, 250, 0.3);
+  --ring-tight: 0 0 0 2px rgba(96, 165, 250, 0.35);
+
+  /* 深色下「加白」会发灰，改成「加亮」——同样只有明度变化，不跨色相 */
+  --sheen-top: linear-gradient(180deg, rgba(255, 255, 255, 0.1) 0%, rgba(255, 255, 255, 0) 56%);
+  --grad-primary: linear-gradient(152deg, #60a5fa 0%, #3b82f6 52%, #2f6fe0 100%);
 }
 
 /* 基础重置 */
@@ -357,22 +419,35 @@ header {
   width: 40px;
   height: 40px;
   border-radius: var(--radius);
+  /*
+   * 品牌块是全页唯一的「材质」锚点：给它单色系微渐变 + 顶部内高光。
+   * 它一有受光方向，下面那一排纯色卡片才读得出是「同一套语言里的平」，
+   * 而不是「这里缺了点什么」。
+   */
   background-color: var(--primary);
+  background-image: var(--grad-primary);
   display: flex;
   align-items: center;
   justify-content: center;
   color: #ffffff;
   flex-shrink: 0;
-  box-shadow: 0 2px 8px rgba(37, 99, 235, 0.25);
-  transition: background-color 0.16s var(--ease),
+  box-shadow: 0 2px 6px -1px rgba(37, 99, 235, 0.35),
+              0 8px 20px -8px rgba(37, 99, 235, 0.45),
+              inset 0 1px 0 rgba(255, 255, 255, 0.28);
+  transition: box-shadow 0.16s var(--ease),
               transform 0.16s var(--ease),
+              filter 0.16s var(--ease),
               width 0.26s var(--ease),
               height 0.26s var(--ease),
               border-radius 0.26s var(--ease);
 }
 .brand-icon:hover {
   transform: translateY(-1px) scale(1.03);
-  background-color: var(--primary-hover);
+  /* 不再改 background-color —— 那会把渐变盖掉；改用 filter 提亮整块 */
+  filter: brightness(1.06);
+  box-shadow: 0 3px 8px -1px rgba(37, 99, 235, 0.4),
+              0 12px 26px -10px rgba(37, 99, 235, 0.55),
+              inset 0 1px 0 rgba(255, 255, 255, 0.3);
 }
 .brand-icon svg {
   width: 20px;
@@ -551,7 +626,8 @@ header {
 }
 .nav-tab.active {
   color: #ffffff;
-  background: var(--primary);
+  background-color: var(--primary);
+  background-image: var(--grad-primary);
   font-weight: 600;
   box-shadow: var(--shadow-primary-sm);
   animation: tabPillPop 0.2s var(--ease);
@@ -659,7 +735,7 @@ button:active {
 button:focus-visible {
   outline: none;
   border-color: var(--primary);
-  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.18);
+  box-shadow: var(--ring);
 }
 /*
  * 禁用态。
@@ -685,6 +761,8 @@ button:disabled {
 /* 主操作按钮：纯正皇家蓝，白字，无渐变，精细阴影 */
 button.primary {
   background-color: var(--primary);
+  /* 顶部 sheen：实心主按钮有受光面，与品牌块共用同一套材质语言 */
+  background-image: var(--sheen-top);
   border-color: var(--primary);
   color: #ffffff !important;
   font-weight: 600;
@@ -886,14 +964,14 @@ button.mini {
   transition: transform 0.2s var(--ease), border-color 0.2s var(--ease), box-shadow 0.2s var(--ease);
   position: relative;
 }
+/*
+ * 悬停抬升改用 --shadow-lift（接触影 + 大扩散环境影），比原来的单层 14px 影立体。
+ * 深色主题不用再写一份 —— lift 令牌在深色下自带 ring，见 [data-theme="dark"]。
+ */
 .card:hover {
   border-color: var(--primary);
-  box-shadow: 0 4px 14px rgba(37, 99, 235, 0.1);
+  box-shadow: var(--shadow-lift);
   transform: translateY(-2px);
-}
-[data-theme="dark"] .card:hover {
-  border-color: var(--primary);
-  box-shadow: 0 4px 14px rgba(59, 130, 246, 0.2);
 }
 
 .card .k {
@@ -912,17 +990,43 @@ button.mini {
   align-items: center;
   justify-content: space-between;
 }
+/*
+ * 图标：16px 描边图标装进一枚 26px 的淡色圆角底衬（tone chip）。
+ *
+ * 两个作用，缺一不可：
+ *   1. **语义编码** —— 颜色由 `.card` 上的 `tone-*` 类给出（本地蓝 / 远端青 /
+ *      健康绿 / 临期琥珀 / 异常红）。原先 8 张卡的图标**全是同一个皇家蓝**，
+ *      扫过去分不出「桥进程」和「上游端点」—— 而这两件事出问题时的排查方向
+ *      完全不同。上色之后它们一眼可分。
+ *   2. **视觉配重** —— 卡片右上角原先是一个 16px 细线图标，和左下角 20px/700
+ *      的大数字完全不配重，整张卡左重右空。加了底衬，右上角才有实体，版面才稳。
+ *
+ * 尺寸靠 padding 撑（16 + 5×2 = 26），图标本身仍是 16px 描边，笔画粗细不变。
+ * `--tone` / `--tone-soft` / `--tone-border` 三个变量给了兜底值，所以**没打 tone 类
+ * 的卡片（比如插件面板复用的样式）自动退回原来的主色观感**，不会变成透明块。
+ */
 .card .k-icon {
-  width: 16px;
-  height: 16px;
-  color: var(--primary);
-  opacity: 0.85;
-  transition: opacity 0.2s var(--ease), transform 0.2s var(--ease);
+  width: 26px;
+  height: 26px;
+  padding: 5px;
+  border-radius: var(--radius-sm);
+  color: var(--tone, var(--primary));
+  background-color: var(--tone-soft, var(--primary-subtle));
+  box-shadow: inset 0 0 0 1px var(--tone-border, var(--primary-border));
+  opacity: 1;
+  transition: transform 0.2s var(--ease);
 }
 .card:hover .k-icon {
-  opacity: 1;
-  transform: scale(1.12);
+  transform: scale(1.08);
 }
+
+/* 语义档位：由渲染层按指标含义给 .card 加类（见 renderCards 的 tone 参数） */
+.card.tone-ok      { --tone: var(--ok);      --tone-soft: var(--ok-soft);         --tone-border: var(--ok-border); }
+.card.tone-warn    { --tone: var(--warn);    --tone-soft: var(--warn-soft);       --tone-border: var(--warn-border); }
+.card.tone-fail    { --tone: var(--fail);    --tone-soft: var(--fail-soft);       --tone-border: var(--fail-border); }
+.card.tone-info    { --tone: var(--info);    --tone-soft: var(--info-soft);       --tone-border: var(--info-border); }
+.card.tone-primary { --tone: var(--primary); --tone-soft: var(--primary-subtle); --tone-border: var(--primary-border); }
+.card.tone-muted   { --tone: var(--muted);   --tone-soft: var(--panel-muted);     --tone-border: var(--border); }
 .card .v {
   font-size: var(--fs-display);
   font-weight: 700;
@@ -1120,7 +1224,12 @@ table {
 th {
   position: sticky;
   top: 0;
-  background: var(--panel-muted);
+  background-color: var(--panel-muted);
+  /*
+   * 极淡的纵向渐变：给表头一条「上沿」。sticky 表头滚到表体上方时，
+   * 两者底色本来就很接近，加这一层之后「哪一行是表头」一眼可辨。浅色加白、深色加亮。
+   */
+  background-image: linear-gradient(180deg, rgba(255, 255, 255, 0.55) 0%, rgba(255, 255, 255, 0) 100%);
   z-index: 2;
   font-weight: 600;
   color: var(--muted);
@@ -1129,6 +1238,9 @@ th {
   padding: 10px 14px;
   border-bottom: 1px solid var(--border-strong);
   white-space: nowrap;
+}
+[data-theme="dark"] th {
+  background-image: linear-gradient(180deg, rgba(255, 255, 255, 0.045) 0%, rgba(255, 255, 255, 0) 100%);
 }
 td {
   padding: 10px 14px;
@@ -1845,7 +1957,9 @@ pre.log {
 .rank-fill {
   display: block;
   height: 100%;
-  background: var(--primary);
+  background-color: var(--primary);
+  /* 横向单色渐变：条越往右越深，给「长度」一个方向感 */
+  background-image: linear-gradient(90deg, var(--primary) 0%, var(--primary-hover) 100%);
   border-radius: var(--radius-full);
   transition: width 0.3s var(--ease);
 }
