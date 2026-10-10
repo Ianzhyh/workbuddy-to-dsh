@@ -27,7 +27,19 @@ export async function startStaticServer(port) {
     const path = (req.url || '/').split('?')[0];
     const file = path === '/' ? join(PUBLIC_DIR, 'index.html') : join(PUBLIC_DIR, path.replace(/^\/+/, ''));
     if (!file.startsWith(PUBLIC_DIR) || !existsSync(file)) { res.writeHead(404).end('not found'); return; }
-    res.writeHead(200, { 'Content-Type': MIME[extname(file)] || 'application/octet-stream' });
+    res.writeHead(200, {
+      'Content-Type': MIME[extname(file)] || 'application/octet-stream',
+      /*
+       * 静态资源一律**不缓存**。
+       *
+       * 为什么必须显式写：openPage 会**复用**常驻的 headless 实例（多个脚本串跑时
+       * 不必反复冷启动），而 Chrome 对没有缓存头的资源走启发式缓存。于是改完
+       * `style.css` / `index.html` 再跑测试时，页面拿到的还是**上一次**的版本 ——
+       * 表现是「改动明明落盘了，测试和截图却完全看不到」，而且不报任何错，
+       * 极难排查（本项目实际踩到：给状态卡加语义色后截图里毫无变化）。
+       */
+      'Cache-Control': 'no-store',
+    });
     res.end(readFileSync(file));
   });
   await new Promise((ok) => server.listen(port, '127.0.0.1', ok));
