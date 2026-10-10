@@ -482,13 +482,20 @@ try {
 }
 
 // ── 第二段：**一开始就**读不到（用户实际遇到的那种：整个面板从没渲染出来过）──
+/*
+ * ⚠️ 这一段必须用**自己的** `page2.cdp`，不能沿用第一段的 `cdp`。
+ * 早先这里写的是 `q(cdp, …)`（闭包里的第一张页面），而 `openPage` 当时会复用
+ * 同一张页面，所以"碰巧"能过 —— 属于**假绿**：harness 一旦改成"每次开一张干净页面"
+ * （见 ui-harness 的页面隔离修复），断言就会去查上一张页面，整段失败。
+ */
 {
   const broken = baseRoutes({ clients: CLIENTS });
   broken['/api/connect'] = { status: 404, body: '404' };
   const page2 = await openPage(`${URL_}?case=hard-404`, broken, { width: 1440, height: 1000, cdpPort: 9335 });
+  const cdp2 = page2.cdp;
   try {
-    await waitFor(cdp, `document.querySelector('#clientsBox .connectbox') !== null`, 10000, '一键接入块').catch(() => {});
-    const hard = await q(cdp, `(() => {
+    await waitFor(cdp2, `document.querySelector('#clientsBox .connectbox') !== null`, 10000, '一键接入块').catch(() => {});
+    const hard = await q(cdp2, `(() => {
       const box = document.querySelector('#clientsBox .connectbox');
       if (!box) return null;
       return {
@@ -511,9 +518,9 @@ try {
     }
 
     // 英文模式下同样不许留中文
-    await q(cdp, `document.getElementById('langToggle').click()`);
+    await q(cdp2, `document.getElementById('langToggle').click()`);
     await sleep(400);
-    const zh2 = await q(cdp, ZH_IN('#clientsBox .connectbox'));
+    const zh2 = await q(cdp2, ZH_IN('#clientsBox .connectbox'));
     if (zh2.length === 0) pass('英文模式：读取失败态无残留中文');
     else fail(`英文模式下失败态仍有中文：\n     ` + zh2.slice(0, 8).join('\n     '));
   } catch (err) {
@@ -536,11 +543,12 @@ try {
   routes3['/api/connect'] = { body: { ...CONNECT, clients: handWritten } };
   routes3['/api/connect/verify'] = { body: VERIFY_OK };
   const page3 = await openPage(`${URL_}?case=hand-written`, routes3, { width: 1440, height: 1000, cdpPort: 9335 });
+  const cdp3 = page3.cdp;   // 同第二段：必须用自己的页面，别再沿用第一段的 cdp
   try {
-    await waitFor(cdp, `document.querySelectorAll('#clientsBox .connectrow').length === 3`, 10000, '第三段三行');
-    const oc = await q(cdp, `(() => {
+    await waitFor(cdp3, `document.querySelectorAll('#clientsBox .connectrow').length === 3`, 10000, '第三段三行');
+    const oc = await q(cdp3, `(() => {
       const row = [...document.querySelectorAll('#clientsBox .connectrow')]
-        .find((r) => (r.querySelector('.connectmeta b') || {}).textContent === 'opencode');
+        .find((r) => (r.querySelector('.connectname') || {}).textContent === 'opencode');
       const tag = row.querySelector('.connectmeta .tag');
       return { text: tag.textContent.trim(), cls: tag.className, buttons: [...row.querySelectorAll('button')].map((b) => b.textContent.trim()) };
     })()`);
@@ -550,22 +558,22 @@ try {
       fail(`手抄的配置没有被认成已接入：${JSON.stringify(oc)}`);
     }
     // 「验证接入」现在在详情里：先展开再找
-    await q(cdp, `(() => { const row = [...document.querySelectorAll('#clientsBox .connectrow')]
+    await q(cdp3, `(() => { const row = [...document.querySelectorAll('#clientsBox .connectrow')]
       .find((r) => (r.querySelector('.connectname') || {}).textContent === 'opencode');
       const b = [...row.querySelectorAll('.connectacts button')].find((x) => x.textContent.trim() === '详情');
       if (b) b.click(); })()`);
-    await waitFor(cdp, `[...document.querySelectorAll('#clientsBox .connectrow')]
+    await waitFor(cdp3, `[...document.querySelectorAll('#clientsBox .connectrow')]
       .find((r) => (r.querySelector('.connectname') || {}).textContent === 'opencode')
       .querySelector('.connectdetail') !== null`, 8000, 'opencode 详情').catch(() => {});
-    const ocDetail = await q(cdp, `(() => { const row = [...document.querySelectorAll('#clientsBox .connectrow')]
+    const ocDetail = await q(cdp3, `(() => { const row = [...document.querySelectorAll('#clientsBox .connectrow')]
       .find((r) => (r.querySelector('.connectname') || {}).textContent === 'opencode');
       return { buttons: [...row.querySelectorAll('button')].map((b) => b.textContent.trim()) }; })()`);
     if (ocDetail.buttons.includes('验证接入')) pass('手抄的配置也能点「验证接入」（在详情里）');
     else fail(`手抄的配置没有验证入口：${JSON.stringify(ocDetail.buttons)}`);
 
-    await waitFor(cdp, `window.__posts.some((p) => p.path === '/api/connect/verify' && p.body && p.body.client === 'opencode')`,
+    await waitFor(cdp3, `window.__posts.some((p) => p.path === '/api/connect/verify' && p.body && p.body.client === 'opencode')`,
       8000, '手抄配置自动验证').catch(() => {});
-    const posted = await q(cdp, `window.__posts.some((p) => p.path === '/api/connect/verify' && p.body && p.body.client === 'opencode')`);
+    const posted = await q(cdp3, `window.__posts.some((p) => p.path === '/api/connect/verify' && p.body && p.body.client === 'opencode')`);
     if (posted) pass('手抄的配置也会自动验证（否则它会悄悄烂掉，用户永远不知道）');
     else fail('手抄的配置没有自动验证');
   } catch (err) {

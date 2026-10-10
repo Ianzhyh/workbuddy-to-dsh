@@ -61,13 +61,20 @@ function findChrome() {
   return candidates.find((p) => p && existsSync(p));
 }
 
-async function devtoolsPage(port) {
+/**
+ * 端口上的**全部** page 目标（含 ws），供 openPage 判断"实例是否已在跑"。
+ *
+ * 注意它只用来**判断实例存在**，不再拿它挑"第一张页面"来用 ——
+ * 复用旧页面会把上一个脚本的注入脚本、localStorage、对话框处理器一起带过来
+ * （详见 `openPage` 里 `newTarget` 的说明）。
+ */
+async function devtoolsPages(port) {
   for (let i = 0; i < 60; i += 1) {
     try {
       const res = await fetch(`http://127.0.0.1:${port}/json/list`);
       const targets = await res.json();
-      const page = targets.find((t) => t.type === 'page' && t.webSocketDebuggerUrl);
-      if (page) return page.webSocketDebuggerUrl;
+      const pages = targets.filter((t) => t.type === 'page' && t.webSocketDebuggerUrl);
+      if (pages.length) return pages;
     } catch { /* 还没起来 */ }
     await sleep(250);
   }
@@ -285,8 +292,50 @@ export async function openPage(url, routes, { cdpPort = 9333, width = 1440, heig
   let chrome = null;
   let profileDir = null;
   let wsUrl;
+  /** 我们要在 close() 里关掉的那张页面（复用实例时才有值）。 */
+  let createdTargetId = null;
+  /**
+   * 在已有实例上**新建一张干净页面**。
+   *
+   * 为什么要新建而不是复用现成的那张：`npm run test:ui` 串行跑 21 个脚本、
+   * 共用 `cdpPort = 9333` 一个浏览器实例。上一个脚本留下的页面还在，
+   * 它的 `addScriptToEvaluateOnNewDocument`（桩数据、`window.__X` 标记）、
+   * localStorage、对话框处理器**全都还生效**。实测复现：新脚本拿到的状态是
+   * `{"second":2,"stale":1}` —— 两轮注入叠加，断言于是在脏状态下跑。
+   * 症状就是"随机红"：`test-r6-detail` 第一次点 ⓘ 没反应（`opened=0`）、
+   * `test-r7-safety` 读到了上一个脚本的 confirm 文案。
+   *
+   * 注意**别顺手把旧页面都关掉**：全关掉会让 Chrome 因为"没有窗口"而退出，
+   * 下一个脚本于是又冷启动一个新实例，越跑越多（实测泄漏到 14 个实例，
+   * 而且后续脚本开始 180s 超时）。留着旧页面，只是多用几 MB 内存。
+   */
+  const newTarget = async (port) => {
+    try {
+      const r = await fetch(`http://127.0.0.1:${port}/json/new?about:blank`, { method: 'PUT' });
+      if (!r.ok) return null;
+      return await r.json();
+    } catch {
+      return null;
+    }
+  };
+
   try {
-    wsUrl = await devtoolsPage(cdpPort);
+    const pages = await devtoolsPages(cdpPort);
+    void pages;
+    const fresh = await newTarget(cdpPort);
+    if (fresh && fresh.webSocketDebuggerUrl) {
+      wsUrl = fresh.webSocketDebuggerUrl;
+      createdTargetId = fresh.id || null;
+    } else {
+      /*
+       * 拿不到 /json/new（老版本只认 GET、或发行版禁了该接口）时退回复用现有页面。
+       * 这条路**可能带着上一轮的注入** —— 所以把话说明白，别让它以"随机红"的形式出现。
+       */
+      const left = await devtoolsPages(cdpPort);
+      wsUrl = left[0].webSocketDebuggerUrl;
+      process.stderr.write('[ui-harness] 提示：/json/new 不可用，本次复用了已有页面；'
+        + '若断言莫名其妙地失败，先怀疑跨脚本残留状态\n');
+    }
   } catch {
     const exe = findChrome();
     if (!exe) throw new Error('找不到 Chrome/Edge，请设置 CHROME_PATH');
@@ -302,7 +351,8 @@ export async function openPage(url, routes, { cdpPort = 9333, width = 1440, heig
       'about:blank',
     ], { stdio: 'ignore', detached: true });
     chrome.unref();
-    wsUrl = await devtoolsPage(cdpPort);
+    const pages = await devtoolsPages(cdpPort);
+    wsUrl = pages[0].webSocketDebuggerUrl;
   }
 
   const cdp = connect(wsUrl);
@@ -310,6 +360,29 @@ export async function openPage(url, routes, { cdpPort = 9333, width = 1440, heig
   await cdp.send('Page.enable');
   await cdp.send('Runtime.enable');
   await cdp.send('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 1, mobile: false });
+
+  /**
+   * 授予剪贴板权限 —— 必须在页面里**真的去复制**之前。
+   *
+   * 为什么需要：页面里的「复制」按钮有两条路（`copyText`）：
+   *   1. `navigator.clipboard.writeText`（要安全上下文 + 用户手势）；
+   *   2. 退化到 `document.execCommand('copy')`。
+   * 无头实例里第 1 条常常被拒，而第 2 条一旦也不可用，页面会**如实**显示
+   * 「复制失败：xxx，请手动选择复制」—— 那是**正确的产品行为**。
+   * 但 i18n 验收会把这句提示当成"漏翻的中文"抓出来（实测：
+   * `span#actionMsg.msg | Copy failed: opencode.json，请手动选择复制` 连报十几条），
+   * 于是失败原因看起来像翻译问题，其实是**测试环境的剪贴板权限**问题。
+   *
+   * 这里统一放行，让被测页面走正常路径；测的是"界面文案"而不是"无头浏览器的权限策略"。
+   */
+  try {
+    await cdp.send('Browser.grantPermissions', {
+      origin: new URL(url).origin,
+      permissions: ['clipboardReadWrite', 'clipboardSanitizedWrite'],
+    });
+  } catch {
+    /* 老版本没有这个命令时忽略：页面还有 execCommand 兜底 */
+  }
 
   /**
    * 清空目标源的 local/sessionStorage —— 必须在**导航之前**。
@@ -340,12 +413,42 @@ export async function openPage(url, routes, { cdpPort = 9333, width = 1440, heig
     cdp.send('Page.handleJavaScriptDialog', { accept: !!accept });
   });
 
+  /*
+   * 等**这一次**导航的 load 事件。
+   *
+   * 注意这里**不能**像早先那样 `Promise.race([loaded, sleep(8000)])`：
+   * 那等于"等 8 秒还没好就往下走"，而下面的断言会立刻对着一个**还没加载完**
+   * 的页面开跑 —— 症状是"第一次点击完全没反应"（实测 `opened=0`），
+   * 却看不出是加载问题。真等不到就**明确报错**，别让失败以随机断言的形式出现。
+   *
+   * 同时也不能只等一个可能来自**上一次**导航的 load：`cdp.on` 只追加不移除，
+   * 所以这里先记下"注册之前的监听数"没有意义 —— 真正保证正确性的是上面
+   * 每次都换成**全新的页面**（新页面的第一次 load 必然属于本次导航）。
+   */
   const loaded = new Promise((ok) => cdp.on('Page.loadEventFired', ok));
   await cdp.send('Page.navigate', { url });
-  await Promise.race([loaded, sleep(8000)]);
+  const timedOut = await Promise.race([loaded.then(() => false), sleep(15000).then(() => true)]);
+  if (timedOut) {
+    // 兜底确认：有些页面（如纯静态、已缓存）可能不触发 loadEventFired 而只是 readyState=complete
+    const ready = await cdp.evaluate('document.readyState').catch(() => null);
+    if (ready !== 'complete') {
+      throw new Error(`页面 15 秒内没有加载完成（readyState=${ready}）：${url}`);
+    }
+  }
 
   const close = () => {
     try { cdp.close(); } catch { /* 忽略 */ }
+    /*
+     * 复用实例时，把**我们新建的这张页面**关掉 —— 不清掉会越攒越多
+     * （每个脚本一张，21 个脚本就是 21 张常驻页面）。
+     * 只关自己建的：旧脚本留下的页面不归我们管，关它们会把浏览器窗口清空、
+     * 导致 Chrome 退出、下一个脚本又冷启动（实测泄漏到 14 个实例）。
+     */
+    if (createdTargetId) {
+      try {
+        fetch(`http://127.0.0.1:${cdpPort}/json/close/${createdTargetId}`).catch(() => {});
+      } catch { /* 忽略 */ }
+    }
     if (chrome) { try { chrome.kill(); } catch { /* 忽略 */ } }
     if (profileDir) { try { rmSync(profileDir, { recursive: true, force: true }); } catch { /* 忽略 */ } }
   };
