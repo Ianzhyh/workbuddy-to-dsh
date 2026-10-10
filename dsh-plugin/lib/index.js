@@ -108,16 +108,24 @@ function readBridgeToken() {
  */
 function resolveLocalToken(rawToken) {
   const explicit = typeof rawToken === 'string' ? rawToken.trim() : '';
-  if (explicit) return explicit;
+  if (explicit) {
+    /*
+     * 令牌是配置显式给的 → 根本没落到磁盘上，也就没有「文件同机可读」这回事。
+     * 必须**显式复位**这个状态：不复位的话它会是上一次调用的残留值，
+     * 面板上就会报一个与当前配置不符的结论。
+     */
+    bridgeTokenHardenResult = { ok: true, code: 'skipped', reason: '令牌由配置显式给定，未落盘，无需加固' };
+    return explicit;
+  }
   const stored = readBridgeToken();
   if (stored) {
-    hardenBridgeTokenFile(); // 旧版本创建的文件权限是继承来的，这里补一次
+    bridgeTokenHardenResult = hardenBridgeTokenFile(); // 旧版本创建的文件权限是继承来的，这里补一次
     return stored;
   }
   const token = randomBytes(24).toString('base64url');
   try {
     writeFileSync(BRIDGE_TOKEN_PATH, `${token}\n`, { mode: 0o600 });
-    hardenBridgeTokenFile();
+    bridgeTokenHardenResult = hardenBridgeTokenFile();
   } catch { /* 只读介质：本次运行用这个值，下次会换新的（用户需重填密钥） */ }
   return token;
 }
@@ -133,22 +141,59 @@ function resolveLocalToken(rawToken) {
  *
  * 与 `config.mjs` 里那份是同一套做法（插件包不引用仓库根的 config，
  * 所以各自持有一份小实现，改动时两处要一起看）。
- * 尽力而为：拿不到就保持默认，绝不因此让插件启动失败。
+ * 尽力而为：拿不到就保持默认，绝不因此让插件启动失败 —— **但失败必须报出来**，
+ * 见返回值。原先写成 `try { spawnSync(...) } catch {}`，等于没看结果：
+ * `spawnSync` 失败**不抛异常**，它把失败放进 `r.error` / `r.status`。
+ * 于是「icacls 没跑成」与「跑成了」在调用方看来一模一样，文件权限其实没收紧
+ * 也没有任何地方会提到 —— 这类「静默失效」是本项目最该避免的。
+ *
+ * @returns {{ ok: boolean, code: 'ok'|'no-user'|'spawn-failed'|'icacls-failed'|'exception', reason?: string }}
  */
 function hardenBridgeTokenFile() {
   try {
     if (process.platform !== 'win32') {
       chmodSync(BRIDGE_TOKEN_PATH, 0o600);
-      return;
+      return { ok: true, code: 'ok' };
     }
     const user = process.env.USERNAME || process.env.USER;
-    if (!user) return;
-    // 用 spawnSync 而不是 execSync：后者经 cmd.exe 且默认给 stdin 开管道，
-    // 在 Windows 上必抛 EBUSY。
-    spawnSync('icacls', [BRIDGE_TOKEN_PATH, '/inheritance:r', '/grant:r', `${user}:F`],
+    if (!user) {
+      return { ok: false, code: 'no-user', reason: 'USERNAME / USER 都为空，无法指定 ACL 主体' };
+    }
+    /*
+     * 用 spawnSync 而不是 execSync：后者经 cmd.exe 且默认给 stdin 开管道，
+     * 在 Windows 上必抛 EBUSY。
+     *
+     * `stdio[0]` 必须是 `'ignore'` —— **这条才是关键**。默认三个 `'pipe'` 时
+     * stdin 也走管道，实测在本机每次调用都返回 `{ error: EBUSY }`：
+     *   默认 stdio（stdin 管道）  → 22/22 失败
+     *   `stdio[0]: 'ignore'`      → 0/22 失败
+     * 也就是说「连打同一个可执行文件会 EBUSY」是误判，真正的触发条件是这个管道。
+     */
+    const r = spawnSync('icacls', [BRIDGE_TOKEN_PATH, '/inheritance:r', '/grant:r', `${user}:F`],
       { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
-  } catch { /* 尽力而为 */ }
+    if (r.error) {
+      return { ok: false, code: 'spawn-failed', reason: `icacls 起不来：${r.error.code || r.error.message}` };
+    }
+    if (r.status !== 0) {
+      const first = String(r.stderr || '').trim().split('\n')[0];
+      return {
+        ok: false,
+        code: 'icacls-failed',
+        reason: `icacls 退出码 ${r.status}${first ? `：${first}` : ''}`,
+      };
+    }
+    return { ok: true, code: 'ok' };
+  } catch (e) {
+    return { ok: false, code: 'exception', reason: e?.message || String(e) };
+  }
 }
+
+/**
+ * 最近一次令牌文件加固的结果。`resolveConfig()` 每次都会调 `resolveLocalToken()`，
+ * 所以这个值随配置一起更新；`resolveConfig()` 把它作为 `localTokenHarden` 返回，
+ * 让面板/诊断能说清「令牌文件到底有没有收紧」。
+ */
+let bridgeTokenHardenResult = { ok: false, code: 'exception', reason: '尚未执行（令牌由配置显式给定时会跳过）' };
 
 /** 默认值集中在一处，README 与面板都读它。 */
 export const DEFAULTS = {
@@ -221,6 +266,12 @@ export function resolveConfig(raw = {}) {
     bridgeHost: String(cfg.bridgeHost || DEFAULTS.bridgeHost),
     bridgePort: Number(cfg.bridgePort) || DEFAULTS.bridgePort,
     localToken: resolveLocalToken(cfg.localToken),
+    /*
+     * 令牌文件权限加固的结果（`{ok, code, reason}`）。加固是「尽力而为、不阻断
+     * 启动」，但**失败必须能被看见** —— 否则「文件其实同机可读」这件事在整条
+     * 链路上没有任何地方会提到。放在 resolveConfig 的返回值里，面板/诊断可读。
+     */
+    localTokenHarden: bridgeTokenHardenResult,
     nodePath: String(cfg.nodePath || ''),
     authFile: String(cfg.authFile || ''),
     autoCheckin: cfg.autoCheckin === undefined || cfg.autoCheckin === null

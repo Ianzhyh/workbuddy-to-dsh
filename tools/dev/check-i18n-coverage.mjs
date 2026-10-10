@@ -3,6 +3,9 @@
  *
  *   node tools/dev/check-i18n-coverage.mjs                      # 控制台
  *   node tools/dev/check-i18n-coverage.mjs dsh-plugin/lib/client.js
+ *   node tools/dev/check-i18n-coverage.mjs --check '某个串'      # 只问这几串翻不翻
+ *   node tools/dev/check-i18n-coverage.mjs --why 3729           # 问「这一行为什么进/不进名单」
+ *   node tools/dev/check-i18n-coverage.mjs --why '保存到 dsh 设置（'
  *
  * ## 为什么需要它
  *
@@ -17,6 +20,13 @@
  *
  * 词条表与规则表直接从源码里**切出来求值**（它们是纯字面量），
  * 这样检查用的翻译逻辑与被测代码永远是同一份 —— 复制一份到检查脚本里必然漂移。
+ *
+ * 判据顺序（任一成立就算「翻得动」，不进名单）：
+ *   1. 整串能翻（含 HTML 的串按拆出的文本片段逐段判）；
+ *   2. 它是**拼接片段** —— 同行拼接、或跨行 `+` 链拼起来能翻（见 `chainSep`）。
+ *
+ * 名单里的条数只说明「嫌疑」，不说明「缺陷」：注释、日志、上游数据也会进来。
+ * 判断单条真伪用 `--why`，别靠猜。
  */
 import { readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
@@ -26,7 +36,7 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(HERE, '..', '..');
 
 /*
- * 参数：`[文件] [--check 串…] [--debug]`
+ * 参数：`[文件] [--check 串…] [--why 行号|串] [--debug]`
  *
  * 位置参数与开关要分开解析 —— 否则 `--check` 后面那串会被当成文件名
  * （实测：`ENOENT: open '…\--check'`）。
@@ -34,11 +44,19 @@ const ROOT = join(HERE, '..', '..');
 const argv = process.argv.slice(2);
 const checkStrings = [];
 const positional = [];
+let whyLine = 0;
+let whyArg = '';
 for (let i = 0; i < argv.length; i += 1) {
   if (argv[i] === '--check') {
     i += 1;
     while (i < argv.length && !argv[i].startsWith('--')) { checkStrings.push(argv[i]); i += 1; }
     i -= 1;
+    continue;
+  }
+  if (argv[i] === '--why') {
+    whyArg = argv[i + 1];
+    whyLine = Number(whyArg) || 0;
+    i += 1;
     continue;
   }
   if (argv[i].startsWith('--')) continue;
@@ -173,23 +191,133 @@ function fillTemplate(s) {
   return out;
 }
 
-const hits = new Map();
-/** 同一行的字面量（按行号索引）：用来判「拼接片段」，见下面 joined 的处理。 */
-const byLine = new Map();
-src.split('\n').forEach((raw, i) => {
-  const trimmed = raw.trim();
-  if (/^(\/\/|\*|\/\*)/.test(trimmed)) return; // 注释行不算
-  const lineVals = [];
-  for (const m of raw.matchAll(/'([^'\\]*(?:\\.[^'\\]*)*)'|"([^"\\]*(?:\\.[^"\\]*)*)"|`([^`\\]*(?:\\.[^`\\]*)*)`/g)) {
-    const val = m[1] ?? m[2] ?? m[3];
-    if (val == null || !CJK.test(val)) continue;
-    const key = val.replace(/\s+/g, ' ').trim();
-    if (!hits.has(key)) hits.set(key, { line: i + 1, raw: val, count: 0 });
-    hits.get(key).count += 1;
-    lineVals.push(val);
+/*
+ * 「拼接片段」的判据要**按 `+` 链**，不能按行。
+ *
+ * 旧实现把**同一行**的字面量用 `'1'` 连起来再判，两个问题：
+ *   1. **跨行拼接看不见**。`'…前半句'` 换行 `+ '后半句…'` 是这份文件里最常见的
+ *      写法（一行太长要断），而词条表里的键是**拼完的整句**。按行拆开判，
+ *      整句永远拼不上，永远是「片段翻不动」——实测 Codex 卡片那 6 条全是这类假阳性。
+ *   2. **分隔符一律用 `'1'` 也不对**：`'a' + n + 'b'` 运行时是 `a1b`（中间是变量），
+ *      而 `'a' + 'b'` 运行时就是 `ab`。分隔符取决于**两个字面量之间夹了什么**。
+ *
+ * 所以先按源码位置把所有字面量排好，再看相邻两个之间的「缝」：
+ *   缝里只有 `+`         → 直接相接，用 `''` 拼；
+ *   缝是 `+ … +`         → 中间夹了表达式，用 `'1'` 当占位；
+ *   其他（逗号 / 冒号 / 换行分隔的数组元素）→ **不拼**。它们在运行时本来就是
+ *   各自独立的文本节点（`appendParts` 就是干这个的），必须各自能翻。
+ */
+const LITERAL_RE = /'([^'\\]*(?:\\.[^'\\]*)*)'|"([^"\\]*(?:\\.[^"\\]*)*)"|`([^`\\]*(?:\\.[^`\\]*)*)`/g;
+const srcLines = src.split('\n');
+const lineStarts = [];
+{
+  let off = 0;
+  for (const l of srcLines) { lineStarts.push(off); off += l.length + 1; }
+}
+const tokens = [];
+srcLines.forEach((raw, i) => {
+  const isComment = /^(\/\/|\*|\/\*)/.test(raw.trim());
+  for (const m of raw.matchAll(LITERAL_RE)) {
+    const startAbs = lineStarts[i] + m.index;
+    tokens.push({
+      line: i + 1,
+      startAbs,
+      endAbs: startAbs + m[0].length,
+      val: m[1] ?? m[2] ?? m[3],
+      isComment,
+    });
   }
-  if (lineVals.length) byLine.set(i + 1, lineVals);
 });
+
+/**
+ * 判断两个字面量之间那道「缝」的性质，返回 `{ sep, depth }`：
+ *
+ *   `sep = ''`   —— 直接相接（`'a' + 'b'` 运行时是 `ab`）
+ *   `sep = '1'`  —— 中间夹着表达式（`'a' + n + 'b'` 运行时是 `a1b`）
+ *   `sep = null` —— 不是同一条 `+` 链，**不拼**（调用方就此收链）
+ *
+ * `depth` 是**进入下一个字面量时的括号深度**，必须由调用方沿着链传下去 ——
+ * 不能每道缝都从 0 开始。反例（实测踩过）：
+ *   `'今天已经签过了（' + (d.message || '') + '）'`
+ * 头一道缝里开了 `(`（结束时深度 1），第二道缝一上来就是 `)`，它闭合的是
+ * **上一道缝开的括号**。每道缝各自从 0 起算，这个 `)` 就会被当成「在深度 0
+ * 闭合 → 表达式结束」，链断在这里，整句永远拼不上。
+ *
+ * 判据里那个「深度 0 闭合即收链」不能省。反例：
+ *   `('已切换到 ' + file) : ('切换失败：' + err)`
+ * 这两个字面量在**三元的两个分支**上，运行时永远不会拼在一起，
+ * 但缝里确实有个 `+`。只有括号闭合在深度 0 才说明表达式真的结束了。
+ */
+function chainSep(gap, startDepth) {
+  let depth = startDepth;
+  let sawPlus = false;
+  let sawExpr = false; // 第一个 `+` 之后是否出现过操作数（一旦为真不再复位）
+  for (let i = 0; i < gap.length; i += 1) {
+    const c = gap[i];
+    if (c === '(' || c === '[' || c === '{') { depth += 1; if (sawPlus) sawExpr = true; continue; }
+    if (c === ')' || c === ']' || c === '}') {
+      if (depth === 0) return { sep: null, depth }; // 表达式在这里就结束了
+      depth -= 1;
+      continue;
+    }
+    if (depth > 0) { if (sawPlus) sawExpr = true; continue; }
+    if (c === ' ' || c === '\t' || c === '\n' || c === '\r') continue;
+    if (c === '+') { sawPlus = true; continue; }
+    // 深度 0 上遇到这些 → 换了一个操作数 / 一条语句，不是同一条 `+` 链
+    if (c === '?' || c === ':' || c === ',' || c === ';') return { sep: null, depth };
+    if (!sawPlus) return { sep: null, depth }; // 第一个 `+` 之前就有别的符号
+    sawExpr = true;
+  }
+  if (!sawPlus) return { sep: null, depth };
+  return { sep: sawExpr ? '1' : '', depth };
+}
+
+// 串成 `+` 链，每个成员记住自己所在链的「运行时拼接形态」。
+let t = 0;
+while (t < tokens.length) {
+  const members = [tokens[t]];
+  let joined = tokens[t].val;
+  let u = t;
+  let depth = 0;
+  while (u + 1 < tokens.length) {
+    const r = chainSep(src.slice(tokens[u].endAbs, tokens[u + 1].startAbs), depth);
+    if (r.sep === null) break;
+    depth = r.depth;
+    u += 1;
+    joined += r.sep + tokens[u].val;
+    members.push(tokens[u]);
+  }
+  if (u > t) for (const tk of members) tk.chain = joined;
+  t = u + 1;
+}
+
+const hits = new Map();
+/** 同一行的字面量（按行号索引）：连同下面的 `+` 链一起判「拼接片段」。 */
+const byLine = new Map();
+srcLines.forEach((raw, i) => {
+  const vals = [];
+  for (const m of raw.matchAll(LITERAL_RE)) {
+    const val = m[1] ?? m[2] ?? m[3];
+    if (val != null && CJK.test(val)) vals.push(val);
+  }
+  if (vals.length) byLine.set(i + 1, vals);
+});
+
+for (const tk of tokens) {
+  if (tk.isComment || !CJK.test(tk.val)) continue;
+  const key = tk.val.replace(/\s+/g, ' ').trim();
+  if (!hits.has(key)) hits.set(key, { line: tk.line, raw: tk.val, count: 0, chains: new Set() });
+  const meta = hits.get(key);
+  meta.count += 1;
+  /*
+   * 链是**按字面量的值**收集的（`meta` 本身就按值去重），不是按出现位置 ——
+   * 所以同一个串只要在**任意一处**是能翻的片段，整条就都被抑制。
+   * 这符合「同一个串在同一个文件里，作者意图一致」的预设；
+   * 反过来的情形（同串在一处是片段、另一处是真漏翻）极罕见，且查得出来
+   * （`--why <串>` 会把每一处都列出来）。
+   */
+  if (tk.chain && tk.chain !== tk.val) meta.chains.add(tk.chain);
+}
 
 /**
  * 一个字面量算「翻得动」的判据。
@@ -230,6 +358,55 @@ if (checkStrings.length) {
   process.exit(0);
 }
 
+/*
+ * `--why <行号 | 字面量>`：两问之一。
+ *   给行号 —— 把这一行上每个中文字面量、它所在的 `+` 链、以及两者各自翻不翻打出来。
+ *   给字面量 —— 直接把它的 meta（首次出现行、所在链、各判据的结论）打出来。
+ * 名单上出现一条不知道是真是假时，这是最快的判据来源 —— `--check` 只能问
+ * 「这串翻不翻」，回答不了「它为什么没被认成片段 / 为什么压根不在名单里」。
+ */
+if (whyArg) {
+  if (whyLine) {
+    const onLine = tokens.filter((tk) => tk.line === whyLine);
+    console.log(`L${whyLine} 上共 ${onLine.length} 个字面量：\n`);
+    for (const tk of onLine) reportLiteral(tk);
+  } else {
+    const key = whyArg.replace(/\s+/g, ' ').trim();
+    const meta = hits.get(key);
+    if (!meta) {
+      console.log(`词条表里没有 ${JSON.stringify(whyArg)} 这个**字面量**（注意：查的是源码字面量，不是词条表的键）。`);
+    } else {
+      console.log(`字面量 ${JSON.stringify(meta.raw)}`);
+      console.log(`  首次出现：L${meta.line}（全文件共 ${meta.count} 处）`);
+      console.log(`  单独看  ：${translates(fillTemplate(unescapeLiteral(meta.raw))) ? '算能翻 → 不进名单' : '翻不动'}`);
+      const lv = byLine.get(meta.line) || [];
+      console.log(`  同行情境：${lv.length > 1 ? `${JSON.stringify(lv.join('1')).slice(0, 70)} → ${translates(fillTemplate(unescapeLiteral(lv.join('1')))) ? '能翻 → 被抑制' : '翻不动'}` : '该行只有这一个中文字面量，此判据不适用'}`);
+      if (!meta.chains.size) console.log('  链      ：（无）');
+      for (const c of meta.chains) {
+        console.log(`  链      ：${JSON.stringify(c).slice(0, 70)} → ${translates(fillTemplate(unescapeLiteral(c))) ? '能翻 → 被抑制' : '翻不动'}`);
+      }
+      console.log('');
+      for (const tk of tokens.filter((x) => x.val === meta.raw)) reportLiteral(tk);
+    }
+  }
+  process.exit(0);
+}
+
+/** 打印一个 token 的判据结论（`--why` 用）。 */
+function reportLiteral(tk) {
+  const self = translateText(fillTemplate(unescapeLiteral(tk.val))) !== fillTemplate(unescapeLiteral(tk.val));
+  console.log(`  ${CJK.test(tk.val) ? '中' : '·'} 字面量 ${JSON.stringify(tk.val).slice(0, 70)}`);
+  console.log(`     单独看：${self ? '能翻' : '翻不动'}${tk.isComment ? '（注释行，不参与统计）' : ''}`);
+  if (tk.chain) {
+    const c = fillTemplate(unescapeLiteral(tk.chain));
+    console.log(`     链形态：${JSON.stringify(tk.chain).slice(0, 70)}`);
+    console.log(`     链看  ：${translateText(c) !== c ? '能翻' : '翻不动'}`);
+  } else {
+    console.log('     链形态：（无 —— 前后字面量不在同一条 `+` 链上）');
+  }
+  console.log('');
+}
+
 const untranslated = [];
 for (const [, meta] of hits) {
   // 用**未 trim 的原文**判：带前导空格的规则才验得到
@@ -240,11 +417,28 @@ for (const [, meta] of hits) {
   /*
    * **拼接片段**：`'保存到 dsh 设置（' + n + '）'` 这种，单独看 `保存到 dsh 设置（`
    * 永远翻不动，但拼起来（`保存到 dsh 设置（1）`）是有规则的。
-   * 所以把**同一行**的字面量用 `1` 连起来再判一次 —— 能翻就说明它只是片段。
-   * （第一版没有这一步，112 条里绝大多数是这类噪音。）
+   *
+   * 两个判据**取并集**，各有各的覆盖范围：
+   *   1. **同行**：把该行所有中文字面量用 `'1'` 连起来 —— 覆盖
+   *      `'已导出请求明细（' + requestScopeText() + ' · ' + n + ' 条）'` 这类
+   *      「一行里好几个字面量、中间夹着调用」。它比下面那条松，但正因为松，
+   *      才能处理「缝里有逗号/三元/嵌套调用」的情形。
+   *   2. **`+` 链（可跨行）**：按运行时真实的拼接形态还原 —— 覆盖
+   *      `'…前半句'` 换行 `+ '后半句…'`，这是这份文件里最常见的断行写法，
+   *      同行判据**看不见**（实测 Codex 卡片那 6 条就是栽在这里）。
+   *
+   * 为什么不全用第 2 条：链会一路吃掉 HTML 标签，拼出一串横跨多个文本节点
+   * 的长串，而 `translates()` 对含标签的串要求**每一段都能翻** —— 反而判不出来。
+   * 宁可多留一条松判据，也不要为了「更精确」把已有的覆盖丢掉。
    */
   const lineVals = byLine.get(meta.line) || [];
   if (lineVals.length > 1 && translates(fillTemplate(unescapeLiteral(lineVals.join('1'))))) continue;
+
+  let isFragment = false;
+  for (const c of meta.chains) {
+    if (translates(fillTemplate(unescapeLiteral(c)))) { isFragment = true; break; }
+  }
+  if (isFragment) continue;
   // 翻不动：再按行拆开，指出是**哪一段**翻不动（只是给线索，不是判据）
   const bad = filled.split('\n')
     .map((s) => s.trim())

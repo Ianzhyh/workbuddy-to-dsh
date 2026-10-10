@@ -1,10 +1,10 @@
 # WorkBuddy Local API Bridge
 
 Expose the model capabilities of your locally-logged-in **WorkBuddy desktop app**
-(DeepSeek / GLM / Kimi / MiniMax …) through a local bridge as **OpenAI-compatible**
-and **Anthropic-compatible** APIs — so **Claude Code**, **opencode**, **Cursor**,
-**Trae**, **Cherry Studio**, **NextChat**, **LobeChat**, **Open WebUI** or any client
-with a custom Base URL can use them directly.
+(DeepSeek / GLM / Kimi / MiniMax …) through a local bridge as **OpenAI-compatible**,
+**Anthropic-compatible** and **OpenAI Responses** APIs — so **Claude Code**, **Codex**,
+**opencode**, **Cursor**, **Trae**, **Cherry Studio**, **NextChat**, **LobeChat**,
+**Open WebUI** or any client with a custom Base URL can use them directly.
 
 Also included: a web console (status / start-stop / diagnostics / model registration /
 usage / health check / chat test) — **bilingual (Chinese / English, switchable in the
@@ -68,7 +68,16 @@ the `EN` / `中` toggle in its top-right corner switches all nine tabs
   (`bridge/workbuddy-bridge.mjs`).
 - **Credentials never hit disk** — AtRest keys are fetched from the desktop app via
   `ELECTRON_RUN_AS_NODE` on demand; plaintext tokens stay in memory only.
-- **Both protocols**, streaming, tool calls, multi-turn tool results.
+- **Three protocols**, streaming, tool calls, multi-turn tool results.
+  Codex speaks the OpenAI **Responses** protocol, which is *not* chat/completions —
+  the bridge contains a real conversion layer (`/v1/responses`), so there is no
+  extra routing process to install. Note that `wire_api = "chat"` was **removed
+  upstream**; `"responses"` is the only value Codex still accepts.
+- **One-click setup** — the console detects installed clients (Codex / Claude Code /
+  opencode) and writes the Base URL and token straight into their config files:
+  only its own keys are touched, the original file is backed up first, undo is
+  one click, and it then verifies end-to-end with the token it just wrote.
+  Same thing from the terminal: `npm run connect status | apply <client> | verify <client> | undo <client>`.
 - **Ops features**: local rate limiting (opt-in), per-request overhead header,
   in-flight request visibility, `count_tokens`, client credential layering
   (per-key accounting / revocation / rate-limit buckets), local usage ledger.

@@ -259,6 +259,36 @@ try {
   const sheetVisible = await q(cdp, `document.querySelectorAll('#clientsBox pre, #clientsBox .cheatsheet, #clientsBox details').length`);
   if (sheetVisible > 0) pass(`客户端接入面板展开 ${sheetVisible} 个块（纳入扫描）`);
   else fail('客户端接入面板没有可展开的块，扫描没覆盖到');
+
+  /*
+   * 逐个客户端页签都扫一遍。
+   *
+   * 为什么必须遍历：**只扫默认页签**是这套验收长期的最大盲区。客户端接入面板是
+   * 「先选后展开」，默认停在 opencode，于是 Claude Code / 图形表单 / 其它客户端
+   * 三块的说明从来没被扫过 —— 实测它们**整段**都没翻（渲染层把词条表里分段的
+   * 文案用 `+` 拼成了一根字符串，按节点匹配永远命中不了），而验收一路是绿的。
+   */
+  const chipLabels = await q(cdp, `[...document.querySelectorAll('#clientsBox .clientchip')].map((b) => b.textContent.trim())`);
+  if (chipLabels.length >= 4) {
+    for (const label of chipLabels) {
+      await q(cdp, `(() => {
+        const b = [...document.querySelectorAll('#clientsBox .clientchip')].find((x) => x.textContent.trim() === ${JSON.stringify(label)});
+        if (b) b.click();
+      })()`);
+      await sleep(400);
+      const zh = await q(cdp, COLLECT_ZH);
+      if (zh.length === 0) pass(`客户端页签「${label}」无残留中文`);
+      else fail(`客户端页签「${label}」仍有 ${zh.length} 处中文：\n     ` + zh.slice(0, 6).join('\n     '));
+    }
+    // 复位到默认页签，免得影响后面的截图与溢出测量
+    await q(cdp, `(() => {
+      const b = [...document.querySelectorAll('#clientsBox .clientchip')].find((x) => x.textContent.trim() === 'opencode');
+      if (b) b.click();
+    })()`);
+    await sleep(300);
+  } else {
+    fail(`客户端页签只找到 ${chipLabels.length} 个（应至少 4 个），遍历没覆盖到`);
+  }
   const left2 = await dump('英文模式 / 展开在途请求 + 对话用量 + 模型详情 + 日志抽屉');
 
   const leftovers = left2.length;
@@ -324,6 +354,18 @@ try {
     await sleep(250);
     await q(cdp, `document.getElementById('langToggle').click()`); // 英文下量
     await sleep(350);
+    /*
+     * **必须在动画收尾后再量。**
+     *
+     * 切语言走 View Transitions，过渡期间 Chrome 会把根快照的宽度算进
+     * `documentElement.scrollWidth`（实测 1440 vs 可视 1434，稳定溢出 6px、
+     * 从约 50ms 持续到动画结束）。但那 6px **用户看不见**：
+     * 同一时刻 `window.scrollTo(99999, …)` 后 `scrollX` 恒为 0（根本不能横向滚），
+     * `clientHeight` 也不变（没有横向滚动条占位）—— 纯粹是读数抖动。
+     * 不等动画就量，这条断言会随机红，而随机红比不测更糟（会训练人忽略红色）。
+     */
+    await waitFor(cdp, `document.getAnimations().every((a) => a.playState === 'finished')`, 4000, '过渡动画收尾')
+      .catch(() => { /* 拿不到动画列表就往下一律按静止处理 */ });
     const over = await q(cdp, `document.documentElement.scrollWidth - document.documentElement.clientWidth`);
     if (over <= 2) pass(`视口 ${w}px 无横向溢出`);
     else fail(`视口 ${w}px 横向溢出 ${over}px`);
