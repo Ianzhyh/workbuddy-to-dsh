@@ -34,6 +34,18 @@ process.on('exit', cleanup);
 
 await sleep(1200);
 
+/*
+ * 先让「已筛选」芯片渲染出来 —— `.filterchip` **只在筛选激活时**才在 DOM 里。
+ * 不先点一下，这一项会永远以「元素不存在」跳过（实测：它和另一个写错类名的目标
+ * 一起，让 12 个目标里有 2 个一直在空跑，而输出里看起来只是"跳过"）。
+ */
+await q(cdp, `(() => {
+  const tr = document.querySelector('#usageBox tr.pickrow');
+  if (tr) { tr.click(); return true; }
+  return false;
+})()`);
+await sleep(500);
+
 /**
  * 在给定选择器的元素上，量 '1111111111' 与 '8888888888' 的渲染宽度。
  * 两者不等宽 → 数字是比例字形 → 列对不齐、刷新时抖动。
@@ -56,7 +68,7 @@ const probe = await q(cdp, `(() => {
     ['接入值', '.valuerow-v'],
     ['徽章', '.badge'],
     ['模型标签', '.tag'],
-    ['诊断值', '.diag-row .s-text'],
+    ['诊断值', '.diag-row .detail'],
     ['筛选芯片', '.filterchip'],
   ];
   const widthOf = (el, text) => {
@@ -74,12 +86,13 @@ const probe = await q(cdp, `(() => {
   const out = [];
   for (const [label, sel] of targets) {
     const el = document.querySelector(sel);
-    if (!el) { out.push({ label, missing: true }); continue; }
+    if (!el) { out.push({ label, sel, missing: true }); continue; }
     const cs = getComputedStyle(el);
     const wa = widthOf(el, A);
     const wb = widthOf(el, B);
     out.push({
       label,
+      sel,
       declared: cs.fontVariantNumeric,
       wa: Number(wa.toFixed(2)),
       wb: Number(wb.toFixed(2)),
@@ -95,7 +108,14 @@ const probe = await q(cdp, `(() => {
 
 console.log('\n数字宽度一致性（1111111111 vs 8888888888）');
 for (const r of probe) {
-  if (r.missing) { console.log(`  · ${r.label}（元素不存在，跳过）`); continue; }
+  /*
+   * 元素不存在**算失败，不算跳过**。
+   *
+   * 原先这里是「跳过」——于是写错类名（`.diag-row .s-text`，真实类名是 `.detail`）
+   * 和"条件渲染没触发"长得一模一样，两条目标静默空跑了很久没人发现。
+   * 目标不存在就说明**这一项什么都没测**，必须让作者要么改选择器、要么补状态准备。
+   */
+  if (r.missing) { fail(`${r.label}：选择器 \`${r.sel}\` 没匹配到任何元素 —— 这一项没测到东西`); continue; }
   if (r.delta < 0.01) pass(`${r.label} 等宽（${r.size}px/${r.weight}，宽 ${r.wa}）`);
   else fail(`${r.label} 数字不等宽：${r.wa} vs ${r.wb}（差 ${r.delta}px，${r.size}px/${r.weight}）—— 列对不齐、刷新时会横向抖动`);
 }

@@ -1960,7 +1960,7 @@ input[type="checkbox"]:active {
 .diag { display: flex; flex-direction: column; gap: 6px; }
 .diag-row {
   display: grid;
-  grid-template-columns: 10px 170px 1fr;
+  grid-template-columns: 18px 170px 1fr;
   gap: var(--space-3);
   padding: 9px 12px;
   border-radius: var(--radius-sm);
@@ -2006,11 +2006,38 @@ input[type="checkbox"]:active {
   font-size: var(--fs-label);
   margin-top: 2px;
 }
+/*
+ * 状态指示器：**颜色 + 字形两条通道**，不能只有颜色。
+ *
+ * 实测（Machado 2009 色觉缺陷模拟，严重度 1.0）—— 绿/红色盲下三色两两色差：
+ *
+ *   | 主题 | 缺陷 | 最差一对 | ΔE00 |
+ *   |---|---|---|---|
+ *   | 浅色 | 绿色盲 | `--warn` vs `--fail` | **0.4** ← 就是同一个颜色 |
+ *   | 浅色 | 红色盲 | ok/warn/fail 两两 | 6.9 – 7.1 |
+ *   | 深色 | 绿色盲 | `--ok` vs `--fail` | **4.4** |
+ *
+ * 绿色盲在男性里约占 6% —— 对这部分用户，**「哪行是失败」完全读不出来**，
+ * 而"红色项不解决，模型就不会出现"正是这个面板的全部意义。
+ * 整行染色（`.diag-row:has(.s-fail)`）救不了：那也是颜色。
+ *
+ * 字形沿用项目**已经有的** `DIAG_MARK`（`{ ok:'✓', warn:'!', fail:'✗' }`）——
+ * 它本来只用在 Markdown 诊断报告里，UI 上一直是纯色点。两处从此同一套符号。
+ *
+ * 字形色走 `--on-solid`（压在实色填充上的文字色，深色主题下自动反转）：
+ * 浅色 5.26–5.65:1、深色 5.73–7.33:1，两个主题都过 AA。
+ */
 .s-dot {
-  width: 8px;
-  height: 8px;
+  width: 16px;
+  height: 16px;
   border-radius: 50%;
   flex-shrink: 0;
+  display: grid;
+  place-items: center;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+  color: var(--on-solid);
 }
 .s-ok { background: var(--ok); }
 .s-warn { background: var(--warn); }
@@ -2531,7 +2558,7 @@ pre.log {
    */
   .head-right { width: 100%; justify-content: space-between; flex-wrap: wrap; row-gap: 8px; }
   .cards { grid-template-columns: repeat(2, 1fr); }
-  .diag-row { grid-template-columns: 10px 130px 1fr; gap: 8px; }
+  .diag-row { grid-template-columns: 18px 130px 1fr; gap: 8px; }
   .panel { padding: 16px 16px; border-radius: var(--radius); }
 }
 
@@ -2541,8 +2568,17 @@ pre.log {
   .action-group { width: 100%; justify-content: space-between; }
   .actions .msg { margin-left: 0; width: 100%; }
   input[type="text"] { min-width: 0; width: 100%; }
-  .diag-row { grid-template-columns: 1fr; gap: 4px; }
-  .diag-row .s-dot { display: none; }
+  /*
+   * 窄屏下状态指示器**不能藏**。
+   *
+   * 原先这里是 `.diag-row { grid-template-columns: 1fr }` + `.s-dot { display: none }`
+   * —— 于是窄屏下状态只剩整行底色的浓淡，**又退回成纯颜色通道**。
+   * 现在改成两行：第一行「圆点 + 标签」，第二行说明占满整宽。
+   */
+  .diag-row { grid-template-columns: 16px 1fr; gap: 2px 8px; }
+  .diag-row .s-dot { grid-row: 1; grid-column: 1; }
+  .diag-row .label { grid-row: 1; grid-column: 2; }
+  .diag-row .detail { grid-row: 2; grid-column: 1 / -1; }
 }
 
 /* ── 20. 客户端接入面板 ──────────────────────────────────────────────── */

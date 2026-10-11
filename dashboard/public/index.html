@@ -4900,6 +4900,16 @@ function applyModelSearch() {
   sel.value = (prev && list.some((m) => m.id === prev)) ? prev : ((list[0] && list[0].id) || '');
 }
 
+/*
+ * 状态字形。**UI 与 Markdown 诊断报告共用这一份** —— 两处必须是同一套符号，
+ * 否则截图看到的和贴给同事的文字对不上。
+ *
+ * UI 用它是因为**不能只靠颜色传达状态**：实测绿色盲下 `--warn` 与 `--fail`
+ * 的色差只有 ΔE00 0.4（浅色主题），对这部分用户整行染色等于没染色。
+ * 详见 style.css 里 `.s-dot` 的注释。
+ */
+const DIAG_MARK = { ok: '✓', warn: '!', fail: '✗' };
+
 async function loadDiag() {
   $('diagList').innerHTML = '<div class="empty">正在检测（需读取客户端密钥）…</div>';
   const d = await api('/api/diagnose');
@@ -4912,7 +4922,7 @@ async function loadDiag() {
   lastDiag = d.items;
   $('diagList').innerHTML = d.items.map(it =>
     '<div class="diag-row">' +
-      '<div class="s-dot s-' + it.status + '"></div>' +
+      '<div class="s-dot s-' + it.status + '">' + (DIAG_MARK[it.status] || '?') + '</div>' +
       '<div class="label">' + escapeAttr(it.label) + '</div>' +
       '<div class="detail">' + escapeAttr(it.detail) +
         (it.hint ? '<span class="hint">建议：' + escapeAttr(it.hint) + '</span>' : '') +
@@ -4924,8 +4934,7 @@ async function loadDiag() {
 // 出问题时要截图 / 手抄太费劲。这里把已有接口的结论拼成一段 Markdown，
 // 直接贴给同事或留档。**绝不含任何令牌值** —— 只有账号、域名、剩余时间与
 // keyId 匹配结论（keyId 是哈希，页面本来就展示）。
-
-const DIAG_MARK = { ok: '✓', warn: '!', fail: '✗' };
+// （状态字形 `DIAG_MARK` 定义在 `loadDiag` 上方，UI 与本报告共用一份。）
 
 function buildDiagReport() {
   const o = lastOverview;
