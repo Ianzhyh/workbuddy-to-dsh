@@ -92,7 +92,7 @@ try {
     await resetPosts();
     await click('#syncUsableBtn');
     await sleep(400);
-    const msg = lastDialog();
+    const msg = await lastDialog();
     const posts = await regPosts();
     if (/将把 2 个「体检可用」的模型写入 dsh/.test(msg) && /替换当前勾选/.test(msg) && /自动备份/.test(msg)) {
       pass('R8.3-2 确认框写清「替换勾选 + 自动备份」');

@@ -414,6 +414,71 @@ export async function openPage(url, routes, { cdpPort = 9333, width = 1440, heig
   });
 
   /*
+   * 自绘确认框（`.modal-scrim`）的接管。
+   *
+   * 页面原先用原生 `confirm`，后来换成了自绘弹窗（原生框样式由浏览器决定、
+   * 深色主题下是一片亮白，还阻塞主线程）。原生框由上面的
+   * `Page.javascriptDialogOpening` 接管；自绘框在 DOM 里，**得自己盯**。
+   *
+   * 做法：页面侧装一个 MutationObserver，一出现 `.modal-scrim` 就通过 CDP binding
+   * 把文案回传给 harness，由 harness 按 `setDialogHandler` 的决定点掉它。
+   *
+   * 为什么不让测试自己点：**「接受」是默认行为**（与原生框一致）—— 绝大多数用例
+   * 只关心"动作做完了没有"，不关心弹窗长什么样。让每个用例各写一遍"如果弹了框就
+   * 点确定"，迟早有人漏写，表现为"请求没发出去"这种**看起来像产品坏了**的失败。
+   */
+  try {
+    await cdp.send('Runtime.addBinding', { name: '__askDialog' });
+    await cdp.send('Page.addScriptToEvaluateOnNewDocument', {
+      source: `(() => {
+        if (window.__modalWatcher) return;
+        window.__modalWatcher = true;
+        const seen = new WeakSet();
+        const check = () => {
+          for (const s of document.querySelectorAll('.modal-scrim')) {
+            if (seen.has(s)) continue;
+            seen.add(s);
+            const text = [...s.querySelectorAll('.modal-body p')].map((p) => p.textContent).join('\\n');
+            try { window.__askDialog(JSON.stringify(text)); } catch { /* binding 未就绪时忽略 */ }
+          }
+        };
+        /*
+         * 观察 **document** 而不是 documentElement。
+         *
+         * 这段脚本在**文档解析之前**执行（addScriptToEvaluateOnNewDocument 的语义），
+         * 那时 documentElement 还是 null —— observe(null) 会直接抛错，
+         * 而标记已经置位，于是**看着像装好了、实际根本没观察**（实测踩到：
+         * 弹窗明明在 DOM 里，lastDialog() 却是 null 且弹窗没人点）。
+         */
+        new MutationObserver(check).observe(document, { childList: true, subtree: true });
+      })();`,
+    });
+    cdp.on('Runtime.bindingCalled', (p) => {
+      if (p.name !== '__askDialog') return;
+      let text = '';
+      try { text = JSON.parse(p.payload); } catch { text = String(p.payload || ''); }
+      dialog.last = text;
+      /*
+       * `setDialogAuto(false)` 时**只记录、不点掉** —— 给「要检查弹窗本身长什么样」
+       * 的用例用（比如断言按钮文案在英文模式下翻了没有）。
+       * 默认自动接管，与原生框的默认行为一致。
+       */
+      if (dialog.auto === false) return;
+      const accept = dialog.handler ? dialog.handler(text) : true;
+      cdp.send('Runtime.evaluate', {
+        expression: `(() => {
+          const s = document.querySelector('.modal-scrim');
+          if (!s) return false;
+          const b = s.querySelectorAll('.modal-actions button');
+          const t = ${accept ? 'b[b.length - 1]' : 'b[0]'};
+          if (t) t.click();
+          return true;
+        })()`,
+      });
+    });
+  } catch { /* 个别发行版没有 Runtime.addBinding 时忽略：那时用 lastDialog() 显式回答 */ }
+
+  /*
    * 等**这一次**导航的 load 事件。
    *
    * 注意这里**不能**像早先那样 `Promise.race([loaded, sleep(8000)])`：
@@ -455,10 +520,31 @@ export async function openPage(url, routes, { cdpPort = 9333, width = 1440, heig
   return {
     cdp,
     close,
-    /** 最近一次 confirm 的文案。 */
-    lastDialog: () => dialog.last,
+    /**
+     * 最近一次确认框的文案。**要 `await`。**
+     *
+     * 两种确认框都会被接管并自动回答（默认接受，`setDialogHandler` 可改成拒绝）：
+     *
+     * - **原生 `confirm`** → `Page.javascriptDialogOpening`；
+     * - **自绘弹窗**（`.modal-scrim`）→ 页面侧 MutationObserver 经 CDP binding
+     *   回传文案，harness 再点掉它。
+     *
+     * 所以这个函数**只负责读文案**，不需要（也不应该）由用例去点按钮 ——
+     * 用例真正关心的是「这个确认框说了什么」，而不是它长什么样、由谁渲染。
+     *
+     * 时序上它是异步的：文案要等页面把弹窗挂上去、binding 回传之后才有。
+     * 在触发动作的点击**之后**调，必要时先 `await sleep(200)`。
+     */
+    lastDialog: async () => dialog.last,
     /** 设置对话框处理：返回 true 接受，false 取消。 */
     setDialogHandler: (fn) => { dialog.handler = fn; },
+    /**
+     * 关掉自动接管（`setDialogAuto(false)`）—— 弹窗出现时**只记录、不点掉**。
+     *
+     * 给「要检查弹窗本身」的用例用（断言标题、按钮文案、焦点、Esc 行为……）。
+     * 默认是开着的：绝大多数用例只关心"动作做完了没有"。
+     */
+    setDialogAuto: (on) => { dialog.auto = on !== false; },
   };
 }
 

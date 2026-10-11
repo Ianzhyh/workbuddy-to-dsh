@@ -812,6 +812,70 @@ header {
 .msg.err { color: var(--fail); }
 .msg.good { color: var(--ok); }
 
+/*
+ * 自绘确认框（替代原生 `confirm`）。
+ *
+ * 原生 confirm 的样式完全由浏览器决定 —— 与页面两套观感，深色主题下弹出来的
+ * 是一片亮白；而且它**阻塞主线程**（弹着的时候页面完全冻结），也**不在 DOM 里**
+ * （i18n 的 DOM 翻译层够不着）。
+ *
+ * 层级用 `--z-overlay`（500）：**比下拉（300）高**——确认框必须盖住它底下那个
+ * 被操作的下拉；**比 toast（600）低**——「已复制」这类提示仍能浮在它上面。
+ *
+ * 遮罩**不用 `backdrop-filter`**：全屏模糊在这台机器上实测会拖慢主线程
+ * （见 style.css 里性能那一段），而这里只是压暗，纯色足够。
+ */
+.modal-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-overlay);
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(0, 0, 0, 0.42);
+  animation: modalScrimIn 0.16s var(--ease);
+}
+.modal {
+  width: min(520px, 100%);
+  max-height: calc(100vh - 48px);
+  overflow: auto;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-drawer);
+  padding: 20px 20px 16px;
+  animation: modalIn 0.2s var(--ease);
+}
+.modal-body p {
+  margin: 0;
+  font-size: var(--fs-body);
+  color: var(--text-secondary);
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+/* 第一行是问句（"确定…？"），给它标题的份量 */
+.modal-body p:first-child {
+  font-size: var(--fs-lead);
+  font-weight: 600;
+  color: var(--text);
+}
+/* 空行只作间隔，不要撑出一行文字的高度 */
+.modal-body p.modal-gap { height: 8px; }
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-2);
+  margin-top: 18px;
+}
+@keyframes modalScrimIn { from { opacity: 0; } to { opacity: 1; } }
+@keyframes modalIn {
+  from { opacity: 0; transform: translateY(-6px) scale(0.985); }
+  to { opacity: 1; transform: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .modal-scrim, .modal { animation: none; }
+}
+
 /* ── 4. 按钮体系 (Buttons: Clean, Solid Blue primary) ────────────────── */
 button {
   font: inherit;
@@ -2618,14 +2682,24 @@ pre.log {
   border-radius: var(--radius-sm);
 }
 
+/*
+ * 标签列**允许换行，而不是省略号截断**（WCAG 1.4.12 文本间距）。
+ *
+ * 列宽写死 124px 是**刻意的**（见上方 `.valuerow` 的注释：内容自适应会让说明列
+ * 错位，实测修过），所以不能靠加宽来解决。但 `nowrap + ellipsis` 会让
+ * 「Anthropic Base URL」在用户放大字距（1.4.12 的测试条件：letter-spacing 0.12em）
+ * 之后**被裁掉 10px** —— 文字丢了一截。
+ *
+ * 改成换行之后：**正常字距下所有标签都装得下，视觉零变化**；
+ * 字距变大时换行而不是丢字。行高由内容撑开，`align-items: center` 负责居中。
+ */
 .valuerow-k,
 .formrow-k {
   font-size: var(--fs-label);
   font-weight: 400;
   color: var(--muted);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .valuerow-v,

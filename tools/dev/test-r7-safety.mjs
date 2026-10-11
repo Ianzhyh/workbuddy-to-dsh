@@ -82,7 +82,7 @@ try {
     await resetCalls();
     await click('#stopBtn');
     await sleep(400);
-    const msg = lastDialog();
+    const msg = await lastDialog();
     const list = await calls();
     if (/确定停止桥服务/.test(msg)) pass('R7.1-1 停止桥弹出确认框');
     else fail(`R7.1-1 确认文案异常：「${msg}」`);
@@ -104,7 +104,7 @@ try {
     setDialogHandler(() => false);
     await click('#stopBtn');
     await sleep(400);
-    const msg = lastDialog();
+    const msg = await lastDialog();
     if (/最近 60 秒内有 2 条请求，会打断正在进行的调用/.test(msg)) {
       pass('R7.1-1 有请求时写明条数（当场取明细，2 条在窗口内、1 条不在）');
     } else {
@@ -118,7 +118,7 @@ try {
     await resetCalls();
     await click('#restartBtn');
     await sleep(400);
-    const msg = lastDialog();
+    const msg = await lastDialog();
     const list = await calls();
     if (/确定重启桥服务/.test(msg) && /中断正在进行的调用/.test(msg)) pass('R7.1-1 重启桥确认写清「会中断调用」');
     else fail(`R7.1-1 重启确认文案异常：「${msg}」`);
@@ -132,7 +132,7 @@ try {
     await resetCalls();
     await click('#accountList button');
     await sleep(400);
-    const msg = lastDialog();
+    const msg = await lastDialog();
     const list = await calls();
     if (/确定切换到账号/.test(msg)) pass('R7.1-1 切换账号弹出确认框');
     else fail(`R7.1-1 切换账号确认文案异常：「${msg}」`);
@@ -152,7 +152,7 @@ try {
       setDialogHandler(() => false);
       await click('#stopBtn');
       await sleep(400);
-      const msg = lastDialog();
+      const msg = await lastDialog();
       if (/体检进行中，停止桥会中断本轮体检/.test(msg)) pass('R7.1-2 体检进行中时追加「会中断本轮体检」');
       else fail(`R7.1-2 缺少体检提示：「${msg}」`);
       // 收尾：取消体检

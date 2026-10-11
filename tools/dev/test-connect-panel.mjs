@@ -879,7 +879,7 @@ try {
       const b = [...row.querySelectorAll('.connectacts button')].find((x) => x.className.includes('primary'));
       if (b) b.click(); })()`);
     await sleep(500);
-    const dlg = page4.lastDialog() || '';
+    const dlg = (await page4.lastDialog()) || '';
     if (dlg && !/[\u4e00-\u9fff]/.test(dlg)) {
       pass(`英文模式下写入确认框是英文：${JSON.stringify(dlg.slice(0, 60))}…`);
     } else if (!dlg) {
