@@ -647,6 +647,14 @@ function enhanceSelect(sel) {
 
   trig.addEventListener('click', (e) => {
     e.stopPropagation(); // 别让 document 上的「点外面就关」立刻把它关掉
+    /*
+     * `preventDefault` **必须加**：下拉若包在 `<label>` 里（`#probeScope` 就是，
+     * 它的 label 上写着「范围」），点 label 内部时浏览器会**额外给 label 的控件
+     * 转发一次 click**。那次是独立事件，`stopPropagation` 拦不住 —— 它会冒泡到
+     * document 触发 `ddCloseAll()`，于是菜单**刚开就被关**，用户看到的就是
+     * 「这个下拉点不开」。9 个下拉里只有它一个在 label 里，所以只有它坏。
+     */
+    e.preventDefault();
     if (dd.classList.contains('open')) ddClose(dd); else ddOpen(dd);
   });
   trig.addEventListener('keydown', (e) => {
@@ -685,7 +693,18 @@ function initDropdowns() {
   // 兜底：直接写 sel.value、既不派 change 又没引起 DOM 变化的场景。
   // 纯本地比较（8 个元素），不发请求；隐藏时跳过，与页面其它轮询同一纪律。
   if (!ddTimer) ddTimer = setInterval(() => { if (!document.hidden) ddSyncAll(); }, 400);
-  document.addEventListener('click', () => ddCloseAll());
+  document.addEventListener('click', (e) => {
+    /*
+     * 点在下拉**内部**不算「点外面」。
+     *
+     * 上面触发器那条 `preventDefault` 已经拦住了 `<label>` 转发的那次 click；
+     * 这里再兜一层，是因为转发也可能来自别的路径（比如点 label 上的文字）——
+     * 那些 click 的 target 仍然落在 `.dd` 里，不该把刚打开的菜单关掉。
+     */
+    const t = e.target;
+    if (t && t.closest && t.closest('.dd')) return;
+    ddCloseAll();
+  });
   document.addEventListener('keydown', (e) => { if (e.key === 'Escape') ddCloseAll(); });
 }
 
