@@ -55,14 +55,25 @@ npm run test:bridge   # 桥用例
 2. **趋势图只支持到"按天 / 最近 24 小时"**
    `days[].byModel` 与 `hours[].byModel` 都有了，但图表没有「按周」之类。按需要再说。
 
-3. **`test-viewports` 的 1024px 横溢**
-   R3 面板「失败水位线」在 1024px 视口溢出 **82px**。暂时豁免（面板未渲染时不计入），
-   **实际渲染时仍会横溢** —— 要不要修取决于是否支持 1024px 宽的设备。详见
-   `docs/UI-GUIDELINES.md` 附录三。
+3. **趋势图粒度只有「按天 / 最近 24 小时」**
+   `#trendGran` 现在只有 `day` 与 `hour` 两档，没有「按周 / 按月」。
+   `days[].byModel` 与 `hours[].byModel` 的数据都有了，加粒度主要是前端的活。
+   是否要做取决于有没有人真的看 30 天以上的窗口（`usageDays` 最大 30）。
 
-4. **无障碍门禁的其余项**
-   `tools/dev/audit-a11y.mjs` 报 1 项：控制台自己的 footer 语言链接组无 `aria-label`。
-   门控常量在 `tools/dev/test-accessible-name.mjs` 顶部，修一项就减一。
+### 已经复核过、**不用再查**的两条
+
+（这两条先前被写进待办，复核后发现是错的，留在这是为了别有人再查一遍）：
+
+- ~~1024px 视口横溢 82px~~ —— **不存在**。用 `tools/dev/probe-width-scan.mjs`
+  扫了 380–1440 共 **14 个宽度**，横向溢出**全部为 0**。
+  改布局后重跑这个探针（约 4 分钟）比只跑 `test-viewports`（4 个宽度）更保险。
+- ~~无障碍审计还剩 1 项~~ —— **没有这回事**。`tools/dev/audit-a11y.mjs`
+  这个文件根本不存在；无障碍靠 `test-accessible-name.mjs`，它**没有任何豁免清单**，
+  任何无名元素都会失败，当前全过。
+
+> **教训（写在交接文档里的反例）**：交接文档**不要写没复核过的结论**。
+> 上面这两条都来自更早的印象而非实测，差点把人引到不存在的 bug 上。
+> 写进待办前先跑一遍确认。
 
 ---
 
@@ -115,7 +126,12 @@ tools/dev/api-shape.mjs           capture（从跑着的控制台取形状）/ c
 npm run test:ui          # 全部 UI 用例（约 10 分钟，33 个）
 node tools/dev/test-dropdowns.mjs     # 单个用例，秒开
 node tools/dev/shot-console.mjs       # 重出 docs/screenshot{,-en}.png
+node tools/dev/probe-width-scan.mjs   # 扫 14 个宽度的横向溢出（约 4 分钟，改布局后跑）
 ```
+
+`tools/dev/` 下的 `probe-*.mjs` 是**一次性排查脚本**（不改代码、只输出结论），
+`test-*.mjs` 才是常驻用例（`run-ui-tests.mjs` 自动发现前者之外的 `test-*`）。
+排查脚本**不在** `npm run test:ui` 里，需要时手动跑。
 
 **骨架要点**（`ui-harness.mjs`）：
 
