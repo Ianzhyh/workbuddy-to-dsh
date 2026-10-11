@@ -36,8 +36,9 @@ npm run test:bridge   # 桥用例
 | `8503fa6` | fix | 诊断状态**只有颜色一条通道**；新增 `test-status-not-color-only` |
 | `d30c3ea` | feat | 趋势图**形态可选** + 积分排行**按模型配色** + **自绘确认框**替代原生 confirm；新增两个用例 |
 | `18a473a` | feat | 趋势图「**按模型堆叠**」（动了桥，新增 `days[].byModel` 交叉维度） |
+| `656cf6e` | fix | **包在 `<label>` 里的下拉点不开**（`#probeScope`）；新增 `test-dropdowns` + 本文档 |
 
-**最新（未推送时）**：`test-dropdowns.mjs` —— 修掉「包在 `<label>` 里的下拉点不开」这个真 bug。
+接手时的状态：`git status` 干净，`test:ui` **33 / 33**，`release:check` 六步全绿。
 
 ---
 
@@ -46,9 +47,10 @@ npm run test:bridge   # 桥用例
 按优先级排：
 
 1. **「下拉点不开」的其余部分（待用户确认）**
-   已修好的是 **9 个自绘下拉里唯一一个真打不开的**（`probeScope`，因为在 `<label>` 里）。
+   已修好的是 **9 个自绘下拉里唯一一个真打不开的**（`probeScope`，因为在 `<label>` 里，
+   点 label 会被额外转发一次 click，把刚开的菜单关掉）。
    用户原话是「我发的那个范围**全部**那个下拉菜单」—— 若指的是别的，需要他再指认一次。
-   `test-dropdowns.mjs` 已经覆盖全部 9 个，可以直接重跑确认。
+   `test-dropdowns.mjs` 已覆盖全部 9 个（含"在 label 里"那类），可直接重跑确认。
 
 2. **趋势图只支持到"按天 / 最近 24 小时"**
    `days[].byModel` 与 `hours[].byModel` 都有了，但图表没有「按周」之类。按需要再说。
