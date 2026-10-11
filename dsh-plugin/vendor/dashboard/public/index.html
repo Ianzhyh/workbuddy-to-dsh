@@ -147,7 +147,7 @@
       <span class="hint">最近 <select id="usageDays" title="统计天数"><option>1</option><option selected>7</option><option>30</option></select> 天 · 只记元数据，不含对话内容</span>
       <span class="spacer"></span>
       <select id="trendMetric" title="趋势图指标"><option value="calls" selected>调用次数</option><option value="tokens">tokens</option><option value="credit">积分</option></select>
-      <select id="trendKind" title="趋势图形态"><option value="auto" selected>形态自动</option><option value="bar">柱状图</option><option value="line">折线图</option></select>
+      <select id="trendKind" title="趋势图形态"><option value="auto" selected>形态自动</option><option value="bar">柱状图</option><option value="line">折线图</option><option value="bymodel">按模型堆叠</option></select>
       <select id="trendGran" title="趋势图粒度"><option value="day" selected>按天</option><option value="hour">最近 24 小时</option></select>
       <button class="mini" id="usageCsvBtn">导出 CSV</button>
       <button class="mini danger" id="usageClearBtn">清空账本</button>
@@ -926,6 +926,7 @@ const I18N_EN = {
   '形态自动': 'Auto',
   '柱状图': 'Bar chart',
   '折线图': 'Line chart',
+  '按模型堆叠': 'Stack by model',
   '积分': 'Credit',
   '趋势图粒度': 'Trend granularity',
   '按天': 'By day',
@@ -3243,6 +3244,7 @@ async function loadUsage() {
     const d = await api('/api/usage?days=1&hours=1');
     setStamp('usageStamp');
     usageHourCache = (d && d.usage) || null;
+    if (usageHourCache) seedModelColors(usageHourCache.models);
     usageView = usageHourCache;
     renderUsage();
     return;
@@ -3251,6 +3253,8 @@ async function loadUsage() {
   const d = await api('/api/usage?days=' + days);
   setStamp('usageStamp');
   usageDayCache = (d && d.usage) || null;
+  // 先按稳定顺序把模型色分配好，再渲染 —— 否则「排行」与「按模型堆叠」会各排各的
+  if (usageDayCache) seedModelColors(usageDayCache.models);
   lastUsage = usageDayCache;
   usageView = usageDayCache;
   renderUsage();
@@ -3443,6 +3447,20 @@ function modelColor(name) {
 }
 
 /**
+ * 按**与图表无关的稳定顺序**给整份模型清单预分配颜色。
+ *
+ * 为什么不能只靠 `modelColor` 的"首次出现顺序"：页面上有两个地方要用模型色
+ * （「积分排行」按**扣分**降序、「按模型堆叠」按**当前所选指标**降序）。
+ * 谁先渲染，谁就决定了分配顺序 —— 切一下指标，同一个模型在两个地方就是两个颜色。
+ *
+ * 这里用桥返回的 `usage.models`（按调用次数降序，与图表怎么画无关）一次性分配好，
+ * 之后两处都只是查表。
+ */
+function seedModelColors(models) {
+  for (const m of (Array.isArray(models) ? models : [])) modelColor(m.model);
+}
+
+/**
  * 趋势图（R10.1）：指标由 `#trendMetric` 决定，粒度由 `#trendGran` 决定。
  * 形态是**固定**的（不做无意义的自由组合）：次数=柱、tokens=堆叠柱、积分=折线+累计虚线。
  */
@@ -3468,7 +3486,39 @@ function buildTrendChart(buckets) {
     tokens: [{ name: '输入', values: pin }, { name: '输出', values: pout }],
     credit: [{ name: '积分', values: credit }, { name: '累计', values: cum, dashed: true }],
   };
-  const series = byMetric[trendMetric] || byMetric.calls;
+
+  /*
+   * 「按模型堆叠」：每天一根柱、按模型分段上色 —— 回答「这些积分是**谁**花掉的」。
+   *
+   * 数据来自 `days[].byModel`（桥侧聚合好的「当天 × 模型」交叉）。
+   * **不能**把 `models[]`（整窗口合计）按比例摊到每天 —— 那是编出来的假数据，
+   * 而这张图的价值恰恰在于"哪一天是谁花的"。
+   *
+   * 指标跟着 `#trendMetric` 走（桥侧同样带了 calls 与 tokens，所以三种都能画）。
+   */
+  const byModelSeries = () => {
+    const pick = (m) => (trendMetric === 'credit' ? Number(m.credit) || 0
+      : trendMetric === 'tokens' ? (Number(m.promptTokens) || 0) + (Number(m.completionTokens) || 0)
+        : Number(m.calls) || 0);
+    // 先按整窗口合计排序：图例顺序稳定，且贡献最大的排最前
+    const totals = new Map();
+    for (const b of buckets) {
+      for (const m of (b.byModel || [])) totals.set(m.model, (totals.get(m.model) || 0) + pick(m));
+    }
+    return [...totals.entries()].sort((a, b) => b[1] - a[1]).map(([model]) => ({
+      name: model,
+      // 颜色走全局的模型配色表 —— 与「积分排行」同一个模型同一个色
+      color: modelColor(model),
+      values: buckets.map((b) => {
+        const hit = (b.byModel || []).find((x) => x.model === model);
+        return hit ? pick(hit) : 0;
+      }),
+    }));
+  };
+
+  const series = trendKind === 'bymodel'
+    ? byModelSeries()
+    : (byMetric[trendMetric] || byMetric.calls);
 
   // 空态：窗口内全 0 → 说清楚，**不画空轴**（空轴只会让人以为图坏了）
   if (series.every((s) => s.values.every((v) => !v))) {
@@ -3478,6 +3528,8 @@ function buildTrendChart(buckets) {
   const granText = isHour ? '最近 24 小时' : ('最近 ' + buckets.length + ' 天');
   const metricName = { calls: '调用次数', tokens: 'tokens', credit: '积分' }[trendMetric] || '调用次数';
   let aria = granText + metricName + '图';
+  // 读屏用户看不到"分段上色"，得直接说是按模型堆叠
+  if (trendKind === 'bymodel') aria += '，按模型堆叠';
   if (trendMetric === 'credit') {
     const sum = Math.round(credit.reduce((a, b) => a + b, 0) * 10000) / 10000;
     aria += '，合计 ' + fmtCredit(sum, true);
@@ -3499,8 +3551,9 @@ function buildTrendChart(buckets) {
    * 而它的语义本来就是"输入 + 输出 = 总量"。
    */
   const autoKind = trendMetric === 'calls' ? 'bar' : (trendMetric === 'tokens' ? 'stackBar' : 'line');
-  const kind = trendKind === 'line' ? 'line'
-    : (trendKind === 'bar' ? (trendMetric === 'tokens' ? 'stackBar' : 'bar') : autoKind);
+  const kind = trendKind === 'bymodel' ? 'stackBar'
+    : (trendKind === 'line' ? 'line'
+      : (trendKind === 'bar' ? (trendMetric === 'tokens' ? 'stackBar' : 'bar') : autoKind));
   const valueFmt = trendMetric === 'credit' ? ((v) => fmtCredit(v, true)) : ((v) => fmtCompact(v));
   return chartLegend(series)
     + renderChart({ kind, series, xLabels, opts: { ariaLabel: aria, valueFmt, height: 190 } });

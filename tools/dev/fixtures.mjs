@@ -173,10 +173,30 @@ export function usageFixture({
         { model: 'glm-5.3', calls: 44, promptTokens: 97000, completionTokens: 19000, ms: 38000, credit: 0.62, creditCalls: 42 },
         { model: 'kimi-k3-1', calls: 13, promptTokens: 16000, completionTokens: 2000, ms: 6000, credit: 0.05, creditCalls: 7 },
       ],
+      /*
+       * 每天带**当天按模型的小计**（`byModel`，桥侧按扣分降序排好）。
+       *
+       * 这是图表「按模型堆叠」的数据来源。构造时**必须让 byModel 加起来等于当天合计**
+       * （calls / credit / creditCalls 三项都要对得上）—— 图上一根柱子的各段之和
+       * 就是那天的高度，对不上就是"图上每个数字都能在面板里对上"这条硬要求破了。
+       * 用例里有一条断言专门核这个和。
+       */
       days: days || [
-        { day: '2026-10-01', calls: 9, promptTokens: 38000, completionTokens: 9000, credit: 0.27, creditCalls: 8 },
-        { day: '2026-10-02', calls: 7, promptTokens: 30000, completionTokens: 7000, credit: 0.22, creditCalls: 7 },
-        { day: '2026-10-03', calls: 8, promptTokens: 44000, completionTokens: 11000, credit: 0.24, creditCalls: 7 },
+        { day: '2026-10-01', calls: 9, promptTokens: 38000, completionTokens: 9000, credit: 0.27, creditCalls: 8,
+          byModel: [
+            { model: 'deepseek-v4.1-flash', calls: 5, promptTokens: 21000, completionTokens: 5000, credit: 0.15, creditCalls: 4 },
+            { model: 'glm-5.3', calls: 4, promptTokens: 17000, completionTokens: 4000, credit: 0.12, creditCalls: 4 },
+          ] },
+        { day: '2026-10-02', calls: 7, promptTokens: 30000, completionTokens: 7000, credit: 0.22, creditCalls: 7,
+          byModel: [
+            { model: 'deepseek-v4.1-flash', calls: 4, promptTokens: 17000, completionTokens: 4000, credit: 0.13, creditCalls: 4 },
+            { model: 'glm-5.3', calls: 3, promptTokens: 13000, completionTokens: 3000, credit: 0.09, creditCalls: 3 },
+          ] },
+        { day: '2026-10-03', calls: 8, promptTokens: 44000, completionTokens: 11000, credit: 0.24, creditCalls: 7,
+          byModel: [
+            { model: 'glm-5.3', calls: 4, promptTokens: 23000, completionTokens: 6000, credit: 0.14, creditCalls: 3 },
+            { model: 'deepseek-v4.1-flash', calls: 4, promptTokens: 21000, completionTokens: 5000, credit: 0.10, creditCalls: 4 },
+          ] },
       ],
       failures,
     },

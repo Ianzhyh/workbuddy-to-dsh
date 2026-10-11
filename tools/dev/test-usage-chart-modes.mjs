@@ -22,7 +22,7 @@
  *   且「其它（N 个）」是聚合行，必须是中性色、不参与配色。
  */
 import { startStaticServer, openPage, waitFor, q, sleep } from './ui-harness.mjs';
-import { baseRoutes } from './fixtures.mjs';
+import { baseRoutes, usageFixture } from './fixtures.mjs';
 
 let failures = 0;
 const pass = (m) => console.log('✓ ' + m);
@@ -30,6 +30,29 @@ const fail = (m) => { console.error('✗ ' + m); failures += 1; };
 
 const PORT = 8830;
 const URL_ = `http://127.0.0.1:${PORT}/`;
+
+/*
+ * 纯数据断言：桩里每天的 `byModel` 加起来必须等于当天合计。
+ *
+ * 为什么值得单独钉一条：图上一根柱子的各段之和**就是**那天的高度，而面板上还有
+ * 一个"当天合计"。两者对不上，就等于"图上的数字在面板里对不上" —— 这个项目的
+ * 硬要求是**图上每个数字都能在面板里找到**。夹具手写，很容易改了一边忘了另一边。
+ */
+{
+  const days = usageFixture().usage.days;
+  let bad = 0;
+  for (const d of days) {
+    const sum = (k) => (d.byModel || []).reduce((n, m) => n + (Number(m[k]) || 0), 0);
+    const r4 = (n) => Math.round(n * 10000) / 10000;
+    const checks = [['calls', d.calls, sum('calls')], ['credit', d.credit, r4(sum('credit'))],
+      ['promptTokens', d.promptTokens, sum('promptTokens')], ['completionTokens', d.completionTokens, sum('completionTokens')],
+      ['creditCalls', d.creditCalls, sum('creditCalls')]];
+    for (const [k, want, got] of checks) {
+      if (want !== got) { bad++; fail(`桩数据 ${d.day} 的 byModel.${k} 合计 ${got} ≠ 当天 ${want}`); }
+    }
+  }
+  if (bad === 0) pass(`桩数据自洽：${days.length} 天的 byModel 五项小计都与当天合计一致`);
+}
 
 /** 图上有什么：柱 / 线 / 虚线。 */
 const SHAPE = `(() => {
@@ -69,6 +92,10 @@ try {
     ['credit', 'auto', { bars: 0, lines: 2, dashed: 1 }],
     ['credit', 'line', { bars: 0, lines: 2, dashed: 1 }],
     ['credit', 'bar', { bars: 3, lines: 1, dashed: 1 }],
+    // 按模型堆叠：桩里 3 天 × 2 个模型 = 6 段
+    ['credit', 'bymodel', { bars: 6, lines: 0 }],
+    ['calls', 'bymodel', { bars: 6, lines: 0 }],
+    ['tokens', 'bymodel', { bars: 6, lines: 0 }],
   ];
 
   for (const [metric, kind, want] of cases) {
@@ -134,6 +161,38 @@ try {
     .map((r) => getComputedStyle(r.querySelector('.rank-fill')).backgroundColor))`)).join(',');
   if (before === after) pass('来回切指标后配色不变（映射是持久的，不是每次重算）');
   else fail(`来回切指标后配色变了：${before} → ${after}`);
+
+  /*
+   * 配色必须在「按模型堆叠」的图例与「积分排行」之间**一致**。
+   *
+   * 这条挡的是一个很容易再犯的错：`modelColor` 按"首次出现顺序"分配，而两处的
+   * 排序依据不同（排行按扣分、图表按当前指标）。谁先渲染谁就定顺序 ——
+   * 切一下指标，同一个模型在两个地方就是两个颜色。所以加载时先按
+   * `usage.models`（与图表无关的稳定顺序）预分配好（`seedModelColors`）。
+   */
+  await q(cdp, set('trendMetric', 'credit'));
+  await sleep(120);
+  await q(cdp, set('trendKind', 'bymodel'));
+  await sleep(450);
+
+  const legend = JSON.parse(await q(cdp, `JSON.stringify([...document.querySelectorAll('#usageBox .chart-legend .lg')].map((e) => ({
+    name: e.textContent,
+    color: getComputedStyle(e.querySelector('i')).backgroundColor,
+  })))`));
+  const rankColors = new Map(JSON.parse(await q(cdp, `JSON.stringify([...document.querySelectorAll('#usageBox .rank-row')]
+    .filter((r) => !/^其它/.test(r.querySelector('.rank-name').textContent))
+    .map((r) => [r.querySelector('.rank-name').textContent, getComputedStyle(r.querySelector('.rank-fill')).backgroundColor]))`)));
+
+  if (legend.length < 2) fail(`图例只有 ${legend.length} 项 —— 桩数据或选择器有问题（防假绿）`);
+  else pass(`按模型堆叠的图例有 ${legend.length} 个模型：${legend.map((l) => l.name).join(' / ')}`);
+
+  let mismatch = 0;
+  for (const l of legend) {
+    const r = rankColors.get(l.name);
+    if (r === undefined) { fail(`图例里的「${l.name}」在积分排行里找不到`); continue; }
+    if (r !== l.color) { mismatch++; fail(`「${l.name}」两处颜色不一致：图例 ${l.color} vs 排行 ${r}`); }
+  }
+  if (legend.length >= 2 && mismatch === 0) pass('图例与积分排行的模型配色完全一致');
 
   console.log('\n页面错误：', await q(cdp, `JSON.stringify(window.__errors || [])`));
 } finally {

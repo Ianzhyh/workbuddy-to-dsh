@@ -1240,6 +1240,30 @@
       "$.usage.days[].creditCalls": {
         "type": "number"
       },
+      "$.usage.days[].byModel": {
+        "type": "array"
+      },
+      "$.usage.days[].byModel[]": {
+        "type": "object"
+      },
+      "$.usage.days[].byModel[].model": {
+        "type": "string"
+      },
+      "$.usage.days[].byModel[].calls": {
+        "type": "number"
+      },
+      "$.usage.days[].byModel[].promptTokens": {
+        "type": "number"
+      },
+      "$.usage.days[].byModel[].completionTokens": {
+        "type": "number"
+      },
+      "$.usage.days[].byModel[].credit": {
+        "type": "number"
+      },
+      "$.usage.days[].byModel[].creditCalls": {
+        "type": "number"
+      },
       "$.usage.failures": {
         "type": "array"
       },

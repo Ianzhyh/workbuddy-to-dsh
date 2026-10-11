@@ -2827,16 +2827,36 @@ function summarizeUsage(days = 7, opts = {}) {
     byModel.set(r.model, m);
 
     const day = localDay(r.t);
-    const d = byDay.get(day) || { day, calls: 0, promptTokens: 0, completionTokens: 0, credit: 0, creditCalls: 0 };
+    const d = byDay.get(day)
+      || { day, calls: 0, promptTokens: 0, completionTokens: 0, credit: 0, creditCalls: 0, byModel: new Map() };
     d.calls += 1; d.promptTokens += pt; d.completionTokens += ct;
     if (hasCredit) { d.credit += cr; d.creditCalls += 1; }
+    /*
+     * 当天 × 该模型的小计。
+     *
+     * 「哪些模型把积分花掉了」在时间轴上是**叠加**的，而上面两个聚合各自缺一半：
+     * `models[]` 只有整窗口的合计、`days[]` 只有每天不分模型的合计。
+     * 图表要按模型堆叠每天那根柱，就得有这个交叉维度。
+     */
+    const dm = d.byModel.get(r.model)
+      || { model: r.model, calls: 0, promptTokens: 0, completionTokens: 0, credit: 0, creditCalls: 0 };
+    dm.calls += 1; dm.promptTokens += pt; dm.completionTokens += ct;
+    if (hasCredit) { dm.credit += cr; dm.creditCalls += 1; }
+    d.byModel.set(r.model, dm);
     byDay.set(day, d);
 
     if (byHour) {
       const hour = localHour(r.t);
-      const h = byHour.get(hour) || { key: hour, calls: 0, promptTokens: 0, completionTokens: 0, credit: 0, creditCalls: 0 };
+      const h = byHour.get(hour)
+        || { key: hour, calls: 0, promptTokens: 0, completionTokens: 0, credit: 0, creditCalls: 0, byModel: new Map() };
       h.calls += 1; h.promptTokens += pt; h.completionTokens += ct;
       if (hasCredit) { h.credit += cr; h.creditCalls += 1; }
+      // 小时桶同样带按模型小计 —— 否则切到「最近 24 小时」这个功能就没了
+      const hm = h.byModel.get(r.model)
+        || { model: r.model, calls: 0, promptTokens: 0, completionTokens: 0, credit: 0, creditCalls: 0 };
+      hm.calls += 1; hm.promptTokens += pt; hm.completionTokens += ct;
+      if (hasCredit) { hm.credit += cr; hm.creditCalls += 1; }
+      h.byModel.set(r.model, hm);
       byHour.set(hour, h);
     }
   }
@@ -2845,17 +2865,25 @@ function summarizeUsage(days = 7, opts = {}) {
   const round4 = (n) => Math.round(n * 10000) / 10000;
   total.credit = round4(total.credit);
   for (const m of byModel.values()) m.credit = round4(m.credit);
-  for (const d of byDay.values()) d.credit = round4(d.credit);
+  for (const d of byDay.values()) {
+    d.credit = round4(d.credit);
+    for (const dm of d.byModel.values()) dm.credit = round4(dm.credit);
+  }
 
   // 补齐 24 个桶：没调用的整点也要出现（记 0），否则柱状图会跳变——
   // 空的那小时直接消失，看上去像时间轴缺了一段。
   let hours = null;
   if (byHour) {
-    for (const h of byHour.values()) h.credit = round4(h.credit);
+    for (const h of byHour.values()) {
+      h.credit = round4(h.credit);
+      for (const hm of h.byModel.values()) hm.credit = round4(hm.credit);
+    }
     hours = [];
     for (let i = 23; i >= 0; i -= 1) {
       const key = localHour(hourAnchor - i * 3600000);
-      hours.push(byHour.get(key) || { key, calls: 0, promptTokens: 0, completionTokens: 0, credit: 0, creditCalls: 0 });
+      // 补出来的空桶也要带 `byModel: []`，形状与真实桶一致 —— 前端不必分支判空
+      const h = byHour.get(key) || { key, calls: 0, promptTokens: 0, completionTokens: 0, credit: 0, creditCalls: 0, byModel: new Map() };
+      hours.push({ ...h, byModel: [...h.byModel.values()].sort((a, b) => b.credit - a.credit) });
     }
   }
 
@@ -2863,7 +2891,14 @@ function summarizeUsage(days = 7, opts = {}) {
     windowDays: days,
     total,
     models: [...byModel.values()].sort((a, b) => b.calls - a.calls),
-    days: [...byDay.values()].sort((a, b) => a.day.localeCompare(b.day)),
+    /*
+     * 每天一行，带**当天按模型的小计**（`byModel`，按扣分降序）——
+     * 图表的「按模型堆叠」靠它。排序放在这里而不是前端：前端拿到的顺序就是
+     * 图例顺序，两处各排一次迟早不一致。
+     */
+    days: [...byDay.values()]
+      .sort((a, b) => a.day.localeCompare(b.day))
+      .map((d) => ({ ...d, byModel: [...d.byModel.values()].sort((a, b) => b.credit - a.credit) })),
     // 只有 ?hours=1 才带这个字段（checklist R1.4-4：按需计算，不白算）
     ...(hours ? { hours } : {}),
     // 最近 20 条失败，新的在前；页面用它做「为什么调不通」的第一手线索
