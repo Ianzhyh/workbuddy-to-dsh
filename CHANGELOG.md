@@ -19,6 +19,25 @@
 
 ## [Unreleased]
 
+### Fixed（模型表的行复选框没有可访问名称）
+
+新增常驻用例 `tools/dev/test-accessible-name.mjs`（逐视图审计 WCAG 4.1.2），
+第一次跑就抓到：模型表每行的 `<input type="checkbox" data-id="…">`
+是**全表唯一一个没有 `<label>` 的** —— 其余复选框都包在 `<label class="check">` 里，
+只有它的说明在右边另一列。于是读屏用户 Tab 到它只会听到「复选框」，
+**完全不知道选的是哪个模型**（那张表最多 30 行）。
+
+补 `aria-label="选中 <显示名>"`（显示名缺失时退回 id）。
+
+> **交叉约束**：`I18N_ATTRS` 包含 `aria-label`，所以新加的名字会自动进翻译层。
+> 拼接式文案必须在 `RULES` 里加规则兜住，且**只翻动词、不翻数据**：
+> `[/^选中 (.+)$/, 'Select $1']`。已实测英文模式渲染为 `Select DeepSeek-V4.1-Flash`
+> —— 动词翻了、模型名作为上游数据保留。`check:i18n` 会把源码片段
+> （`' aria-label="选中 '`）报成「片段翻不动」，那是静态扫描的假阳性
+> （同 `搜索模型` 那条），已补进检查器里那份人工清单。
+
+断言已验证有牙齿：撤掉 `aria-label` → 1 项失败、退出码 1。
+
 ### Fixed（焦点环被自己的 box-shadow 吃掉 + 一处 `outline: none` 没有替代）
 
 新增常驻用例 `tools/dev/test-focus-ring.mjs`（逐视图审计键盘焦点可见性），

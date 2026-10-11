@@ -1860,6 +1860,9 @@ const I18N_RULES_EN = [
   // 模型清单里的两处 aria-label（客户端名 + 模型 id + 动作）
   [/^(.+) 搜索模型$/, (m, label) => translateText(label) + ' search models'],
   [/^(.+) 设为主模型$/, (m, label) => translateText(label) + ' set as default model'],
+  // 模型表的行复选框：aria-label 是「选中 + 显示名」拼出来的。
+  // **显示名是上游数据，不能翻**（翻不动也没意义），只翻动词。
+  [/^选中 (.+)$/, 'Select $1'],
   // 模型选择器的徽章 title：GLM-5.3（点击移除）
   [/^(.+)（点击移除）$/, (m, rest) => rest + ' (click to remove)'],
   [/^(.+)（点击加入）$/, (m, rest) => rest + ' (click to add)'],
@@ -4596,7 +4599,14 @@ function renderModelTable(models, registered) {
         + '" data-free="' + (m.free ? '1' : '') + '" data-credits="'
         + (typeof m.credits === 'number' ? m.credits : '') + '" data-probe-ok="' + probeOk
         + '" data-probe-ms="' + probeMs + '">' +
-        '<td><input type="checkbox" data-id="' + escapeAttr(m.id) + '"' + (on ? ' checked' : '') + '></td>' +
+        /*
+         * 行复选框**必须给可访问名称**：这个单元格里只有一枚裸 checkbox，
+         * 而模型名在右边另一列 —— 读屏 Tab 到它只会念「复选框」，不说选的是哪个。
+         * 全表就它一个没有 <label>（其余复选框都包在 <label class="check"> 里）。
+         * 名字用「选中 + 显示名」，显示名缺失时退回 id。
+         */
+        '<td><input type="checkbox" data-id="' + escapeAttr(m.id)
+          + '" aria-label="选中 ' + escapeAttr(m.name || m.id) + '"' + (on ? ' checked' : '') + '></td>' +
         '<td class="mono copyable" data-copy="' + escapeAttr(m.id) + '">'
           + '<button type="button" class="idcopy" title="点击复制">' + escapeAttr(m.id) + COPY_ICON + '</button>' +
           '<button type="button" class="infobtn" data-info="' + escapeAttr(m.id)
