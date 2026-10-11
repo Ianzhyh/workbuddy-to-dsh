@@ -13,7 +13,11 @@ native plugin**.
 
 > **In one line**: WorkBuddy quota → local API → any AI client you like.
 
-![WorkBuddy Local API Bridge console (English UI)](docs/screenshot-en.png)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/console-hero-en-dark.png">
+  <img src="docs/console-hero-en-light.png" width="100%"
+       alt="The WorkBuddy Local API Bridge console (English UI): a bridge-status badge and start/stop controls at the top, eight status cards showing account, token TTL, credential encryption, upstream endpoint, bridge process, available models, credit balance and dsh readiness, with the account list below">
+</picture>
 
 > 🌏 **English summary only.** The full documentation is in Chinese
 > ([README.md](README.md), [docs/](docs/)); both cover the same system.
