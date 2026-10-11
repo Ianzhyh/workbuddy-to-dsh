@@ -19,6 +19,34 @@
 
 ## [Unreleased]
 
+### Fixed（焦点环被自己的 box-shadow 吃掉 + 一处 `outline: none` 没有替代）
+
+新增常驻用例 `tools/dev/test-focus-ring.mjs`（逐视图审计键盘焦点可见性），
+**第一次跑就抓到两个真缺陷** —— 两个都是"读代码看不出来、必须真聚焦一次才知道"的：
+
+- **所有主按钮聚焦时屏幕上什么都不变。** 根因是个**同特异性陷阱**：
+  `button:focus-visible`（0,1,1）设 `box-shadow: var(--ring)`，而 `button.primary`
+  （0,1,1）设 `box-shadow: var(--shadow-primary-sm)` —— 同特异性下靠后的胜出，
+  焦点环被按钮自己的投影吃掉了。受影响的是「保存到 dsh 设置」「发送」「写入」等
+  **全部主按钮**。修法是**把环与投影叠起来**（只补环会让按钮看着"掉"下来）：
+  `box-shadow: var(--ring), var(--shadow-primary-sm)`。
+  讽刺的是同一个文件在 `button.primary:disabled` 那条注释里**已经记录过这个陷阱**，
+  焦点环这条漏了。
+- **「查看桥日志（最近 80 行）」聚焦时零反馈。** `#logDrawer > summary` 写着
+  `outline: none` 却**没有任何替代**。补 `summary:focus-visible`；抽屉那条必须用
+  **`inset`** —— `#logDrawer` 是 `overflow: hidden`，向外扩的环会被左右与上方裁掉。
+  顺带把另外三个行内折叠开关（`.manualconnect` / `.connecthow` / `.connectpre`）
+  从**浏览器默认轮廓**统一到本项目的 `--ring` 语言。
+
+**为什么人肉 Tab 没发现**：两个都藏在标签页内部（模型页 / 对话测试页 / 客户端页 /
+日志抽屉），只 Tab 当前页看不到。用例因此**逐视图**审计，5 个视图共 105 个可聚焦元素。
+
+> 用例头注释记了三条纪律：**必须先发一次真实 Tab 键**建立键盘模态（否则
+> `focus()` 不命中 `:focus-visible`，会把所有元素误判成没有焦点环）；
+> **测量期间关掉过渡**（焦点环本身是过渡属性）；**禁用态 / 未渲染要单独归类**
+> （实测 13 个"无焦点环"里只有 3 个是真缺陷，假阳性会把真问题淹掉）。
+> 断言已验证有牙齿：撤掉修复 → 5 项失败、退出码 1。
+
 ### Fixed（模型选择芯片：五套配色在浅色下文字都不达标）
 
 `tools/dev/test-accent-schemes.mjs`（五套强调色 × 两主题的对比度体检）红着 7 项。

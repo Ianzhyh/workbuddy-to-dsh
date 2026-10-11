@@ -909,6 +909,25 @@ button.primary:active {
 button.primary svg { color: var(--on-solid) !important; }
 
 /*
+ * 主按钮的焦点环必须**单独补一条**，否则被它自己的 `box-shadow` 吃掉。
+ *
+ * 又是一个**同特异性陷阱**（和下面 `button.primary:disabled` 那条同源）：
+ *   `button:focus-visible`（0,1,1，见上方）设 `box-shadow: var(--ring)`；
+ *   `button.primary`      （0,1,1）设 `box-shadow: var(--shadow-primary-sm)`。
+ * 两者特异性**相同**，靠后的胜出 —— 于是主按钮聚焦时**屏幕上什么都不变**。
+ *
+ * 实测（无头 Chromium 真实 Tab 键走一遍）：`#startBtn`、`#saveRegBtn`、
+ * `button.mini.primary`、`#sendBtn` 四个全部「聚焦成功但计算样式零变化」。
+ * 而普通按钮（`#langToggle` / `#refreshBtn` 等）是好的 —— 差别只在这个 box-shadow。
+ *
+ * 修法：**环与自身投影叠起来**（只补环会让按钮看着"掉"下来，丢了层次）。
+ * 顺序上必须排在本块**最后**，否则 `:hover`（0,2,1）在鼠标悬停时还会盖掉它。
+ */
+button.primary:focus-visible {
+  box-shadow: var(--ring), var(--shadow-primary-sm);
+}
+
+/*
  * 主按钮的禁用态**必须单独写**。
  *
  * `button.primary` 的 `color: #ffffff !important` 在本文件里排在 `button:disabled`
@@ -943,6 +962,15 @@ button.danger:active {
   transform: translateY(0.5px) scale(0.97);
 }
 button.danger svg { color: inherit; }
+
+/*
+ * 危险按钮：基础态没有投影，所以只要环；但 `button.danger:hover`（0,2,1）
+ * 会加一层红色投影把环盖掉，而两者特异性相同 —— 这条排在它之后才生效。
+ * 同源问题与说明见上方 `button.primary:focus-visible`。
+ */
+button.danger:focus-visible {
+  box-shadow: var(--ring);
+}
 
 button.icon-btn {
   padding: 6px 10px;
@@ -2212,6 +2240,27 @@ summary::marker {
 }
 #logDrawer[open] > summary svg {
   transform: rotate(90deg);
+}
+
+/*
+ * 可折叠标题（<summary>）的焦点环。
+ *
+ * 规范第 7 条要求焦点态走 `:focus-visible` + `--ring`，但四个 <summary> 原先都没做到：
+ *
+ *   · `#logDrawer > summary` 上面写着 `outline: none`，却**没有任何替代** ——
+ *     键盘 Tab 到「查看桥日志（最近 80 行）」时屏幕上什么都不变。实测抓到的。
+ *   · 另外三个行内折叠开关（.manualconnect / .connecthow / .connectpre）
+ *     落回**浏览器默认轮廓**：能用，但和本项目"焦点 = 主色光环"的语言不一致。
+ *
+ * 抽屉那条必须用 **inset**：`#logDrawer` 是 `overflow: hidden`，向外扩的环会被
+ * 左右与上方裁掉（这个栏是抽屉的第一行，正好贴着裁切边）。
+ */
+summary:focus-visible {
+  outline: none;
+  box-shadow: var(--ring);
+}
+#logDrawer > summary:focus-visible {
+  box-shadow: inset var(--ring);
 }
 .logctl {
   display: flex;
