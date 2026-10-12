@@ -2939,6 +2939,32 @@ pre.log {
 }
 
 /*
+ * 「协议兼容」档的**形态分组标题**（桌面应用 / 网页应用 / 服务端应用）。
+ *
+ * 原先这一档只列 7 个名字，用户不知道"我该照哪种接"。分成三组后，每组标题
+ * 自带一句「请求从哪发出」—— 用户据此就能认出自己那一档。
+ *
+ * 视觉上比卡片轻一档：它是一段说明的开头，不是要用户操作的对象，
+ * 用左侧竖条 + 主色文字做区分，不与下面的 clientcard 抢层级。
+ */
+.compat-group {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-2);
+  margin: var(--space-4) 0 var(--space-2);
+  padding-left: var(--space-3);
+  border-left: 3px solid var(--primary);
+  font-size: var(--fs-body);
+  color: var(--text-primary);
+}
+
+.compat-group-note {
+  font-size: var(--fs-label);
+  color: var(--text-secondary);
+}
+
+/*
  * 客户端选择器：先选后展开。
  *
  * 为什么要有它：原先每个客户端的完整配置同时铺开，实测这一块占 3220px ——

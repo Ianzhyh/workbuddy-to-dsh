@@ -3925,6 +3925,70 @@ function originAllowed(req) {
 }
 
 /**
+ * 回环 Origin 的 CORS 响应头（**只回显回环，永不 `*`**）。
+ *
+ * ## 为什么需要
+ *
+ * `originAllowed()` 的注释承诺「本机网页版客户端照常可用」，但浏览器做跨源
+ * 请求**必须先过预检**，而预检按设计**不带 Authorization** —— 它会先撞上令牌
+ * 闸门（401）或被 404 兜底吃掉，于是这条承诺从来没能兑现（实测：
+ * `OPTIONS /v1/chat/completions` 带回环 Origin → 401；带合法令牌 → 404，
+ * 两个状态下都没有任何 `Access-Control-Allow-*`）。
+ *
+ * ## 为什么不是"放开"
+ *
+ * 加 CORS 会动到 `docs/CLIENT-CONNECT-AUDIT.md` 里明确依赖的一条性质
+ * （"跨站页面读不到响应"）。所以这里取**收窄**做法：
+ *   - 只对 `originAllowed()` 已经认可的回环 Origin 回显该 Origin —— 非回环一律不发头，
+ *     跨站页面仍然读不到响应（原性质保留）；
+ *   - **永不发 `*`**：`*` 会让任意网页读响应，等于把原性质直接拆掉；
+ *   - **不发 `Access-Control-Allow-Credentials`**：本桥不靠 Cookie 鉴权（靠
+ *     Bearer / x-api-key 头），带上它只会平白扩大攻击面。
+ *
+ * 回显得用请求里的**原样** Origin（预检是逐 Origin 的，回显别的值浏览器不认）；
+ * 能用 `originAllowed()` 做谓词说明它已过 URL 解析，这里再取一次是安全的。
+ *
+ * @returns {object} 要合并进响应的头；非回环 / 无 Origin 时返回 `{}`
+ */
+function corsHeaders(req) {
+  const origin = req.headers.origin;
+  if (!origin || !originAllowed(req)) return {};
+  return {
+    'Access-Control-Allow-Origin': origin,
+    'Vary': 'Origin',
+  };
+}
+
+/**
+ * 处理浏览器预检（`OPTIONS` + `Access-Control-Request-Method`）。
+ *
+ * **必须放在令牌闸门之前**：预检按规范**不带凭证**，放到闸门后面等于没加
+ * （这正是当前 401 的成因）。预检本身不碰上游、不落账、不产生副作用，
+ * 所以在这里放行是安全的 —— 真正的安全性仍由后续真实请求的令牌校验保证。
+ *
+ * 只对回环 Origin 应答；非回环 Origin 返回 false，让调用方走正常流程
+ * （那会和以前一样被 `originAllowed` 判 403）。
+ *
+ * @returns {boolean} 已处理并结束响应则 true
+ */
+function handlePreflight(req, res) {
+  if (req.method !== 'OPTIONS') return false;
+  const origin = req.headers.origin;
+  if (!origin || !originAllowed(req)) return false; // 非回环：交给正常流程拒绝
+  // 请求预检时浏览器会带 Access-Control-Request-Method；不带也照答，无害。
+  res.writeHead(204, {
+    // 只声明我们真的会处理的请求头/方法，不做无根据的放大
+    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+    'Access-Control-Allow-Headers': 'Authorization, Content-Type, x-api-key, anthropic-version, anthropic-beta',
+    'Access-Control-Max-Age': '600',
+    ...corsHeaders(req),
+    ...SECURITY_HEADERS,
+  });
+  res.end();
+  return true;
+}
+
+/**
  * 本地令牌校验。两种写法都收：
  *   - `Authorization: Bearer <token>` —— OpenAI 系客户端的惯例
  *   - `x-api-key: <token>`            —— Anthropic 系客户端的惯例（Claude Code 用这个）
@@ -4037,6 +4101,11 @@ const procStats = { requests: 0, errors: 0, byStatus: {} };
  */
 function observeResponse(req, res) {
   if (req.url?.startsWith('/health')) return; // 探活不计数、不加头
+  // CORS 头在这里统一注入：**所有**响应（含 401 / 403 / 404 / 上游错误）
+  // 都要带上，否则浏览器读不到那条错误 —— 用户看到的是"CORS 错误"而不是
+  // "令牌不对"，排查会南辕北辙。非回环 Origin 时 corsHeaders 返回 {}，等于不加。
+  // 放在 writeHead 包装里是刻意的：8 个响应点分散在各处，逐个改必漏。
+  const cors = corsHeaders(req);
   const origWriteHead = res.writeHead.bind(res);
   res.writeHead = (...args) => {
     const statusCode = args[0];
@@ -4046,12 +4115,11 @@ function observeResponse(req, res) {
       if (statusCode >= 400) procStats.errors += 1;
     }
     // 只在 (status, headers对象) 形态时注入；其余形态（数组头/statusMessage）原样放行
-    if (
-      res.__overheadMs !== undefined
-      && args.length === 2
-      && args[1] && typeof args[1] === 'object' && !Array.isArray(args[1])
-    ) {
-      args[1] = { 'X-WorkBuddy-Overhead-Ms': String(res.__overheadMs), ...args[1] };
+    if (args.length === 2 && args[1] && typeof args[1] === 'object' && !Array.isArray(args[1])) {
+      args[1] = { ...cors, ...args[1] };
+      if (res.__overheadMs !== undefined) {
+        args[1] = { 'X-WorkBuddy-Overhead-Ms': String(res.__overheadMs), ...args[1] };
+      }
     }
     return origWriteHead(...args);
   };
@@ -4109,6 +4177,12 @@ async function handleRequest(req, res) {
     if (!originAllowed(req)) {
       return json(res, 403, { error: { message: 'workbuddy-bridge: cross-origin request rejected (this bridge serves local clients only)' } });
     }
+    /*
+     * 浏览器预检必须在令牌闸门**之前**处理：预检按规范不带 Authorization，
+     * 放到闸门后面就会被 401 吃掉（这正是「本机网页版客户端」一直不可用的原因）。
+     * 详见 handlePreflight 的说明。
+     */
+    if (handlePreflight(req, res)) return;
     /*
      * 令牌**始终必需**。
      *

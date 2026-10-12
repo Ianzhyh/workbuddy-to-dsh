@@ -1417,6 +1417,28 @@ const I18N_EN = {
   'opencode / Cherry Studio / Cursor / Trae 等填这里': 'opencode / Cherry Studio / Cursor / Trae and friends go here',
   'Claude Code 的 ANTHROPIC_BASE_URL（注意不带 /v1）': 'Claude Code\'s ANTHROPIC_BASE_URL (no /v1 suffix)',
   'API Key / 令牌': 'API key / token',
+  // 兼容档卡片里的三格值标签（与剪贴板 / 复制的文本同源，必须能翻）
+  'Base URL（API 地址）': 'Base URL (API address)',
+  // 桌面卡片重写后的步骤文案（2026-10-12：每张卡片自带三格值）
+  '设置 → 模型服务 → 添加「OpenAI」，API 地址填 Base URL、密钥填令牌。':
+    'Settings → Model Services → add "OpenAI"; put the Base URL in API Address and the token in API Key.',
+  '模型 ID 填下面那个（就是桥认识的真实 id），上下文留空即可 —— 这个客户端会自己按 /v1/models 拉。':
+    'Use the model ID shown below (a real id the bridge knows). You can leave the context length empty — this client pulls it from /v1/models.',
+  '设置 → 模型 → 添加自定义 OpenAI 兼容提供商，API Host 填 Base URL、API Key 填令牌。':
+    'Settings → Model → add a custom OpenAI-compatible provider; put the Base URL in API Host and the token in API Key.',
+  '模型那一栏填下面的模型名；填完点「检查」能拉到列表就说明通了。':
+    'Put the model name below in the model field; if "Check" pulls the list, you are connected.',
+  'Settings → Models → 把令牌填进 OpenAI API Key，把 Base URL 填进 Override OpenAI Base URL，':
+    'Settings → Models → put the token in OpenAI API Key and the Base URL in Override OpenAI Base URL,',
+  '然后在下面的模型列表里手动加一行、名字填下面那个模型名（Cursor 不会自动读 /v1/models）。':
+    'then add a row manually in the model list below with the model name shown (Cursor does not read /v1/models automatically).',
+  '模型管理 → 添加自定义模型 → OpenAI 兼容：':
+    'Model management → add a custom model → OpenAI-compatible:',
+  '下面三格分别对应客户端的三栏（Base URL / API Key / 模型名），各点各的复制按钮。':
+    'The three rows below map to the client\'s three fields (Base URL / API Key / model name) — use each row\'s own copy button.',
+  '模型名（Model ID）': 'Model name (Model ID)',
+  '填法同桌面应用：Base URL 与令牌各一格，照下面复制。':
+    'Fill it in the same way as the desktop apps: one row for the Base URL and one for the token — copy each below.',
   '本地回环令牌，不是上游凭据；只用于防止同机其它程序误用端口':
     'A loopback token, not an upstream credential; it only keeps other local programs from using the port by mistake',
   '桥未运行，客户端连不上。先点上方「启动桥服务」。':
@@ -1481,9 +1503,89 @@ const I18N_EN = {
   '已实测': 'Verified',
   '协议兼容': 'Protocol-compatible',
   '不支持': 'Not supported',
+  // 速查表（复制文本）里的分档标签：通用「键 : 值」规则会单独翻键，
+  // 所以这些**键**必须在词条表里，否则整行会半中半英。
+  '兼容 · 桌面应用': 'Compatible · desktop',
+  '兼容 · 服务端应用': 'Compatible · server',
+  '兼容 · 本地网页版': 'Compatible · local web',
   '已实测 : opencode、Claude Code（Anthropic 协议）': 'Verified: opencode, Claude Code (Anthropic protocol)',
-  '协议兼容: Cherry Studio / NextChat / LobeChat / ChatBox / Open WebUI / Cursor / Trae':
-    'Protocol-compatible: Cherry Studio / NextChat / LobeChat / ChatBox / Open WebUI / Cursor / Trae',
+  // ── 「协议兼容」分档指引（2026-10-12）：每条都是**独立文本节点**，整句必须原样命中 ──
+  '下面这些都只用 /v1/models 与 /v1/chat/completions 两个端点，Base URL 与令牌都填同一个。':
+    'These all only use the /v1/models and /v1/chat/completions endpoints — same Base URL and token for all of them.',
+  '但它们的接法不同：桌面应用填表单，网页 / 服务端应用要配环境变量 —— 按形态分开看，别混着填。':
+    'But they do not connect the same way: desktop apps use a form, while web / server apps need environment variables — read the section that matches yours, do not mix them up.',
+  '「未实测」是指本机没有真的装一遍跑通，不是已知有问题 —— 但也没法替你保证。':
+    '"Not verified" means we have not actually installed and run it on this machine; it does not mean it is known broken — but we cannot promise it works either.',
+  'token 的位置：控制台 →「客户端接入」面板直接显示并可复制，':
+    'Where the token is: shown and copyable right in the Console → "Client setup" panel,',
+  '或读文件 dsh-plugin/.bridge-token。': 'or read the file dsh-plugin/.bridge-token.',
+  'Base URL 该填哪一个': 'Which Base URL to use',
+  'OpenAI 兼容客户端一律填带 /v1 的那个；只有 Claude Code（Anthropic 协议）才用不带 /v1 的。':
+    'OpenAI-compatible clients always use the one with /v1; only Claude Code (Anthropic protocol) uses the one without /v1.',
+  '大多数 OpenAI 兼容客户端（Cherry Studio / ChatBox / Cursor / Trae / NextChat / LobeChat）填下面这个':
+    'Most OpenAI-compatible clients (Cherry Studio / ChatBox / Cursor / Trae / NextChat / LobeChat) use the one below',
+  'Claude Code 那类走 Anthropic 协议的才用不带 /v1 的那个':
+    'Only Anthropic-protocol clients like Claude Code use the one without /v1',
+  '如果填完报 404 或「模型不存在」，先看是不是多补了一层 /v1 —— 拼出来会变成 /v1/v1/chat/completions':
+    'If you get a 404 or "model not found", first check for a doubled /v1 — it would become /v1/v1/chat/completions',
+  'OpenAI 兼容（带 /v1）': 'OpenAI-compatible (with /v1)',
+  'Anthropic（不带 /v1）': 'Anthropic (without /v1)',
+  '一、桌面应用（图形表单）': '1. Desktop apps (GUI form)',
+  '请求由应用主进程发出，与浏览器同源策略无关，填表单即通。':
+    'Requests come from the app\'s main process, so the browser same-origin policy does not apply — filling in the form is enough.',
+  '设置 → 模型服务 → 添加「OpenAI」，API 地址填 Base URL、密钥填 token。':
+    'Settings → Model Services → add "OpenAI"; put the Base URL in API Address and the token in API Key.',
+  '它自带知识库 / RAG —— 那部分用不了（见文末「不支持」），但要先把对话接上再去掉对应开关。':
+    'It ships with a knowledge base / RAG — that part will not work (see "Not supported" at the end); get chat working first, then turn that toggle off.',
+  '设置 → 模型 → 添加自定义 OpenAI 兼容提供商，API Host 填 Base URL、API Key 填 token。':
+    'Settings → Model → add a custom OpenAI-compatible provider; put the Base URL in API Host and the token in API Key.',
+  '官方 Web 版走的是浏览器，需要本桥最新版才支持（旧版没有 CORS 头，会失败）。':
+    'The official Web version runs in the browser and needs the latest bridge (older builds send no CORS headers and will fail).',
+  'Settings → Models → OpenAI API Key 处填 token，并在 Override OpenAI Base URL 里填 Base URL。':
+    'Settings → Models → put the token in OpenAI API Key and the Base URL in Override OpenAI Base URL.',
+  'Agent 模式依赖工具调用：桥已把上游只认字符串的 tool_choice 做了归一化，工具调用本身实测可用，':
+    'Agent mode relies on tool calls: the bridge normalizes tool_choice (upstream only accepts a string), and tool calls themselves are verified working,',
+  '但 Cursor 具体发哪种写法没有验证过。':
+    'but which exact form Cursor sends has not been verified.',
+  '模型管理 → 添加自定义模型 → OpenAI 兼容，Base URL 与 token 照填。':
+    'Model management → add custom model → OpenAI-compatible; fill in the Base URL and token as above.',
+  '同 Cursor：Agent 模式的工具调用走的是归一化那条路，未实测。':
+    'Same as Cursor: agent-mode tool calls go through that same normalization path; not verified.',
+  '桌面应用（请求由主进程发出）': 'Desktop app (requests from the main process)',
+  '二、网页应用（浏览器直连）': '2. Web apps (browser-direct)',
+  '请求由浏览器发出，受同源策略约束：桥必须支持 CORS 预检，旧版桥做不到。':
+    'Requests come from the browser and are subject to the same-origin policy: the bridge must support the CORS preflight, which older builds cannot do.',
+  '本地网页版（浏览器直连）': 'Local web version (browser-direct)',
+  '浏览器发跨源请求前会先发 OPTIONS 预检，而预检不带令牌 —— 桥需要专门放行它。':
+    'Before a cross-origin request the browser sends an OPTIONS preflight, which carries no token — the bridge has to allow it explicitly.',
+  '本桥当前版本已支持：只对回环来源（localhost / 127.0.0.1 / ::1）回显跨源许可，':
+    'This bridge build supports it: it echoes the cross-origin grant only for loopback origins (localhost / 127.0.0.1 / ::1),',
+  '其它来源一律不放行（防止恶意网页借浏览器访问本机）。':
+    'and never for any other origin (this stops a malicious page from reaching this machine through your browser).',
+  '所以：浏览器里打开的客户端页面必须也在本机（localhost / 127.0.0.1），远程部署的页面连不上，这是刻意的。':
+    'So the client page in your browser must also be local (localhost / 127.0.0.1); a remotely hosted page cannot connect, and that is deliberate.',
+  '如果你的桥是旧版本，先更新 —— 旧版本预检会被令牌闸门拦下（表现为浏览器控制台报 CORS 错误）。':
+    'If your bridge is an older build, update it first — the preflight is stopped at the token gate there (it shows up as a CORS error in the browser console).',
+  '三、服务端应用（环境变量）': '3. Server apps (environment variables)',
+  '请求由它自己的服务端发出，不走浏览器 —— 所以不要去填图形表单，配环境变量后重启。':
+    'Requests come from its own server, not the browser — so do not fill in a GUI form; set the environment variables and restart.',
+  'Open WebUI / LobeChat / NextChat（自部署）': 'Open WebUI / LobeChat / NextChat (self-hosted)',
+  '这类是先启动一个本地服务、再用浏览器访问它自己端口的应用，请求由它的服务端转发 —— 天然不碰 CORS。':
+    'These start a local service and you browse to its own port; requests are forwarded by its server, so CORS never comes into play.',
+  '配置方式是环境变量 + 重启，在它的管理界面里找不到「自定义提供商」也没关系。':
+    'Configure via environment variables plus a restart — it is fine if you cannot find "custom provider" in its admin UI.',
+  'LobeChat / NextChat 也支持在界面里配，但走服务端环境变量更稳、且不受版本界面改动影响。':
+    'LobeChat / NextChat can also be configured in the UI, but environment variables are steadier and immune to UI changes between versions.',
+  '把下面这几个环境变量设好，然后重启该服务（改完不重启不生效）':
+    'Set the environment variables below, then restart the service (changes take effect only after a restart)',
+  'Base URL 用带 /v1 的那个；模型名直接填上面「模型名」一栏里的真实 id':
+    'Use the /v1 Base URL; for the model name use a real id from the "Model name" column above',
+  '环境变量（Open WebUI / LobeChat / NextChat 通用）':
+    'Environment variables (works for Open WebUI / LobeChat / NextChat)',
+  '注意：Cherry Studio / LobeChat / Open WebUI 都自带知识库（RAG），而本桥没有 embedding 模型，':
+    'Note: Cherry Studio / LobeChat / Open WebUI all ship with a knowledge base (RAG), and this bridge has no embedding model,',
+  '那部分会明确报 501。详见文末「不支持」一节 —— 要把知识库用起来，得另配一个 embedding 服务。':
+    'so that part returns a clear 501. See the "Not supported" section at the end — to use the knowledge base you need a separate embedding service.',
   '不支持 : 知识库 / RAG（上游没有 embedding 模型，/v1/embeddings 返回 501）':
     'Not supported: knowledge base / RAG (no upstream embedding model; /v1/embeddings returns 501)',
   'WorkBuddy 本地桥 — 客户端接入': 'WorkBuddy Local Bridge — client setup',
@@ -1733,8 +1835,15 @@ const I18N_RULES_EN = [
   [/^API Key \/ 令牌       : (.*)$/, 'API key / token      : $1'],
   [/^已实测  : opencode、Claude Code（Anthropic 协议）$/,
     'Verified   : opencode, Claude Code (Anthropic protocol)'],
-  [/^协议兼容: Cherry Studio \/ NextChat \/ LobeChat \/ ChatBox \/ Open WebUI \/ Cursor \/ Trae$/,
-    'Compatible : Cherry Studio / NextChat / LobeChat / ChatBox / Open WebUI / Cursor / Trae'],
+  // 注意：按节点查表时空白会被规范化（多个空格 → 一个），所以这里写**单**空格
+  [/^兼容 · 桌面应用\s*:\s*Cherry Studio \/ ChatBox \/ Cursor \/ Trae（填表单，同上面的 Base URL 与令牌）$/,
+    'Compatible · desktop : Cherry Studio / ChatBox / Cursor / Trae (fill the form with the same Base URL and token above)'],
+  [/^兼容 · 服务端应用: Open WebUI \/ LobeChat \/ NextChat 自部署（配环境变量后重启，不用打开表单）$/,
+    'Compatible · server   : self-hosted Open WebUI / LobeChat / NextChat (set env vars and restart; no GUI form needed)'],
+  [/^兼容 · 本地网页版: 浏览器直连需桥支持 CORS 预检；只放行回环来源，远程部署的页面连不上$/,
+    'Compatible · local web: browser-direct needs the bridge CORS preflight; only loopback origins are allowed, so a remotely hosted page cannot connect'],
+  [/^--- Open WebUI \/ LobeChat \/ NextChat 等（环境变量，改完重启）---$/,
+    '--- Open WebUI / LobeChat / NextChat etc. (env vars; restart after changing) ---'],
   [/^不支持  : 知识库 \/ RAG（上游没有 embedding 模型，\/v1\/embeddings 返回 501）$/,
     'Unsupported: knowledge base / RAG (no upstream embedding model; /v1/embeddings returns 501)'],
   // 表单字段行（`提供商 ID : workbuddy`）：键查词条表，值也过一遍（可能是「（留空）」）
@@ -5998,6 +6107,46 @@ function opencodeConfigText(d) {
   return JSON.stringify(obj, null, 2);
 }
 
+/**
+ * 服务端型应用（Open WebUI / LobeChat / NextChat 自部署）的**环境变量**片段。
+ *
+ * ## 为什么这类应用不给图形表单指引
+ *
+ * 它们的请求由**自己的服务端**发出（浏览器只是访问它自己的端口），所以
+ * 「跨源」这件事根本不存在 —— 环境变量一配、服务一重启就通了。
+ * 反过来，若照别家那样教用户"在界面里找自定义提供商"，用户会先在
+ * 一个没有该入口的界面里迷路。形态不同，接法就必须不同。
+ *
+ * ## 变量名为什么给两组
+ *
+ * `OPENAI_API_BASE_URL` 与 `OPENAI_BASE_URL` 这两个名字各被不同项目读取
+ * （Open WebUI 用前者，LobeChat / 一般 SDK 用后者）。两个都写上去最省事，
+ * 且互不冲突 —— 多设一个无人读的环境变量没有副作用。
+ *
+ * 注释按既有约定用**英文**：`pre.textContent` 是**一整块多行文本节点**，
+ * i18n 按节点查表必然漏掉它，塞中文进去就是英文模式下一块永远翻不掉的中文
+ * （见 codexConfigText 的同款说明）。
+ */
+function openAIEnvText(d) {
+  const base = (d && d.baseUrlOpenAI) || 'http://127.0.0.1:8790/v1';
+  const key = (d && d.token) || 'wb-local-bridge';
+  const model = (d && clientModels(d)[0]?.id) || 'glm-5.3';
+  return [
+    '# use the /v1 Base URL here',
+    'OPENAI_API_BASE_URL=' + base,
+    'OPENAI_BASE_URL=' + base,
+    'OPENAI_API_KEY=' + key,
+    '# any real model id from the panel, e.g.',
+    'OPENAI_MODEL=' + model,
+    '',
+    '# PowerShell',
+    '$env:OPENAI_API_BASE_URL="' + base + '"',
+    '$env:OPENAI_BASE_URL="' + base + '"',
+    '$env:OPENAI_API_KEY="' + key + '"',
+    '$env:OPENAI_MODEL="' + model + '"',
+  ].join('\n');
+}
+
 /** Claude Code 的环境变量片段。 */
 function claudeCodeConfigText(d) {
   const base = (d && d.baseUrlAnthropic) || 'http://127.0.0.1:8790';
@@ -6297,8 +6446,17 @@ function appendParts(el, parts) {
   return el;
 }
 
-/** 一个客户端卡片：名称 + 状态标签 + 说明 + 步骤 + 代码块。 */
-function clientCard(name, status, note, steps, blocks, blockOpts = {}) {
+/**
+ * 一个客户端卡片：名称 + 状态标签 + 说明 + 步骤 + 值行 + 代码块。
+ *
+ * `valueRows` 用于「把这几格抄进客户端表单」这类场景 —— 它渲染成紧凑的
+ * 可复制值行（`valuerow`），而不是代码块：值只有一两行，套个代码块外壳
+ * 反而显得笨重，且与上面「三个接入值」的观感不一致。
+ * 不传就与从前完全一样（纯说明卡）。
+ *
+ * @param {Array<[string,string]>} [valueRows] 每项 `[标签, 值]`
+ */
+function clientCard(name, status, note, steps, blocks, blockOpts = {}, valueRows = null) {
   const card = clientEl('div', 'clientcard');
   const head = clientEl('div', 'clientcard-head');
   head.append(clientEl('b', null, name));
@@ -6311,6 +6469,9 @@ function clientCard(name, status, note, steps, blocks, blockOpts = {}) {
     const ol = clientEl('ol', 'clientsteps');
     for (const s of steps) ol.append(appendParts(clientEl('li'), s));
     card.append(ol);
+  }
+  for (const [k, v] of valueRows || []) {
+    if (v) card.append(clientValueRow(k, v));
   }
   for (const pair of blocks || []) card.append(clientCodeBlock(pair[0], pair[1], blockOpts));
   return card;
@@ -7753,21 +7914,149 @@ function renderClients() {
     ]));
     pane.append(fcard);
   } else {
+    /*
+     * 「协议兼容」这一档：**不是**"我们不管的"那一档，而是"没法替你写配置"那一档。
+     *
+     * 原先这里只列 7 个名字，用户看完的下一步是猜「Base URL 填什么、要不要带 /v1、
+     * 令牌填哪一格」—— 等于把最需要指引的人丢在原地。现在按**请求从哪发出**
+     * 分三类给指引，因为这三类的接法**根本不同**：
+     *
+     *   桌面应用   → 图形表单填 Base URL + 令牌
+     *   网页应用   → 本地自部署要在**服务端**配，或依赖桥的 CORS 支持
+     *   服务端应用 → 配环境变量后重启，**根本不用打开表单**
+     *
+     * 形态判断的依据写在每条 `note` 里（Electron 主进程 / Python 服务端 / 浏览器），
+     * 不含糊其辞 —— 用户不知道自己属于哪一档，指引就等于没有。
+     */
     const compat = clientEl('div', 'clientcard');
     compat.append(appendParts(clientEl('p', 'clientcard-note'), [
-      '下面这些都只用 /v1/models 与 /v1/chat/completions 两个端点，填同样的 Base URL 和令牌即可。',
-      '「未实测」是指没有真的装一遍跑通，不是已知有问题——但也没法替你保证。',
+      '下面这些都只用 /v1/models 与 /v1/chat/completions 两个端点，Base URL 与令牌都填同一个。',
+      '但它们的接法不同：桌面应用填表单，网页 / 服务端应用要配环境变量 —— 按形态分开看，别混着填。',
+      '「未实测」是指本机没有真的装一遍跑通，不是已知有问题 —— 但也没法替你保证。',
     ]));
-    const chips = clientEl('div', 'clientchips');
-    for (const n of ['Cherry Studio', 'NextChat', 'LobeChat', 'ChatBox', 'Open WebUI', 'Cursor', 'Trae']) {
-      chips.append(clientEl('span', 'clientchip', n));
-    }
-    compat.append(chips);
     compat.append(appendParts(clientEl('p', 'clientcard-note'), [
-      'Cursor / Trae 这类带 Agent 模式的客户端依赖工具调用。桥已把上游只认字符串的 tool_choice 做了归一化',
-      '（对象形式会被上游 400），工具调用本身也实测可用；但它们具体发哪种写法没有验证过。',
+      'token 的位置：控制台 →「客户端接入」面板直接显示并可复制，',
+      '或读文件 dsh-plugin/.bridge-token。',
     ]));
     pane.append(compat);
+
+    /*
+     * Base URL 的**两种写法**都要给，因为客户端对要不要带 `/v1` 要求不一。
+     * 这是实测最常见的踩坑：粘了带 `/v1` 的那个、而客户端又自己补一次，
+     * 就变成 `/v1/v1/chat/completions`，报错只看得到 404 或"模型不存在"。
+     */
+    const baseCard = clientCard(
+      'Base URL 该填哪一个', 'proto',
+      'OpenAI 兼容客户端一律填带 /v1 的那个；只有 Claude Code（Anthropic 协议）才用不带 /v1 的。',
+      [
+        ['大多数 OpenAI 兼容客户端（Cherry Studio / ChatBox / Cursor / Trae / NextChat / LobeChat）填下面这个'],
+        ['Claude Code 那类走 Anthropic 协议的才用不带 /v1 的那个'],
+        ['如果填完报 404 或「模型不存在」，先看是不是多补了一层 /v1 —— 拼出来会变成 /v1/v1/chat/completions'],
+      ],
+      [
+        ['OpenAI 兼容（带 /v1）', d.baseUrlOpenAI],
+        ['Anthropic（不带 /v1）', d.baseUrlAnthropic],
+      ],
+    );
+    pane.append(baseCard);
+
+    // ── A. 桌面应用：Electron 主进程发请求，不碰 CORS ────────────────────
+    const deskHead = clientEl('div', 'compat-group');
+    deskHead.append(clientEl('b', null, '一、桌面应用（图形表单）'));
+    deskHead.append(appendParts(clientEl('span', 'compat-group-note'), [
+      '请求由应用主进程发出，与浏览器同源策略无关，填表单即通。',
+    ]));
+    pane.append(deskHead);
+
+    /*
+     * 每张卡片**自带两格值**（Base URL + 令牌），而不是只给 Base URL。
+     *
+     * 实测反馈：「你这不详细啊，key 呢」。原因是这些卡片是独立渲染的，
+     * 而页面顶部那个「API Key / 令牌」值行在**折叠区**里 —— 用户在这张卡片上
+     * 看不到它，等于让他自己去找。令牌和 Base URL 是一起填进客户端的**一对**，
+     * 分开放就是在制造一趟往返。
+     *
+     * 所以这里把 token 也作为一格可复制的值放进每张卡片，
+     * 并且**同时给出模型名** —— 客户端那一栏也得填，同样不该让用户去别处找。
+     */
+    for (const [name, extra] of [
+      ['Cherry Studio', ['设置 → 模型服务 → 添加「OpenAI」，API 地址填 Base URL、密钥填令牌。',
+        '模型 ID 填下面那个（就是桥认识的真实 id），上下文留空即可 —— 这个客户端会自己按 /v1/models 拉。',
+        '它自带知识库 / RAG —— 那部分用不了（见文末「不支持」），但要先把对话接上再去掉对应开关。']],
+      ['ChatBox', ['设置 → 模型 → 添加自定义 OpenAI 兼容提供商，API Host 填 Base URL、API Key 填令牌。',
+        '模型那一栏填下面的模型名；填完点「检查」能拉到列表就说明通了。',
+        '官方 Web 版走的是浏览器，需要本桥最新版才支持（旧版没有 CORS 头，会失败）。']],
+      ['Cursor', ['Settings → Models → 把令牌填进 OpenAI API Key，把 Base URL 填进 Override OpenAI Base URL，',
+        '然后在下面的模型列表里手动加一行、名字填下面那个模型名（Cursor 不会自动读 /v1/models）。',
+        'Agent 模式依赖工具调用：桥已把上游只认字符串的 tool_choice 做了归一化，工具调用本身实测可用，',
+        '但 Cursor 具体发哪种写法没有验证过。']],
+      ['Trae', ['模型管理 → 添加自定义模型 → OpenAI 兼容：',
+        '下面三格分别对应客户端的三栏（Base URL / API Key / 模型名），各点各的复制按钮。',
+        '同 Cursor：Agent 模式的工具调用走的是归一化那条路，未实测。']],
+    ]) {
+      pane.append(clientCard(name, 'proto',
+        ['桌面应用（请求由主进程发出）'],
+        extra,
+        [],
+        {},
+        [
+          ['Base URL（API 地址）', d.baseUrlOpenAI],
+          ['API Key / 令牌', d.token],
+          ['模型名（Model ID）', (d.models && d.models[0]) || ''],
+        ],
+      ));
+    }
+
+    // ── B. 网页应用：请求从浏览器发 → 依赖桥的 CORS 支持 ─────────────────
+    const webHead = clientEl('div', 'compat-group');
+    webHead.append(clientEl('b', null, '二、网页应用（浏览器直连）'));
+    webHead.append(appendParts(clientEl('span', 'compat-group-note'), [
+      '请求由浏览器发出，受同源策略约束：桥必须支持 CORS 预检，旧版桥做不到。',
+    ]));
+    pane.append(webHead);
+    pane.append(clientCard('本地网页版（浏览器直连）', 'proto',
+      [
+        '浏览器发跨源请求前会先发 OPTIONS 预检，而预检不带令牌 —— 桥需要专门放行它。',
+        '本桥当前版本已支持：只对回环来源（localhost / 127.0.0.1 / ::1）回显跨源许可，',
+        '其它来源一律不放行（防止恶意网页借浏览器访问本机）。',
+        '所以：浏览器里打开的客户端页面必须也在本机（localhost / 127.0.0.1），远程部署的页面连不上，这是刻意的。',
+        '填法同桌面应用：Base URL 与令牌各一格，照下面复制。',
+        '如果你的桥是旧版本，先更新 —— 旧版本预检会被令牌闸门拦下（表现为浏览器控制台报 CORS 错误）。',
+      ],
+      [],
+      [],
+      {},
+      [
+        ['Base URL（API 地址）', d.baseUrlOpenAI],
+        ['API Key / 令牌', d.token],
+        ['模型名（Model ID）', (d.models && d.models[0]) || ''],
+      ],
+    ));
+    // ── C. 服务端应用：配环境变量后重启，**不用打开表单** ────────────────
+    const srvHead = clientEl('div', 'compat-group');
+    srvHead.append(clientEl('b', null, '三、服务端应用（环境变量）'));
+    srvHead.append(appendParts(clientEl('span', 'compat-group-note'), [
+      '请求由它自己的服务端发出，不走浏览器 —— 所以不要去填图形表单，配环境变量后重启。',
+    ]));
+    pane.append(srvHead);
+    pane.append(clientCard('Open WebUI / LobeChat / NextChat（自部署）', 'proto',
+      [
+        '这类是先启动一个本地服务、再用浏览器访问它自己端口的应用，请求由它的服务端转发 —— 天然不碰 CORS。',
+        '配置方式是环境变量 + 重启，在它的管理界面里找不到「自定义提供商」也没关系。',
+        'LobeChat / NextChat 也支持在界面里配，但走服务端环境变量更稳、且不受版本界面改动影响。',
+      ],
+      [
+        ['把下面这几个环境变量设好，然后重启该服务（改完不重启不生效）'],
+        ['Base URL 用带 /v1 的那个；模型名直接填上面「模型名」一栏里的真实 id'],
+      ],
+      [['环境变量（Open WebUI / LobeChat / NextChat 通用）', openAIEnvText(d)]],
+    ));
+
+    // ── 交叉引用：最可能去点知识库的恰恰是这一档 ─────────────────────────
+    compat.append(appendParts(clientEl('p', 'clientcard-note'), [
+      '注意：Cherry Studio / LobeChat / Open WebUI 都自带知识库（RAG），而本桥没有 embedding 模型，',
+      '那部分会明确报 501。详见文末「不支持」一节 —— 要把知识库用起来，得另配一个 embedding 服务。',
+    ]));
   }
 
   // ── 常驻尾注：都是短文本，且与「选哪个客户端」无关 ────────────────────
@@ -7844,11 +8133,16 @@ function clientsCheatSheet(d) {
   lines.push('', '--- opencode（opencode.json）---', opencodeConfigText(d));
   lines.push('', '--- Claude Code（环境变量）---', claudeCodeConfigText(d));
   lines.push('', '--- Codex（~/.codex/config.toml）---', codexConfigText(d));
+  lines.push('', '--- Open WebUI / LobeChat / NextChat 等（环境变量，改完重启）---', openAIEnvText(d));
   lines.push('',
     '--- 兼容性 ---',
     '  已实测  : opencode、Claude Code（Anthropic 协议）',
     '  协议转换: Codex（Responses 协议 → 桥转成 chat/completions）',
-    '  协议兼容: Cherry Studio / NextChat / LobeChat / ChatBox / Open WebUI / Cursor / Trae',
+    // 按**形态**分档，而不是笼统列 7 个名字 —— 接法本来就不同：
+    // 桌面填表单、服务端配环境变量、网页版受同源策略约束（桥已支持回环来源的 CORS 预检）
+    '  兼容 · 桌面应用  : Cherry Studio / ChatBox / Cursor / Trae（填表单，同上面的 Base URL 与令牌）',
+    '  兼容 · 服务端应用: Open WebUI / LobeChat / NextChat 自部署（配环境变量后重启，不用打开表单）',
+    '  兼容 · 本地网页版: 浏览器直连需桥支持 CORS 预检；只放行回环来源，远程部署的页面连不上',
     '  不支持  : 知识库 / RAG（上游没有 embedding 模型，/v1/embeddings 返回 501）');
   return lines.join('\n');
 }

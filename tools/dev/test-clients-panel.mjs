@@ -386,9 +386,104 @@ const okTags = await q(cdp, `[...document.querySelectorAll('#clientsBox .clientc
 if (okTags.includes('已实测')) pass('存在「已实测」档'); else fail('缺少「已实测」档');
 await selectClient('other');
 
-const chips = await q(cdp, `[...document.querySelectorAll('#clientsBox .clientchip')].map(e => e.textContent)`);
-for (const need of ['Cursor', 'Trae', 'Cherry Studio', 'LobeChat']) {
-  if (chips.includes(need)) pass(`兼容清单含 ${need}`); else fail(`兼容清单缺少 ${need}`);
+/*
+ * 名单完整性：7 个客户端**一个都不能少**。
+ *
+ * 原先它们是 7 个裸名字 chip，现在升级成了带指引的卡片（见下面那一块），
+ * 所以这里改从**整块兼容区文本**里找名字 —— 形式变了，覆盖范围不能缩水。
+ */
+const compatText = await q(cdp, `(() => {
+  const box = document.getElementById('clientsBox');
+  return box ? box.textContent : '';
+})()`);
+for (const need of ['Cursor', 'Trae', 'Cherry Studio', 'LobeChat', 'ChatBox', 'Open WebUI', 'NextChat']) {
+  if (compatText.includes(need)) pass(`兼容清单含 ${need}`); else fail(`兼容清单缺少 ${need}`);
+}
+
+/*
+ * 兼容档的**升级验收**（2026-10-12）。
+ *
+ * 原先这一档只渲染 7 个**裸名字**（`.clientchip`），用户看完的下一步只能靠猜。
+ * 现在按「请求从哪发出」分成三组给真指引。下面这几条盯的就是「别再退回裸名字」——
+ * 名字还在（上面的循环照样过），但必须**同时**有分组、有下一步、有环境变量片段。
+ */
+{
+  const groups = await q(cdp, `[...document.querySelectorAll('#clientsBox .compat-group b')].map(e => e.textContent)`);
+  eq(groups.length, 3, '兼容档按形态分成 3 组');
+  for (const want of ['桌面应用', '网页应用', '服务端应用']) {
+    if (groups.some((g) => g.includes(want))) pass(`存在「${want}」分组`);
+    else fail(`缺少「${want}」分组 —— 用户不知道该照哪种接法`);
+  }
+
+  // 每组标题旁边要有一句「请求从哪发出」——只给组名等于没解释
+  const groupNotes = await q(cdp, `[...document.querySelectorAll('#clientsBox .compat-group-note')].map(e => e.textContent)`);
+  eq(groupNotes.length, 3, '每组都带一句形态说明');
+
+  // 每个桌面客户端都要有自己的**下一步**（设置路径），不能只给名字
+  const deskCards = await q(cdp, `[...document.querySelectorAll('#clientsBox .clientcard')]
+    .map(c => ({
+      name: (c.querySelector('.clientcard-head b') || {}).textContent || '',
+      steps: [...c.querySelectorAll('.clientsteps li')].map(x => x.textContent).join(' '),
+      values: [...c.querySelectorAll('.valuerow')].map(r => ({
+        k: (r.querySelector('.valuerow-k') || {}).textContent || '',
+        v: (r.querySelector('.valuerow-v') || {}).textContent || '',
+        btn: !!r.querySelector('button.mini'),
+      })),
+    }))
+    .filter(c => ['Cherry Studio', 'ChatBox', 'Cursor', 'Trae'].includes(c.name))`);
+  eq(deskCards.length, 4, '四个桌面客户端各有卡片');
+  for (const c of deskCards) {
+    if (c.steps.length > 5 && /设置|Settings|模型/.test(c.steps)) pass(`${c.name} 卡片给了具体设置路径`);
+    else fail(`${c.name} 卡片没有可执行的下一步（仍是个裸名字）`);
+
+    /*
+     * **每张卡片必须自带令牌**（2026-10-12 用户实测反馈：「你这不详细啊，key 呢」）。
+     *
+     * 这些卡片是独立渲染的，而页面顶部的「API Key / 令牌」值行在**折叠区**里 ——
+     * 用户在卡片上看不到它，只能自己去找。只给 Base URL 等于把一对值拆开，
+     * 制造一趟没必要的往返。这条断言盯的就是「别再退回只给 Base URL」。
+     */
+    const values = Object.fromEntries(c.values.map((v) => [v.k, v]));
+    if (values['API Key / 令牌']?.v === CLIENTS.token) pass(`${c.name} 卡片自带令牌`);
+    else fail(`${c.name} 卡片没有令牌（用户不知道去哪拿 key）`);
+    if (values['Base URL（API 地址）']?.v === CLIENTS.baseUrlOpenAI) pass(`${c.name} 卡片自带 Base URL`);
+    else fail(`${c.name} 卡片 Base URL 不对`);
+    if (values['模型名（Model ID）']?.v) pass(`${c.name} 卡片自带模型名`);
+    else fail(`${c.name} 卡片没有模型名（客户端那一栏同样要填）`);
+    // 三格都必须能单独复制 —— 只显示不给复制按钮，用户还是得手抄
+    const noBtn = c.values.filter((v) => !v.btn).map((v) => v.k);
+    if (noBtn.length === 0) pass(`${c.name} 三格值都可单独复制`);
+    else fail(`${c.name} 这些格缺复制按钮：${JSON.stringify(noBtn)}`);
+  }
+
+  // 服务端型必须给**环境变量**片段（而不是让人去填图形表单）
+  const envText = await q(cdp, `[...document.querySelectorAll('#clientsBox .codeblock')]
+    .map(b => b.querySelector('pre').textContent).find(t => /OPENAI_API_BASE_URL/.test(t)) || ''`);
+  if (envText.includes('OPENAI_API_BASE_URL=' + CLIENTS.baseUrlOpenAI)) pass('环境变量片段含真实 Base URL');
+  else fail('环境变量片段缺少真实 Base URL');
+  if (envText.includes('OPENAI_API_KEY=' + CLIENTS.token)) pass('环境变量片段含真实令牌');
+  else fail('环境变量片段未用真实令牌');
+  // 这两个变量名各被不同项目读取，都要给
+  if (envText.includes('OPENAI_BASE_URL=')) pass('同时给了 OPENAI_BASE_URL（不同项目读的名字不同）');
+  else fail('只给了一个变量名，另一个项目会读不到');
+
+  // Base URL 的两种写法都要给（/v1 踩坑是实测最常见的）
+  const baseCards = await q(cdp, `[...document.querySelectorAll('#clientsBox .clientcard')]
+    .filter(c => (c.querySelector('.clientcard-head b') || {}).textContent === 'Base URL 该填哪一个')
+    .map(c => [...c.querySelectorAll('.codeblock pre')].map(p => p.textContent).join('\\n'))`);
+  eq(baseCards.length, 1, '存在「Base URL 该填哪一个」卡片');
+  if (baseCards[0] && baseCards[0].includes(CLIENTS.baseUrlOpenAI) && baseCards[0].includes(CLIENTS.baseUrlAnthropic)) {
+    pass('Base URL 卡片同时给出带 /v1 与不带 /v1 两种写法');
+  } else fail('Base URL 卡片没有给出两种写法');
+
+  // 网页版要说清「只放行回环来源」——这是它的安全边界，不能含糊
+  const webCard = await q(cdp, `(() => {
+    const c = [...document.querySelectorAll('#clientsBox .clientcard')]
+      .find(x => ((x.querySelector('.clientcard-head b') || {}).textContent || '').includes('本地网页版'));
+    return c ? c.textContent : '';
+  })()`);
+  if (/回环|localhost/.test(webCard) && /CORS|预检/.test(webCard)) pass('网页版卡片说明了 CORS 预检与回环限制');
+  else fail('网页版卡片没有说明跨源限制（用户会以为远程页面也能连）');
 }
 
 const ragText = await q(cdp, `(() => {

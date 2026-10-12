@@ -186,6 +186,22 @@ POST /api/bridge/stop      无头 → 403      ← 写操作照旧
 一个恶意页面可以反复触发它们（放大 / 资源消耗）。**读不到响应**（没有 CORS 头），
 所以这不是数据泄漏；写接口有 `x-workbuddy-panel` 挡着。
 
+> **2026-10-12 更新（CORS 性质收窄，不再是"靠没有头"）**
+>
+> 上面这条「读不到响应」原本是靠**全站不发任何 CORS 头**实现的。桥后来为了兑现
+> `originAllowed()` 注释里「本机网页版客户端照常可用」那句承诺，新增了 CORS 支持
+> （见 `docs/CLIENT-PLATFORMS-AUDIT-2026-10-12.md`）。**这条性质因此改成靠
+> 「只回显回环 Origin」实现**，安全性没有放松：
+>
+> - 只对回环来源（`127.0.0.1` / `localhost` / `::1`）回显
+>   `Access-Control-Allow-Origin`，**非回环一律不发头** —— 恶意网页仍读不到响应；
+> - **永不发 `*`**（`*` 会让任意网页读响应，等于把本条性质直接拆掉）；
+> - **不发 `Access-Control-Allow-Credentials`**（本桥靠 Bearer / x-api-key 头鉴权，
+>   不靠 Cookie，带上它只会平白扩大攻击面）。
+>
+> 锁定这三条的用例：`bridge/bridge-cors.test.mjs`（含"任何响应都不得出现 `*`
+> 或 `Allow-Credentials`"）。**改 CORS 前先读那一组用例。**
+
 **实测证据（修复前）**：
 
 ```
