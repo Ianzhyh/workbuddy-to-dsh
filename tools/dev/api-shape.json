@@ -392,6 +392,13 @@
       "$.models[].free": {
         "type": "boolean",
         "optional": true
+      },
+      "$.models[].reasoning_efforts": {
+        "type": "array",
+        "optional": true
+      },
+      "$.models[].reasoning_efforts[]": {
+        "type": "string"
       }
     },
     "/api/clients": {

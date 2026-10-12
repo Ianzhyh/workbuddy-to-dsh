@@ -526,6 +526,35 @@ try {
     if (imageMark.hasEmoji) problems.push('模型列表里还有 emoji 字符（🖼 这类看不懂的标记应当换成文字）');
     if (!imageMark.summary) problems.push('模型页没有说明有多少模型支持图片');
     console.log(`多模态标记：「图片」文字标记 ${imageMark.imageTags} 个，统计行已给出`);
+    /*
+     * 推理能力的可见性：模型行要有「推理」徽章，统计行要报推理模型数,
+     * 详情面板要列出实测档位 —— 用户报的"选不了思考强度"链路修好后，
+     * 面板必须能在**接入前**就看出来，否则只能进 dsh 才知道。
+     */
+    const reasonMark = await page.cdp.evaluate(`(() => {
+      const table = document.querySelector('.wb-table');
+      const tags = [...(table ? table.querySelectorAll('.wb-badge') : [])].map((el) => el.textContent);
+      return {
+        reasonTags: tags.filter((t) => t === '推理').length,
+        summary: /个支持推理/.test(document.body.innerText),
+      };
+    })()`);
+    if (!reasonMark.reasonTags) problems.push('模型列表没有渲染「推理」徽章（支持推理的模型应当标出来）');
+    if (!reasonMark.summary) problems.push('模型页没有说明有多少模型支持推理');
+    console.log(`推理标记：「推理」文字标记 ${reasonMark.reasonTags} 个，统计行已给出`);
+    // 详情面板：推理能力一行必须给出档位（夹具里全档模型是 6 个档）
+    const reasonDetail = await page.cdp.evaluate(`(() => {
+      const open = document.querySelector('.wb-detail');
+      const text = open ? open.innerText : '';
+      return {
+        hasLabel: text.includes('推理能力'),
+        hasLevels: /个档位/.test(text),
+        hasFallback: /上游未给档位信息/.test(text),
+      };
+    })()`);
+    if (!reasonDetail.hasLabel) problems.push('模型详情里没有「推理能力」一行');
+    if (!reasonDetail.hasLevels) problems.push('模型详情没有列出实测档位（"N 个档位：…"）');
+    console.log(`推理详情：档位列 ${reasonDetail.hasLevels ? '已渲染' : '缺失'}，兜底提示 ${reasonDetail.hasFallback ? '在' : '不在'}当前打开的模型上`);
     // 详情里的「用这个模型对话 →」应当切到对话测试并选中该模型
     await page.cdp.evaluate(`(() => { const b=[...document.querySelectorAll('.wb-btn')].find(x=>x.textContent.includes('用这个模型对话')); if(b) b.click(); return !!b; })()`);
     await sleep(600);

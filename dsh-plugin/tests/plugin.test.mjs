@@ -391,6 +391,66 @@ test('模型目录归一化：徽章从 tags 里拆出来（带颜色），厂�
   assert.ok(!JSON.stringify(dir).includes('badge:'), '整个目录里都不该再出现 badge: 原始规格');
 });
 
+test('模型目录归一化：推理能力与档位必须映射出来（面板"看得见"的前提）', async () => {
+  const { toDirectory } = await import('../lib/models.mjs');
+  const dir = toDirectory([
+    // 实测六档的全档模型
+    {
+      id: 'deepseek-v4.1-flash', name: 'DeepSeek-V4.1-Flash', supports_images: true,
+      supports_reasoning: true, only_reasoning: true,
+      reasoning_efforts: ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'],
+    },
+    // 老桥：说支持推理但没有档位字段 → efforts 必须是 null（"未知"，不是"没有"）
+    { id: 'legacy', name: 'Legacy', supports_reasoning: true },
+    // 桥实测"一个档都不收" → efforts 必须是空数组（与 null 语义不同）
+    { id: 'dead', name: 'Dead', supports_reasoning: true, reasoning_efforts: [] },
+    // 档位表里有空白项 → 应被剔除（dsh 校验 id 非空）
+    { id: 'dirty', name: 'Dirty', supports_reasoning: true, reasoning_efforts: ['low', '', '  ', 'high', 'low'] },
+    // 不支持推理 → reasoning 必须是 false（不是 undefined）
+    { id: 'plain', name: 'Plain', supports_images: true },
+  ]);
+
+  const flash = dir.find((m) => m.id === 'deepseek-v4.1-flash');
+  assert.equal(flash.reasoning, true, '支持推理要说出来');
+  assert.deepEqual(flash.efforts, ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'], '六档照单映射');
+  assert.equal(flash.onlyReasoning, true, '纯思考模型要标记（面板据此提示）');
+
+  const legacy = dir.find((m) => m.id === 'legacy');
+  assert.equal(legacy.reasoning, true);
+  assert.equal(legacy.efforts, null, '没有档位字段 = null（未知），与空数组语义不同');
+
+  const dead = dir.find((m) => m.id === 'dead');
+  assert.deepEqual(dead.efforts, [], '空数组照实保留（面板据此提示"暂无可选档位"）');
+  assert.notEqual(dead.efforts, null, '空数组不能被吞成 null');
+
+  const dirty = dir.find((m) => m.id === 'dirty');
+  assert.deepEqual(dirty.efforts, ['low', 'high'], '空串剔除、重复去重、保序');
+
+  const plain = dir.find((m) => m.id === 'plain');
+  assert.equal(plain.reasoning, false, '不支持推理给 false（不是 undefined）');
+  assert.equal(plain.onlyReasoning, false);
+
+  // 判据必须与 toAdapterModel 一致 —— 两处不一致会让"面板说的"与"dsh 能选的"对不上
+  const { toAdapterModel } = await import('../lib/models.mjs');
+  for (const raw of [
+    { id: 'a', supports_reasoning: true, reasoning_efforts: ['low', 'high'] },
+    { id: 'b', supports_reasoning: true },
+    { id: 'c', supports_reasoning: true, reasoning_efforts: [] },
+    { id: 'd', supports_reasoning: true, reasoning_efforts: ['low', '', 'low', 'xhigh'] },
+  ]) {
+    const dirOne = toDirectory([raw])[0];
+    const adapted = toAdapterModel(raw);
+    assert.equal(dirOne.reasoning, adapted.reasoning === true,
+      `${raw.id}：目录的 reasoning 与适配器声明必须一致`);
+    if (Array.isArray(dirOne.efforts)) {
+      assert.deepEqual(dirOne.efforts, adapted.reasoningEfforts,
+        `${raw.id}：目录的 efforts 与适配器给 dsh 的档位必须一致`);
+    }
+  }
+
+  assert.ok(!JSON.stringify(dir).includes('badge:'), '整个目录里都不该再出现 badge: 原始规格');
+});
+
 test('桥的健康检查：503 要认领成「凭据异常」，不能误判成"端口上是别人的服务"', async () => {
   const { createServer } = await import('node:http');
   const { BridgeSupervisor } = await import('../lib/bridge.mjs');

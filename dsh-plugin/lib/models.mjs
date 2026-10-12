@@ -99,12 +99,27 @@ export function toDirectory(catalog) {
       if (m.badge && !badges.some((b) => b.label === String(m.badge))) {
         badges.push({ label: String(m.badge), color: null });
       }
+      // 推理能力：判据与 toAdapterModel **同一套**（supports_reasoning 透传、
+      // 兼容旧形状 reasoning:true）—— 两处不一致会让面板说的和 dsh 里能选的对不上。
+      const reasoning = m.supports_reasoning === true || m.supportsReasoning === true || m.reasoning === true;
+      // 档位表：与 toAdapterModel 同样去空、去重、保序。
+      // **注意空数组的语义**：`reasoning_efforts: []` 是桥实测"一个档都不收"
+      // （如网关暂时不接的 claude-*）—— 那是"有推理能力但当前无可选档"，
+      // 与"没有这个字段"（老桥 / 非推理模型）不同，面板要能分开这两种情形。
+      const efforts = Array.isArray(m.reasoning_efforts)
+        ? [...new Set(m.reasoning_efforts.map((e) => String(e || '').trim()).filter(Boolean))]
+        : null;
       return {
         id: m.id,
         name: String(m.name || m.id),
         contextWindow: Number(m.context_window || 0) || null,
         maxTokens: Number(m.max_output_tokens || 0) || null,
         images: m.supports_images === true,
+        // 推理：reasoning=是否支持；efforts=实测档位（null=未知/无此字段，[]=实测无档）
+        reasoning,
+        efforts,
+        // 只推理模型（上游 only_reasoning）：面板据此提示"这是纯思考模型"。
+        onlyReasoning: m.only_reasoning === true,
         credits: typeof m.credits === 'number' ? m.credits : null,
         free: m.free === true,
         // 上游的厂商标识是单字母代码（f/j/v/e…），不是名字；原样保留但由界面

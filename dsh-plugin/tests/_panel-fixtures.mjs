@@ -43,15 +43,25 @@ export const FIXTURES = {
     /** 控制台状态：这一页的主入口。 */
     console: { state: 'running', url: 'http://127.0.0.1:8792', error: '', managed: false, autoStart: true },
     route: { registered: true, provider: 'workbuddy', error: '', fallback: false },
+    /*
+     * 模型目录夹具。
+     *
+     * ⚠️ `reasoning` / `efforts` / `onlyReasoning` **必须有** —— 面板要在模型行标
+     * 「推理」徽章、在详情里列实测档位；夹具里缺这几个字段，那部分渲染就等于没测
+     * （本项目栽过两次：服务端拼的界面文案，桩里没有就测不到）。
+     * 排序也特意覆盖三种形态：全档 / 无档位字段（老桥） / 显式空数组（网关不接）。
+     */
     directory: [
-      { id: 'deepseek-v4.1-flash', name: 'Deepseek-V4.1-Flash', contextWindow: 1000000, maxTokens: 128000, images: true, credits: 0.11, free: false, vendor: 'f', tags: ['craft'], badges: [] },
-      { id: 'glm-5.3', name: 'GLM-5.3', contextWindow: 1000000, maxTokens: 48000, images: true, credits: 0.79, free: false, vendor: 'e', tags: ['craft'], badges: [] },
-      { id: 'kimi-k3', name: 'Kimi-K3', contextWindow: 960000, maxTokens: 32000, images: false, credits: 0.35, free: false, vendor: 'v', tags: ['craft'], badges: [] },
+      { id: 'deepseek-v4.1-flash', name: 'Deepseek-V4.1-Flash', contextWindow: 1000000, maxTokens: 128000, images: true, reasoning: true, efforts: ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'], onlyReasoning: true, credits: 0.11, free: false, vendor: 'f', tags: ['craft'], badges: [] },
+      { id: 'glm-5.3', name: 'GLM-5.3', contextWindow: 1000000, maxTokens: 48000, images: true, reasoning: true, efforts: ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'], onlyReasoning: true, credits: 0.79, free: false, vendor: 'e', tags: ['craft'], badges: [] },
+      // 没有 efforts 字段：老桥 / 上游未给档位 → 面板提示"按低/中/高三档兜底"
+      { id: 'kimi-k3', name: 'Kimi-K3', contextWindow: 960000, maxTokens: 32000, images: false, reasoning: true, efforts: null, onlyReasoning: false, credits: 0.35, free: false, vendor: 'v', tags: ['craft'], badges: [] },
       // 带促销徽章的样例：既让"徽章要渲染成带色标记"这条断言在离线模式下也成立，
       // 也顺带验证「同名套餐/徽章」的展示
-      { id: 'hy3', name: 'HY3', contextWindow: 131072, maxTokens: 8192, images: false, credits: 0, free: true, vendor: 'j', tags: ['craft', 'badge:限时免费:#FF0000'], badges: [{ label: '限时免费', color: '#FF0000' }] },
-      { id: 'hy4-preview', name: 'Hy4 preview', contextWindow: 960000, maxTokens: 64000, images: true, credits: 0, free: true, vendor: 'j', tags: ['badge:夜间免费:#FF0000'], badges: [{ label: '夜间免费', color: '#FF0000' }] },
-      { id: 'glm-5v-turbo', name: 'GLM-5v-Turbo', contextWindow: 200000, maxTokens: 64000, images: true, credits: 0.71, free: false, vendor: 'e', tags: [], badges: [] },
+      { id: 'hy3', name: 'HY3', contextWindow: 131072, maxTokens: 8192, images: false, reasoning: false, efforts: null, onlyReasoning: false, credits: 0, free: true, vendor: 'j', tags: ['craft', 'badge:限时免费:#FF0000'], badges: [{ label: '限时免费', color: '#FF0000' }] },
+      { id: 'hy4-preview', name: 'Hy4 preview', contextWindow: 960000, maxTokens: 64000, images: true, reasoning: true, efforts: ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'], onlyReasoning: true, credits: 0, free: true, vendor: 'j', tags: ['badge:夜间免费:#FF0000'], badges: [{ label: '夜间免费', color: '#FF0000' }] },
+      // 显式空数组：桥实测"一个档都不收"（网关暂时不接）→ 面板提示"暂无可选档位"
+      { id: 'glm-5v-turbo', name: 'GLM-5v-Turbo', contextWindow: 200000, maxTokens: 64000, images: true, reasoning: true, efforts: [], onlyReasoning: false, credits: 0.71, free: false, vendor: 'e', tags: [], badges: [] },
     ],
     catalogAt: new Date(now - 300_000).toISOString(),
     catalogError: '',
@@ -119,6 +129,10 @@ export const FIXTURES = {
 FIXTURES.models.models = FIXTURES.status.directory.map((m) => ({
   id: m.id, name: m.name, contextWindow: m.contextWindow, maxTokens: m.maxTokens,
   credits: m.credits, images: m.images, free: m.free, vendor: m.vendor,
+  // 推理能力：与 lib/models.mjs 的 toDirectory 输出**逐字段对齐**（含 null /
+  // 空数组的区分语义）—— 少一个字段，模型页的「推理」徽章与详情档位就渲染不出来，
+  // 而 i18n 验收只扫渲染出来的东西，于是会静默漏掉。
+  reasoning: m.reasoning === true, efforts: m.efforts ?? null, onlyReasoning: m.onlyReasoning === true,
   // tags 要洗干净（`badge:标签:#色` 已拆进 badges）；模型页的促销徽章靠 badges 渲染
   tags: (m.tags || []).filter((t) => !/^badge:/.test(t)), badges: m.badges,
   description: '',

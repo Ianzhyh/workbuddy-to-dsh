@@ -652,6 +652,18 @@ body.dark .wb-root,
       '已隐藏（保存后 dsh 选择器不再出现）': 'Hidden (will disappear from the dsh picker after saving)',
       '支持图片输入（多模态）': 'Accepts image input (multimodal)',
       '图片': 'Image',
+      // 推理能力的可见性标记：与「图片」并列。用户报的"选不了思考强度"修好后，
+      // 面板要能在**接入前**就看出"这个模型能选几档"，否则只能进 dsh 才知道。
+      '推理': 'Reasoning',
+      '支持推理（可以选择思考强度）': 'Supports reasoning (choose a reasoning effort level)',
+      '纯思考模型（不接受非思考调用）': 'Reasoning-only model (does not accept non-reasoning calls)',
+      '推理能力': 'Reasoning',
+      '调用方式': 'Invocation',
+      '思考强度档位': 'Reasoning effort levels',
+      '档': ' levels',
+      '个档位：': ' levels: ',
+      '暂无可选档位（网关对该模型尚未提供）': 'No selectable levels yet (the gateway does not offer them for this model)',
+      '上游未给档位信息（按低/中/高三档兜底）': 'The upstream did not report levels (falls back to low/medium/high)',
       '免费': 'Free',
       /*
        * 上游促销徽章的**已知**标签（藏在 `tags` 里的 `badge:限时免费:#FF0000`）。
@@ -878,6 +890,22 @@ body.dark .wb-root,
         (m, n, _s, at) => n + ' package(s)' + (at ? ' · updated ' + at : '')],
       [/^ · 更新于 (.+)$/, ' · updated $1'],
 
+      // ── 推理能力（模型详情）──
+      // 动态串必须在这里翻译（i18n 只按整文本节点查表，拼接出来的整句
+      // 不在词条表里）。档位名（minimal/low/…）本身是英文，原样保留。
+      // ⚠️ label 组用 `([^：]+)` 是本项目踩过的坑的反面教材：这里「推理能力」
+      // 后面紧跟的是全角冒号，用它做分界是安全的（档位名里不会出现全角冒号）。
+      [/^支持 · (\d+) 个档位：(.+)$/, (m, n, list) => 'Supported · ' + n
+        + (n === '1' ? ' level: ' : ' levels: ') + translateText(list)],
+      [/^支持 · 暂无可选档位（网关对该模型尚未提供）$/,
+        'Supported · no selectable levels yet (the gateway does not offer them for this model)'],
+      [/^支持 · 上游未给档位信息（按低\/中\/高三档兜底）$/,
+        'Supported · upstream reported no levels (falls back to low/medium/high)'],
+      [/^支持 · (.+)$/, (m, rest) => 'Supported · ' + translateText(rest)],
+      [/^不支持$/, 'Not supported'],
+      [/^这就是 dsh 模型选择器里「思考强度」下拉会显示的档位$/,
+        'These are the levels the "Reasoning effort" dropdown in the dsh model picker will show'],
+
       // ── 概览 / 账号 / 模型里的拼接串 ──
       // 这几条都**必须排在下面的 `^(.+)：(.+)$` 之前** —— 否则「登录目录：C:\…」
       // 会先被那条通用规则切成两半，前缀留在中文（踩过一次）。
@@ -918,6 +946,8 @@ body.dark .wb-root,
       [/^（本轮 (\d+) 个，范围 (.+)）$/, ' ($1 models this run, scope $2)'],
       [/^共 (\d+) 个模型，其中 (\d+) 个支持图片输入（名称旁标「图片」），$/,
         '$1 models total, $2 accept image input (marked "Image" next to the name), '],
+      [/^(\d+) 个支持推理（名称旁标「推理」），$/,
+        '$1 support reasoning (marked "Reasoning" next to the name), '],
       [/^(\d+) 个免费；体检过的 (\d+) 个。$/, '$1 free; $2 probed.'],
       [/^(\d+) 项通过 \/ (\d+) 项警告 \/ (\d+) 项失败 —— 红色项不解决，模型就不会出现。$/,
         (m, ok, warn, fail) => ok + ' passed / ' + warn + ' warning' + (warn === '1' ? '' : 's')
@@ -2652,8 +2682,9 @@ body.dark .wb-root,
           '模型列表来自桥的动态目录，不需要勾选或保存：选模型时 provider 选 “WorkBuddy” 就能看到全部。体检结论存在 .state.json 的 probe 字段，与控制器共用一份。'),
         models.length
           ? h('p', { className: 'wb-note' },
-            // 两段**分开传**：它们各自在词条表里有条目，先拼成一串就查不到词条了
+            // 三段**分开传**：它们各自在词条表里有条目，先拼成一串就查不到词条了
             `共 ${models.length} 个模型，其中 ${models.filter((m) => m.images).length} 个支持图片输入（名称旁标「图片」），`,
+            `${models.filter((m) => m.reasoning).length} 个支持推理（名称旁标「推理」），`,
             `${models.filter((m) => m.free).length} 个免费；体检过的 ${models.filter((m) => resultOf(m.id)).length} 个。`)
           : null,
         h('div', { className: 'wb-actions split', style: { margin: '12px 0' } },
@@ -2674,8 +2705,14 @@ body.dark .wb-root,
             h(Btn, { disabled: !!working, onClick: () => { setRefreshTick(refreshTick + 1); reload(); } }, '刷新目录'),
             h(Btn, { disabled: !!working || !consoleReady, onClick: clearProbes }, '清除体检结论'),
             h(Btn, { onClick: () => downloadCsv('workbuddy-models.csv',
-              ['id', 'name', 'contextWindow', 'maxTokens', 'credits', 'free', 'images', 'probe', 'probeMs', 'probeError'],
-              models.map((m) => [m.id, m.name, m.contextWindow || '', m.maxTokens || '', m.credits ?? '', m.free ? 1 : 0, m.images ? 1 : 0, resultOf(m.id) ? (resultOf(m.id).ok ? 'ok' : 'fail') : '', resultOf(m.id)?.ms ?? '', resultOf(m.id)?.error || ''])) }, '导出 CSV'))),
+              // reasoning / effortCount / efforts 三列：推理能力与实测档位是这块的
+              // 关键信息，导出后应能直接核对（原表只有 images/free，看不出能不能推理）。
+              // efforts 用 `|` 分隔（档位名里没有竖线，CSV 转义不会歧义）。
+              ['id', 'name', 'contextWindow', 'maxTokens', 'credits', 'free', 'images', 'reasoning', 'effortCount', 'efforts', 'onlyReasoning', 'probe', 'probeMs', 'probeError'],
+              models.map((m) => [m.id, m.name, m.contextWindow || '', m.maxTokens || '', m.credits ?? '', m.free ? 1 : 0, m.images ? 1 : 0,
+                m.reasoning ? 1 : 0, Array.isArray(m.efforts) ? m.efforts.length : '',
+                Array.isArray(m.efforts) ? m.efforts.join('|') : '', m.onlyReasoning ? 1 : 0,
+                resultOf(m.id) ? (resultOf(m.id).ok ? 'ok' : 'fail') : '', resultOf(m.id)?.ms ?? '', resultOf(m.id)?.error || ''])) }, '导出 CSV'))),
         !consoleReady ? h('p', { className: 'wb-note' }, '体检需要控制台在跑（结论只由它写，保证两边一致）。') : null,
         // ── 模型显示偏好：勾选决定哪些模型出现在 dsh 的模型选择器里 ─────────
         h('div', { className: 'wb-actions split', style: { marginBottom: '10px' } },
@@ -2710,6 +2747,9 @@ body.dark .wb-root,
                 h('td', null, m.id + (m.id === sampleModel ? ' ★' : '')),
                 h('td', null, (m.name || ''),
                   m.images ? h('span', { className: 'wb-badge', title: '支持图片输入（多模态）' }, '图片') : null,
+                  // 「推理」徽章与「图片」并列：有推理能力就标（档位细节在详情里，
+                  // 列表行只做"能不能"的一眼判断，避免把六个档位名塞进一行）。
+                  m.reasoning ? h('span', { className: 'wb-badge', title: '支持推理（可以选择思考强度）' }, '推理') : null,
                   badgesOf(m).map((b, bi) => h('span', {
                     key: bi,
                     className: 'wb-badge',
@@ -2735,6 +2775,30 @@ body.dark .wb-root,
                         h(DetailItem, { label: '上下文 / 输出', value: `${fmtInt(m.contextWindow)} / ${fmtInt(m.maxTokens)} tokens` }),
                         h(DetailItem, { label: '计费倍率', value: m.free ? '免费' : (m.credits === null || m.credits === undefined ? '未知' : String(m.credits)) }),
                         h(DetailItem, { label: '多模态', value: m.images ? '支持图片' : '纯文本' }),
+                        /*
+                         * 推理能力一行要能分辨**三种**情形（这块最容易含糊）：
+                         *   1. 不支持推理          → 「不支持」，不显示档位
+                         *   2. 支持且实测有档位    → 「支持 · N 个档位：a / b / c」（dsh 会看到的）
+                         *   3. 支持但档位未知/为空 → 分别提示"上游未给"或"网关未提供"
+                         * 第 3 种若一律显示成"不支持"，用户会以为模型没推理能力 —— 那是
+                         * 与 toAdapterModel 的判据脱节的显示（它按 efforts 是否非空决定声明）。
+                         */
+                        h(DetailItem, {
+                          label: '推理能力',
+                          value: !m.reasoning
+                            ? '不支持'
+                            : (Array.isArray(m.efforts) && m.efforts.length
+                              ? `支持 · ${m.efforts.length} 个档位：${m.efforts.join(' / ')}`
+                              : (Array.isArray(m.efforts)
+                                ? '支持 · 暂无可选档位（网关对该模型尚未提供）'
+                                : '支持 · 上游未给档位信息（按低/中/高三档兜底）')),
+                          hint: m.reasoning && Array.isArray(m.efforts) && m.efforts.length
+                            ? '这就是 dsh 模型选择器里「思考强度」下拉会显示的档位'
+                            : undefined,
+                        }),
+                        m.onlyReasoning
+                          ? h(DetailItem, { label: '调用方式', value: '纯思考模型（不接受非思考调用）' })
+                          : null,
                         h(DetailItem, { label: '体检', value: probe ? (probe.ok ? `可用 · ${probe.ms}ms` : `不可用 · ${probe.ms}ms`) + (typeof probe.credit === 'number' ? ` · 实测扣分 ${probe.credit}` : '') : '未测' }),
                         h(DetailItem, { label: '标签', value: tagsOf(m).join(' · ') || '—' })),
                       badgesOf(m).length
