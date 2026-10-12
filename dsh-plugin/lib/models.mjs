@@ -23,7 +23,14 @@ export function isChatModel(id) {
 }
 
 /**
- * 把桥的一个模型对象翻译成 dsh 适配器的模型元数据。
+ * 桥的一个模型对象翻译成 dsh 适配器的模型元数据。
+ *
+ * 能力字段来自桥 `/v1/models`（OpenAI 模型对象 + 项目自加的字段）：
+ *   `supports_images` / `supports_reasoning` / `reasoning_efforts` / `only_reasoning`。
+ *
+ * ⚠️ `reasoning_efforts` 是**每模型实测**出来的档位表（桥侧按 id 查表给出，
+ * 见 bridge 的 REASONING_EFFORTS_BY_MODEL）。没有它就不声明推理 —— 老桥没有
+ * 这个字段时退回"低/中/高"三档兜底（adapter 里做，见 FALLBACK_EFFORTS）。
  * @param {object} model 桥上 `/v1/models` 的一项
  */
 export function toAdapterModel(model) {
@@ -34,6 +41,10 @@ export function toAdapterModel(model) {
   // 推理能力：桥以 supports_reasoning（上游 supportsReasoning 的透传）标记；
   // 兼容直接给 reasoning:true 的旧形状。
   const reasoning = model.supports_reasoning === true || model.supportsReasoning === true || model.reasoning === true;
+  // 档位表：只收非空字符串、去重、保序（dsh 要求 id 非空且不重复）
+  const efforts = Array.isArray(model.reasoning_efforts)
+    ? [...new Set(model.reasoning_efforts.map((e) => String(e || '').trim()).filter(Boolean))]
+    : null;
   return {
     id,
     name: String(model.name || id),
@@ -41,6 +52,7 @@ export function toAdapterModel(model) {
     ...(maxTokens ? { maxTokens } : {}),
     inputModalities: images ? ['text', 'image'] : ['text'],
     ...(reasoning ? { reasoning: true } : {}),
+    ...(efforts ? { reasoningEfforts: efforts } : {}),
   };
 }
 

@@ -138,13 +138,203 @@ const LOG = process.env.WORKBUDDY_LOG === '1';
 const STARTED_AT = Date.now();
 
 // Curated models exposed by default; others remain reachable via /v1/models?all=1
-// 兜底的精选模型定义。倍率优先取上游的 credits（形如 "x0.11"），
-// 这里的数值取自上游实测，仅在上游没给时才用——注意它们会随官方调价而过时。
+/**
+ * 已知可用、但**上游目录可能漏掉**的模型（兜底展示 + 放行用）。
+ *
+ * 倍率优先取上游的 `credits`（形如 `x0.11`），这里的数值取自上游实测、
+ * 仅在上游没给时才用 —— 注意它们会随官方调价而过时。
+ *
+ * ## 为什么必须带能力标记（2026-10-12 修）
+ *
+ * 上游目录**并不完整**：国际版能成功调用 `deepseek-v4.1-flash`，但它不出现在
+ * 任何一个目录端点里（`/health.upstreamShape.supplemented` 能看到补了谁）。
+ * 走补全进来的模型**原本不带任何能力字段** —— 于是 dsh 的模型选择器把它显示成
+ * 「纯文本、不支持推理」，用户想选思考强度还会被 dsh 直接拒掉：
+ * `session/model-unavailable: model "deepseek-v4.1-flash" does not support reasoning effort "high"`。
+ *
+ * 所以这里的能力标记**必须实测过**（不猜，与项目其它地方同一纪律）：
+ *   · `deepseek-v4.1-flash` —— 2026-10-12 打真实国际版网关实测：
+ *     ① 视觉：塞一张 1×1 红点图，它答出「粉色」；
+ *     ② 推理：`reasoning_effort` 五档（minimal/low/medium/high/max）全部 200，
+ *        且都返回 `reasoning_content`（探针见 `tools/dev/probe-capability.mjs`
+ *        与 `tools/dev/probe-effort.mjs`）。
+ *
+ * ## `regions`：只在列出的区域补全
+ *
+ * `deepseek-v4-pro` 在国际版网关实测 **400 `model [...] service info not found`**
+ * —— 那个区域根本不提供它。补进去只会得到选择器里一个一调就报错的死条目，
+ * 所以标 `['cn']`：国内版照旧补，国际版不补。
+ * 没写 `regions` 的条目视为**全区域**。
+ */
 const FEATURED = [
-  { id: 'deepseek-v4.1-flash', name: 'DeepSeek-V4.1-Flash', context: 1000000, maxOutput: 128000, credits: 0.11 },
-  { id: 'deepseek-v4-pro', name: 'DeepSeek-V4-Pro', context: 1000000, maxOutput: 50000, credits: 0.51 },
+  {
+    id: 'deepseek-v4.1-flash',
+    name: 'DeepSeek-V4.1-Flash',
+    context: 1000000,
+    maxOutput: 128000,
+    credits: 0.11,
+    images: true,
+    supportsReasoning: true,
+  },
+  { id: 'deepseek-v4-pro', name: 'DeepSeek-V4-Pro', context: 1000000, maxOutput: 50000, credits: 0.51, regions: ['cn'] },
   { id: 'glm-5.3', name: 'GLM-5.3', context: 1000000, maxOutput: 48000, credits: 0.79 },
 ];
+
+/**
+ * 登录文件对应的上游区域：`'cn' | 'intl'`（只用于 FEATURED 的 `regions` 过滤）。
+ *
+ * 按**登录域名**判，不看 `auth.endpoint`：`CODEBUDDY_ENDPOINT` 会把 endpoint
+ * 覆盖成桩地址（验收用例靠它把出站流量导向本地），那不是区域信息。
+ */
+function upstreamRegion(auth) {
+  return pickUpstream(auth?.domain) === 'https://copilot.tencent.com' ? 'cn' : 'intl';
+}
+
+/** 某个 FEATURED 条目在当前区域是否可用（未标 `regions` = 全区域）。 */
+function featuredAllowedIn(f, region) {
+  return !Array.isArray(f.regions) || f.regions.includes(region);
+}
+
+/**
+ * 每个模型**实测**支持的 `reasoning_effort` 档位。
+ *
+ * ## 为什么需要它（2026-10-12 用户反馈）
+ *
+ * 插件给 dsh 声明的档位原先**写死**成低/中/高三档。而上游到底收哪些值，
+ * 目录里**没有任何字段可查**（`supportsReasoning` 只说"这个模型会推理"，
+ * 不说"接受哪几档 reasoning_effort"）。声明了却不接受的值，用户一选就报错
+ * （`does not support reasoning effort "xxx"`）—— 与"能力标记"是同一类问题。
+ *
+ * ## 数据怎么来的：实测，不猜
+ *
+ * `tools/dev/probe-efforts-all.mjs` 对**真实网关**逐模型 × 逐档位打一遍
+ * （判据 = HTTP 200；另打一个**不带档位的对照组**，用来把"模型不可用"和
+ * "这个档位不支持"分开）。2026-10-12 国际版账号、20 个模型的结论：
+ *
+ * - 档位全集取自**国际版桌面端产物**的 `EXTENDED_THINKING_LEVELS`
+ *   （off / minimal / low / medium / high / xhigh / max，另加 none）；
+ * - **档位差异是真实存在的**（这正是不能写死的原因）：
+ *   · `gpt-5.6-sol / terra / luna` **不收 `minimal`**；`gpt-6-luna` 收；
+ *   · `gpt-5.3-codex / 5.4 / 5.5 / primary-model` 连 **`max` 都不收**；
+ *   · `gemini-3.5-flash` 不收 `xhigh`；`deepseek-v4.1-flash` 不收 `off`；
+ * - **`off` / `none` 一律不声明**：`off` 对一部分模型 400、对另一部分模型虽然
+ *   200 但**照样思考**（实测 reasoning_tokens > 0）；`none` 对 gemini 400。
+ *   暴露出来只会造成误导或报错；
+ * - `claude-haiku-4.5` / `claude-opus-4.8`：对照请求就 400
+ *   （`service info not found`）—— 网关当前不接。显式空数组 = 不声明推理。
+ *
+ * 同日国内版账号、CN 目录 29 个推理模型的结论（矩阵与上表**按模型 id 共用**）：
+ *
+ * - **22 个全档**；`deepseek-v4-pro` / `deepseek-v4-flash` 只拒 `off`
+ *   （`off` 照例不声明）；`deepseek-v4-pro` 国内版可用（国际版目录里根本没有它，
+ *   只在国内版补全，所以并表对国际版无影响）；
+ * - **7 个目录在列但网关不接**（对照即 400 `service info not found`）：
+ *   `glm-4.6 / 4.6v / 4.7 / 5.0`、`hy4-preview-x`、`kimi-k2-thinking`、
+ *   `minimax-m2.5` —— 显式空数组，与 claude-* 同款处理；
+ * - 两端共有的 5 个模型（hy3 / hy4-preview / glm-5.2 / glm-5.3 / kimi-k2.6）
+ *   复测**结论一致** → 表不需要区域维度；
+ * - `deepseek-v4.1-flash` 的 CN 复测**已于 2026-10-12 16:04 补完**（换新账号后
+ *   不起 429 了）：对照组 200、`off` 400、`none` 200、`minimal…max` 六档全 200
+ *   （reasoning_tokens 99/147/164/49/40/123/60）→ **与国际版结论一致**，
+ *   即"只拒 `off`"。先前的 429 是**旧账号**的模型级频率限制，与档位无关。
+ *
+ * ## 教训：第一批矩阵全错，原因是探针自己
+ *
+ * 第一版探针用 `max_tokens: 8` 发请求，而**推理模型会拒绝过小的输出预算**
+ * （`gpt-5.6-sol`：8 → 400 `model_param_invalid`，≥64 → 200 正常答题），
+ * 于是 9 个模型被误判成"完全不可调"——对照组也用 8，所以对照没对照出问题。
+ * 探针现在用 1024。**测量脚本自己的参数也是被测系统的一部分。**
+ *
+ * ## 教训：孤立单格 400 要复测再缩表（2026-10-12 CN）
+ *
+ * CN 矩阵里 `space-bunny/minimal` 与 `hunyuan-2.0-thinking/xhigh` 各出现过
+ * **一次** 400，其余格子全 200。直接信它就会把这两个模型误判成"不收某档"。
+ * 复测 **6/6 全 200** → 判定为网关在 16 分钟持续高压下的**偶发拒绝**。
+ * 区分依据：真不支持的档位是**确定性** 400（7 个死模型 9/9 格全 400、
+ * gpt-5.6 不收 minimal、gemini 不收 xhigh），而偶发拒绝是孤立单格。
+ * 探针对 400 不重试（只对 429 退避）—— **看到孤立 400，手动复测再决定**。
+ *
+ * ⚠️ 表会随上游变化而过时。上游改了档位、或加了新模型，**复跑探针**并按结果更新本表
+ * （新模型先用默认三档 —— 安全：宁可少一档，不可多一个会 400 的档）。
+ */
+const DEFAULT_REASONING_EFFORTS = ['low', 'medium', 'high'];
+
+/** 实测与默认不同的模型（key = 模型 id，value = 实测接受的档位，顺序即展示顺序）。 */
+const REASONING_EFFORTS_BY_MODEL = {
+  // 全档（minimal…max + xhigh）—— 2026-10-12 实测
+  'deepseek-v4.1-flash': ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'],
+  'fast-model': ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'],
+  'balanced-model': ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'],
+  'hy3': ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'],
+  'hy4-preview': ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'],
+  'glm-5.2': ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'],
+  'glm-5.3': ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'],
+  'kimi-k3': ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'],
+  'kimi-k2.6': ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'],
+  'gpt-6-luna': ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'],
+  // gpt-5.6 系：**不收 minimal**（实测 400）
+  'gpt-5.6-sol': ['low', 'medium', 'high', 'xhigh', 'max'],
+  'gpt-5.6-terra': ['low', 'medium', 'high', 'xhigh', 'max'],
+  'gpt-5.6-luna': ['low', 'medium', 'high', 'xhigh', 'max'],
+  // 这四个连 max 都不收
+  'gpt-5.3-codex': ['low', 'medium', 'high', 'xhigh'],
+  'gpt-5.4': ['low', 'medium', 'high', 'xhigh'],
+  'gpt-5.5': ['low', 'medium', 'high', 'xhigh'],
+  'primary-model': ['low', 'medium', 'high', 'xhigh'],
+  // gemini：不收 xhigh（none / off 也 400）
+  'gemini-3.5-flash': ['minimal', 'low', 'medium', 'high', 'max'],
+
+  // ===== 国内版 2026-10-12 实测（CN 目录 29 个推理模型，全部实测）=====
+  // 与上表**共有的 5 个模型**（hy3 / hy4-preview / glm-5.2 / glm-5.3 / kimi-k2.6）
+  // 复测结论一致，已在上表，不重复列。deepseek-v4.1-flash 的 CN 复测**已补完**
+  // （2026-10-12 16:04，换账号后）：只拒 off、其余六档全 200，与国际版一致
+  // —— 同一 id 共用上表条目，此处不重复列。
+  //
+  // 全档（minimal…max + xhigh）——16 个。其中 space-bunny / hunyuan-2.0-thinking
+  // 探针各有一格偶发 400（space-bunny/minimal、hunyuan/xhigh），**复测 6/6 全 200**
+  // —— 判定为网关在持续高压下的偶发拒绝，按全档入表。真不支持的档位（见上表
+  // gpt-5.6 不收 minimal、gemini 不收 xhigh）是**确定性** 400，与此不同。
+  'auto': ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'],
+  'deepseek-v3-2-volc': ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'],
+  'deepseek-v4-flash': ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'],
+  'deepseek-v4-pro': ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'],
+  'glm-5.1': ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'],
+  'glm-5.3-flash': ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'],
+  'glm-5v-turbo': ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'],
+  'hunyuan-2.0-thinking': ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'],
+  'hy3-x': ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'],
+  'kimi-k2.5': ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'],
+  'kimi-k2.7': ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'],
+  'kimi-k2.8-preview': ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'],
+  'kimi-k3-1': ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'],
+  'minimax-m3': ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'],
+  'space-bunny': ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'],
+  'step-5-preview': ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'],
+
+  // 网关当前不接（对照请求 400 `service info not found`）→ 显式空数组 =
+  // "不声明推理"，dsh 选择器不显示思考强度（比显示一个必然失败的控件好）。
+  // 网关真提供后：复跑探针，把实测档位填回来。
+  // claude-*（国际版目录在列）：
+  'claude-haiku-4.5': [],
+  'claude-opus-4.8': [],
+  // 国内版目录在列、**网关不接**：连不带档位的对照请求都 400
+  // `service info not found`（与 claude-* 同类，是可用性问题不是档位问题）。
+  // 显式空数组 = 不声明推理，dsh 选择器不显示思考强度（比显示一个必然失败的控件好）。
+  'glm-4.6': [],
+  'glm-4.6v': [],
+  'glm-4.7': [],
+  'glm-5.0': [],
+  'hy4-preview-x': [],
+  'kimi-k2-thinking': [],
+  'minimax-m2.5': [],
+};
+
+/** 取某模型的档位（只有目录说它支持推理时才该调用）。 */
+function effortsFor(id) {
+  const hit = REASONING_EFFORTS_BY_MODEL[id];
+  // 显式空数组 = 实测一个档都不收 → 照实返回（插件会因此不声明推理）
+  return Array.isArray(hit) ? hit : DEFAULT_REASONING_EFFORTS;
+}
 
 /**
  * 取某模型的消耗倍率。
@@ -3187,8 +3377,18 @@ async function fetchCatalog() {
     // 目录接口**并不完整**：国际版能成功调用 deepseek-v4.1-flash，
     // 但它不出现在任何一个目录端点里。因此把已知可用、目录却漏掉的模型补进来
     // ——能不能用最终由上游决定，列出来才有机会被选到。
+    //
+    // ⚠️ 能力标记（images / supportsReasoning）**必须一起带上**：补全项一旦缺了
+    // 它们，dsh 就会把模型显示成「纯文本、不支持推理」，用户连思考强度都选不了
+    // （2026-10-12 的真实反馈）。这些值都是实测过的，见 FEATURED 的注释。
+    // `regions` 过滤同理：不提供的区域不要补，否则是个一调就报错的死条目。
+    const region = upstreamRegion(auth);
     for (const f of FEATURED) {
       if (merged.has(f.id)) continue;
+      if (!featuredAllowedIn(f, region)) {
+        shape.skippedByRegion = [...(shape.skippedByRegion || []), f.id];
+        continue;
+      }
       // 倍率**不猜**：本区域目录没给这个模型，就说明不知道该区域的定价。
       // 早前直接套用 FEATURED 的值（那是国内实测），会把国际版的免费模型
       // 标成 0.11——除非促销明确说它免费（factor 0），否则一律留空。
@@ -3198,6 +3398,8 @@ async function fetchCatalog() {
         name: f.name,
         maxInputTokens: f.context,
         maxOutputTokens: f.maxOutput,
+        ...(f.images ? { supportsImages: true } : {}),
+        ...(f.supportsReasoning ? { supportsReasoning: true } : {}),
         ...(promo?.free ? { credits: 0 } : {}),
         _supplemented: true,
       });
@@ -3274,12 +3476,32 @@ async function fetchCatalog() {
  * deepseek-v4.1-flash，只有 default-model / fast-model 这类档位名。
  * 若一律照搬 FEATURED，就会报出上游根本没有的模型。
  */
-function pickFeatured(catalog) {
+/**
+ * 默认视图的精选集：目录里有的用目录条目，缺的用定义兜底。
+ *
+ * `region` 只约束**兜底**那部分：目录里**有**的条目一律保留（它来自上游，
+ * 说明这个区域确实提供它）；要拿定义补的则必须过 `regions` 过滤 ——
+ * 否则国际版的默认视图里还会挂着 `deepseek-v4-pro` 这个一调就 400 的死条目。
+ */
+function pickFeatured(catalog, region = '') {
   const byId = new Map(catalog.map((m) => [m.id, m]));
   // 精选模型始终保留：目录里没有的用定义值补上（上游目录并不完整，
   // 例如国际版能调 deepseek-v4.1-flash，但目录里没有它）。
-  return FEATURED.map((f) => byId.get(f.id)
-    ?? { id: f.id, name: f.name, context: f.context, maxOutput: f.maxOutput, credits: f.credits });
+  //
+  // ⚠️ 能力标记要跟着一起补（原先这里只补 id/name/context/maxOutput/credits）——
+  // 少了 `images` / `supportsReasoning`，默认视图里的精选模型就是"纯文本 +
+  // 不支持推理"，与补全路径（fetchCatalog）给的形状不一致。
+  return FEATURED
+    .filter((f) => byId.has(f.id) || featuredAllowedIn(f, region))
+    .map((f) => byId.get(f.id) ?? {
+      id: f.id,
+      name: f.name,
+      context: f.context,
+      maxOutput: f.maxOutput,
+      credits: f.credits,
+      ...(f.images ? { images: true } : {}),
+      ...(f.supportsReasoning ? { supportsReasoning: true } : {}),
+    });
 }
 
 // ── Billing / credits ────────────────────────────────────────────────────
@@ -3839,8 +4061,10 @@ async function handleRequest(req, res) {
 
     if (url.pathname === '/health') {
       let auth = null;
+      let region = '';
       try {
         const a = readStoredAuth();
+        region = upstreamRegion(a);
         auth = { userId: a.userId, endpoint: a.endpoint, expiresAt: new Date(a.expiresAt).toISOString(), expired: a.expiresAt < Date.now() };
       } catch (e) { return json(res, 503, { ok: false, error: e.message, authFile: AUTH_PATH }); }
       // 这里**绝不能等上游**：控制台的探测超时是 4 秒，冷缓存时抓目录要好几秒，
@@ -3857,7 +4081,7 @@ async function handleRequest(req, res) {
         // 客户端定位结果（**只读内存缓存、绝不触发探测** —— /health 有 4 秒超时
         // 约束，慢探测会让控制台把桥误判成"未运行"；没定位过就显示空）
         clientExe: atRestUsedExe || wbExeCache || '',
-        models: (catalog.length ? pickFeatured(catalog) : FEATURED).map((m) => m.id),
+        models: (catalog.length ? pickFeatured(catalog, region) : FEATURED.filter((f) => featuredAllowedIn(f, region))).map((m) => m.id),
         catalogSize: catalog.length,
         catalogAt: catalogCache.at ? new Date(catalogCache.at).toISOString() : null,
         catalogRefreshing: !!catalogRefreshing,
@@ -3897,16 +4121,32 @@ async function handleRequest(req, res) {
       // 刚刷过就别再走 upstreamCatalog()（它在缓存为空时会再触发一次刷新，等于白打一轮上游）
       const catalog = wantRefresh ? catalogCache.models : await upstreamCatalog();
 
+      /*
+       * 区域（用于 FEATURED 的 `regions` 过滤）。
+       * 凭据读不出来时给空串 —— 那时只列**全区域**条目：region-restricted 的
+       * 条目在没有区域信息时不敢声称可用（多报一个一调就 400 的模型比少报更糟）。
+       */
+      const region = (() => { try { return upstreamRegion(readStoredAuth()); } catch { return ''; } })();
+
       let models;
       if (!catalog.length) {
-        // 上游目录取不到：退回精选定义，至少让客户端能用
-        models = FEATURED.map((f) => ({
-          id: f.id, name: f.name, context: f.context, maxOutput: f.maxOutput, images: true,
-        }));
+        // 上游目录取不到：退回精选定义，至少让客户端能用。
+        // 能力标记照抄 FEATURED 的定义（原先这里给所有模型硬写 `images: true`
+        // 且从不给 reasoning —— 对非视觉模型是**多报**，对推理模型是**漏报**）。
+        models = FEATURED
+          .filter((f) => featuredAllowedIn(f, region))
+          .map((f) => ({
+            id: f.id,
+            name: f.name,
+            context: f.context,
+            maxOutput: f.maxOutput,
+            images: f.images === true,
+            supportsReasoning: f.supportsReasoning === true,
+          }));
       } else if (all) {
         models = catalog;
       } else {
-        models = pickFeatured(catalog).map((u) => ({
+        models = pickFeatured(catalog, region).map((u) => ({
           ...u,
           name: FEATURED.find((f) => f.id === u.id)?.name || u.name,
         }));
@@ -3914,6 +4154,15 @@ async function handleRequest(req, res) {
 
       const list = models.map((m) => {
         const credits = creditsOf(m);
+        /*
+         * 档位：只在目录说"支持推理"时才给，且按 id 查实测表（见 REASONING_EFFORTS_BY_MODEL）。
+         * 插件据此给 dsh 声明"这个模型能选哪几档思考强度" —— 写死三档的旧做法
+         * 既会漏档（模型支持更多），也会埋雷（声明了上游不接受的值）。
+         * **空数组也要发**：那是"实测一个档都不收"（如网关暂时不接的 claude-*），
+         * 插件看到空数组就不声明推理 —— 选择器不显示一个必然失败的控件。
+         * 不声明推理的模型才完全没有这个字段。
+         */
+        const efforts = m.supportsReasoning ? effortsFor(m.id) : null;
         return {
           id: m.id,
           object: 'model',
@@ -3925,6 +4174,7 @@ async function handleRequest(req, res) {
           ...(typeof credits === 'number' ? { credits } : {}),
           ...(m.images ? { supports_images: true } : {}),
           ...(m.supportsReasoning ? { supports_reasoning: true } : {}),
+          ...(Array.isArray(efforts) ? { reasoning_efforts: efforts } : {}),
           ...(m.onlyReasoning ? { only_reasoning: true } : {}),
           ...(m.vendor ? { vendor: m.vendor } : {}),
           ...(Array.isArray(m.tags) && m.tags.length ? { tags: m.tags } : {}),
@@ -4567,29 +4817,35 @@ if (process.argv.includes('--check')) {
   lines.push(`node            ${process.version}${major >= 18 ? '' : '  [FAIL] Node 18+ required'}`);
   lines.push(`auth file       ${AUTH_PATH}`);
   let authOk = false;
+  let checkRegion = '';
   try {
     const a = readStoredAuth();
     authOk = true;
     lines.push(`account         ${a.userId || '(no sub claim)'}`);
     lines.push(`endpoint        ${a.endpoint}`);
     lines.push(`token expires   ${new Date(a.expiresAt).toISOString()}${a.expiresAt < Date.now() ? '  (expired: the bridge refreshes on first request)' : ''}`);
+    checkRegion = upstreamRegion(a);
   } catch (e) {
     lines.push(`auth            [FAIL] ${e.message}`);
   }
   lines.push(`client exe      ${atRestUsedExe || resolveWorkBuddyExe() || '未找到（设置 WORKBUDDY_APP_EXECUTABLE 指向 WorkBuddy.exe）'}`);
-  lines.push(`models          ${FEATURED.map((m) => m.id).join(', ')}`);
+  // 精选列表按区域过滤 —— 日志里列一个当前区域**不提供**的模型，会让人以为
+  // "桥明明认识它、为什么 /v1/models 里没有"（诊断日志的可信度就靠这点）
+  lines.push(`models          ${FEATURED.filter((m) => featuredAllowedIn(m, checkRegion)).map((m) => m.id).join(', ')}`);
   console.log(lines.join('\n'));
   process.exit(authOk || API_KEY ? 0 : 1);
 }
 
 server.listen(PORT, HOST, () => {
   let who = '(no desktop session read)';
-  try { const a = readStoredAuth(); who = `${a.userId} @ ${a.endpoint}`; } catch (e) { who = `ERROR: ${e.message}`; }
+  let region = '';
+  try { const a = readStoredAuth(); region = upstreamRegion(a); who = `${a.userId} @ ${a.endpoint}`; } catch (e) { who = `ERROR: ${e.message}`; }
   console.log(`workbuddy-bridge listening on http://${HOST}:${PORT}/v1`);
   console.log(`auth       : ${API_KEY ? 'API key (CODEBUDDY_API_KEY)' : `desktop session ${who}`}`);
   console.log(`auth file  : ${AUTH_PATH}`);
   console.log(`client exe : ${atRestUsedExe || resolveWorkBuddyExe() || '未找到（设置 WORKBUDDY_APP_EXECUTABLE 指向 WorkBuddy.exe）'}`);
-  console.log(`models     : ${FEATURED.map((m) => m.id).join(', ')}  (all models: /v1/models?all=1)`);
+  // 同上：精选列表按区域过滤（国际版别在日志里列 v4-pro —— 那个区域不提供它）
+  console.log(`models     : ${FEATURED.filter((m) => featuredAllowedIn(m, region)).map((m) => m.id).join(', ')}  (all models: /v1/models?all=1)`);
   /*
    * 只在**开了**的时候说一句：默认行为（丢弃思维链）不需要每次都提醒，
    * 但既然有人开了这个开关，就要让他一眼看到"确实生效了"——

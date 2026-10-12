@@ -16,7 +16,7 @@ import { WorkBuddyAdapter, mapUsage } from '../lib/adapter.mjs';
 import { BridgeClient } from '../lib/bridge.mjs';
 
 /** 起一个假桥：/health、/v1/models、/v1/chat/completions（SSE 回放）。 */
-async function startStub({ sseFrames = [], status = 200, errorBody = null, capture = null } = {}) {
+async function startStub({ sseFrames = [], status = 200, errorBody = null, capture = null, catalog = null } = {}) {
   const server = createServer(async (req, res) => {
     const url = new URL(req.url, 'http://127.0.0.1');
     if (url.pathname === '/health') {
@@ -34,9 +34,8 @@ async function startStub({ sseFrames = [], status = 200, errorBody = null, captu
     }
     if (url.pathname === '/v1/models') {
       res.writeHead(200, { 'content-type': 'application/json' });
-      return res.end(JSON.stringify({
-        object: 'list',
-        data: [
+      // `catalog` 可覆盖（默认给两个固定桩）：用例要按形状区分"带推理标记"的模型
+      return res.end(JSON.stringify({ object: 'list', data: catalog || [
           { id: 'stub-model', name: 'Stub Model', context_window: 128000, max_output_tokens: 8192, credits: 0.5, supports_images: true },
           { id: 'stub-free', name: 'Stub Free', context_window: 32000, max_output_tokens: 4096, credits: 0, free: true },
         ],
@@ -95,6 +94,51 @@ test('listModels / resolveModel 使用桥目录的元数据', async () => {
     assert.equal(resolved.defaultMaxTokens, 8192);
     assert.equal(adapter.providerInfo('workbuddy').id, 'workbuddy');
     assert.equal(adapter.providerRetryPolicy().mode, 'normal');
+  } finally { await stub.close(); }
+});
+
+test('resolveModel：按桥给的 reasoning_efforts 逐模型声明档位（用户"每个模型只有三档"的那条链）', async () => {
+  /*
+   * 2026-10-12：档位原先在 adapter 里**写死**成低/中/高三档。上游对支持推理的
+   * 模型其实收 minimal/low/medium/high（多数还收 xhigh，实测见 bridge 的
+   * REASONING_EFFORTS_BY_MODEL），于是 dsh 里"每个模型都只有三档"。
+   * 现在档位由桥按模型给出，本用例钉住三种来源与 dsh 的校验约束。
+   */
+  const stub = await startStub({
+    catalog: [
+      // 桥给了实测档位表 → 照单全给
+      { id: 'r6', name: 'R6', context_window: 1000000, max_output_tokens: 128000, supports_images: true, supports_reasoning: true, reasoning_efforts: ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'] },
+      // 老桥：没有 reasoning_efforts 字段，但目录说支持推理 → 兜底三档
+      { id: 'r3', name: 'R3', context_window: 32000, max_output_tokens: 4096, supports_reasoning: true },
+      // 目录没说支持推理 → 一个档位都不给
+      { id: 'plain', name: 'Plain', context_window: 32000, max_output_tokens: 4096, supports_images: false },
+      // 档位里没有 medium → defaultEffort 必须落到列表内的值（dsh 会校验）
+      { id: 'odd', name: 'Odd', context_window: 32000, max_output_tokens: 4096, supports_reasoning: true, reasoning_efforts: ['low', 'high'] },
+      // 桥实测"一个档都不收"（显式空数组，如网关暂时不接的 claude-*）→ 不声明推理
+      { id: 'dead', name: 'Dead', context_window: 32000, max_output_tokens: 4096, supports_reasoning: true, reasoning_efforts: [] },
+    ],
+  });
+  try {
+    const adapter = makeAdapter(stub.baseUrl);
+
+    const r6 = await adapter.resolveModel('workbuddy', 'r6');
+    assert.deepEqual(r6.reasoning.efforts.map((e) => e.id), ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'], '照单全给');
+    assert.equal(r6.reasoning.defaultEffort, 'medium');
+    assert.ok(r6.reasoning.efforts.some((e) => e.id === 'xhigh' && e.name === 'Extra High'), '扩展档要有可读的名字');
+
+    const r3 = await adapter.resolveModel('workbuddy', 'r3');
+    assert.deepEqual(r3.reasoning.efforts.map((e) => e.id), ['low', 'medium', 'high'], '老桥没有档位表 → 兜底三档');
+    assert.equal(r3.reasoning.defaultEffort, 'medium');
+
+    const plain = await adapter.resolveModel('workbuddy', 'plain');
+    assert.equal(plain.reasoning, undefined, '没标推理的模型不给 reasoning 字段');
+
+    const odd = await adapter.resolveModel('workbuddy', 'odd');
+    assert.deepEqual(odd.reasoning.efforts.map((e) => e.id), ['low', 'high']);
+    assert.equal(odd.reasoning.defaultEffort, 'high', 'defaultEffort 必须在 efforts 里（dsh 会校验）');
+
+    const dead = await adapter.resolveModel('workbuddy', 'dead');
+    assert.equal(dead.reasoning, undefined, '显式空数组 = 桥实测无档可用 → 不声明推理');
   } finally { await stub.close(); }
 });
 

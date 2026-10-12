@@ -18,6 +18,31 @@
  */
 import { toAdapterModels, isChatModel } from './models.mjs';
 
+/**
+ * 思考强度的档位显示名（id → name）。
+ *
+ * 档位集合与**国际版桌面端产物**一致（`EXTENDED_THINKING_LEVELS`）。
+ * `off` / `none` 不在表里：那是"关闭思考"，而网关对它们的处理不一致
+ * （一部分模型 400、另一部分模型收了但仍然思考）—— 所以桥侧根本不发这两个值。
+ */
+export const EFFORT_NAMES = {
+  minimal: 'Minimal',
+  low: 'Low',
+  medium: 'Medium',
+  high: 'High',
+  xhigh: 'Extra High',
+  max: 'Max',
+};
+
+/**
+ * 老桥（没有 `reasoning_efforts` 字段）时的兜底档位。
+ *
+ * 这三个值是 OpenAI 系的标准档，也是实测里**所有可调通模型都接受**的一档
+ * （见 bridge 的 REASONING_EFFORTS_BY_MODEL 注释）—— 宁可少两档，
+ * 也不要给出上游不接受的值（那正是"选了就报错"的来源）。
+ */
+export const FALLBACK_EFFORTS = ['low', 'medium', 'high'];
+
 /** dsh 侧的错误码取值（与内置适配器同一套词汇）。 */
 export const CODE = {
   AUTH: 'AUTH',
@@ -476,20 +501,24 @@ export class WorkBuddyAdapter {
    * 选择器据此显示"推理等级"下拉；用户选的值经 stream(options.reasoningEffort)
    * 回到我们这里，翻成上游的 reasoning_effort（见 stream 内）。
    *
-   * 只对"声明支持推理"的模型给出：目录里 reasoning === true 的模型（上游目录
-   * 有该标记）直接给低/中/高三档；其余模型不返回 reasoning 字段 —— 选择器
-   * 就不会显示这个下拉（发了上游也可能 400，与"不猜参数"同一原则）。
+   * 档位来源分三种：
+   *   1. 桥给了 `reasoning_efforts`（**每模型实测**的档位表）→ 照单全给。
+   *      **显式空数组也算数**：那是桥实测"一个档都不收"（如网关暂时不接的
+   *      claude-*），此时不给 reasoning 字段，选择器不显示思考强度；
+   *   2. 桥老、没这个字段、但目录说支持推理 → 退回 FALLBACK_EFFORTS（低/中/高）；
+   *   3. 目录没说支持推理 → 不给 reasoning 字段（发了上游可能 400，
+   *      与"不猜参数"同一原则）。
    */
   async resolveModel(provider, model) {
     const catalog = await this.catalog();
     const hit = catalog.find((m) => m && m.id === model);
     if (!hit) return { provider, id: model, name: model };
     const [mapped] = toAdapterModels([hit]);
-    const efforts = [
-      { id: 'low', name: 'Low' },
-      { id: 'medium', name: 'Medium' },
-      { id: 'high', name: 'High' },
-    ];
+    const levels = Array.isArray(mapped?.reasoningEfforts)
+      ? mapped.reasoningEfforts
+      : (mapped?.reasoning ? FALLBACK_EFFORTS : []);
+    // defaultEffort 必须在列表里（dsh 会校验）：优先 medium，退 high，再退化到最强档
+    const defaultEffort = ['medium', 'high'].find((e) => levels.includes(e)) || levels[levels.length - 1];
     return {
       provider,
       id: model,
@@ -497,7 +526,9 @@ export class WorkBuddyAdapter {
       ...(mapped?.contextWindow ? { context: { contextWindow: mapped.contextWindow } } : {}),
       ...(mapped?.maxTokens ? { defaultMaxTokens: mapped.maxTokens } : {}),
       ...(mapped?.inputModalities ? { inputModalities: mapped.inputModalities } : {}),
-      ...(mapped?.reasoning ? { reasoning: { efforts, defaultEffort: 'medium' } } : {}),
+      ...(levels.length
+        ? { reasoning: { efforts: levels.map((id) => ({ id, name: EFFORT_NAMES[id] || id })), defaultEffort } }
+        : {}),
     };
   }
 

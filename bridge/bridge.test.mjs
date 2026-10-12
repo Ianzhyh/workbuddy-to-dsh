@@ -382,6 +382,207 @@ test('桥：超大请求体必须是 413 JSON，且桥仍然可用（D2）', { t
   }
 });
 
+test('目录补全：国际版漏列的模型必须带上**实测过的**视觉 / 推理标记（2026-10-12 用户反馈）', { timeout: 90_000 }, async () => {
+  /*
+   * 现场：国际版网关能调 `deepseek-v4.1-flash`，但**任何一个目录端点里都没有它**
+   * → 桥用 FEATURED 补全 → 补全项原先不带任何能力字段 → dsh 把它显示成
+   * 「纯文本、不支持推理」，用户点思考强度直接被拒：
+   *   session/model-unavailable: model "deepseek-v4.1-flash" does not support reasoning effort "high"
+   *
+   * 真实能力是**实测过**的（1×1 红点图答出颜色；reasoning_effort 五档全 200，
+   * 见 tools/dev/probe-capability.mjs / probe-effort.mjs），所以补全必须把它们带上。
+   *
+   * 同时钉住区域过滤：`deepseek-v4-pro` 在国际版实测 400
+   * （`model [...] service info not found`），不能补进去当死条目。
+   */
+  const upstream = createServer((req, res) => {
+    const path = new URL(req.url, 'http://127.0.0.1').pathname;
+    if (path === '/v2/enterprises/personal/models') {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      // 故意只给 glm-5.3：两个 deepseek 都不在目录里（国际版的真实形状）
+      return res.end(JSON.stringify({
+        code: 0,
+        data: {
+          models: [{
+            id: 'glm-5.3', name: 'GLM-5.3', maxInputTokens: 1000000, maxOutputTokens: 48000,
+            supportsImages: true, supportsReasoning: true, credits: 'x0.79',
+          }],
+        },
+      }));
+    }
+    if (path === '/v3/config') {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      return res.end(JSON.stringify({ code: 0, data: { models: [] } }));
+    }
+    res.writeHead(404, { 'content-type': 'application/json' });
+    res.end('{}');
+  });
+  await new Promise((r) => upstream.listen(0, '127.0.0.1', r));
+  const upstreamBase = `http://127.0.0.1:${upstream.address().port}`;
+
+  // 国际版凭据：域名为 workbuddy.ai（区域判定看**登录域名**，不看 endpoint —— 
+  // CODEBUDDY_ENDPOINT 只是把出站流量导向桩）
+  const intlAuth = {
+    auth: {
+      accessToken: 'fake-access-token',
+      refreshToken: 'fake-refresh-token',
+      domain: 'workbuddy.ai',
+      expiresAt: Date.now() + 30 * 86_400_000,
+    },
+  };
+  const bridge = await startBridge({ CODEBUDDY_ENDPOINT: upstreamBase }, { auth: intlAuth });
+  try {
+    const models = await (await fetch(bridge.baseUrl + '/v1/models?all=1', { headers: auth })).json();
+    const flash = models.data.find((m) => m.id === 'deepseek-v4.1-flash');
+    assert.ok(flash, `国际版目录缺它时，精选补全必须列出来。实际：${models.data.map((m) => m.id).join(',')}`);
+    assert.equal(flash.supports_images, true, '实测视觉可用 → 补全项必须声明 supports_images');
+    assert.equal(flash.supports_reasoning, true, '实测接受 reasoning_effort → 补全项必须声明 supports_reasoning');
+    assert.equal(flash.context_window, 1000000, '上下文窗口照精选定义（1M）');
+
+    // 上游真给了的模型：能力标记用上游的（不被精选定义覆盖）
+    const glm = models.data.find((m) => m.id === 'glm-5.3');
+    assert.equal(glm.supports_reasoning, true, '目录里有的模型，标记来自上游');
+
+    // 区域过滤：国际版不提供 v4-pro（实测 400），不能出现在列表里
+    assert.ok(
+      !models.data.some((m) => m.id === 'deepseek-v4-pro'),
+      '国际版不得补出 deepseek-v4-pro —— 那个区域实测 400（service info not found）',
+    );
+
+    // 默认视图（不带 all=1）走的是 pickFeatured 那条路，同样要带能力标记
+    const def = await (await fetch(bridge.baseUrl + '/v1/models', { headers: auth })).json();
+    const flashDef = def.data.find((m) => m.id === 'deepseek-v4.1-flash');
+    assert.ok(flashDef, '默认视图也要列出精选模型');
+    assert.equal(flashDef.supports_images, true, '默认视图同样要带视觉标记（原先只在补全路径里修是不够的）');
+    assert.equal(flashDef.supports_reasoning, true, '默认视图同样要带推理标记');
+    assert.ok(
+      !def.data.some((m) => m.id === 'deepseek-v4-pro'),
+      '默认视图同样要过区域过滤：国际版不该出现 v4-pro',
+    );
+  } finally { await bridge.stop(); upstream.close(); }
+});
+
+test('目录补全：国内版仍会补 deepseek-v4-pro（region 过滤只挡"该区域不提供"的）', { timeout: 90_000 }, async () => {
+  // 与上一条互补：区域过滤不能把国内版的兜底一起挡掉。
+  // 凭据用默认的 example.invalid 域 → pickUpstream 落到国内端点。
+  const upstream = createServer((req, res) => {
+    const path = new URL(req.url, 'http://127.0.0.1').pathname;
+    if (path === '/v2/enterprises/personal/models') {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      return res.end(JSON.stringify({ code: 0, data: { models: [{ id: 'cn-model', maxInputTokens: 1000, maxOutputTokens: 100 }] } }));
+    }
+    if (path === '/v3/config') {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      return res.end(JSON.stringify({ code: 0, data: { models: [] } }));
+    }
+    res.writeHead(404, { 'content-type': 'application/json' });
+    res.end('{}');
+  });
+  await new Promise((r) => upstream.listen(0, '127.0.0.1', r));
+  const upstreamBase = `http://127.0.0.1:${upstream.address().port}`;
+
+  const bridge = await startBridge({ CODEBUDDY_ENDPOINT: upstreamBase }, { auth: READABLE_FAKE_AUTH });
+  try {
+    const models = await (await fetch(bridge.baseUrl + '/v1/models?all=1', { headers: auth })).json();
+    const ids = models.data.map((m) => m.id);
+    assert.ok(ids.includes('deepseek-v4-pro'), `国内版应当照旧补出 deepseek-v4-pro。实际：${ids.join(',')}`);
+    assert.ok(ids.includes('deepseek-v4.1-flash'), '精选里的全区域模型照旧补出');
+  } finally { await bridge.stop(); upstream.close(); }
+});
+
+test('/v1/models：每模型给出**实测过**的 reasoning_efforts 档位（写死三档的旧做法）', { timeout: 90_000 }, async () => {
+  /*
+   * 2026-10-12 用户反馈："每个模型只有三个档"，而上游对支持推理的模型其实收
+   * minimal/low/medium/high（多数模型还收 xhigh/max，少数连 minimal/max 都不收）。
+   * 目录里没有任何字段说"接受哪几档"，所以桥按**实测表**（REASONING_EFFORTS_BY_MODEL）给。
+   *
+   * 这条用例钉五件事：
+   *   1. 有实测覆盖的模型给覆盖表里的档位（含 xhigh）；
+   *   2. 没有覆盖的模型给默认三档（**不含 xhigh/minimal/max** —— 实测里这三个
+   *      都有模型不收，未测模型不能赌）；
+   *   3. 目录没说支持推理的模型**完全没有** reasoning_efforts 字段；
+   *   4. 显式空数组（实测一个档都不收，如网关暂时不接的 claude-* / glm-5.0）
+   *      → 同样不出字段，插件会因此不声明推理；
+   *   5. 国内版 2026-10-12 实测并进来的 id 同样按表给（auto 全档 / glm-5.0 空数组）。
+   */
+  const upstream = createServer((req, res) => {
+    const path = new URL(req.url, 'http://127.0.0.1').pathname;
+    if (path === '/v2/enterprises/personal/models') {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      return res.end(JSON.stringify({
+        code: 0,
+        data: {
+          models: [
+            { id: 'glm-5.3', name: 'GLM-5.3', maxInputTokens: 1000000, maxOutputTokens: 48000, supportsReasoning: true, supportsImages: true },
+            { id: 'gemini-3.5-flash', name: 'Gemini 3.5 Flash', maxInputTokens: 1000000, maxOutputTokens: 65536, supportsReasoning: true, supportsImages: true },
+            { id: 'claude-haiku-4.5', name: 'Claude Haiku 4.5', maxInputTokens: 176000, maxOutputTokens: 24000, supportsReasoning: true, supportsImages: true },
+            { id: 'auto', name: 'Auto', maxInputTokens: 1000000, maxOutputTokens: 48000, supportsReasoning: true },
+            { id: 'glm-5.0', name: 'GLM-5.0', maxInputTokens: 1000000, maxOutputTokens: 48000, supportsReasoning: true },
+            { id: 'stub-reasoner', name: 'Stub Reasoner', maxInputTokens: 1000, maxOutputTokens: 100, supportsReasoning: true },
+            { id: 'plain-1', name: 'Plain', maxInputTokens: 1000, maxOutputTokens: 100 },
+          ],
+        },
+      }));
+    }
+    if (path === '/v3/config') {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      return res.end(JSON.stringify({ code: 0, data: { models: [] } }));
+    }
+    res.writeHead(404, { 'content-type': 'application/json' });
+    res.end('{}');
+  });
+  await new Promise((r) => upstream.listen(0, '127.0.0.1', r));
+  const upstreamBase = `http://127.0.0.1:${upstream.address().port}`;
+
+  const bridge = await startBridge({ CODEBUDDY_ENDPOINT: upstreamBase }, { auth: READABLE_FAKE_AUTH });
+  try {
+    const models = await (await fetch(bridge.baseUrl + '/v1/models?all=1', { headers: auth })).json();
+    const byId = new Map(models.data.map((m) => [m.id, m]));
+
+    // ① 实测覆盖表里的模型：连 xhigh 一起给
+    assert.deepEqual(
+      byId.get('glm-5.3').reasoning_efforts,
+      ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'],
+      'glm-5.3 实测连 xhigh 都收 —— 档位必须按实测表给，不能写死三档',
+    );
+    // ② 没有覆盖的模型：默认三档，**不含** xhigh/minimal/max（实测都有模型不收）
+    assert.deepEqual(
+      byId.get('stub-reasoner').reasoning_efforts,
+      ['low', 'medium', 'high'],
+      '没有实测覆盖的模型用默认三档；未测的档不能赌',
+    );
+    // ②b 国内版实测并进来的 id：auto 全档 / glm-5.0 对照 400 → 显式空数组
+    assert.deepEqual(
+      byId.get('auto').reasoning_efforts,
+      ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'],
+      '国内版实测全档的模型（auto）必须给全 6 档',
+    );
+    assert.deepEqual(
+      byId.get('glm-5.0').reasoning_efforts,
+      [],
+      '国内版目录在列但网关不接（glm-5.0 对照 400 service info not found）→ 空数组',
+    );
+    // ③ 目录没说支持推理的模型：一个档位字段都不该有
+    assert.equal(byId.get('plain-1').supports_reasoning, undefined, 'plain-1 不声明推理');
+    assert.equal(byId.get('plain-1').reasoning_efforts, undefined, '不声明推理就没有档位字段');
+    // ④ 显式空数组（实测一个档都不收）→ 同样不出字段
+    assert.deepEqual(
+      byId.get('claude-haiku-4.5').reasoning_efforts,
+      [],
+      'claude-* 网关当前不接，实测表里是显式空数组',
+    );
+
+    // ⑤ 补全进来的模型同样要有档位（FEATURED 的 deepseek-v4.1-flash 实测过）
+    const flash = models.data.find((m) => m.id === 'deepseek-v4.1-flash');
+    assert.ok(flash, '补全模型要在列表里');
+    assert.deepEqual(
+      flash.reasoning_efforts,
+      ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'],
+      '补全进来的模型也要带档位 —— 否则 dsh 里它还是没有思考强度可选',
+    );
+  } finally { await bridge.stop(); upstream.close(); }
+});
+
 test('桥：目录非空时拒绝未知模型，且不打上游（D3）', { timeout: 90_000 }, async () => {
   // 起一个**打桩上游**：它按上游的目录形状回模型清单，并记录 chat 有没有被调过。
   // 为什么必须打桩、不能沿用 example.invalid：预校验只在「目录已知」时生效，

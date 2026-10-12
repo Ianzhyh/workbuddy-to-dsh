@@ -19,6 +19,187 @@
 
 ## [Unreleased]
 
+### Changed（思考强度档位：从"每模型写死三档"改成**逐模型实测**）
+
+dsh 的「推理等级」下拉原先对所有模型都只给**低 / 中 / 高**三档（adapter 里写死）。
+而上游对支持推理的模型其实收 `minimal / low / medium / high`，多数模型还收
+`xhigh / max` —— 用户反馈"每个模型也就只有三个档"。
+
+目录里**没有任何字段**说"接受哪几档"（`supportsReasoning` 只说这个模型会推理），
+所以档位是**实测**出来的（不猜）：
+
+- 新增 `tools/dev/probe-efforts-all.mjs`：对真实网关逐模型 × 逐档打一遍
+  （每格 `max_tokens:8`，判据 = HTTP 200；**另打一个不带档位的对照组**，
+  用来把"模型不可用"和"这个档位不支持"分开）。可续跑、429 自动退避。
+  2026-10-12 国际版账号实测 20 个模型，结论：
+  - 档位全集 = 国际版桌面端产物里的 `EXTENDED_THINKING_LEVELS`
+    （off / minimal / low / medium / high / xhigh / max，另加 none）；
+  - **可调通的 10 个模型里 9 个连 `xhigh` 都收**；唯一例外 `gemini-3.5-flash`
+    （`xhigh` / `none` / `off` 全部 400）—— 正好落在默认档位上；
+  - **`off` / `none` 一律不声明**：对一部分模型 400、对另一部分模型虽然 200
+    但照样思考（实测 `reasoning_tokens > 0`）—— 暴露出来只会误导或报错；
+  - 另有 **8 个模型连"不带档位"的对照请求都 400**（gpt-5.x 全家 / gpt-6-luna /
+    primary-model / claude-haiku-4.5 / claude-opus-4.8）—— 那是**可用性**问题，
+    与档位无关，照常给默认档位（修好后大概率仍成立）。
+- 桥 `/v1/models` 新增每模型的 `reasoning_efforts`（默认五档 + 实测覆盖表
+  `REASONING_EFFORTS_BY_MODEL`，注释里写了探针与日期）；
+- 插件 `toAdapterModel` 透传该表、`resolveModel` 照单声明：
+  `efforts` 每项带可读名字（含 `xhigh → Extra High`），`defaultEffort`
+  优先 `medium`、退 `high`、再退化到最强档（**保证在 efforts 里** —— dsh 会校验）；
+  老桥没这个字段时退回低/中/高三档，目录没说支持推理则一个档位都不给。
+
+新增用例：桥 1 条（默认五档 / 覆盖表 / 不给非推理模型 / 补全模型也要带）、
+插件 1 条（照单声明 / 老桥兜底 / 无推理不给 / defaultEffort 必须在列表内）。
+**撤掉映射即变红**。已重启用户那个桥并端到端复核：
+`deepseek-v4.1-flash` 与 `glm-5.3` 现在给出 **6 档**（minimal…xhigh、max），
+`gemini-3.5-flash` 给出 **5 档**（与实测一致，不含 xhigh）。
+
+### Changed（国内版档位矩阵：29 个推理模型实测并表）
+
+`REASONING_EFFORTS_BY_MODEL` 补齐**国内版**一侧（用户要求"国内版账号也要功能一致"）。
+用 `probe-efforts-all.mjs` 对 CN 目录 31 个模型里的 **29 个推理模型**做了同样的
+逐模型 × 逐档实测（含对照组），矩阵落盘可续跑：
+
+- **22 个全档**（minimal…max + xhigh）；`deepseek-v4-pro` / `deepseek-v4-flash`
+  只拒 `off`（照例不声明）；`deepseek-v4-pro` **国内版可用**（国际版目录里没有它，
+  只在国内版补全，并表对国际版无影响）；
+- **7 个目录在列但网关不接**（对照即 400 `service info not found`）→ 显式空数组、
+  dsh 不显示思考强度：`glm-4.6` / `glm-4.6v` / `glm-4.7` / `glm-5.0` /
+  `hy4-preview-x` / `kimi-k2-thinking` / `minimax-m2.5`；
+- 两端共有的 5 个模型复测**结论一致** → 档位表**不需要区域维度**（id 键控的设计被证实）；
+- `space-bunny/minimal`、`hunyuan-2.0-thinking/xhigh` 探针各有一格**偶发 400**，
+  复测 6/6 全 200 → 按全档入表。**孤立单格 400 先复测再缩表**（确定性 400 才是真不收）；
+- 遗留：`deepseek-v4.1-flash` 的 CN 复测被**模型级 429** 挡下（频率限制
+  2026-10-12 21:22 UTC+8 重置、可按模型切换），先按国际版实测结论，到点复跑补确认。
+
+桥用例扩了 2 条断言（CN 全档模型给 6 档 / 网关不接给空数组，撤掉即红）。
+已 re-vendor、`release:check` 六步全绿，端到端复核：CN 一次性桥看新表生效、
+重启用户桥后国际版可见行为逐条不变。
+
+### Fixed（核心功能：国际版下补全模型的**能力元数据**丢了 —— 视觉模型被当成纯文本、选不了思考强度）
+
+**用户反馈（2026-10-12）**：DSH 里选 WorkBuddy 国际版账号的 `deepseek-v4.1-flash` 时
+「选不了思考强度」，报
+`session/model-unavailable: provider "workbuddy" model "deepseek-v4.1-flash" does not support reasoning effort "high"`；
+而且它明明是**视觉模型**，却被显示成纯文本。
+
+**根因**（全链路已实测确认）：国际版网关的目录端点里**根本没有这个模型**
+（`/health.upstreamShape.supplemented` 里能看到它靠 FEATURED 兜底补全），
+而补全项**原先不带任何能力字段** → `dsh` 适配器拿到的就是「纯文本、不支持推理」：
+
+```
+上游目录(18+14 个模型) ──缺 v4.1-flash──▶ FEATURED 补全(只有 id/name/ctx/out)
+   ──▶ toAdapterModel: inputModalities=['text']、无 reasoning ──▶ dsh：没有推理等级
+```
+
+**这个模型到底支不支持？—— 实测，不猜**（新增两个探针，可复跑）：
+
+- `tools/dev/probe-capability.mjs`：塞一张 1×1 红点图 → 上游 **200，答出「粉色」**（视觉可用）；
+- `tools/dev/probe-effort.mjs`：`reasoning_effort` 五档（minimal/low/medium/high/max）
+  **全部 200 且都返回 `reasoning_content`**（推理可用）。
+
+**修法**（bridge 三处 + 区域过滤）：
+
+1. `FEATURED` 的 `deepseek-v4.1-flash` 带上 `images: true` / `supportsReasoning: true`
+   （值都有上面的实测出处，注释里写明探针）；
+2. 补全路径（`fetchCatalog`）与默认视图兜底（`pickFeatured`）、空目录兜底三处
+   **都要把能力标记带上**（原先三处全丢，只在其中一处修会漏）；
+3. 新增 `regions` 过滤：`deepseek-v4-pro` 在国际版实测 **400 `service info not found`**
+   （该区域不提供），标 `['cn']` 只在国内版补全 —— 否则选择器里多一个一调就报错的死条目。
+   区域按**登录域名**判（`upstreamRegion()`），不看 `CODEBUDDY_ENDPOINT`（那是验收用的出站覆盖）。
+
+**验收**：
+
+- 桥新增 2 条用例（国际版补全带标记 + 国内版照旧补 v4-pro），插件新增 1 条
+  （`supports_reasoning` → 必须给出 `reasoning{efforts,defaultEffort}`；没标则**不许**给）。
+  **撤掉修复跑一次 = 变红**（有牙齿）。桥 53/53、插件 83/83。
+- 真机验证（用国际版登录文件起的一次性桥）：26 个模型、
+  `deepseek-v4.1-flash { supports_images: true, supports_reasoning: true, ctx:1000000 }`、
+  `supplemented: ["deepseek-v4.1-flash"]`、**v4-pro 不再出现**。
+
+> **改完已重启用户的桥**（控制台 `POST /api/bridge/restart`，带上 `.state.json` 里
+> 选定的国际版登录文件 —— 实测重启**不会**换账号）；插件分发跑的是 `vendor/` 里的
+> 桥副本，已同步。
+> 附一条排障知识：**控制台起的桥**会带上 `.state.json` 的账号选择、且发现端口上的桥
+> 账号不一致会主动纠正；**插件起的桥**不读 `.state.json`，默认自探测（本机自探测会落到
+> 国内版文件）。要固定账号就在插件配置里显式写 `authFile`。
+
+### Added（趋势图「按周」粒度）
+
+`#trendGran` 从「按天 / 最近 24 小时」扩到三档：**按天 / 按周 / 最近 24 小时**。
+
+- **取数固定 84 天（12 周）**，按**自然周（周一为一周之首）**在**前端**聚合 ——
+  `days[].byModel` 桥侧早就有，加粒度不必再动桥；小时视图才是桥侧分桶的。
+- 桶的起点锚在**数据**上（最早一天所在的那一周画到本周）、中间空周补 0。
+  为什么不是固定画 12 个桶：取数窗口是**滚动 84 天**，与周一对不齐 ——
+  固定 12 桶会把窗口最早那几天的数据漏在桶外，而它们仍计入面板 total，
+  违反「图上的数字必须能在面板里对上」这条硬要求。
+- 标签为 `MM-DD 周`；`byModel` 逐周合并，「按模型堆叠」在周视图照常可用；
+  aria 为「最近 N 周…」。
+- 顺带：`buildTrendChart` 对 **0 / 1 个桶**不再静默返回空（一块空白看起来像图坏了），
+  改为给文案（0 桶：「这段时间没有调用」；1 桶：「换个粒度能看到更多」）。
+- i18n：新增 `按周` / 单桶提示词条；图表 aria 规则扩展到 `周`；
+  **图表 tooltip 的前缀也过一遍 translateText**（否则英文模式下会留「09-29 周: 2 calls」），
+  并补了「输入·输出 / 积分·累计」两条多序列规则（原先贪婪匹配会把尾巴留在中文）。
+
+新增 `tools/dev/test-trend-week.mjs`（15 条断言：选项存在 / `days=84` 请求 /
+周一起算的分桶 / 空周补 0 / 同周多天合并 / 合计与面板一致 / 切回按天走缓存 /
+单桶文案 / 英文模式无残留中文 / 英文 aria 规则）。**第一版全红**（9 项失败）。
+
+### Fixed（视觉对齐：把还写着旧配色值的四处收敛到令牌）
+
+同一类缺陷的四个实例 —— **颜色写死在组件里、不跟随主题与五套配色方案**。
+这类问题读代码看不出来（值混在 URL 编码 / 注释旁边），页面上也不报错，
+只有把"当前方案的主色"和"实际渲染色"对起来量才发现：
+
+| 位置 | 原先 | 现在 |
+|---|---|---|
+| 下拉箭头（`.dd-arrow`） | SVG data-URI 写死皇家蓝 `#2563eb`（深色 `#3b82f6`）与冷灰 `#64748b`/`#94a3b8` | `mask-image`（取 alpha）+ `background-color: var(--muted/--primary)` |
+| 原生 `select` 箭头 | 同上一套（**永远不可见**：select 一律被 `.dd-native` 透明化） | 直接删除；`padding` 保留（它决定 `.dd` 宽度） |
+| 表格行 悬停 / 勾选 | 写死蓝色 rgba（注释还写着"陶土色"）；勾选行在深色下几乎看不见 | 悬停 → `--panel-hover`；勾选 → `--primary-subtle` |
+| 桥日志终端块 `pre.log` | GitHub 冷蓝黑 `#0d1117` + 冷灰 `#c9d1d9`（暖纸底上"发蓝"） | 新增 `--log-bg` / `--log-fg`（浅色 Sooty、深色再暗一档） |
+| 危险按钮悬停光晕 | 写死上一套红 `rgba(220,38,38,.25)` | `--shadow-danger`（两套主题各一份） |
+| 失败行悬停 | 写死上一套红 `rgba(239,68,68,.18)` | `--fail-border`（fail 家族的深一档） |
+
+新增 `tools/dev/test-accent-icons.mjs`：静态扫描（样式里不许有**写死颜色的图标
+data-URI**，mask 例外）+ 运行时 5 配色 × 2 主题**实测箭头渲染色**。
+**撤掉修复跑一次 = 40 项失败**（有牙齿）。另用一次性像素探针确认 mask 渲染出的
+确实是"箭头形状"而不是实心方块（撤掉修复时 `mask=none`）。
+
+顺带把 stale 值留在注释里的地方一次清掉（`--faint (#94a3b8)`、`--primary-soft`
+这个**根本不存在**的令牌 fallback、"默认陶土 5.40:1"等），并同步
+`docs/DESIGN_SYSTEM.md`（**它整篇还写着皇家蓝 `#2563eb` 体系**，与实现完全对不上）
+与 `dashboard/README.md` 的视觉规范段。
+
+### Changed（推广图对齐新配色）
+
+`docs/promo/social-preview.html`（GitHub 社交预览图源文件）整页还是更早的
+"皇家蓝 + 冷灰蓝"体系，与控制台"不是同一个产品"。已按暖色体系重做：
+暖纸底 + 土色水洗、衬线大标题（与品牌名同一条 Georgia 栈）、Sooty 实底按钮/终端块、
+ok 家族对勾。`docs/promo/social-preview.png` 用新增的
+`tools/dev/shot-promo.mjs` 重渲染（1280×640 @2x，脚本会断言页面尺寸防裁切）。
+界面截图同批重出（`shot-hero` 四张 + `shot-console` 两张，像素差分核对变化范围）。
+
+### Fixed（两处"看运行环境脸色"的假红）
+
+1. **`lib/client-connect.test.mjs` 用了 `execFileSync`** —— 违反本项目"同步子进程一律
+   `spawnSync` + `stdio: ['ignore','pipe','pipe']`"的硬规矩。它是否触发 `EBUSY`
+   取决于**本进程的 stdio 形态**：前台跑碰巧过，把输出**重定向到文件（后台任务）**
+   跑就必红。改成 `spawnSync` + 显式查 `status`（失败时把 `error`/`stderr` 带进断言，
+   不再是一个裸的异常）。修后同样的后台重定向环境 `test:lib` 124/124 全过。
+2. **`tools/dev/test-transitions.mjs` 的伪元素采样**从固定 `sleep(90)` 改**轮询**
+   （上限 900ms）：View Transition 的伪元素是**下一帧**才建的，机器忙时固定等待会
+   取到空数组 —— 整套连跑偶发红一次、单跑必过。改后 3 连过。
+
+### Fixed（`probe-clickable.mjs` 静默挂死）
+
+上一轮新增的可点击性全量探针**跑不完**：它等 `document.getAnimations()` 的
+`finished` 全部 settle，而页面上有三处 `infinite` 动画（状态点呼吸光晕 / 骨架屏
+shimmer / 请求活动指示器）——**对它们 `finished` 永远不会 settle**，探针挂在第一次
+等待处、零输出，端口还占着（上一轮遗留的两个孤儿进程就是这么来的）。
+修法：只等**有限次数**的动画 + 3 秒硬上限兜底。
+修好后重跑：**六个视图、0 个元素点不到**。
+
 ### Fixed（自绘下拉：包在 `<label>` 里的那个**点不开**）
 
 9 个自绘下拉里，`#probeScope`（体检范围）**点了打不开** —— 这就是反馈里说的
