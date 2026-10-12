@@ -148,7 +148,7 @@
       <span class="spacer"></span>
       <select id="trendMetric" title="趋势图指标"><option value="calls" selected>调用次数</option><option value="tokens">tokens</option><option value="credit">积分</option></select>
       <select id="trendKind" title="趋势图形态"><option value="auto" selected>形态自动</option><option value="bar">柱状图</option><option value="line">折线图</option><option value="bymodel">按模型堆叠</option></select>
-      <select id="trendGran" title="趋势图粒度"><option value="day" selected>按天</option><option value="hour">最近 24 小时</option></select>
+      <select id="trendGran" title="趋势图粒度"><option value="day" selected>按天</option><option value="week">按周</option><option value="hour">最近 24 小时</option></select>
       <button class="mini" id="usageCsvBtn">导出 CSV</button>
       <button class="mini danger" id="usageClearBtn">清空账本</button>
     </div>
@@ -949,6 +949,7 @@ const I18N_EN = {
   '积分': 'Credit',
   '趋势图粒度': 'Trend granularity',
   '按天': 'By day',
+  '按周': 'Weekly',
   '最近 24 小时': 'Last 24 hours',
   '清空账本': 'Clear ledger',
   '用量图表': 'Usage chart',
@@ -956,6 +957,7 @@ const I18N_EN = {
   '输出': 'Output',
   '累计': 'Cumulative',
   '这段时间没有调用。': 'No calls in this period.',
+  '这段时间只有 1 个时间点，换个粒度能看到更多。': 'Only one data point in this period — try a different granularity.',
   '，合计': ', total ',
   '，其中': ', of which ',
   '次调用未回报扣分': ' calls reported no credit',
@@ -1855,10 +1857,17 @@ const I18N_RULES_EN = [
    */
   // 趋势图的无障碍标签（renderTrendChart 里的 aria）：「最近 N 天」+ 指标名 + 「图」+ 尾段。
   // 整串在词条表里查不到，只能拆成「前缀 / 指标名 / 尾段」各自翻。
-  [/^最近 (\d+) (天|小时)(调用次数|tokens|积分)图(.*)$/,
-    (m, n, unit, metric, tail) => 'Last ' + n + ' ' + (unit === '天' ? 'days' : 'hours')
+  [/^最近 (\d+) (天|小时|周)(调用次数|tokens|积分)图(.*)$/,
+    (m, n, unit, metric, tail) => 'Last ' + n + ' ' + (unit === '天' ? 'days' : unit === '周' ? 'weeks' : 'hours')
       + (metric === '调用次数' ? ' calls' : metric === '积分' ? ' credit' : ' tokens')
       + ' chart' + translateText(tail)],
+  /*
+   * 趋势图 x 轴的两个「带单位的刻度」：`09 时` / `09-29 周`。
+   * 它们是**拼出来的**（`raw.slice(...) + ' 时'`），整串查不到词条，只能给规则。
+   * 天视图的刻度是纯 `MM-DD`，不需要翻。
+   */
+  [/^(\d{2}) 时$/, '$1h'],
+  [/^(\d{2}-\d{2}) 周$/, 'wk of $1'],
   [/^，合计 (.+)，其中 (\d+) 次调用未回报扣分$/, ', total $1, of which $2 calls reported no credit'],
   [/^，合计 (.+) 次$/, ', $1 total'],
   [/^，输入 (.+) \/ 输出 (.+)$/, ', input $1 / output $2'],
@@ -2038,12 +2047,30 @@ const I18N_RULES_EN = [
   [/^icacls 起不来：(.+)$/, 'icacls could not be started: $1'],
   [/^icacls 退出码 (.+)$/, 'icacls exited with code $1'],
 
-  // 图表 tooltip / 无障碍标签
-  [/^(.+)：调用次数 (\d+)$/, '$1: $2 calls'],
-  [/^(.+)：输入 (.+)$/, '$1: input $2'],
-  [/^(.+)：输出 (.+)$/, '$1: output $2'],
-  [/^(.+)：积分 (.+)$/, '$1: credit $2'],
-  [/^(.+)：累计 (.+)$/, '$1: cumulative $2'],
+  /*
+   * 图表 tooltip / 无障碍标签。
+   *
+   * 前缀是 x 轴刻度（`10-04` / `09 时` / `09-29 周`），**要再过一遍 translateText**：
+   * 小时与周视图的刻度带中文单位，前缀不翻的话英文模式会留下「09-29 周: 2 calls」。
+   * 天视图是纯 `MM-DD`，过一遍等于原样返回，没有副作用。
+   *
+   * 两条「多序列」规则（输入 · 输出 / 积分 · 累计）必须排在单序列规则前面：
+   * 否则 `^(.+)：积分 (.+)$` 会把 `0.02 · 累计 0.02` 整段吞进值里，尾巴留在中文。
+   */
+  [/^(.+)：输入 (.+) · 输出 (.+)$/, (m, p, a, b) => translateText(p) + ': input ' + a + ' · output ' + b],
+  [/^(.+)：积分 (.+) · 累计 (.+)$/, (m, p, a, b) => translateText(p) + ': credit ' + a + ' · cumulative ' + b],
+  [/^(.+)：调用次数 (\d+)$/, (m, p, n) => translateText(p) + ': ' + n + ' calls'],
+  [/^(.+)：输入 (.+)$/, (m, p, v) => translateText(p) + ': input ' + v],
+  [/^(.+)：输出 (.+)$/, (m, p, v) => translateText(p) + ': output ' + v],
+  [/^(.+)：积分 (.+)$/, (m, p, v) => translateText(p) + ': credit ' + v],
+  [/^(.+)：累计 (.+)$/, (m, p, v) => translateText(p) + ': cumulative ' + v],
+  /*
+   * 「按模型堆叠」的 tooltip 只有「刻度：各模型分段」，没有任何指标名词 ——
+   * 上面几条都匹配不到，这里给小时 / 周刻度一个兜底（只翻前缀，模型名是数据不动）。
+   * 必须排在上面的单序列规则**之后**，否则会把 `调用次数 3` 这类尾巴留在中文。
+   */
+  [/^(\d{2}-\d{2}) 周：(.+)$/, (m, d, rest) => 'wk of ' + d + ': ' + rest],
+  [/^(\d{2}) 时：(.+)$/, (m, h, rest) => h + 'h: ' + rest],
 
   // 最近请求的失败摘要（被 <b> 拆成多段，逐段翻）
   [/^最近 (\d+) 条里有$/, 'Of the last $1,'],
@@ -2721,10 +2748,11 @@ let lastUsage = null;
  * 切到小时视图不该把成本口径也换掉。
  */
 let usageView = null;
-/** 按天 / 按小时两份响应的缓存——切回按天时直接用缓存，不发多余请求。 */
+/** 按天 / 按周 / 按小时三份响应的缓存——切回时直接用缓存，不发多余请求。 */
 let usageDayCache = null;
 let usageHourCache = null;
-/** 趋势图粒度：'day' | 'hour'。 */
+let usageWeekCache = null;
+/** 趋势图粒度：'day' | 'week' | 'hour'。 */
 let trendGran = 'day';
 /** 趋势图指标：'calls' | 'tokens' | 'credit'。 */
 let trendMetric = 'calls';
@@ -3269,6 +3297,24 @@ async function loadUsage() {
     return;
   }
 
+  if (gran === 'week') {
+    /*
+     * 周视图单独请求一次（days=84 = 12 周）。与小时视图同理：**不覆盖**
+     * lastUsage —— 成本列与导出 CSV 认的仍是按天窗口。
+     *
+     * 为什么固定 84 天而不是沿用「最近 N 天」下拉：按周看趋势至少要几周才有意义，
+     * 用 7 天窗口聚合出来的周桶只剩 1~2 个（图上什么都看不出来）。
+     * 84 = 12 整周，且桥对 days 的上限就是 90，留了余量。
+     */
+    const d = await api('/api/usage?days=84');
+    setStamp('usageStamp');
+    usageWeekCache = (d && d.usage) || null;
+    if (usageWeekCache) seedModelColors(usageWeekCache.models);
+    usageView = usageWeekCache;
+    renderUsage();
+    return;
+  }
+
   const d = await api('/api/usage?days=' + days);
   setStamp('usageStamp');
   usageDayCache = (d && d.usage) || null;
@@ -3280,11 +3326,12 @@ async function loadUsage() {
   refreshCostCells();
 }
 
-/** 切粒度：小时视图要请求一次；切回按天**直接用缓存**，不发多余请求。 */
+/** 切粒度：小时 / 周视图要请求一次；切回**直接用缓存**，不发多余请求。 */
 function onTrendGranChange(e) {
   const gran = e.target.value;
   trendGran = gran;
   if (gran === 'hour') { loadUsage(); return; }
+  if (gran === 'week') { if (usageWeekCache) { usageView = usageWeekCache; renderUsage(); return; } loadUsage(); return; }
   if (usageDayCache) { usageView = usageDayCache; renderUsage(); return; }
   loadUsage();
 }
@@ -3480,15 +3527,101 @@ function seedModelColors(models) {
 }
 
 /**
+ * 把按天的桶（`usage.days`）聚合成**自然周**桶：周一为一周之首。
+ *
+ * ## 为什么桶的起点锚在「数据」上，而不是固定画 12 个桶
+ *
+ * 取数窗口是**滚动 84 天**，与周一对不齐 —— 固定画满 12 个桶（= 12 个周一）
+ * 时，窗口首尾那两个半截周里、落在 12 个桶之前的那几天会被丢在桶外，而它们
+ * 仍然计入面板的 total。那就违反了项目的硬要求「图上的每个数字都能在面板里对上」。
+ *
+ * 所以起点取「**最早一天所在的那一周**」（终点固定是本周）：`days[]` 里的每一天
+ * 都必然落在某个桶里，`sum(周桶) == sum(days) == 面板 total` 恒成立。
+ * 账本历史短时桶数自然就少（几周就画几根），不会在前面排一整排空柱。
+ *
+ * ## 空周补 0
+ *
+ * 中间某周没有数据时仍然出一个 0 桶 —— 与小时视图同一约定：缺的周直接消失
+ * 会让柱状图"跳变"，看上去像时间轴缺了一段。
+ *
+ * `byModel` 逐周合并（同一天内的多个模型、同一周的多个天都并进去），
+ * 否则「按模型堆叠」切到周视图就画不出来。merge 后按扣分降序，与桥侧同一约定。
+ */
+function toWeekBuckets(days) {
+  const list = Array.isArray(days) ? days : [];
+  if (!list.length) return [];
+  const ymd = (d) => d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+  /** 某天所在那一周的周一（本地时区）。日期串必须**逐段解析**：`new Date('2026-10-02')` 按 UTC 解析，负时区会掉到前一天。 */
+  const mondayOf = (dayStr) => {
+    const p = String(dayStr).split('-').map(Number);
+    const d = new Date(p[0], (p[1] || 1) - 1, p[2] || 1);
+    d.setDate(d.getDate() - ((d.getDay() + 6) % 7));
+    return d;
+  };
+  const now = new Date();
+  const thisMonday = mondayOf(ymd(now));
+  // `days[]` 由桥按日期升序返回（summarizeUsage 里排过），所以第一个就是最早一天。
+  // 传进来的若是乱序，桶的起点会偏晚、把更早的天丢在桶外 —— 那会破坏"合计对得上"，
+  // 所以这里依赖的是一个**不变量**，不是巧合；桥侧改了排序这里要一起改。
+  const firstMonday = mondayOf(list[0].day);
+
+  const buckets = [];
+  const index = new Map();
+  // 用 setDate 推进而不是 `t += 7*86400000`：后者在夏令时切换那天会漂一小时，
+  // 跨到前一天/后一天，桶的日期就错一格（本地时区工具，别赌它永远没有 DST）。
+  const cur = new Date(firstMonday.getTime());
+  while (cur.getTime() <= thisMonday.getTime()) {
+    const key = ymd(cur);
+    const b = { day: key, calls: 0, promptTokens: 0, completionTokens: 0, credit: 0, creditCalls: 0, byModel: new Map() };
+    buckets.push(b);
+    index.set(key, b);
+    cur.setDate(cur.getDate() + 7);
+  }
+  for (const d of list) {
+    const b = index.get(ymd(mondayOf(d.day)));
+    if (!b) continue;
+    for (const k of ['calls', 'promptTokens', 'completionTokens', 'credit', 'creditCalls']) {
+      b[k] += Number(d[k]) || 0;
+    }
+    for (const m of (Array.isArray(d.byModel) ? d.byModel : [])) {
+      // 注意别把这个 `dm` 写成 `cur` —— 上面分桶循环的游标就叫 `cur`，同名会把外层压住
+      const dm = b.byModel.get(m.model)
+        || { model: m.model, calls: 0, promptTokens: 0, completionTokens: 0, credit: 0, creditCalls: 0 };
+      for (const k of ['calls', 'promptTokens', 'completionTokens', 'credit', 'creditCalls']) {
+        dm[k] += Number(m[k]) || 0;
+      }
+      b.byModel.set(m.model, dm);
+    }
+  }
+  // 浮点累加收尾（与桥侧同一做法）：0.1+0.2 会攒出 0.30000000000000004
+  const round4 = (n) => Math.round(n * 10000) / 10000;
+  for (const b of buckets) {
+    b.credit = round4(b.credit);
+    b.byModel = [...b.byModel.values()]
+      .map((m) => ({ ...m, credit: round4(m.credit) }))
+      .sort((a, b2) => b2.credit - a.credit);
+  }
+  return buckets;
+}
+
+/**
  * 趋势图（R10.1）：指标由 `#trendMetric` 决定，粒度由 `#trendGran` 决定。
  * 形态是**固定**的（不做无意义的自由组合）：次数=柱、tokens=堆叠柱、积分=折线+累计虚线。
  */
 function buildTrendChart(buckets) {
-  if (buckets.length <= 1) return ''; // 只有一根柱子没有比较意义
+  /*
+   * 桶太少时的两种文案。**不能静默返回空**：一块什么都没有的区域
+   * 看起来像图坏了（尤其「按周」在只有一两周数据时，静默空白会被当成 bug）。
+   */
+  if (!buckets.length) return '<div class="empty">这段时间没有调用。</div>';
+  if (buckets.length === 1) return '<div class="empty">这段时间只有 1 个时间点，换个粒度能看到更多。</div>';
   const isHour = trendGran === 'hour';
+  const isWeek = trendGran === 'week';
   const xLabels = buckets.map((b) => {
     const raw = isHour ? String(b.key || '') : String(b.day || '');
-    return isHour ? (raw.slice(11, 13) + ' 时') : raw.slice(5);
+    // 桶的类型写进标签（「09 时」/「09-29 周」），否则「这一格是几号还是哪一周」要靠猜
+    if (isHour) return raw.slice(11, 13) + ' 时';
+    return isWeek ? (raw.slice(5) + ' 周') : raw.slice(5);
   });
   const calls = buckets.map((b) => Number(b.calls) || 0);
   const pin = buckets.map((b) => Number(b.promptTokens) || 0);
@@ -3544,7 +3677,8 @@ function buildTrendChart(buckets) {
     return '<div class="empty">这段时间没有调用。</div>';
   }
 
-  const granText = isHour ? '最近 24 小时' : ('最近 ' + buckets.length + ' 天');
+  const granText = isHour ? '最近 24 小时'
+    : isWeek ? ('最近 ' + buckets.length + ' 周') : ('最近 ' + buckets.length + ' 天');
   const metricName = { calls: '调用次数', tokens: 'tokens', credit: '积分' }[trendMetric] || '调用次数';
   let aria = granText + metricName + '图';
   // 读屏用户看不到"分段上色"，得直接说是按模型堆叠
@@ -3671,9 +3805,12 @@ function renderUsage() {
 
   // 趋势图（R10.1）：指标由 #trendMetric、粒度由 #trendGran 决定。
   // 空态 / 单桶由 buildTrendChart 自己处理（不画空轴）。
+  // 周视图在前端聚合（桥已经给了 days[].byModel，加粒度不必再动桥）
   const buckets = trendGran === 'hour'
     ? (Array.isArray(u.hours) ? u.hours : [])
-    : (Array.isArray(u.days) ? u.days : []);
+    : trendGran === 'week'
+      ? toWeekBuckets(u.days)
+      : (Array.isArray(u.days) ? u.days : []);
   html += buildTrendChart(buckets);
 
   // 积分排行：与趋势图同一份数据，回答「这段时间积分花在哪了」

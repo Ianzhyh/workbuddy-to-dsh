@@ -50,6 +50,25 @@ const PSEUDO = `document.getAnimations()
   .filter((a) => a.effect && a.effect.pseudoElement)
   .map((a) => ({ p: a.effect.pseudoElement, t: Math.round(a.currentTime || 0) }))`;
 
+/**
+ * 轮询等伪元素动画出现（最长 ~900ms，远短于过渡本身的时长）。
+ *
+ * 为什么不能只 `sleep(90)` 一次：伪元素是浏览器**下一帧**才建的，
+ * 单次固定等待在机器忙的时候会取到空数组 —— 实测：**整套连跑时偶发**
+ * `没有整页交叉淡化的伪元素动画：[]` 一次，单跑必过。
+ * 那种红是时序噪声不是产品缺陷，但会把"全套绿"这个基线搅浑。
+ */
+async function waitPseudo(maxMs = 900) {
+  const t0 = Date.now();
+  let out = [];
+  do {
+    out = await q(cdp, PSEUDO);
+    if (out.length) return out;
+    await sleep(40);
+  } while (Date.now() - t0 < maxMs);
+  return out;
+}
+
 try {
   await waitFor(cdp, `document.querySelectorAll('#modelTable tbody tr').length > 0`, 15000, '控制台渲染');
   await sleep(700);
@@ -68,12 +87,8 @@ try {
   })()`);
 
   await q(cdp, `document.getElementById('themeToggle').click()`);
-  /*
-   * 取样要**等一帧以上**：View Transition 的伪元素动画是浏览器在下一帧才建的，
-   * 点击后立刻读会拿到空数组（第一次就是这么误报的）。
-   */
-  await sleep(90);
-  const during = await q(cdp, `(() => ({ calls: window.__vtSpy.calls, pseudo: ${PSEUDO} }))()`);
+  // 取样用**轮询**而不是固定 sleep（见 waitPseudo 的注释）
+  const during = { calls: await q(cdp, `window.__vtSpy.calls`), pseudo: await waitPseudo() };
   await sleep(90);
   const later = await q(cdp, `${PSEUDO}`);
   await sleep(500);
@@ -110,8 +125,7 @@ try {
     calls: window.__vtSpy.calls,
   }))()`);
   await q(cdp, `document.getElementById('langToggle').click()`);
-  await sleep(90); // 同上：伪元素动画在下一帧才建
-  const langDuring = await q(cdp, `(() => ({ calls: window.__vtSpy.calls, pseudo: ${PSEUDO} }))()`);
+  const langDuring = { calls: await q(cdp, `window.__vtSpy.calls`), pseudo: await waitPseudo() };
   await sleep(500);
   const langAfter = await q(cdp, `(() => ({
     text: document.getElementById('langToggleText').textContent,
@@ -144,15 +158,24 @@ try {
   await sleep(200);
   const rmReduce = await q(cdp, `matchMedia('(prefers-reduced-motion: reduce)').matches`);
   await q(cdp, `document.getElementById('themeToggle').click()`);
-  await sleep(90); // 同样要等伪元素动画建出来
   /*
    * 只看 `old` / `new` 两条淡入淡出：`::view-transition-group(root)` 那一条是
    * 浏览器给快照做定位/尺寸用的（默认 250ms），不该被我们改 ——
    * 改它会与淡入淡出的节奏错开。第一版把三条一起断言，于是恒红。
+   * （这一段同样用轮询等动画建出来，理由见 waitPseudo。）
    */
-  const rmDurations = await q(cdp, `document.getAnimations()
+  const RM_DUR = `document.getAnimations()
     .filter((a) => a.effect && a.effect.pseudoElement && /view-transition-(old|new)/.test(a.effect.pseudoElement))
-    .map((a) => a.effect.getTiming().duration)`);
+    .map((a) => a.effect.getTiming().duration)`;
+  let rmDurations = [];
+  {
+    const t0 = Date.now();
+    do {
+      rmDurations = await q(cdp, RM_DUR);
+      if (rmDurations.length) break;
+      await sleep(40);
+    } while (Date.now() - t0 < 900);
+  }
   await sleep(300);
   await cdp.send('Emulation.setEmulatedMedia', { features: [] });
   if (!rmReduce) fail('模拟 prefers-reduced-motion 没生效，这段断言没意义');

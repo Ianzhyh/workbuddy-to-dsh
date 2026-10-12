@@ -1,12 +1,17 @@
 /* ==========================================================================
-   WorkBuddy 中转控制台 — 精致工程设计规范 (Blue Precision Design System)
+   WorkBuddy 中转控制台 — 设计规范 (Warm Precision Design System)
    核心规范：
    1. 色彩基调：Claude / Anthropic 的暖色语言 —— 暖纸底（Lotion / Salt）+ 冷调强调色
-      （Windstorm #6a9bcc），细边框分隔、不用渐变、不用投影做层次
-   2. 统一圆角：严格遵守 4px / 8px / 12px / 16px / 9999px 层级规范（包含抽屉与容器）
-   3. 间距节奏：统一基于 4px / 8px 网格，舒适呼吸感与高信息密度并存
-   4. 适度动效：微交互、抽屉旋转、淡入平移、脉冲状态均采用优雅物理缓动
-   5. 字体字号：三层字体栈（正文 / 中文 / 数据）+ 六级字号阶梯 + 400/600/700 三档字重
+      （Windstorm #6a9bcc 系），细边框分隔、不用渐变、不用投影做层次
+   2. 强调色五套方案：data-accent = blue（默认）/ terracotta / moss / violet / teal，
+      覆盖同一批 --primary* 令牌；组件一律用令牌，不写死颜色
+   3. 统一圆角：严格遵守 4px / 8px / 12px / 16px / 20px / 9999px 六级规范（含抽屉与容器）
+   4. 间距节奏：统一基于 4px / 8px 网格，舒适呼吸感与高信息密度并存
+   5. 适度动效：微交互、抽屉旋转、淡入平移、脉冲状态均采用优雅物理缓动
+   6. 字体字号：三层字体栈（正文 / 中文 / 数据）+ 六级字号阶梯 + 400/600/700 三档字重
+
+   （旧名 "Blue Precision Design System" 是皇家蓝时代留下的，已随配色重做一并更名 ——
+    整套规范的正确版本在 docs/DESIGN_SYSTEM.md，两处改令牌要一起改。）
    ========================================================================== */
 
 :root {
@@ -159,6 +164,13 @@
   --shadow-lift: 0 1px 2px rgba(60, 50, 38, 0.06), 0 8px 20px -10px rgba(60, 50, 38, 0.16);
   --shadow-primary-sm: 0 1px 2px rgba(20, 20, 20, 0.18), 0 3px 10px -2px rgba(20, 20, 20, 0.22);
   --shadow-primary-md: 0 2px 4px rgba(20, 20, 20, 0.2), 0 10px 22px -6px rgba(20, 20, 20, 0.28);
+  /*
+   * 危险按钮悬停时的红色光晕。
+   * 原先这里写死的是 `rgba(220, 38, 38, .25)` —— 上一套配色的 red-600，
+   * 与现在的 --fail (#b0442f) 差着一整个色相段；深色主题更是照抄不改。
+   * 收成令牌：浅色用 --fail 的 alpha，深色用提亮后的 --fail。
+   */
+  --shadow-danger: 0 3px 10px rgba(176, 68, 47, 0.25);
 
   /* ── 6. 浮层提示 (Tooltip) ───────────────────────────────────────────── */
   /* 提示气泡用「反色面板」：浅色主题下是深底浅字，与系统自带的那只小框
@@ -166,6 +178,17 @@
   --tip-bg: #2c2b26;
   --tip-fg: #faf9f5;
   --tip-border: transparent;
+
+  /*
+   * 终端块（桥日志 `pre.log`）。
+   *
+   * 浅色主题下它是页面上唯一的"黑块"，用 Sooty #141414（与主按钮同一族），
+   * 而不是原先写死的 GitHub 冷蓝黑 `#0d1117` —— 冷色压在暖纸底上会"发蓝"，
+   * 和「整套配色只有一个色温」这条自相矛盾。
+   * 文字用暖浅灰（深色主题的次级文字色），不用 GitHub 的冷灰 `#c9d1d9`。
+   */
+  --log-bg: #141414;
+  --log-fg: #d5d0c4;
 
   /* ── 5. 动效曲线 (Transitions & Curves) ──────────────────────────────── */
   --ease: cubic-bezier(0.16, 1, 0.3, 1);
@@ -361,10 +384,15 @@
 
   /*
    * 主色在深色下**反转角色**：
-   *   --primary       陶土色压 #1e1d1a 有 5.40:1，可以直接当强调文字
+   *   --primary       提亮后压 #1e1d1a 有 7.78:1（默认蓝；四套备选方案
+   *                   各自覆盖 --primary*，最低的一套也 ≥6.5:1），可以直接当强调文字
    *   --primary-solid 实心按钮取**浅色**（Lotion 底 + Sooty 字 17.5:1）
    * 浅色主题是"深按钮配浅字"，深色主题就反过来。两边的共同点是
    * **按钮永远是页面上最"实"的那一块**，而不是"永远是某个颜色"。
+   *
+   * ⚠️ 这段注释原先写的是「陶土色压 #1e1d1a 有 5.40:1」——那是**默认方案还是陶土**
+   * 的年代留下的；默认早换回蓝了，抄的却是备选方案的值。改令牌时顺手改注释，
+   * 否则下一个人会拿一个不属于这里的数字去核对。
    */
   --primary: #8fb4d9;
   --primary-hover: #a8c6e4;
@@ -400,6 +428,15 @@
   --tip-fg: #faf9f5;
   --tip-border: rgba(255, 255, 255, 0.12);
 
+  /*
+   * 终端块（桥日志）。
+   * 深色主题里页面上一切都已经很暗，这里要比 --bg(#141414) **再暗一档**，
+   * 才读得作"沉在面板里的一块"（与浅色主题里"页面上唯一的黑块"同一角色）。
+   * 正文色两套共用，深底上对比度实测足够。
+   */
+  --log-bg: #0f0e0c;
+  --log-fg: #d5d0c4;
+
   /* 深色同样不用投影做层次；只有浮层保留一圈影 + 1px 环 */
   --shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.45);
   --shadow-sm: 0 2px 6px -2px rgba(0, 0, 0, 0.55);
@@ -409,6 +446,8 @@
   --shadow-lift: 0 0 0 1px var(--border-strong);
   --shadow-primary-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
   --shadow-primary-md: 0 4px 14px -4px rgba(0, 0, 0, 0.5);
+  /* 与浅色主题同名：危险按钮悬停的红色光晕，深色下用提亮后的 --fail (#d97a63) */
+  --shadow-danger: 0 3px 10px rgba(217, 122, 99, 0.28);
 
   /* 焦点环在深色下用陶土色，压深底才看得见 */
   --ring: 0 0 0 3px rgba(143, 180, 217, 0.35);
@@ -1019,7 +1058,7 @@ button.danger:hover {
   background: var(--fail);
   color: var(--on-solid);
   border-color: var(--fail);
-  box-shadow: 0 3px 10px rgba(220, 38, 38, 0.25);
+  box-shadow: var(--shadow-danger);
   transform: translateY(-1.5px);
 }
 button.danger:active {
@@ -1542,7 +1581,8 @@ button.tag.fail:hover {
 /* 时间戳与辅助文字 */
 /*
  * 时间戳是**信息**（「数据更新于 HH:MM:SS」是判断数据新旧的唯一依据），
- * 不是装饰。--faint (#94a3b8) 在浅色卡片上只有 2.45:1，读不清就等于没有。
+ * 不是装饰。--faint（#a09884）压在浅色面板上实测只有 2.47:1，读不清就等于没有，
+ * 所以这一档用 --hint（6.34:1）。
  */
 .stamp {
   color: var(--hint);
@@ -1624,23 +1664,26 @@ td {
  */
 td.num, th.num { text-align: right; }
 /*
- * 行悬停：暖纸底上 --panel-hover 与表体底色差得不明显，扫读时看不出鼠标停在哪一行。
- * 用一抹极淡的**陶土色**（主色 5% 透明）—— 有指示性，又明显轻于"选中态"那层。
+ * 行悬停 / 勾选行。
+ *
+ * 这两个状态原先写的是**写死的蓝色 rgba**（`rgba(89,130,171,.07)` 等）——
+ * 注释里甚至还写着"用一抹极淡的**陶土色**"，而值一直是蓝的：默认方案从陶土
+ * 换回蓝之后，注释改了、值没人动。后果与前两处（select / 下拉箭头）同类：
+ * 切到苔绿 / 雾紫 / 青绿后，**只有这两处底色还是蓝的**。
+ *
+ * 现在分两档，各自有出处：
+ *   · 悬停 → `--panel-hover`：该令牌的定义就是"表格行悬停、次要按钮悬停态"，
+ *     是中性档（悬停是**瞬时**的，不该占用强调色那 5% 的配额）。
+ *   · 勾选 → `--primary-subtle`：该令牌的定义就是"激活行背景"，且**跟随配色方案**。
  */
 tr:hover td {
-  background: rgba(89, 130, 171, 0.07);
-}
-[data-theme="dark"] tr:hover td {
-  background: rgba(143, 180, 217, 0.10);
+  background: var(--panel-hover);
 }
 tr:last-child td { border-bottom: none; }
 
-/* 勾选行轻微底色高亮（陶土 tint） */
+/* 勾选行（令牌自己会随主题解析，不必再写深色覆盖） */
 tr:has(input[type="checkbox"]:checked) td {
-  background: rgba(89, 130, 171, 0.05);
-}
-[data-theme="dark"] tr:has(input[type="checkbox"]:checked) td {
-  background: rgba(143, 180, 217, 0.08);
+  background: var(--primary-subtle);
 }
 
 td.mono, .mono {
@@ -1650,13 +1693,18 @@ td.mono, .mono {
 }
 td.name { font-weight: 600; color: var(--text); }
 
-/* 失败整行轻微醒目 */
+/*
+ * 失败整行轻微醒目。
+ * 悬停加深用 `--fail-border` —— 它是 fail 家族里比 `--fail-soft` 更实的一档
+ * （每个语义色都是 soft → border 递增的同色阶），跟着主题走。
+ * 原先写死的是旧配色的 `rgba(239, 68, 68, .18)`（red-500），两套主题都是它。
+ */
 tr.rowfail td {
   background: var(--fail-soft);
   color: var(--fail);
 }
 tr.rowfail:hover td {
-  background: rgba(239, 68, 68, 0.18);
+  background: var(--fail-border);
 }
 
 /* 可点击模型行联动 */
@@ -1735,10 +1783,17 @@ select {
   -webkit-appearance: none;
   -moz-appearance: none;
   appearance: none;
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%2364748b' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
-  background-repeat: no-repeat;
-  background-position: right 9px center;
-  background-size: 13px 13px;
+  /*
+   * **不再给原生 select 画箭头。**
+   *
+   * 它一律被包进 `.dd` 并被 `.dd-native` 透明化（见下方 10b），真正给用户看的
+   * 是 `.dd-arrow` —— 这里原先那枚写死颜色的 SVG 箭头（旧设计系统的皇家蓝
+   * `#2563eb` / 冷灰 `#64748b`）是**看不见的遗留**：既然永远不渲染，
+   * 就删掉而不是"把它改成对的颜色"。
+   *
+   * ⚠️ `padding` 必须保留：原生 select 的宽度**决定 `.dd` 的宽度**，右侧预留的
+   * 28px 是给箭头的位置，删掉会让所有自绘下拉一起变窄（宽度会与最长 option 脱钩）。
+   */
 }
 
 select:hover,
@@ -1747,30 +1802,15 @@ select:hover,
   color: var(--text);
   box-shadow: var(--shadow-sm);
 }
-select:hover {
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%232563eb' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
-}
 
 select:focus,
 .dd-trigger:focus-visible {
   border-color: var(--primary);
   box-shadow: var(--ring-tight);
 }
-select:focus {
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%232563eb' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
-}
 
 select:active {
   transform: scale(0.98);
-}
-
-[data-theme="dark"] select {
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%2394a3b8' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
-}
-
-[data-theme="dark"] select:hover,
-[data-theme="dark"] select:focus {
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%233b82f6' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
 }
 
 /*
@@ -1802,20 +1842,33 @@ select option {
   gap: 8px; padding: 0 9px 0 10px; min-width: 0; text-align: left;
 }
 .dd-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+/*
+ * 下拉箭头：**mask + background-color**，颜色走令牌。
+ *
+ * 为什么不能用 SVG 的 data-URI 直接画（上一版的做法）：data-URI 里的颜色是**死的**
+ * —— 旧值写的是上一套设计系统的皇家蓝（浅色 `#2563eb` / 深色 `#3b82f6`）
+ * 与冷灰（`#64748b` / `#94a3b8`）。后果实测过两类：
+ *   ① 切「配色方案」（陶土 / 苔绿 / 雾紫 / 青绿）时全站都跟着变，
+ *      **只有这个箭头还是蓝的** —— 它根本不认 `--primary`；
+ *   ② 暖纸底上那两档冷灰跟整页的中性色系不一个调（冷灰压在暖米色上"发青"）。
+ *
+ * mask 只取图形的 alpha 通道（描边处不透明、其余透明），颜色交给
+ * `background-color` —— 主题与配色方案一换自动跟着走，零 JS，
+ * 也不必为深色主题再写一遍覆盖规则。
+ * 图形里的 stroke 颜色无关紧要（取的是 alpha），写成黑色只是惯例。
+ */
 .dd-arrow {
   flex: none; width: 13px; height: 13px; margin-right: -1px;
-  background-repeat: no-repeat; background-position: center; background-size: 13px 13px;
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%2364748b' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
-  transition: transform 0.16s var(--ease), background-image 0.16s var(--ease);
-}
-[data-theme="dark"] .dd-arrow {
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%2394a3b8' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+  background-color: var(--muted);
+  -webkit-mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+  mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+  -webkit-mask-repeat: no-repeat; mask-repeat: no-repeat;
+  -webkit-mask-position: center; mask-position: center;
+  -webkit-mask-size: 13px 13px; mask-size: 13px 13px;
+  transition: transform 0.16s var(--ease), background-color 0.16s var(--ease);
 }
 .dd.open .dd-arrow, .dd-trigger:hover .dd-arrow {
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%232563eb' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
-}
-[data-theme="dark"] .dd.open .dd-arrow, [data-theme="dark"] .dd-trigger:hover .dd-arrow {
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%233b82f6' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+  background-color: var(--primary);
 }
 .dd.open .dd-arrow { transform: rotate(180deg); }
 
@@ -2364,8 +2417,15 @@ summary:focus-visible {
 }
 pre.log {
   margin: 8px 18px 18px;
-  background: #0d1117;
-  color: #c9d1d9;
+  /*
+   * 颜色走 `--log-*` 令牌（两套主题各一份）——原先写死的是 GitHub 的
+   * 冷蓝黑底 `#0d1117` + 冷灰字 `#c9d1d9`，是本文件里最后一处**成对的**
+   * 旧配色残留：浅色主题的整条色轴（Lotion/Salt/Sooty）都是暖的，
+   * 只有这块日志"发蓝"。深色主题下它又比页面底色更黑一档，
+   * 与"底 → 面板"的明度阶梯对不上。
+   */
+  background: var(--log-bg);
+  color: var(--log-fg);
   border: 1px solid rgba(255, 255, 255, 0.08);
   border-radius: var(--radius-sm);
   padding: 14px 16px;
@@ -3142,7 +3202,7 @@ pre.log {
 }
 
 .connectml-row:last-child { border-bottom: none; }
-.connectml-row.on { background: var(--primary-soft, rgba(89, 130, 171, 0.08)); }
+.connectml-row.on { background: var(--primary-subtle); }
 
 .connectml-box { flex: none; margin: 0; cursor: pointer; width: 13px; height: 13px; }
 
@@ -3170,7 +3230,10 @@ pre.log {
   border-radius: var(--radius-sm);
 }
 
-.connectml-star.on { color: var(--warn, #f59e0b); }
+/* 收藏星标：选中态走 --warn。
+   （原先写的是 `var(--warn, #f59e0b)` —— 那个 fallback 是上一套配色的琥珀色，
+    在本项目里 --warn 永远有定义，它只是"旧色值还留在文件里"，删掉。） */
+.connectml-star.on { color: var(--warn); }
 .connectml-star:hover { background: var(--panel); }
 .connectml-star:focus-visible { outline: 2px solid var(--primary); outline-offset: 1px; }
 

@@ -2,31 +2,48 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
+<!--
+  GitHub 社交预览图源文件（1280×640，@2x 渲染出 social-preview.png）。
+
+  ⚠️ 配色**必须与控制台的令牌一致**（Claude / Anthropic 暖色语言）。
+  2026-10-12 对齐过一次：此前整页还是更早的"皇家蓝"体系（#2563eb / #3b82f6 /
+  #0f172a 冷灰蓝），而控制台早已换成暖纸底 + 土色系 —— 卡片与控制台"不是同一个产品"。
+  改控制台配色时顺手看一眼这里（还有 docs/console-hero-*.png 那两张头图）。
+
+  渲染：`node tools/dev/shot-promo.mjs`（1280×640、deviceScaleFactor 2，
+  输出 2560×1280 的 social-preview.png；脚本会断言页面尺寸，防边缘被裁）。
+-->
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
   html, body { width: 1280px; height: 640px; overflow: hidden; }
   body {
+    /* 与控制台同一套字体：界面无衬线 / 展示衬线 / 数据等宽（不引 webfont） */
     font-family: "Segoe UI", "Microsoft YaHei", "PingFang SC", system-ui, sans-serif;
-    background: #f8fafc;
-    color: #0f172a;
+    background: #faf9f5;   /* Lotion */
+    color: #141414;        /* Sooty */
     -webkit-font-smoothing: antialiased;
   }
   .stage {
     position: relative;
     width: 1280px; height: 640px;
+    /*
+     * 暖色水洗：两团极淡的土色光晕（各自取自控制台的 primary-subtle / ok-soft），
+     * 取代原先的冷蓝 (#dbeafe / #e0e7ff)。**不做多彩渐变**，只用同族浅色。
+     */
     background:
-      radial-gradient(900px 480px at 88% -10%, #dbeafe 0%, rgba(219,234,254,0) 62%),
-      radial-gradient(620px 420px at 4% 108%, #e0e7ff 0%, rgba(224,231,255,0) 60%),
-      #f8fafc;
+      radial-gradient(900px 480px at 88% -10%, #f7ece5 0%, rgba(247,236,229,0) 62%),
+      radial-gradient(620px 420px at 4% 108%, #eef0e6 0%, rgba(238,240,230,0) 60%),
+      #faf9f5;
     display: flex;
     flex-direction: column;
     padding: 46px 56px 28px;
   }
   .grid {
     position: absolute; inset: 0;
+    /* 网格线用暖中性色（--muted 的极低 alpha），不用冷蓝 */
     background-image:
-      linear-gradient(to right, rgba(37,99,235,.055) 1px, transparent 1px),
-      linear-gradient(to bottom, rgba(37,99,235,.055) 1px, transparent 1px);
+      linear-gradient(to right, rgba(94,87,72,.07) 1px, transparent 1px),
+      linear-gradient(to bottom, rgba(94,87,72,.07) 1px, transparent 1px);
     background-size: 40px 40px;
     mask-image: linear-gradient(to bottom, #000 0%, rgba(0,0,0,.35) 70%, transparent 100%);
     pointer-events: none;
@@ -38,104 +55,114 @@
   /* ---------- 品牌行 ---------- */
   .brandrow { display: flex; align-items: center; gap: 10px; margin-bottom: 22px; }
   .logo {
-    width: 40px; height: 40px; border-radius: 11px;
-    background: linear-gradient(160deg, #3b82f6, #2563eb);
-    color: #fff; font-weight: 800; font-size: 16px; letter-spacing: .5px;
+    width: 40px; height: 40px; border-radius: 12px;
+    /* 与控制台品牌标同款：强调色实底 + 浅色记号。不用渐变、不用投影。 */
+    background: #5982ab;   /* --primary（Windstorm 蓝，浅色档） */
+    color: #faf9f5;        /* --on-solid */
+    font-weight: 800; font-size: 16px; letter-spacing: .5px;
     display: flex; align-items: center; justify-content: center;
-    box-shadow: 0 6px 16px rgba(37,99,235,.30);
   }
   .pill {
     font-size: 13px; font-weight: 600; line-height: 1;
     padding: 7px 12px; border-radius: 999px;
-    background: #eff6ff; color: #1d4ed8; border: 1px solid #bfdbfe;
+    /* primary-subtle / primary-text / primary-border */
+    background: #edf1f7; color: #48698b; border: 1px solid #c8d7e5;
   }
-  .pill.mono { font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; font-size: 12px; }
-  .pill.ghost { background: #fff; color: #475569; border-color: #e2e8f0; }
+  .pill.mono { font-family: ui-monospace, Consolas, "Courier New", monospace; font-size: 12px; }
+  .pill.ghost { background: #faf9f5; color: #5e5748; border-color: #d3c8b2; }
 
   /* ---------- 标题 ---------- */
   h1 {
-    font-size: 50px; line-height: 1.1; font-weight: 800;
-    letter-spacing: -1.2px; color: #0b1220;
+    /* 展示性文字用衬线（与控制台品牌名同一条栈：Georgia + 中文宋体） */
+    font-family: Georgia, "Times New Roman", "Songti SC", "SimSun", serif;
+    font-size: 50px; line-height: 1.12; font-weight: 700;
+    letter-spacing: -1.2px; color: #141414;
   }
-  h1 .to { color: #2563eb; }
+  h1 .to { color: #5982ab; }
   .sub {
-    margin-top: 16px; font-size: 18px; line-height: 1.62; color: #475569;
-    font-weight: 500;
+    margin-top: 16px; font-size: 18px; line-height: 1.62; color: #5e5748;
+    font-weight: 400;
   }
-  .sub b { color: #1e293b; font-weight: 700; }
+  .sub b { color: #2c2b26; font-weight: 700; }
 
   /* ---------- 特性列表 ---------- */
   .feats { list-style: none; margin-top: 22px; display: flex; flex-direction: column; gap: 12px; }
-  .feats li { display: flex; align-items: center; gap: 11px; font-size: 16px; color: #334155; font-weight: 500; }
+  .feats li { display: flex; align-items: center; gap: 11px; font-size: 16px; color: #5e5748; font-weight: 400; }
   .tick {
     width: 21px; height: 21px; flex: none; border-radius: 999px;
-    background: #ecfdf5; border: 1px solid #a7f3d0;
+    /* ok-soft / ok-border；对勾描边用 --ok */
+    background: #eef0e6; border: 1px solid #ccd5bd;
     display: flex; align-items: center; justify-content: center;
   }
   .tick svg { width: 12px; height: 12px; }
-  .feats b { color: #0f172a; font-weight: 700; }
+  .feats b { color: #141414; font-weight: 700; }
 
   /* ---------- 安装命令 ---------- */
   .cmd {
     margin-top: 24px; display: inline-flex; align-items: center; gap: 12px;
-    background: #0f172a; color: #e2e8f0; border-radius: 12px;
-    padding: 15px 20px; font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
-    font-size: 14.5px; box-shadow: 0 10px 26px rgba(15,23,42,.22);
+    /* 与控制台"终端块"同一族：Sooty 底 + 暖浅灰字（--log-bg / --log-fg） */
+    background: #141414; color: #d5d0c4; border-radius: 12px;
+    padding: 15px 20px; font-family: ui-monospace, Consolas, "Courier New", monospace;
+    font-size: 14.5px;
   }
-  .cmd .dollar { color: #60a5fa; font-weight: 700; }
-  .cmd .flag { color: #93c5fd; }
+  .cmd .dollar { color: #8fb4d9; font-weight: 700; }
+  .cmd .flag { color: #b0a99a; }
 
   /* ---------- 右侧流程图 ---------- */
   .flow {
-    background: #ffffff; border: 1px solid #e2e8f0; border-radius: 16px;
-    padding: 20px 20px 18px; box-shadow: 0 14px 40px rgba(15,23,42,.09);
+    /* 纸叠纸：比页面**深一档**的 Salt + 1px 边框，不用投影（与控制台同规矩） */
+    background: #f0eee6; border: 1px solid #e3dacc; border-radius: 16px;
+    padding: 20px 20px 18px;
   }
   .flow h2 {
     font-size: 12px; font-weight: 700; letter-spacing: 1.4px; text-transform: uppercase;
-    color: #94a3b8; margin-bottom: 14px;
+    color: #a09884; margin-bottom: 14px;   /* --faint：装饰性小标 */
   }
   .node {
-    border: 1px solid #e2e8f0; border-radius: 12px; padding: 12px 14px;
-    background: #f8fafc; display: flex; align-items: center; gap: 12px;
+    border: 1px solid #e3dacc; border-radius: 12px; padding: 12px 14px;
+    background: #faf9f5; display: flex; align-items: center; gap: 12px;
   }
   .node .ic {
     width: 34px; height: 34px; flex: none; border-radius: 9px;
     display: flex; align-items: center; justify-content: center; font-size: 16px;
   }
-  .node .tt { font-size: 14.5px; font-weight: 700; color: #0f172a; line-height: 1.35; }
-  .node .dd { font-size: 11.5px; color: #64748b; margin-top: 2px; font-weight: 500; }
-  .node.blue { background: #eff6ff; border-color: #bfdbfe; }
-  .node.blue .ic { background: #2563eb; color: #fff; }
-  .node.dark { background: #0f172a; border-color: #0f172a; }
-  .node.dark .tt { color: #f1f5f9; }
-  .node.dark .dd { color: #94a3b8; }
-  .node.dark .ic { background: #1e293b; color: #93c5fd; }
+  .node .tt { font-size: 14.5px; font-weight: 700; color: #141414; line-height: 1.35; }
+  .node .dd { font-size: 11.5px; color: #5e5748; margin-top: 2px; font-weight: 400; }
+  /* 本地桥：强调色浅底 + 强调色实底图标 */
+  .node.blue { background: #edf1f7; border-color: #c8d7e5; }
+  .node.blue .ic { background: #5982ab; color: #faf9f5; }
+  /* DSH：Sooty 近黑块，与控制台主按钮同色 */
+  .node.dark { background: #141414; border-color: #141414; }
+  .node.dark .tt { color: #faf9f5; }
+  .node.dark .dd { color: #b0a99a; }
+  .node.dark .ic { background: #2c2b26; color: #8fb4d9; }
   .link { display: flex; justify-content: center; padding: 6px 0; }
-  .link .bar { width: 2px; height: 16px; background: #cbd5e1; border-radius: 2px; position: relative; }
+  .link .bar { width: 2px; height: 16px; background: #d3c8b2; border-radius: 2px; position: relative; }
   .link .bar::after {
     content: ""; position: absolute; left: 50%; bottom: -1px;
     transform: translateX(-50%);
     border-left: 4px solid transparent; border-right: 4px solid transparent;
-    border-top: 6px solid #cbd5e1;
+    border-top: 6px solid #d3c8b2;
   }
   .tagline { margin-top: 15px; display: flex; gap: 8px; flex-wrap: wrap; }
   .tagline span {
     font-size: 11.5px; font-weight: 600; padding: 6px 10px; border-radius: 7px;
-    background: #f1f5f9; color: #475569; border: 1px solid #e2e8f0;
+    background: #eae7dd; color: #5e5748; border: 1px solid #e3dacc;
   }
-  .tagline span.hi { background: #ecfdf5; color: #047857; border-color: #a7f3d0; }
+  /* 高亮标签：ok 家族软底 */
+  .tagline span.hi { background: #eef0e6; color: #5e6f49; border-color: #ccd5bd; }
 
   /* ---------- 页脚 ---------- */
   footer {
     position: relative; flex: none;
     display: flex; align-items: center; justify-content: space-between;
-    font-size: 13.5px; color: #64748b; font-weight: 500;
+    font-size: 13.5px; color: #5e5748; font-weight: 400;
     padding-top: 18px;
   }
-  footer .repo { display: flex; align-items: center; gap: 9px; font-weight: 600; color: #334155; }
-  footer .repo svg { width: 17px; height: 17px; fill: #475569; }
+  footer .repo { display: flex; align-items: center; gap: 9px; font-weight: 600; color: #2c2b26; }
+  footer .repo svg { width: 17px; height: 17px; fill: #5e5748; }
   footer .meta { display: flex; align-items: center; gap: 9px; }
-  footer .dot { width: 4px; height: 4px; border-radius: 99px; background: #cbd5e1; }
+  footer .dot { width: 4px; height: 4px; border-radius: 99px; background: #d3c8b2; }
 </style>
 </head>
 <body>
@@ -158,9 +185,9 @@
         </p>
 
         <ul class="feats">
-          <li><span class="tick"><svg viewBox="0 0 12 12"><path d="M1 6.4 4.3 9.6 11 2.4" fill="none" stroke="#059669" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></span>零依赖 · 零配置 · <b>双击即用</b></li>
-          <li><span class="tick"><svg viewBox="0 0 12 12"><path d="M1 6.4 4.3 9.6 11 2.4" fill="none" stroke="#059669" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></span><b>30+ 模型</b>原生可用，改完即生效</li>
-          <li><span class="tick"><svg viewBox="0 0 12 12"><path d="M1 6.4 4.3 9.6 11 2.4" fill="none" stroke="#059669" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></span><b>9 个标签页</b>数据面板 + 网页控制台</li>
+          <li><span class="tick"><svg viewBox="0 0 12 12"><path d="M1 6.4 4.3 9.6 11 2.4" fill="none" stroke="#5e6f49" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></span>零依赖 · 零配置 · <b>双击即用</b></li>
+          <li><span class="tick"><svg viewBox="0 0 12 12"><path d="M1 6.4 4.3 9.6 11 2.4" fill="none" stroke="#5e6f49" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></span><b>30+ 模型</b>原生可用，改完即生效</li>
+          <li><span class="tick"><svg viewBox="0 0 12 12"><path d="M1 6.4 4.3 9.6 11 2.4" fill="none" stroke="#5e6f49" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></span><b>9 个标签页</b>数据面板 + 网页控制台</li>
         </ul>
 
         <div class="cmd">
@@ -174,7 +201,7 @@
           <h2>How it works</h2>
 
           <div class="node">
-            <div class="ic" style="background:#eef2ff;color:#4f46e5">&#9673;</div>
+            <div class="ic" style="background:#efedf5;color:#6a6699">&#9673;</div>
             <div>
               <div class="tt">WorkBuddy 桌面端（已登录）</div>
               <div class="dd">凭据现取现解，不落盘、不回写</div>
