@@ -61,7 +61,60 @@ const upstream = createServer((req, res) => {
       return;
     }
 
+    if (scenario.kind === 'error429') {
+      res.writeHead(429, { 'Content-Type': 'application/json', 'retry-after': '7' });
+      res.end(JSON.stringify({ msg: 'slow down', code: 42901 }));
+      return;
+    }
+
+    if (scenario.kind === 'error500') {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ msg: 'boom', code: 50001 }));
+      return;
+    }
+
+    if (scenario.kind === 'ctxlen') {
+      // 上游用 400 + 上下文超限的措辞 —— 桥要把它映射成 context_length_exceeded，
+      // 否则 Codex 只会当成普通 upstream_error、不做上下文裁剪就整轮失败
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ msg: 'maximum context length exceeded', code: 40001 }));
+      return;
+    }
+
     res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+    if (scenario.kind === 'truncated') {
+      // 上游因 max_tokens 截断 —— finish_reason 是 length
+      res.write(sse({ id: 'c1', model: 'm', choices: [{ index: 0, delta: { content: 'partial' } }] }));
+      res.write(sse({
+        id: 'c1',
+        model: 'm',
+        choices: [{ index: 0, delta: {}, finish_reason: 'length' }],
+        usage: { prompt_tokens: 5, completion_tokens: 16, total_tokens: 21 },
+      }));
+      res.write('data: [DONE]\n\n');
+      res.end();
+      return;
+    }
+
+    if (scenario.kind === 'usageDetails') {
+      res.write(sse({ id: 'c1', model: 'm', choices: [{ index: 0, delta: { content: 'ok' } }] }));
+      res.write(sse({
+        id: 'c1',
+        model: 'm',
+        choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
+        usage: {
+          prompt_tokens: 100,
+          completion_tokens: 40,
+          total_tokens: 140,
+          prompt_tokens_details: { cached_tokens: 64 },
+          completion_tokens_details: { reasoning_tokens: 25 },
+        },
+      }));
+      res.write('data: [DONE]\n\n');
+      res.end();
+      return;
+    }
+
     if (scenario.kind === 'text') {
       res.write(sse({ id: 'c1', model: 'm', choices: [{ index: 0, delta: { role: 'assistant', content: 'Hel' } }] }));
       res.write(sse({ id: 'c1', model: 'm', choices: [{ index: 0, delta: { content: 'lo ' } }] }));
@@ -593,6 +646,165 @@ test('思维链：默认丢弃；开开关后按 reasoning 项转发且顺序正
   } finally {
     b.kill();
   }
+});
+
+/*
+ * 截断收尾：Codex **只认** `reason: "interrupted"`。
+ *
+ * 依据 `codex-rs/codex-api/src/sse/responses.rs`：`response.incomplete` 的
+ * `reason` 除 `interrupted` 外一律 `Err(Stream("Incomplete response returned,
+ * reason: {reason}"))` —— 也就是**整轮中断**，用户看到的是报错而不是"回答被截断"。
+ * 桥原先发的是 `max_output_tokens`，等于每次触发 max_output_tokens 都把回合炸掉。
+ *
+ * 另外 `end_turn` 必须显式 `false`（`ResponseCompleted.end_turn: Option<bool>`），
+ * 否则 Codex 会把这一轮当成"模型自己说完了"，不去续写剩下的部分。
+ */
+test('max_output_tokens 截断：reason 必须是 interrupted（发 max_output_tokens 会让 Codex 炸流）', async () => {
+  await waitReady();
+  scenario = { kind: 'truncated' };
+  const { status, text } = await post({
+    model: 'gpt-5.1-codex', stream: true, max_output_tokens: 16,
+    input: [{ type: 'message', role: 'user', content: 'hi' }],
+  });
+  assert.equal(status, 200);
+  const evs = parseSse(text);
+  const inc = evs.find((e) => e.event === 'response.incomplete');
+  assert.ok(inc, '截断时必须发 response.incomplete');
+  assert.equal(inc.data.response.status, 'incomplete');
+  assert.equal(inc.data.response.incomplete_details.reason, 'interrupted',
+    'reason 只能是 interrupted —— 其它任何值（包括 max_output_tokens）都会让 Codex 抛流错误、整轮失败');
+  assert.equal(inc.data.response.end_turn, false,
+    '截断时 end_turn 必须是 false，否则 Codex 以为模型自己说完了、不会继续');
+  // 截断的正文仍要完整给出（Codex 只在 done 里取内容）
+  const done = evs.find((e) => e.event === 'response.output_item.done');
+  assert.ok(done, '缺 output_item.done');
+  assert.equal(done.data.item.content[0].text, 'partial');
+  // 截断路径不该再出现 completed
+  assert.equal(evs.some((e) => e.event === 'response.completed'), false,
+    '截断时不能同时发 completed —— 两个收尾事件会让 Codex 行为未定义');
+});
+
+test('非流式截断：incomplete_details.reason 同样是 interrupted，且 end_turn=false', async () => {
+  await waitReady();
+  scenario = { kind: 'truncated' };
+  const { status, text } = await post({
+    model: 'gpt-5.1-codex', stream: false, max_output_tokens: 16,
+    input: [{ type: 'message', role: 'user', content: 'hi' }],
+  });
+  assert.equal(status, 200);
+  const j = JSON.parse(text);
+  assert.equal(j.status, 'incomplete');
+  assert.equal(j.incomplete_details.reason, 'interrupted',
+    '非流式也必须用 interrupted（同一个枚举值）');
+  assert.equal(j.end_turn, false);
+  assert.equal(j.output_text, 'partial');
+});
+
+/*
+ * 正常收尾：`end_turn: true` + `response.headers["openai-model"]` 回显真实模型。
+ *
+ * - `end_turn: true` 是 Codex 判"这一轮自然结束"的依据（`Some(false)` 会被当成需要继续）。
+ * - `openai-model` 头是 Codex `response_model()` 的来源：不回显的话它只能沿用请求里
+ *   那个（可能是 `gpt-5.1-codex` 这种桥内部再映射的别名），界面上显示的模型就是错的。
+ */
+test('正常收尾：end_turn=true 且回显真实模型（openai-model 头）', async () => {
+  await waitReady();
+  scenario = { kind: 'text' };
+  const { text } = await post({
+    model: 'gpt-5.1-codex', stream: true,
+    input: [{ type: 'message', role: 'user', content: 'hi' }],
+  });
+  const completed = parseSse(text).find((e) => e.event === 'response.completed');
+  assert.ok(completed, '缺 response.completed');
+  assert.equal(completed.data.response.end_turn, true, '正常收尾要显式 end_turn:true');
+  /*
+   * `incomplete_details` 在正常收尾时给 `null` 是**安全的**：Codex 的
+   * `ResponseCompleted` 只有 4 个字段（id/usage/usage_metadata/end_turn，
+   * 见 `codex-rs/codex-api/src/sse/responses.rs:108`），既没有 `incomplete_details`
+   * 也没有 `deny_unknown_fields` —— 多了的字段被 serde 直接忽略。
+   * 所以这里只要求"不是非 null 的截断标记"，不要求它消失。
+   */
+  assert.ok(completed.data.response.incomplete_details == null,
+    '正常收尾不该带截断标记（null / 缺省都行，Codex 都当 None）');
+  assert.equal(completed.data.response.headers?.['openai-model'], 'resolved-default',
+    'completed 里要回显上游真实模型（Codex 的 response_model() 读这个头）');
+});
+
+test('usage 细节：cached_tokens / reasoning_tokens 要透传（Codex 的用量面板读这两项）', async () => {
+  await waitReady();
+  scenario = { kind: 'usageDetails' };
+  const { text } = await post({
+    model: 'gpt-5.1-codex', stream: true,
+    input: [{ type: 'message', role: 'user', content: 'hi' }],
+  });
+  const u = parseSse(text).find((e) => e.event === 'response.completed').data.response.usage;
+  assert.equal(u.input_tokens_details?.cached_tokens, 64, '缓存命中数要透传');
+  assert.equal(u.output_tokens_details?.reasoning_tokens, 25, '思维链 token 数要透传');
+  // 三个总数仍必须在
+  assert.equal(u.input_tokens, 100);
+  assert.equal(u.output_tokens, 40);
+  assert.equal(u.total_tokens, 140);
+});
+
+/*
+ * 429 的错误码映射：Codex 按 `error.code` 决定要不要自动退避重试。
+ *
+ * 依据 `codex-rs/codex-api/src/sse/responses_error.rs`：只认
+ * `rate_limit_exceeded` / `server_is_overloaded` / `context_length_exceeded` 等少数几个；
+ * 不映射的话它就当成普通 `upstream_error` —— 上下文超限不会被裁剪、限流不会退避，
+ * 用户只能手动重试。`retry-after` 要从 `error.headers` 里读。
+ */
+test('429 限流（流式）：response.failed 带 rate_limit_exceeded 与 retry-after', async () => {
+  await waitReady();
+  scenario = { kind: 'error429' };
+  const { status, text, headers } = await post({
+    model: 'gpt-5.1-codex', stream: true,
+    input: [{ type: 'message', role: 'user', content: 'hi' }],
+  });
+  assert.equal(status, 200, '流式路径必须用 200 + SSE 收尾');
+  assert.match(headers.get('content-type') || '', /text\/event-stream/);
+  const failed = parseSse(text).find((e) => e.event === 'response.failed');
+  assert.ok(failed, '缺 response.failed');
+  assert.equal(failed.data.response.error.code, 'rate_limit_exceeded',
+    '429 必须映射成 rate_limit_exceeded，否则 Codex 不会自动退避重试');
+  assert.equal(failed.data.response.error.headers?.['retry-after'], '7',
+    'retry-after 要放进 error.headers（Codex 从这里读退避时长）');
+});
+
+test('5xx：映射成 server_is_overloaded；非流式也带 error.code，且如实回状态码', async () => {
+  await waitReady();
+  scenario = { kind: 'error500' };
+  const { status, text } = await post({
+    model: 'gpt-5.1-codex', stream: false,
+    input: [{ type: 'message', role: 'user', content: 'hi' }],
+  });
+  assert.equal(status, 500, '非流式如实回上游状态码');
+  const j = JSON.parse(text);
+  assert.equal(j.error.code, 'server_is_overloaded', '5xx 要映射成 server_is_overloaded');
+  assert.match(j.error.message, /boom/);
+
+  // 同一条上游行为在流式路径上要变成 SSE response.failed
+  scenario = { kind: 'error500' };
+  const s = await post({
+    model: 'gpt-5.1-codex', stream: true,
+    input: [{ type: 'message', role: 'user', content: 'hi' }],
+  });
+  const failed = parseSse(s.text).find((e) => e.event === 'response.failed');
+  assert.ok(failed, '流式路径缺 response.failed');
+  assert.equal(failed.data.response.error.code, 'server_is_overloaded');
+});
+
+test('上下文超限：按措辞识别成 context_length_exceeded（Codex 才会去裁剪上下文）', async () => {
+  await waitReady();
+  scenario = { kind: 'ctxlen' };
+  const { status, text } = await post({
+    model: 'gpt-5.1-codex', stream: false,
+    input: [{ type: 'message', role: 'user', content: 'hi' }],
+  });
+  assert.equal(status, 400);
+  const j = JSON.parse(text);
+  assert.equal(j.error.code, 'context_length_exceeded',
+    '上游只说 "maximum context length exceeded"，桥要认出来并映射');
 });
 
 // ── 收尾 ──────────────────────────────────────────────────────────────────

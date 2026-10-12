@@ -2323,16 +2323,57 @@ function responsesToolChoiceToOpenAI(tc) {
   return null;
 }
 
-/** 上游 usage → Responses 的 usage。三个总数是 Codex 的必填项，一律补齐。 */
+/**
+ * 上游 HTTP 状态码 / 错误文本 → Codex 认识的 `error.code`。
+ *
+ * 为什么要映射：Codex 的 `parse_failed_response`
+ * （`codex-rs/codex-api/src/sse/responses_error.rs`）按 `error.code` 分派：
+ *   - `rate_limit_exceeded` / `slow_down` → `RateLimitExceeded`（**带 retry_after，可自动退避**）
+ *   - `context_length_exceeded`          → `ContextWindowExceeded`（界面给准确提示）
+ *   - `server_is_overloaded`             → `ServerOverloaded`
+ *   - `insufficient_quota` 等            → `QuotaExceeded`
+ *   - 其余（含认不出的字串）              → `Retryable`
+ *
+ * 原来我们发的是 `String(up.status)`（`"429"` / `"500"`…），**全部落进 `_`
+ * 那一支的 Retryable**：429 拿不到官方退避节奏、上下文超限退化成泛化提示。
+ * 这里做最小映射（只映射语义明确的几个），其余保持原状不误导。
+ */
+function responsesErrorCode(status, message, parsedCode) {
+  const text = String(message || '').toLowerCase();
+  if (Number(status) === 429) return 'rate_limit_exceeded';
+  if (/context[_ ]?length|context[_ ]?window|too many tokens|maximum context/.test(text)) {
+    return 'context_length_exceeded';
+  }
+  if (/insufficient[_ ]?quota|credit[_ ]?balance|spend[_ ]?limit/.test(text)) return 'insufficient_quota';
+  if (Number(status) >= 500) return 'server_is_overloaded';
+  // 上游自己给的机器可读 code 若本来就是官方认识的字串，原样透传
+  return typeof parsedCode === 'string' && parsedCode ? parsedCode : 'upstream_error';
+}
+
+/**
+ * 上游 usage → Responses 的 usage。三个总数是 Codex 的必填项，一律补齐。
+ *
+ * **明细要透传**（`input_tokens_details.cached_tokens` /
+ * `output_tokens_details.reasoning_tokens`）—— Codex 的 `ResponseCompletedUsage`
+ * 会把它们读进 `TokenUsage`
+ * （`codex-rs/codex-api/src/sse/responses.rs` 的 `impl From<ResponseCompletedUsage>`），
+ * 用户据此看到「缓存命中」与「思考 token」。原来硬编码成 0，等于把上游给的账丢了。
+ *
+ * 上游 chat 协议里的对应字段名不同（`prompt_tokens_details.cached_tokens` /
+ * `completion_tokens_details.reasoning_tokens`），这里做一次映射；
+ * 上游没给就补 0（Codex 这几个子字段是非 Option 的，缺了会解析失败）。
+ */
 function responsesUsage(u) {
   const input = Number(u?.prompt_tokens) || 0;
   const output = Number(u?.completion_tokens) || 0;
   const total = Number(u?.total_tokens) || input + output;
+  const cached = Number(u?.prompt_tokens_details?.cached_tokens) || 0;
+  const reasoning = Number(u?.completion_tokens_details?.reasoning_tokens) || 0;
   return {
     input_tokens: input,
-    input_tokens_details: { cached_tokens: 0 },
+    input_tokens_details: { cached_tokens: cached },
     output_tokens: output,
-    output_tokens_details: { reasoning_tokens: 0 },
+    output_tokens_details: { reasoning_tokens: reasoning },
     total_tokens: total,
   };
 }
@@ -2395,6 +2436,7 @@ function openAIToResponsesResponse(agg, model) {
     created_at: Number(agg.created) || Math.floor(Date.now() / 1000),
     status: truncated ? 'incomplete' : 'completed',
     model,
+    headers: { 'openai-model': model },
     output,
     output_text: responsesTextOf(output),
     parallel_tool_calls: true,
@@ -2402,7 +2444,10 @@ function openAIToResponsesResponse(agg, model) {
     tools: [],
     usage: responsesUsage(agg.usage),
     error: null,
-    incomplete_details: truncated ? { reason: 'max_output_tokens' } : null,
+    // 同流式那条：`incomplete` 的 reason 只能是 `interrupted`（见 relayResponsesStream
+    // 里那段说明）。`end_turn` 两边一致地给。
+    incomplete_details: truncated ? { reason: 'interrupted' } : null,
+    end_turn: !truncated,
     instructions: null,
     metadata: {},
     temperature: null,
@@ -2444,12 +2489,20 @@ async function relayResponsesStream(up, res, model) {
 
   const responseId = responsesId('resp');
   const createdAt = Math.floor(Date.now() / 1000);
+  /**
+   * `headers.openai-model` 是 Codex 认「**实际生效的模型**」的地方
+   * （`codex-rs/codex-api/src/sse/responses.rs` 的 `response_model()` 优先读
+   * `response.headers` 里的 `openai-model`）。我们这里 model 是**解析后**的真实
+   * 上游模型（Codex 发来的可能是 `gpt-5.1-codex`），回显它，客户端的模型显示
+   * 才是真的、而不是它自己填的那个占位名。
+   */
   const envelope = (status) => ({
     id: responseId,
     object: 'response',
     created_at: createdAt,
     status,
     model,
+    headers: { 'openai-model': model },
     output: [],
     output_text: '',
     parallel_tool_calls: true,
@@ -2720,13 +2773,34 @@ async function relayResponsesStream(up, res, model) {
 
   const finalOutput = output.filter(Boolean);
   const truncated = finishReason === 'length';
+  /*
+   * ⚠️ `response.incomplete` 的 `reason` **只能是 `"interrupted"`**。
+   *
+   * Codex 的解析器（`codex-rs/codex-api/src/sse/responses.rs`：
+   *   let interrupted = kind == "response.incomplete";
+   *   if reason == "content_filter" { return Err(ContentFilter); }
+   *   if reason != "interrupted" {
+   *       return Err(ApiError::Stream("Incomplete response returned, reason: {reason}"));
+   *   }
+   * ）**会把任何别的 reason 当成流损坏并中断整轮**。
+   *
+   * 我们原来发的是 `"max_output_tokens"`（照 OpenAI 官方文档写的）—— 结果
+   * 上游一旦因 max_tokens 截断，用户看到的不是「回答被截断」，而是整轮报错。
+   * 实测（本机 glm-5.3 + max_output_tokens:16）确认了这条。
+   *
+   * 真实 OpenAI 在「被中断」时用的也是 `interrupted`；`max_output_tokens` 那种
+   * 语义在这里**没有客户端认**，所以只能映射成 `interrupted`。
+   * 另：官方 `responses.rs` 在 interrupted 分支里把 `end_turn` 强制成 `Some(false)`，
+   * 我们两边都显式带上 `end_turn`（completed 为 `true`）。
+   */
   send(truncated ? 'response.incomplete' : 'response.completed', {
     response: {
       ...envelope(truncated ? 'incomplete' : 'completed'),
       output: finalOutput,
       output_text: responsesTextOf(finalOutput),
       usage: responsesUsage(usage),
-      ...(truncated ? { incomplete_details: { reason: 'max_output_tokens' } } : {}),
+      end_turn: !truncated,
+      ...(truncated ? { incomplete_details: { reason: 'interrupted' } } : {}),
     },
   });
   res.end();
@@ -4693,6 +4767,7 @@ async function handleRequest(req, res) {
           let parsed; try { parsed = JSON.parse(text); } catch {}
           log('upstream error (responses)', up.status, text.slice(0, 300));
           const message = parsed?.msg || parsed?.message || parsed?.error?.message || text || `upstream HTTP ${up.status}`;
+          const errorCode = responsesErrorCode(up.status, message, parsed?.code ?? parsed?.error?.code);
           recordRequest({
             model,
             stream: wantStream,
@@ -4705,7 +4780,7 @@ async function handleRequest(req, res) {
           // 非流式：按 Responses 的错误形状回
           if (!wantStream) {
             return json(res, up.status === 200 ? 502 : up.status, {
-              error: { type: 'upstream_error', code: String(up.status), message },
+              error: { type: 'upstream_error', code: errorCode, message },
             });
           }
           // 已经答应过客户端「这是事件流」，就不能中途改回 JSON —— 用 SSE 发
@@ -4717,6 +4792,22 @@ async function handleRequest(req, res) {
             'X-Accel-Buffering': 'no',
             ...SECURITY_HEADERS,
           });
+          /*
+           * `error.code` 走映射（见 responsesErrorCode 的说明），让 429 能命中
+           * Codex 的 RateLimitExceeded（它会按 retry_after 自动退避）、上下文超限
+           * 能命中 ContextWindowExceeded。
+           * `error.headers` 里放 `retry-after`：Codex 的 `parse_failed_response`
+           * 正是从 `error.headers` 里取 retry-after（responses_error.rs:31-35）。
+           * 上游给了就用上游的秒数，没给就 429 兜底 1s（避免客户端立刻猛重试）。
+           */
+          /*
+           * ⚠️ `up` 是 node 的 `http.IncomingMessage`，**不是** fetch 的 `Response` ——
+           * `up.headers` 是普通对象，没有 `.get()`。写 `up.headers.get(...)` 会静默
+           * 返回 undefined（可选链把它吞掉），于是上游给的 retry-after 永远读不到、
+           * 一律落到下面的兜底 1s。node 侧要按小写键名直接取。
+           */
+          const retryAfterSec = up.headers?.['retry-after']
+            || (Number(up.status) === 429 ? '1' : null);
           const failed = JSON.stringify({
             type: 'response.failed',
             response: {
@@ -4724,9 +4815,14 @@ async function handleRequest(req, res) {
               object: 'response',
               status: 'failed',
               model,
+              headers: { 'openai-model': model },
               output: [],
               usage: null,
-              error: { code: String(up.status), message },
+              error: {
+                code: errorCode,
+                message,
+                ...(retryAfterSec ? { headers: { 'retry-after': String(retryAfterSec) } } : {}),
+              },
             },
           });
           res.write(`event: response.failed\ndata: ${failed}\n\n`);
@@ -4770,7 +4866,41 @@ async function handleRequest(req, res) {
         if (e?.code === 'RATE_LIMITED') {
           const retryAfter = Math.max(1, Math.ceil((e.retryAfterMs || 1000) / 1000));
           recordRequest({ model, stream: wantStream, ms: Date.now() - startedAt, ok: false, status: 429, code: null, error: `rate_limited (retry in ${retryAfter}s)` });
-          return json(res, 429, { error: { type: 'rate_limit_error', message: e.message } }, { 'Retry-After': String(retryAfter) });
+          /*
+           * 流式请求不能中途改回 JSON —— 客户端（Codex）的解析器只认 SSE。
+           * 统一发 `response.failed`，并把 `retry-after` 放进 `error.headers`，
+           * 让 Codex 命中 `RateLimitExceeded` 并按官方节奏自动退避
+           * （codex-rs/codex-api/src/sse/responses_error.rs:31-35）。
+           */
+          if (wantStream) {
+            res.writeHead(200, {
+              'Content-Type': 'text/event-stream; charset=utf-8',
+              'Cache-Control': 'no-cache, no-transform',
+              Connection: 'keep-alive',
+              'X-Accel-Buffering': 'no',
+              ...SECURITY_HEADERS,
+            });
+            const failed = JSON.stringify({
+              type: 'response.failed',
+              response: {
+                id: responsesId('resp'),
+                object: 'response',
+                status: 'failed',
+                model,
+                headers: { 'openai-model': model },
+                output: [],
+                usage: null,
+                error: {
+                  code: 'rate_limit_exceeded',
+                  message: e.message,
+                  headers: { 'retry-after': String(retryAfter) },
+                },
+              },
+            });
+            res.write(`event: response.failed\ndata: ${failed}\n\n`);
+            return res.end();
+          }
+          return json(res, 429, { error: { type: 'rate_limit_error', code: 'rate_limit_exceeded', message: e.message } }, { 'Retry-After': String(retryAfter) });
         }
         if (e?.code === 'RATE_LIMIT_ABORTED') {
           return; // 客户端等待时断开：无上游副作用，不记账

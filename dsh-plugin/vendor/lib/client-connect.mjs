@@ -889,6 +889,70 @@ function readCatalogSource(client) {
 }
 
 /**
+ * 档位 → Codex 目录里的描述文案。
+ *
+ * 描述来自 Codex 官方目录的原文（模板里就有这几条），照抄是为了让选择器里的
+ * 说明与用户在原版 Codex 里看到的一致 —— 只有 `ultra` 是 Codex 独有的
+ * "自动任务委派"，我们的上游没有这个概念（实测：`ultra` 会被当普通高力度收下，
+ * 但**不会**带来委派行为），所以不声明它。
+ */
+const EFFORT_DESCRIPTIONS = {
+  minimal: 'Minimal reasoning for the fastest responses',
+  low: 'Fast responses with lighter reasoning',
+  medium: 'Balances speed and reasoning depth for everyday tasks',
+  high: 'Greater reasoning depth for complex problems',
+  xhigh: 'Extra high reasoning depth for complex problems',
+  max: 'Maximum reasoning depth for the hardest problems',
+};
+
+/**
+ * 把桥实测的档位表转成目录要的形状。
+ *
+ * `efforts` 来自桥的 `/v1/models`（`reasoning_efforts`，是**逐模型实测**的结果，
+ * 见桥里 `REASONING_EFFORTS_BY_MODEL`）。空数组是"实测一档都不收"的明确信号
+ * （如网关暂时不接的 claude-*），此时**照实声明空表** —— 选择器里没有可选项，
+ * 比列一串必然失败的档位强。`null`（桥没给这个字段）才回退到模板原值。
+ *
+ * 描述文案缺失时**照旧保留该档**、只给一句中性说明：宁可描述不精确，
+ * 也不能因为一句文案把一个真实可用的档位从选择器里删掉。
+ */
+function reasoningLevels(efforts) {
+  if (!Array.isArray(efforts)) return null;
+  return efforts.map((effort) => ({
+    effort,
+    description: EFFORT_DESCRIPTIONS[effort] || `${effort} reasoning effort`,
+  }));
+}
+
+/**
+ * 我们自己写的系统提示（**不复用模板里那份 GPT-5 Codex 官方提示**，理由见
+ * `makeCatalogEntry` 里 `instructions_template` 那一段）。
+ *
+ * 只写这条链路真正成立的事实：
+ *   - 工具是 Codex 提供的那套（`shell` 等，见桥的请求翻译）—— 桥会把它们
+ *     转成上游认的 `tools`；freeform / custom 工具（`exec`）**转不了**，别去调。
+ *   - 上游是 chat/completions 形态的模型，不是 GPT-5 原生 Responses。
+ *   - 不点名任何我们没提供的工具（模板原文点名的 `notes` / `history` /
+ *     `functions.new_context` / `apply_patch` 走桥时都不存在）。
+ *
+ * 刻意**不**写行为规范/人设（那是 Codex 自己的默认提示的职责）——
+ * 这里只做一件事：把"工具集与协议"这个事实讲对，避免模型去调幽灵工具。
+ */
+function neutralInstructions(model) {
+  const name = model?.name || model?.id || 'this model';
+  return [
+    `You are ${name}, running through a local OpenAI-compatible bridge.`,
+    '',
+    'The tools available to you are exactly the ones defined in the request. Call them',
+    'through the normal tool-calling interface; do not write tool calls into your reply text.',
+    '',
+    'Some tools the client may advertise as freeform/custom scripts are not forwarded by the',
+    'bridge. If a tool is not listed in the request, it does not exist — do not invent or',
+    'mention tools such as `notes`, `history`, `functions.new_context`, or `apply_patch`.',
+  ].join('\n');
+}
+
+/**
  * 按模板克隆一条目录条目。只改归属、上下文与**行为开关** —— 其余字段原样继承。
  *
  * ⚠️ 那几行开关必须**显式定死**，不能让它们随模板漂：
@@ -900,6 +964,22 @@ function readCatalogSource(client) {
  *     `<||DSML||invoke name="exec_command">` 这种标记），Codex 无工具可执行 →
  *     一个回合就此结束 —— 用户看到的就是"话说一半断了"。
  *   - `multi_agent_version`：Codex 多智能体的版本号，与我们的上游无关。
+ *
+ * ⚠️ **三类字段必须按桥的实测值覆盖，不能继承模板**（模板是 cc-switch 给"别的
+ * 隧道"写的，它的模型上限/档位/输出预算都与我们不同）：
+ *   - `supported_reasoning_levels` / `default_reasoning_level`：模板列的是它那个
+ *     上游的档位（含 Codex 独有的 `ultra`）。照抄会让用户在 Codex 里挑一个
+ *     我们这边语义不同的档位。以桥的实测表为准；桥没给才继承。
+ *   - `max_output_tokens` / `truncation_policy.limit`：桥的 `/v1/models` 明确报了
+ *     单次输出上限（如 deepseek 128000），模板里没有这个字段或值不对时，
+ *     Codex 就按自己的默认值规划输出与截断 —— 长回答会被提前砍掉。
+ *   - `model_messages.instructions_template`：模板里是 **GPT-5 Codex 的官方系统提示**
+ *     （"You are Codex, an agent based on GPT-5"），里面点名要求用 `notes` /
+ *     `history` / `functions.new_context` / `apply_patch` 这些工具。走我们的桥时
+ *     **这些工具一个都不存在**（上游是 chat/completions，工具由 Codex 自己那套
+ *     `shell` / `read_file` 提供）——照抄等于教模型去调幽灵工具：它要么把工具调用
+ *     写进正文，要么反复尝试不存在的 `notes`，白烧 token。
+ *     我们**不用模板的正文**，换成一句中性说明（见 `neutralInstructions`）。
  */
 function makeCatalogEntry(template, model) {
   const window = Number(model.context) || 128000;
@@ -914,6 +994,42 @@ function makeCatalogEntry(template, model) {
   };
   delete entry.tool_mode;
   delete entry.multi_agent_version;
+
+  const levels = reasoningLevels(model.efforts);
+  if (levels) {
+    entry.supported_reasoning_levels = levels;
+    /*
+     * 默认档位要落在**声明过的档位里**：模板的默认值（通常是 `low`）在我们
+     * 自己的表里可能压根不存在（如 gpt-5.6 系不收 `minimal`、gemini 不收
+     * `xhigh`）。落在表外时选择器会显示一个"选中了但列表里没有"的值。
+     * 取 `medium` 优先（居中的日常档），没有就退到第一档。
+     */
+    if (!levels.some((l) => l.effort === entry.default_reasoning_level)) {
+      entry.default_reasoning_level = levels.some((l) => l.effort === 'medium')
+        ? 'medium'
+        : (levels[0]?.effort ?? entry.default_reasoning_level);
+    }
+    if (!levels.length) delete entry.default_reasoning_level;
+  }
+
+  /*
+   * 输出上限：桥报的是**上游真接受**的单次输出预算，比模板的猜测可靠。
+   * `truncation_policy` 也要跟着调 —— 它是 Codex 自己的输出截断策略，
+   * 留在模板那个小值（10000）上会让回答远早于上游上限就被砍断。
+   */
+  const maxOut = Number(model.maxOutput) || 0;
+  if (maxOut > 0) {
+    entry.max_output_tokens = maxOut;
+    if (entry.truncation_policy && typeof entry.truncation_policy === 'object') {
+      entry.truncation_policy = { ...entry.truncation_policy, limit: maxOut };
+    }
+  }
+
+  // 系统提示换成中性文案（理由见上面那段 `instructions_template` 的说明）
+  if (entry.model_messages && typeof entry.model_messages === 'object') {
+    entry.model_messages = { ...entry.model_messages, instructions_template: neutralInstructions(model) };
+  }
+
   return entry;
 }
 
@@ -1201,6 +1317,15 @@ export async function buildConnectBase() {
       name: m.name || m.id,
       context: Number(m.context_window) || 0,
       maxOutput: Number(m.max_output_tokens) || 0,
+      /*
+       * 实测档位（`reasoning_efforts`，见桥的 REASONING_EFFORTS_BY_MODEL）与
+       * "只能推理、不能关"（`only_reasoning`）要一起带下去 —— Codex 的目录里
+       * `supported_reasoning_levels` / `default_reasoning_level` 必须与它对得上，
+       * 否则用户在 Codex 选择器里挑的档位，桥这边要么不认识、要么默认值挑了个
+       * 上游不收的。这两项**只有桥知道**（上游目录没有这些字段），所以只能在这里接。
+       */
+      efforts: Array.isArray(m.reasoning_efforts) ? m.reasoning_efforts : null,
+      onlyReasoning: m.only_reasoning === true,
     });
   }
   const models = all
