@@ -97,7 +97,7 @@ npm run test:plugin   # 插件用例
    会把桥回收：起桥 → 等端口 → 跑探针 → 杀桥。探针第三个参数起可只跑指定模型）：
 
    ```bash
-   WORKBUDDY_AUTH_FILE="C:/Users/Ian/AppData/Local/CodeBuddyExtension/Data/Public/auth/workbuddy-desktop.info" \
+   WORKBUDDY_AUTH_FILE="C:/Users/<用户>/AppData/Local/CodeBuddyExtension/Data/Public/auth/workbuddy-desktop.info" \
    WORKBUDDY_PORT=8799 WORKBUDDY_LOCAL_TOKEN="$(cat dsh-plugin/.bridge-token)" \
    WORKBUDDY_AUTO_CHECKIN=0 WORKBUDDY_LOG=0 node bridge/workbuddy-bridge.mjs &
    # 等端口起来后：

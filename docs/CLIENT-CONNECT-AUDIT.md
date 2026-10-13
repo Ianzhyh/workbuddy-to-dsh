@@ -68,15 +68,18 @@
 **实测证据**（本机真实 ACL，2026-10-10）：
 
 ```
-客户端配置  C:\Users\Ian\.codex\config.toml
-            → LAPTOP-RED00CSJ\Ian:(F)                       ← 已收紧
+客户端配置  C:\Users\<用户>\.codex\config.toml
+            → <机器名>\<用户>:(F)                          ← 已收紧
 
-备份文件    E:\workbuddy-to-dsh\.backup\client-configs\codex\20261010-132325-config.toml
+备份文件    <仓库>\.backup\client-configs\codex\<时间戳>-config.toml
             → BUILTIN\Administrators:(I)(F)
               NT AUTHORITY\SYSTEM:(I)(F)
               NT AUTHORITY\Authenticated Users:(I)(M)       ← 任何已认证用户可改
               BUILTIN\Users:(I)(RX)                         ← 任何用户可读
 ```
+
+> 注：上述路径与 ACL 主体已用占位符（`<用户>` / `<机器名>` / `<仓库>`）替换本机实值 ——
+> 文档要说明的是**权限形状**，把真实用户名与机器名写进公开仓库没有必要。
 
 **复现（沙箱）**：连续 apply 两次，读第二次的备份内容 —— 里面有第一次写进去的令牌。
 

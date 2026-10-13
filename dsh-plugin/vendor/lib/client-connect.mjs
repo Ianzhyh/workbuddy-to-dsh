@@ -292,7 +292,7 @@ function backupFile(path, root, clientId) {
  * （`applied.json`）的 `restore.section` 也可能带着上一把令牌。
  *
  * 实测（2026-10-10，本机真实 ACL）：
- *   客户端配置 `.codex/config.toml`        → `Ian:(F)`（已收紧）
+ *   客户端配置 `.codex/config.toml`        → `<当前用户>:(F)`（已收紧）
  *   `.backup/client-configs/codex/*-config.toml` → 继承来的
  *   `Authenticated Users:(M)` + `Users:(RX)`
  * 也就是：**同机任何用户都能读到那把令牌**，而令牌能直接调桥、消耗账号额度。
@@ -978,30 +978,43 @@ const BRIDGE_NOTES_MARK = '[workbuddy-bridge-notes]';
  *      `custom_tool_call` 全链路支持）。
  *
  * 所以保留来源模板、只在末尾补一段**这条链路上真的会错**的事实：
- * 工具集边界、freeform 的参数形状、以及回合纪律（用户实际踩到的"话说一半就断了"）。
+ *   1. 工具集边界：请求里 `tools` 列出的可直接调；MCP server 的工具**不在**里面，
+ *      要先 `tool_search` 检索命中后才以 `mcp__<server>__<tool>` 可用。
+ *   2. freeform 的参数形状（`input` 字符串）。
+ *   3. 回合纪律（用户实际踩到的"话说一半就断了"）。
+ *
+ * ⚠️ 早先那版写着"computer use 在这里不存在" —— 已删。freeform 工具自
+ * `ba7a394`（2026-10-13）打通，"不存在"这类断言会随桥的进度变成假话；
+ * 现在只写"某能力要 MCP 工具就先 `tool_search`"这种对链路成立的说法。
+ *
+ * 这段**逐字进每一次请求**，篇幅要克制（总量 ≤1400 字符；一段截图的 token 是它的
+ * 几十倍，教对写法比省这两百字符划算，但上限必须存在防它悄悄膨胀）。
  */
 function bridgeNotes() {
   return [
     BRIDGE_NOTES_MARK,
     '',
-    'This session runs through a local OpenAI-compatible bridge, so two things differ from a',
-    'stock setup:',
+    'Local bridge; differences from stock:',
     '',
-    '- The tools declared in the request are the complete set. Anything not declared (web search,',
-    '  sub-agents, computer use, `notes` / `history` / `functions.*`) does not exist here — do not',
-    '  call it, and do not tell the user you did.',
-    '- Freeform tools (`apply_patch`, and any other `custom` tool) are exposed as ordinary',
-    '  functions: pass the whole payload as the string argument `input`, not wrapped in more JSON.',
+    "- The request's `tools` list is the complete set of directly callable tools; anything else",
+    '  (web search, `notes`/`functions.*`) does not exist — do not call it or claim you did.',
+    '- MCP tools are NOT in that list: search first with `tool_search`, e.g.',
+    '  `{"query":"node_repl js execute javascript"}`; matches become callable as',
+    '  `mcp__<server>__<tool>`.',
+    '- Desktop control / screenshots: search node_repl, then in `js` start EVERY snippet with',
+    "  `if (!globalThis.sky) globalThis.sky = (await import('@oai/sky')).sky;` and call",
+    '  `globalThis.sky.list_apps()` / `get_window_state({window, include_screenshot:true})` /',
+    '  `click(...)`; return images via `await nodeRepl.emitImage(state.screenshots[0].image_url)`',
+    '  (the image lives in the `screenshots` array). Minimized window? `activate_window` first.',
+    '  Reading a UI as text? Prefer `state.accessibility` — it is far cheaper than screenshots.',
+    '  Never hand-write PowerShell screenshot scripts.',
+    '- Freeform tools (`apply_patch`) are ordinary functions: pass the whole payload as the string argument `input`.',
     '',
-    'The user only sees your messages and tool calls — never your intent. So:',
+    'The user sees only messages and tool calls, never intent:',
     '',
-    '- If you are about to run, read, check, or verify something, issue that tool call in the same',
-    '  turn. A turn that ends on "let me …" / "I will …" looks to the user like the assistant went',
-    '  silent, and the work simply stops.',
-    '- If a command you started is still running, keep waiting on it with `write_stdin` and a',
-    '  generous `yield_time_ms` instead of handing the turn back with a promise to wait.',
-    '- End the turn only when the task is done, when you need input from the user, or when you are',
-    '  blocked and must say so.',
+    '- Issue the tool call in the same turn — ending on "let me …" looks like work stopped.',
+    '- Poll a running command via `write_stdin` with a generous `yield_time_ms`.',
+    '- End the turn only when done, needing input, or blocked.',
   ].join('\n');
 }
 
@@ -1035,6 +1048,10 @@ function catalogInstructions(templateEntry, model) {
  *     `<||DSML||invoke name="exec_command">` 这种标记），Codex 无工具可执行 →
  *     一个回合就此结束 —— 用户看到的就是"话说一半断了"。
  *   - `multi_agent_version`：Codex 多智能体的版本号，与我们的上游无关。
+ *   - `supports_search_tool` / `web_search_tool_type`：声明 `true` 会让 Codex 向模型
+ *     提供**服务端**执行的 `web_search` 工具，而桥的上游（chat/completions）
+ *     没有这个能力，只能把它丢掉 → 模型蒙调用并失败。**必须显式 `false`**。
+ *     2026-10-13 真机实测：日志 `dropped=web_search`，模型答"我没有 web search 工具"。
  *
  * ⚠️ **三类字段必须按桥的实测值覆盖，不能继承模板**（模板是 cc-switch 给"别的
  * 隧道"写的，它的模型上限/档位/输出预算都与我们不同）：
@@ -1049,7 +1066,8 @@ function catalogInstructions(templateEntry, model) {
  *     **全量系统提示**（`input[0]` 的 developer 消息逐字等于模板），整段换掉等于
  *     连行为规范一起删掉；而模板点名的工具（`apply_patch` / `exec_command` /
  *     `write_stdin` / `view_image`）走桥时都成立。只补"这条链路上真的会错"的
- *     三件事：工具集边界、freeform 的 `input` 参数形状、回合纪律。
+ *     三件事：`tools` 之外还有一层需要 `tool_search` 检索的 MCP 工具、
+ *     freeform 的 `input` 参数形状、回合纪律。
  */
 function makeCatalogEntry(template, model) {
   const window = Number(model.context) || 128000;
@@ -1061,9 +1079,30 @@ function makeCatalogEntry(template, model) {
     context_window: window,
     max_context_window: window,
     use_responses_lite: false,
+    /*
+     * ⚠️ `supports_search_tool` 我们**声明 false**，但必须说清它的真实作用边界 ——
+     * 2026-10-13 实测：**改这个字段并不能阻止 Codex 发 `web_search`**。
+     *
+     * 实测方法（`tools/dev/probe-codex-websearch-source.mjs` 的 A/B 对照）：
+     * 同一份目录只改 `supports_search_tool`（true / false 各跑一次真 `codex exec`），
+     * 桥日志两次都是 `dropped=web_search`；另外试过
+     * `web_search_mode = "disabled"` 与 `[tools] web_search = false`，**都没用**。
+     * → `web_search` 是 Codex 的**内置工具**，不由目录字段或这几个配置开关控制。
+     *
+     * 那为什么还写 false：它是**事实陈述**（桥的上游确实没有服务端检索能力），
+     * 且万一将来某个 Codex 版本开始读这个字段，声明 false 是正确的一侧。
+     * 但**不要**把它当成"web_search 已经关掉了"——它没关。
+     *
+     * 真正的处置在桥侧：`responsesToolsToOpenAI` 把 `web_search` 丢掉，
+     * 并在请求日志里打 `dropped=web_search`（可诊断）；
+     * 系统提示的桥补充说明里也明说了"这里没有联网检索"，
+     * 让模型**知道**别去调它（这是目前唯一能让模型不去撞墙的手段）。
+     */
+    supports_search_tool: false,
   };
   delete entry.tool_mode;
   delete entry.multi_agent_version;
+  delete entry.web_search_tool_type;
 
   const levels = reasoningLevels(model.efforts);
   if (levels) {
