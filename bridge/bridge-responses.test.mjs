@@ -81,6 +81,19 @@ const upstream = createServer((req, res) => {
       return;
     }
 
+    if (scenario.kind === 'ctxlenReal') {
+      /*
+       * **上游真实原文**（2026-10-13 bridge.log 实测，不是编的）：
+       *   {"code":11115,"msg":"prompt is too long: 1252936 tokens > 1048576 maximum"}
+       * 旧正则只认 "context length" / "too many tokens" / "maximum context"，
+       * 这条**一个都不匹配** → 落兜底 upstream_error → Codex 归到 Retryable →
+       * 原样重发 6 次、白烧 249 秒才失败（实测 08:50:33→08:52:16 连 6 条）。
+       */
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ code: 11115, msg: 'prompt is too long: 1252936 tokens > 1048576 maximum' }));
+      return;
+    }
+
     res.writeHead(200, { 'Content-Type': 'text/event-stream' });
     if (scenario.kind === 'truncated') {
       // 上游因 max_tokens 截断 —— finish_reason 是 length
@@ -137,6 +150,25 @@ const upstream = createServer((req, res) => {
       res.write(sse({ id: 'c1', model: 'm', choices: [{ index: 0, delta: { tool_calls: [{ index: 0, id: 'call_patch', type: 'function', function: { name: 'apply_patch' } }] } }] }));
       res.write(sse({ id: 'c1', model: 'm', choices: [{ index: 0, delta: { tool_calls: [{ index: 0, function: { arguments: '{"input":"*** Begin Patch\\n' } }] } }] }));
       res.write(sse({ id: 'c1', model: 'm', choices: [{ index: 0, delta: { tool_calls: [{ index: 0, function: { arguments: '*** Add File: a.txt\\n+hi\\n*** End Patch\\n"}' } }] } }] }));
+    } else if (scenario.kind === 'toolSearch') {
+      /*
+       * 模型调用「延迟工具检索」。上游看到的只是我们声明的普通函数 `tool_search`
+       * （参数 `{query, limit?}`）；桥必须把这次调用回成 `tool_search_call`
+       * （Codex 的**客户端**会去执行检索），回 `function_call` 会被它拒掉，
+       * 检索这一步就永远发生不了。
+       */
+      res.write(sse({ id: 'c1', model: 'm', choices: [{ index: 0, delta: { content: 'searching' } }] }));
+      res.write(sse({ id: 'c1', model: 'm', choices: [{ index: 0, delta: { tool_calls: [{ index: 0, id: 'call_ts_1', type: 'function', function: { name: 'tool_search' } }] } }] }));
+      res.write(sse({ id: 'c1', model: 'm', choices: [{ index: 0, delta: { tool_calls: [{ index: 0, function: { arguments: '{"query":"node_repl js' } }] } }] }));
+      res.write(sse({ id: 'c1', model: 'm', choices: [{ index: 0, delta: { tool_calls: [{ index: 0, function: { arguments: '","limit":3}' } }] } }] }));
+    } else if (scenario.kind === 'mcpTool') {
+      /*
+       * 模型调用一个**延迟下发**的 MCP 工具。桥给上游声明的是拍平名
+       * `mcp__node_repl__js`；回给 Codex 必须是**短名 + 独立 namespace 字段**
+       * （本机 2026-08-09 那次跑通的会话里 135/135 条 MCP 调用都是这个形状）。
+       */
+      res.write(sse({ id: 'c1', model: 'm', choices: [{ index: 0, delta: { tool_calls: [{ index: 0, id: 'call_js_1', type: 'function', function: { name: 'mcp__node_repl__js' } }] } }] }));
+      res.write(sse({ id: 'c1', model: 'm', choices: [{ index: 0, delta: { tool_calls: [{ index: 0, function: { arguments: '{"code":"nodeRepl.write(1)"}' } }] } }] }));
     } else if (scenario.kind === 'reasoning') {
       /*
        * 上游先给思维链、再给正文 —— 这是**真实顺序**（实测日志里就是这样），
@@ -149,6 +181,19 @@ const upstream = createServer((req, res) => {
     } else if (scenario.kind === 'empty') {
       // 上游只回 usage、没有任何内容帧
       res.write(sse({ id: 'c1', model: 'm', choices: [{ index: 0, delta: {} }] }));
+    } else if (scenario.kind === 'midBreak') {
+      /*
+       * 上游在**流中途**断掉：已经吐了半句话，然后连接被掐（没有 finish_reason、
+       * 没有 [DONE]）。真实成因：网络故障 / 上游超时 / 网关掐连接。
+       *
+       * 这时回答是**截断在半句话上**的。桥原来无条件发 `response.completed`
+       * + `end_turn:true` → Codex 以为"回合正常结束" → 用户看到
+       * **说话说一半突然停下**，且不报错、不重试。必须改成 `response.failed`。
+       */
+      res.write(sse({ id: 'c1', model: 'm', choices: [{ index: 0, delta: { content: '我来验证一下' } }] }));
+      res.write(sse({ id: 'c1', model: 'm', choices: [{ index: 0, delta: { content: '——这句话说到一半' } }] }));
+      setTimeout(() => res.destroy(), 20);
+      return;   // 不走下面的正常收尾
     }
     res.write(sse({
       id: 'c1',
@@ -198,7 +243,26 @@ const child = spawn(process.execPath, [BRIDGE], {
     CODEBUDDY_ENDPOINT: `http://127.0.0.1:${UPSTREAM_PORT}`,
     CODEBUDDY_API_KEY: 'stub-key',
     WORKBUDDY_AUTO_CHECKIN: '0',
-    WORKBUDDY_LOG: '0',
+    /*
+     * ⚠️ 账本必须**显式**指到临时目录，`cwd: dir` 是不够的。
+     *
+     * `usageFile()` 解析的是 `WORKBUDDY_USAGE_FILE`，否则退回
+     * **桥脚本所在目录**（`dirname(fileURLToPath(import.meta.url))`）——
+     * 那是仓库里的 `bridge/usage.jsonl`，**使用者的真实账本**，与 cwd 无关。
+     * 少了这一行，每跑一次本文件就会往真实账本里写几十条测试记录，
+     * 而账本到 2000 行会截断保留最近一半 —— 等于把用户自己的用量历史挤掉。
+     * 本文件模型名固定为 `resolved-default`/`resolved-fast`，
+     * 所以污染在账本里一眼可辨（实测真实账本里 914 条 `resolved-default`、
+     * 58 条 `resolved-fast`、14 条 `stub-model`，占总量一半以上）。
+     */
+    WORKBUDDY_USAGE_FILE: join(dir, 'usage.jsonl'),
+    /*
+     * 日志**开着**：有一条用例要断言请求日志里的 `dropped=` 字段
+     * （"被丢掉的工具必须可见"）。关掉的话那条用例没法验，
+     * 而它守的正是 2026-10-13 连续两次翻车的那个盲区。
+     * 日志走 stderr，用例用 `bridgeLog` 收着，不会污染测试输出。
+     */
+    WORKBUDDY_LOG: '1',
     // 固定解析结果，免得住默认值一变用例就跟着漂
     WORKBUDDY_RESPONSES_MODEL: 'resolved-default',
     WORKBUDDY_RESPONSES_FAST_MODEL: 'resolved-fast',
@@ -460,6 +524,201 @@ test('非流式：custom 工具同样回 custom_tool_call（与流式形状一�
   assert.equal(j.output.some((i) => i.type === 'function_call'), false);
 });
 
+test('延迟工具检索：tool_search 必须转发，模型的调用必须回 tool_search_call', async () => {
+  await waitReady();
+  scenario = { kind: 'toolSearch' };
+  const { text } = await post({
+    model: 'gpt-5.1-codex', stream: true,
+    input: [{ type: 'message', role: 'user', content: 'use computer use' }],
+    tools: [
+      { type: 'function', name: 'exec_command', description: 'run', parameters: { type: 'object', properties: {} } },
+      {
+        type: 'tool_search',
+        execution: 'client',
+        description: '# Tool discovery\n\nSearches over deferred tool metadata with BM25.',
+        parameters: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] },
+      },
+      { type: 'web_search', external_web_access: true },
+    ],
+  });
+
+  const sent = lastUpstreamBody?.tools || [];
+  assert.ok(sent.some((t) => t.function?.name === 'tool_search'),
+    'tool_search 必须转发给上游 —— 原先它被**静默丢弃**，于是 Codex 的 MCP 工具'
+    + '（含 computer-use 的唯一入口 mcp__node_repl.js）走桥时永远发现不了，且不报错');
+  assert.equal(sent.some((t) => t.function?.name === 'web_search'), false,
+    'web_search 上游没有对应能力，仍然丢掉');
+
+  const evs = parseSse(text);
+  const done = evs.find((e) => e.event === 'response.output_item.done' && e.data.item.type === 'tool_search_call');
+  assert.ok(done, 'tool_search 的调用必须回 tool_search_call —— 发成 function_call 会被 Codex 的工具路由器拒掉');
+  assert.equal(done.data.item.call_id, 'call_ts_1');
+  assert.equal(done.data.item.execution, 'client');
+  assert.equal(done.data.item.status, 'completed');
+  assert.deepEqual(done.data.item.arguments, { query: 'node_repl js', limit: 3 },
+    'arguments 必须是**对象**（Codex 的 ToolSearchCallResponseItem 就长这样），不是 JSON 字符串');
+  assert.equal(evs.some((e) => e.data?.item?.type === 'function_call'), false,
+    '同一个块不能既当 tool_search_call 又当 function_call');
+  assert.equal(evs.some((e) => e.event === 'response.function_call_arguments.delta'), false,
+    'tool_search 不发逐片参数 delta（它没有 delta 事件，参数只走 output_item.done）');
+});
+
+test('延迟下发：tool_search_output 里的 MCP 工具要补进上游 tools[]，分组调用要拍平', async () => {
+  await waitReady();
+  scenario = { kind: 'text' };
+  await post({
+    model: 'gpt-5.1-codex', stream: true,
+    input: [
+      { type: 'message', role: 'user', content: 'control the desktop' },
+      {
+        type: 'tool_search_call', execution: 'client', call_id: 'call_ts_9', status: 'completed',
+        arguments: { query: 'node_repl js', limit: 3 },
+      },
+      {
+        type: 'tool_search_output', execution: 'client', call_id: 'call_ts_9', status: 'completed',
+        tools: [
+          {
+            type: 'namespace',
+            name: 'mcp__node_repl',
+            description: 'Tools in the mcp__node_repl namespace.',
+            tools: [
+              {
+                type: 'function',
+                name: 'js',
+                description: 'Run JavaScript in a persistent Node-backed kernel.',
+                strict: false,
+                defer_loading: true,
+                parameters: { type: 'object', properties: { code: { type: 'string' } }, required: ['code'] },
+              },
+            ],
+          },
+        ],
+      },
+      { type: 'function_call', call_id: 'call_js_9', name: 'js', namespace: 'mcp__node_repl', arguments: '{"code":"1"}' },
+      { type: 'function_call_output', call_id: 'call_js_9', output: 'ok' },
+    ],
+    tools: [
+      {
+        type: 'tool_search', execution: 'client', description: 'search',
+        parameters: { type: 'object', properties: { query: { type: 'string' } } },
+      },
+    ],
+  });
+
+  const sent = lastUpstreamBody?.tools || [];
+  const js = sent.find((t) => t.function?.name === 'mcp__node_repl__js');
+  assert.ok(js, 'tool_search_output 里的 MCP 工具必须补进上游 tools[] —— 不补的话模型看不到也调不了，'
+    + 'Codex 自带的 computer-use 走桥就是不可达的');
+  assert.deepEqual(js.function.parameters.required, ['code'], '内层 function 的 parameters 要原样带过去');
+
+  const msgs = lastUpstreamBody.messages;
+  const tsAssistant = msgs.find((m) => Array.isArray(m.tool_calls)
+    && m.tool_calls.some((c) => c.function?.name === 'tool_search'));
+  assert.ok(tsAssistant, 'tool_search_call 历史要回放成 assistant.tool_calls（名称 tool_search）');
+  const tsOut = msgs.find((m) => m.role === 'tool' && m.tool_call_id === 'call_ts_9');
+  assert.ok(tsOut, 'tool_search_output 要转成 role:"tool" 消息 —— 原先它和 reasoning 一起被**静默丢弃**');
+  assert.match(String(tsOut.content), /mcp__node_repl__js/, '工具结果里要列出检索到的工具名，否则模型不知道检索生效了');
+
+  const call = msgs.flatMap((m) => m.tool_calls || []).find((c) => c.id === 'call_js_9');
+  assert.ok(call, '带 namespace 的 function_call 历史要回放成 assistant.tool_calls');
+  assert.equal(call.function.name, 'mcp__node_repl__js',
+    '带 namespace 的调用必须拍平成**出站声明过的同一个名字**，否则上游看到的是一个从没声明过的工具');
+});
+
+test('分组工具（MCP）回包：短名 + 独立 namespace 字段（与 Codex 实测形状一致）', async () => {
+  await waitReady();
+  scenario = { kind: 'mcpTool' };
+  const { text } = await post({
+    model: 'gpt-5.1-codex', stream: true,
+    input: [
+      { type: 'message', role: 'user', content: 'go' },
+      {
+        type: 'tool_search_output', execution: 'client', call_id: 'call_ts_0', status: 'completed',
+        tools: [
+          {
+            type: 'namespace',
+            name: 'mcp__node_repl',
+            tools: [
+              {
+                type: 'function',
+                name: 'js',
+                description: 'run js',
+                parameters: { type: 'object', properties: { code: { type: 'string' } }, required: ['code'] },
+              },
+            ],
+          },
+        ],
+      },
+    ],
+    tools: [
+      {
+        type: 'tool_search', execution: 'client', description: 'search',
+        parameters: { type: 'object', properties: { query: { type: 'string' } } },
+      },
+    ],
+  });
+  const evs = parseSse(text);
+  const done = evs.find((e) => e.event === 'response.output_item.done' && e.data.item.type === 'function_call');
+  assert.ok(done, 'MCP 工具的调用回包用 function_call');
+  assert.equal(done.data.item.name, 'js', 'name 必须是**短名**（不是 mcp__node_repl__js）');
+  assert.equal(done.data.item.namespace, 'mcp__node_repl',
+    '必须带独立的 namespace 字段 —— 少了它 Codex 的路由器认不出这条调用属于哪个 MCP server');
+  assert.equal(done.data.item.arguments, '{"code":"nodeRepl.write(1)"}');
+  const added = evs.find((e) => e.event === 'response.output_item.added' && e.data.item.type === 'function_call');
+  assert.ok(added, '分组工具也是普通 tool 块，delta 之前必须先有 added');
+  assert.equal(added.data.item.namespace, 'mcp__node_repl', 'added 与 done 的 namespace 要一致');
+  assert.equal(added.data.item.name, 'js', 'added 与 done 的 name 要一致');
+});
+
+test('非流式：tool_search 同样回 tool_search_call（与流式形状一致）', async () => {
+  await waitReady();
+  scenario = { kind: 'toolSearch' };
+  const { status, text } = await post({
+    model: 'gpt-5.1-codex', stream: false,
+    input: [{ type: 'message', role: 'user', content: 'search' }],
+    tools: [
+      {
+        type: 'tool_search', execution: 'client', description: 'search',
+        parameters: { type: 'object', properties: { query: { type: 'string' } } },
+      },
+    ],
+  });
+  assert.equal(status, 200);
+  const j = JSON.parse(text);
+  const item = j.output.find((i) => i.type === 'tool_search_call');
+  assert.ok(item, '非流式的 output 里也必须是 tool_search_call（两边形状不一致客户端会判 payload 不符）');
+  assert.equal(item.execution, 'client');
+  assert.deepEqual(item.arguments, { query: 'node_repl js', limit: 3 });
+  assert.equal(j.output.some((i) => i.type === 'function_call'), false);
+});
+
+test('非流式：分组工具的调用同样回短名 + namespace', async () => {
+  await waitReady();
+  scenario = { kind: 'mcpTool' };
+  const { status, text } = await post({
+    model: 'gpt-5.1-codex', stream: false,
+    input: [
+      { type: 'message', role: 'user', content: 'go' },
+      {
+        type: 'tool_search_output', execution: 'client', call_id: 'call_ts_0', status: 'completed',
+        tools: [
+          {
+            type: 'namespace',
+            name: 'mcp__node_repl',
+            tools: [{ type: 'function', name: 'js', description: 'run js', parameters: { type: 'object', properties: {} } }],
+          },
+        ],
+      },
+    ],
+  });
+  assert.equal(status, 200);
+  const j = JSON.parse(text);
+  const item = j.output.find((i) => i.type === 'function_call');
+  assert.ok(item, '非流式也要给出 function_call');
+  assert.equal(item.name, 'js');
+  assert.equal(item.namespace, 'mcp__node_repl');
+});
+
 test('非流式：回完整的 Responses 对象（output / output_text / usage）', async () => {
   await waitReady();
   scenario = { kind: 'text' };
@@ -678,6 +937,8 @@ async function startBridge(extraEnv = {}) {
       CODEBUDDY_API_KEY: 'stub-key',
       WORKBUDDY_AUTO_CHECKIN: '0',
       WORKBUDDY_LOG: '0',
+      // 账本隔离：同上，`cwd: dir` 挡不住（usageFile 按**脚本目录**解析）
+      WORKBUDDY_USAGE_FILE: join(dir, 'usage.jsonl'),
       WORKBUDDY_RESPONSES_MODEL: 'resolved-default',
       WORKBUDDY_RESPONSES_FAST_MODEL: 'resolved-fast',
       ...extraEnv,
@@ -923,6 +1184,168 @@ test('上下文超限：按措辞识别成 context_length_exceeded（Codex 才�
   const j = JSON.parse(text);
   assert.equal(j.error.code, 'context_length_exceeded',
     '上游只说 "maximum context length exceeded"，桥要认出来并映射');
+});
+
+test('上下文超限：上游真实措辞 "prompt is too long" 也必须认出来（否则白重试 6 次）', async () => {
+  await waitReady();
+  scenario = { kind: 'ctxlenReal' };
+  const { status, text } = await post({
+    model: 'gpt-5.1-codex', stream: false,
+    input: [{ type: 'message', role: 'user', content: 'hi' }],
+  });
+  assert.equal(status, 400);
+  const j = JSON.parse(text);
+  /*
+   * 这是 2026-10-13 真实崩溃的原文（`prompt is too long: 1252936 tokens > 1048576 maximum`）。
+   * 映射成 `context_length_exceeded` 后，Codex 走 ContextWindowExceeded 分支：
+   * 立刻给出「上下文超了」的准确提示，而不是当成可重试错误反复重发。
+   * **撤掉正则里的 `too long` 这一支，本用例即红。**
+   */
+  assert.equal(j.error.code, 'context_length_exceeded',
+    '上游原文是 "prompt is too long: N tokens > M maximum"，桥必须认出来');
+});
+
+test('工具输出里的图片：必须走视觉通道，不能 JSON.stringify 成纯文本（187 倍 token 差）', async () => {
+  await waitReady();
+  scenario = { kind: 'text' };
+  /*
+   * Codex 的截图工具输出长这样（rollout 实测）：
+   *   output: [{type:'input_text',text:'Wall time…'}, {type:'input_image',image_url:'data:image/jpeg;base64,…'}]
+   *
+   * 旧实现 `responsesOutputText` 对没有 `text` 字段的块走 `JSON.stringify(p)`
+   * → 整段 base64 变成 `role:"tool"` 消息里的**纯文本**。
+   * 实测代价：同一张图，视觉通道 987 tokens，纯文本 184,718 tokens（**187 倍**）。
+   * 后果不是"慢"，是**整轮崩掉** —— Codex 按 ~1K 记帐、永不自动压缩，
+   * 上游实际收到 125 万 tokens 直接 400。
+   */
+  const dataUri = 'data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAA==';
+  await post({
+    model: 'gpt-5.1-codex',
+    stream: false,
+    input: [
+      { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'look' }] },
+      { type: 'function_call', call_id: 'call_img', name: 'js', arguments: '{}' },
+      {
+        type: 'function_call_output',
+        call_id: 'call_img',
+        output: [
+          { type: 'input_text', text: 'Wall time: 0.4 seconds' },
+          { type: 'input_image', image_url: dataUri },
+        ],
+      },
+    ],
+    tools: [{ type: 'function', name: 'js', parameters: { type: 'object', properties: {} } }],
+    max_output_tokens: 64,
+  });
+
+  const m = lastUpstreamBody;
+  assert.ok(m, '上游没收到请求体');
+  const toolMsg = m.messages.find((x) => x.role === 'tool');
+  assert.ok(toolMsg, '缺 role:"tool" 消息');
+
+  // 关键：content 必须是**数组**且含 image_url 块
+  assert.ok(Array.isArray(toolMsg.content),
+    `工具输出含图片时必须回内容块数组，实际是 ${typeof toolMsg.content}`
+    + '（降级成字符串会让单图从 ~1K 变 18 万 tokens）');
+  const img = toolMsg.content.find((p) => p.type === 'image_url');
+  assert.ok(img, '图片块丢了：tool 消息的 content 里必须有一个 image_url 块');
+  assert.equal(img.image_url.url, dataUri, '图片必须原样透传（data URI 不变形）');
+  assert.equal(toolMsg.content.find((p) => p.type === 'text')?.text, 'Wall time: 0.4 seconds',
+    '同一条输出里的文本块要保留');
+
+  // 反证：整段 base64 不得出现在任何**字符串** content 里
+  const asText = JSON.stringify(toolMsg.content);
+  assert.ok(!(typeof toolMsg.content === 'string' && toolMsg.content.includes('base64')),
+    'base64 不得被当成纯文本塞进 tool 消息');
+  assert.ok(asText.includes(dataUri), '图片数据本身要在（只是换了通道）');
+});
+
+test('工具输出里的图片：纯文本输出仍然降级成字符串（不多包一层数组）', async () => {
+  await waitReady();
+  scenario = { kind: 'text' };
+  await post({
+    model: 'gpt-5.1-codex',
+    stream: false,
+    input: [
+      { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'go' }] },
+      { type: 'function_call', call_id: 'call_txt', name: 'js', arguments: '{}' },
+      { type: 'function_call_output', call_id: 'call_txt', output: [{ type: 'input_text', text: 'plain result' }] },
+    ],
+    tools: [{ type: 'function', name: 'js', parameters: { type: 'object', properties: {} } }],
+    max_output_tokens: 64,
+  });
+  const m = lastUpstreamBody;
+  const toolMsg = m.messages.find((x) => x.role === 'tool');
+  assert.equal(toolMsg.content, 'plain result',
+    '只有一个文本块时应降成字符串（保持既有形状，避免无谓的数组包装）');
+});
+
+test('流中途断开：必须发 response.failed，不能发 completed（否则「说话说一半」被当成功）', async () => {
+  await waitReady();
+  scenario = { kind: 'midBreak' };
+  const { status, text } = await post({
+    model: 'gpt-5.1-codex',
+    stream: true,
+    input: [{ type: 'message', role: 'user', content: 'do the thing' }],
+  });
+  assert.equal(status, 200, '已经答应过是事件流，只能 200 + SSE');
+
+  const events = parseSse(text);
+  const kinds = events.map((e) => e.event);
+
+  /*
+   * 核心断言：截断的流**不能**被报成成功。
+   * 发 completed 会让 Codex 认为回合正常结束 → 用户看到半句话就停、不报错、不重试。
+   */
+  assert.ok(!kinds.includes('response.completed'),
+    `上游流中途断了，绝不能发 response.completed（会伪装成成功）。实际事件：${kinds.join(', ')}`);
+  const failed = events.find((e) => e.event === 'response.failed');
+  assert.ok(failed, `缺 response.failed。实际事件：${kinds.join(', ')}`);
+  assert.equal(failed.data.response.status, 'failed');
+  assert.ok(failed.data.response.error, 'response.failed 必须带 error');
+  assert.match(failed.data.response.error.message, /interrupted/i,
+    '错误信息要说清是"上游流中途断了"');
+
+  // 已经收到的半截内容仍要带出去（便于排查，但不代表成功）
+  assert.match(JSON.stringify(failed.data.response.output), /说到一半/,
+    '已收到的半截内容应保留在 output 里');
+});
+
+test('被丢掉的工具必须在请求日志里可见（否则「模型有个工具用不了」永远查不出来）', async () => {
+  await waitReady();
+  scenario = { kind: 'text' };
+  const mark = bridgeLog.length;   // 只看本用例之后的日志
+  await post({
+    model: 'gpt-5.1-codex',
+    stream: false,
+    input: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'hi' }] }],
+    tools: [
+      // 桥**能**转发这三类 —— 都不该出现在 dropped 里
+      { type: 'function', name: 'exec_command', parameters: { type: 'object', properties: {} } },
+      { type: 'custom', name: 'apply_patch', description: 'patch' },
+      { type: 'tool_search' },
+      // 桥**不能**转发 —— 必须出现在 dropped 里
+      { type: 'web_search' },
+    ],
+    max_output_tokens: 64,
+  });
+
+  const logs = bridgeLog.slice(mark);
+  const line = logs.split('\n').filter((l) => l.includes('[responses]') && l.includes('dropped=')).pop();
+  assert.ok(line, `请求日志里没有 dropped= 字段。本用例日志：\n${logs.slice(-800)}`);
+  assert.match(line, /dropped=web_search/, 'web_search 被丢掉了，必须在日志里点名');
+  /*
+   * 反向断言（这条是踩过的坑）：`apply_patch` 是 `custom` 类型，桥**能**转发它
+   * （同一行还会有 `freeform=apply_patch`）。第一版实现漏了这个排除，
+   * 日志打出 `dropped=apply_patch,web_search` —— 自相矛盾、会误导排查。
+   */
+  assert.ok(!/dropped=\S*apply_patch/.test(line),
+    `apply_patch 是能转发的 custom 工具，不该出现在 dropped 里：${line}`);
+  assert.ok(!/dropped=\S*tool_search/.test(line),
+    `tool_search 是能转发的，不该出现在 dropped 里：${line}`);
+  assert.ok(!/dropped=\S*exec_command/.test(line),
+    `exec_command 是普通 function，不该出现在 dropped 里：${line}`);
+  assert.match(line, /freeform=apply_patch/, '同一行应能看到 apply_patch 确实被转发了');
 });
 
 // ── 收尾 ──────────────────────────────────────────────────────────────────

@@ -19,6 +19,214 @@
 
 ## [Unreleased]
 
+### Fixed（测试在写坏使用者的真实账本 —— 每跑一次挤掉几十行用量历史）
+
+**现象**：`bridge/usage.jsonl`（使用者的真实账本）里 57% 是测试记录 ——
+914 条 `resolved-default` + 58 条 `resolved-fast` + 14 条 `stub-model`，
+模型名一眼可辨、`ms` 恒为 0-1ms、token 数固定。
+
+**根因**：`usageFile()` 解析的是 `WORKBUDDY_USAGE_FILE`，否则退回
+**桥脚本所在目录**（`dirname(fileURLToPath(import.meta.url))`）下的 `usage.jsonl`
+—— 也就是仓库里那份真实账本，**与 `cwd` 无关**。测试里惯用的
+`cwd: <临时目录>` 根本挡不住。
+
+而账本涨到 `MAX_USAGE_LINES`(2000) 会**截断保留最近一半** ——
+所以每跑一次测试都在把用户自己的用量历史往外挤。
+`bridge.test.mjs` / `bridge-startup.test.mjs` 早就设了这一项，
+`bridge-responses.test.mjs` 与 `bridge-cors.test.mjs` 是漏的。
+
+**实测**：跑一次 `bridge-responses.test.mjs`（32 用例）就往真实账本写进 **36 行**。
+
+**改法**：两处补上 `WORKBUDDY_USAGE_FILE: join(dir, 'usage.jsonl')`。
+并加了源码级守卫用例（照 `numEnv` 那条的思路扫源码，能覆盖**未来**新增的测试文件）：
+凡是 `spawn(process.execPath` 起桥的文件都必须有该赋值。
+
+实测修后：跑全套 4 个文件 **0 字节增量**。
+反证也做了 —— 把赋值删掉、注释留着时守卫**变红**
+（第一版守卫只搜 `WORKBUDDY_USAGE_FILE` 这个字符串，会被注释骗过、测不出东西，
+已改成要求真正的赋值形状 `WORKBUDDY_USAGE_FILE\s*[:=]`）。
+
+### Feat（账本记下提示缓存命中量 —— 一处 26 倍的隐藏成本）
+
+提示缓存是这条链路上**最大的单因素**，但原先在账本里**完全不可见**。
+
+实测同一批 `promptTokens >= 40k` 的请求（93 条）：
+
+| | 条数 | 平均 credit / 1k tokens | 合计 |
+|---|---|---|---|
+| 未命中缓存 | 6 | **0.0142** | **10.00 积分** |
+| 已命中缓存 | 87 | 0.0005 | 10.20 积分 |
+
+**6 条未命中就花掉 10 个积分**，与 87 条命中的花费相当 —— 单价差 **26 倍**。
+延迟侧的差同理：实测冷缓存 TTFT 14.8s → 命中后 5.9s（2.5 倍）。
+
+账本现在带 `cachedTokens` / `cacheMissTokens`，控制台能把"贵且慢"的那几条标出来。
+
+口径要点（已钉进用例）：
+- 上游对同一件事给多个别名，且常与**恒 0 的占位**并存
+  （实测 `prompt_tokens_details.cached_tokens` 与顶层 `cached_tokens`、
+  `prompt_cache_hit_tokens` 同时存在）→ 取**最大值**，不是 `??` 链；
+- 上游**没报**时不写 0 —— "没报"与"确实未命中"是两件事，
+  混起来会把命中率统计系统性压低。
+
+### 调查记录（结论：不改代码）
+
+两个看似可优化、实测**无收益**的方向，记下来免得后人重做：
+
+1. **给 tools 按名字稳定排序**（想救提示缓存）。实测只把工具**顺序**颠倒，
+   命中率从 99.7% 掉到 0.6% —— 看起来该排序。但扫真实日志的 98 条
+   `names=[…]`：**8 种工具集合、0 个"同集合不同顺序"** ——
+   顺序差异全部来自集合本身变化（工具增删），而集合变了缓存本来就该失效。
+   排序收益为 0，故**不做**（避免为想象中的问题加代码）。
+2. **桥自身的处理开销**。用 `X-WorkBuddy-Overhead-Ms` 口径实测：
+   328k tokens / 606KB payload 下 `overhead` 仍只有 1-3ms
+   （纯 `JSON.stringify` 同尺寸 payload = 2.6ms）。这条链路不需要优化。
+
+### Fixed（接入速度：确定性 400 白等 40 秒 + 瞬时 DNS 抖动直接 500）
+
+**用户看到的现象**：问一句，**卡 40 秒**，然后报错。不是偶发 —— 日志取证
+（`bridge/bridge.log`，2026-10-12）显示 467 条 `transient 400 (11133), retry N`
+聚成 117 簇，其中 **109 簇跑满 4 档退避**，最后**仍然**落 `upstream error 400`。
+
+**根因**：`code 11133` 只是网关的**包装码**，真因在响应体的 `extError.code` 里。
+桥原先对所有 11133 一视同仁地跑 `TRANSIENT_400_DELAYS`（1s+4s+10s+25s = 40 秒），
+而实测这一族里 **122/122 全是确定性的**
+（`model_param_invalid` 116 + `invalid_reasoning_effort` 6）——
+参数被模型提供方拒了，同样的参数原样重发一万次也不会变。
+纯等待累计 **2460 秒（41 分钟）**，平均每簇白等 **37.3 秒**。
+
+**改法**：按 `extError.code` 分流。
+- **确定性**（`model_param_invalid` / `invalid_reasoning_effort` / `invalid_request_error`
+  / `model_not_found` / `context_length_exceeded` …）→ **立刻**返回，不退避；
+- **认不出来**的 → 仍按原退避表重试（保守：不认识的不擅自放弃）；
+- `WORKBUDDY_TRANSIENT_400_RETRY=0` → 连瞬时的也不重试（速度绝对优先的出口）；
+- `WORKBUDDY_TRANSIENT_400_DELAYS` 可覆盖退避表（主要给测试用，让"仍会重试"
+  这条路径能在毫秒级被验证，而不是真等 40 秒）。
+
+**实测对比**（同一条确定性 400 请求，打桩上游）：
+
+| | 修前 | 修后 |
+|---|---|---|
+| 桥返回耗时 | **40.07 s** | **0.02 s** |
+| 打到上游的次数 | 6 | 1 |
+
+### Fixed（瞬时 DNS 抖动被当成硬故障，直接 500）
+
+**用户看到的现象**：`本地桥连接失败：... getaddrinfo ENOTFOUND www.workbuddy.ai`。
+
+**根因**：账本里 20 条 ENOTFOUND，其中 **17 条挤在同一个小时** —— 典型的解析器抖动
+（VPN/代理切换、DNS 缓存过期），不是域名不存在：同一台机器随后连测 12 次解析
+全部成功、中位 0.2ms。而桥的重试只认 `ECONNRESET|socket hang up|EPIPE`
+（keep-alive 复用被掐），对 DNS 这一族**一次都不重试**。
+
+**改法**：把 `ENOTFOUND|EAI_AGAIN|ETIMEDOUT|ECONNREFUSED|EADDRNOTAVAIL|getaddrinfo`
+一并纳入瞬时重试，重试前隔 `WORKBUDDY_TRANSPORT_RETRY_MS`（默认 250ms，只在失败
+路径上花这个时间）—— 立刻重查很可能撞上同一个坏状态。
+
+### Fixed（测试脆弱性：账本用例会因并发流量误报）
+
+`桥：账本是本地文件，且不写使用者的那份` 原先断言"仓库账本字节数前后相等"。
+但那份账本属于**正在运行的真实桥**：本机跑用例时任何并发请求（控制台轮询、
+另一个终端里的对话、实测脚本）都会追加一行，于是它**误报**成"测试改到了使用者
+的账本"（实测报 `223443 !== 222905`，差的 538 字节正好是一条真实请求的账本行）。
+改用对**本用例动作**真正敏感、且对并发追加免疫的判据：DELETE 会把文件**清空**
+（"非空→空"是它造成的铁证），而追加**永远不会改首行** —— 所以拿首行当指纹。
+已反证：故意让测试桥写仓库账本时，用例照旧变红。
+
+### Fixed（Codex 接入：截图把上下文烧穿导致整轮崩掉 —— 单图 18 万 tokens 降到 1 千）
+
+**用户看到的现象**：Codex 里用 computer-use / 截图时，**干到一半整个回合突然崩掉**，
+界面上是 `stream disconnected before completion: prompt is too long: 1252936 tokens > 1048576 maximum`，
+前面已经说了半句话（"我先把窗口激活…"），然后卡死约 4 分钟后失败。
+
+**不是偶发**：扫近 3 天 14 个 rollout，**两次**撞上同一个崩溃，且第二次更极端 ——
+
+| rollout | 图片 | base64 字符 | Codex 自报 input | 上游实际 | 倍差 |
+|---|---|---|---|---|---|
+| 10-13 15:58 | 4 张 | 685,540 | 585,007 | 1,252,936 | 2.1× |
+| **10-12 21:11** | **1 张** | **1,539,602** | **14,705** | **1,216,490** | **82.7×** |
+
+10-12 那次**单张图**就把上下文烧穿了：Codex 认为才用了 14,705 tokens
+（离压缩线 90 万差得远），上游却收到 1,216,490 —— **差 82.7 倍**，
+`last_agent_message: null`（连半句话都没说出口就整轮崩了）。
+
+**根因**（2026-10-13 用真实 rollout + 桥日志 + 真实网关三路对账，不是猜的）：
+
+1. **工具输出里的图片被降级成了纯文本。** Codex 把截图回在
+   `function_call_output.output` 的 `{type:"input_image", image_url:"data:image/jpeg;base64,…"}`
+   块里；桥的 `responsesOutputText()` 对没有 `text` 字段的块走 `JSON.stringify(p)`
+   → **整段 26 万字符的 base64 变成 `role:"tool"` 消息里的纯文本**。
+   真实网关实测同一张图：走视觉通道 **987** tokens，降级成文本 **184,718** tokens
+   （**187 倍**）；该会话 4 张图复刻：视觉通道 7,668 vs 降级 476,483（**62 倍**）。
+2. **于是账实不符，压缩线形同虚设。** Codex 按视觉通道的 ~1K 记帐，上游按 18 万记帐 ——
+   Codex 认为只用了 58.5 万（压缩线 90 万），上游实际已收到 125.3 万 → 直接 400 拒绝。
+   桥账本与 Codex rollout 的 `input_tokens` **逐条完全一致**，证明不是记错账，
+   而是**送出去的东西和记的东西不是一回事**。
+3. **顺带暴露两处相关缺陷**：
+   - 上游超限原文是 `prompt is too long: N tokens > M maximum`，而桥的
+     `responsesErrorCode()` 正则**认不出来**（只认 `context length` / `too many tokens` /
+     `maximum context`）→ 落到兜底 `upstream_error` → Codex 归到 `Retryable` →
+     **原样重发 6 次、白烧 249 秒**才失败（bridge.log 08:50:33→08:52:16 连 6 条同样的 400）。
+   - **上游在流中途断掉时，桥仍发 `response.completed` + `end_turn:true`** →
+     Codex 以为回合正常结束 → 用户看到"说话说一半突然停下"，不报错也不重试。
+
+**改法**：
+
+- 桥新增 `responsesOutputContent()`：`function_call_output` 的 `content` 保留**内容块数组**
+  （`[{type:'text'},{type:'image_url'}]`），实测上游认这条路并走视觉计费；
+  只有纯文本时才降成字符串（保持既有形状）。`file_id` 引用式图片仍换成一句明确说明，不静默丢。
+- 新增 `responsesOutputText()`（薄包装）供**必须**是字符串的字段用（`custom_tool_call.input`），
+  那些地方图片降级成占位文本 —— 不再有"把 26 万字符塞进字符串参数"的灾难。
+- `responsesErrorCode()` 补上真实措辞：`…too long` / `exceeds the maximum` / `maximum (number of) tokens`
+  → 命中 `context_length_exceeded`，Codex 立刻走 `ContextWindowExceeded` 而不再白重试。
+- `relayResponsesStream()`：`streamError` 非空时改发 **`response.failed`**（带 error 与已收到的半截 output），
+  不再伪装成成功收尾。
+- Anthropic 路径同源的坑一并修：`anthropicToolResultText()` 原来**只挑 `type:"text"` 的块**，
+  `tool_result` 里的图片被**静默丢掉**（Claude Code 的截图工具就是这么回的）→
+  改成 `anthropicToolResultContent()` 保留 image 块。
+- **请求日志新增 `dropped=` 字段**：把「被丢掉、没转发给上游」的工具名打出来。
+  原先只记**翻译后**的 `tools=N names=[…]`，两者必然自洽 —— 于是"某个工具被静默丢掉"
+  在日志里**完全看不出来**，`apply_patch` 与 `tool_search` 两次翻车都栽在这个盲区上。
+
+**用例**：桥 +6（图片走视觉通道 / 纯文本仍降成字符串 / `prompt is too long` 认出来 /
+流中途断开必须发 failed / Anthropic tool_result 保留图片 / dropped 可见且不误报），
+lib +1（`supports_search_tool` 声明与提示词），**每一条都做过突变验证
+（撤掉对应修复即红、还原即绿）**。`release:check` 全绿（vendor 同步 + 类型 + lint +
+lib 128 + bridge 85 + plugin 84 + 独立分发演练）。
+
+**真机验证**（2026-10-13 18:2x，真 `codex.exe` + 真桥 + 真上游）：
+
+- 走 **Codex 真实路径 `/v1/responses`** 发带图的工具输出：`prompt_tokens=1281`（视觉量级），
+  不再是 18 万 —— 日志 `[responses] … msgs=4 tools=1 names=[js]`。
+- 真机触发上游超限（2.6M 字符随机文本）：上游回
+  `prompt is too long: 1257825 tokens > 1048576 maximum`，桥**正确映射成
+  `context_length_exceeded`**。
+- `codex exec` 端到端：`provider: workbuddy` / `model: deepseek-v4.1-flash` 正常出话；
+  `apply_patch`（freeform）真机落盘成功（日志 `freeform=apply_patch`），无 `incompatible payload`。
+
+**新增探针**（`tools/dev/`，都不花额度或只花极少）：
+`probe-codex-tool-image-cost.mjs`（单图两种通道的真实代价）、
+`probe-codex-image-crash-repro.mjs`（用会话真图复刻崩溃）、
+`probe-codex-responses-image.mjs`（走真实 Responses 路径验证视觉通道）、
+`probe-codex-ctxlen-mapping.mjs`（超限错误码映射）、
+`probe-codex-rollout-analyze.mjs`（rollout 取证）。
+
+> **一并纠正一条先前的猜测**：曾怀疑"目录把 `context_window` 声明成 100 万导致 Codex 不压缩"。
+> 核对官方源码（tag `rust-v0.162.0-alpha.17.2`，与本机版本精确对应）后**这条不成立**：
+> 压缩有两条线取先到 —— `auto_compact_token_limit`（缺省 = `context_window × 9/10` = **900,000**）
+> 与 `effective_context_window_percent`（95% = 950,000）。**900,000 < 上游硬上限 1,048,576，是安全的。**
+> 崩溃的唯一原因是账实不符（图片通道），**本轮不动窗口与压缩字段**。
+> 详见 [`docs/CODEX-COMPACT-FIELDS.md`](docs/CODEX-COMPACT-FIELDS.md)。
+>
+> **另一条排查出来但不成立的**：日志里出现 `dropped=web_search`，一度按"目录声明了
+> 桥做不到的能力"去改 `supports_search_tool`。三次对照实验（真 `codex.exe` + 临时
+> `CODEX_HOME`）证明**改目录关不掉它** —— `web_search` 是 Codex 的内置工具，
+> `web_search_mode = "disabled"` 与 `[tools] web_search = false` 也都不生效。
+> 而它**实际无害**：桥补充说明已明写"web search 不存在、别调用"，真机实测模型会正确
+> 回答 `NO_WEB_SEARCH` 而不是去撞它。所以保留 `supports_search_tool: false`（事实陈述）
+> 并让桥侧照旧丢掉 + 记日志，**不再当成缺陷**。探针见
+> `tools/dev/probe-codex-websearch-source.mjs`。
+
 ### Fixed（Codex 接入：freeform 工具 `apply_patch` 全链路打通 + 系统提示不再一代代退化）
 
 **用户看到的现象**：Codex 里做长任务时"跑一半就断了" —— 模型说一句"我来验证一下"这一轮就结束
@@ -60,6 +268,89 @@
 
 > 相邻但不在接管范围的一件事：`config.toml` 顶层的 `model_reasoning_effort` 是用户手写的，
 > 目录里已不声明 `ultra`，需要用户自己决定改不改（不改也不报错，只是语义与 Codex 官方不同）。
+
+### Fixed（Codex 接入：computer-use（操控桌面）走桥不可达 —— `tool_search` 与 MCP 工具被静默丢弃）
+
+**用户看到的现象**：Codex 接桥后，它自带的 computer-use（`computer-use@openai-bundled` 插件）
+完全用不上 —— 模型"说要用但用不上"，而且**全程不报错**。2026-10-12 的诊断
+（`docs/CODEX-NATIVE-PLUGINS-2026-10-12.md` §3.3）曾把原因归为「桥不转发 freeform 工具」，
+本次查明**那个归因不成立**，真正的原因在别处（详见 `docs/COMPUTER-USE-2026-10-13.md`）。
+
+**根因**（全部有实测证据）：
+
+1. **MCP 工具是「延迟下发」的，而桥把唯一的入口丢了。** Codex 不把 MCP server 的工具放进
+   `tools[]`，只给一个 `type:"tool_search"` 的检索工具；模型检索之后，命中结果才以
+   `tool_search_output`（`{type:"namespace", name:"mcp__node_repl", tools:[…]}`）的形式出现在
+   **下一轮请求的 `input[]`** 里。桥原先把 `tool_search` 与 `web_search` 一起在
+   `responsesToolsToOpenAI` 里**静默丢弃**、把 `input[]` 里的 `tool_search_output` 与
+   `reasoning` 一起**静默丢弃** → 模型永远发现不了 `mcp__node_repl.js`
+   （computer-use 的唯一入口：在里面 `await import("@oai/sky")`）。
+2. **修正一个旧结论**：`mcp__node_repl.js` **不是** freeform/`custom` 工具 —— 它是带
+   `{code, title, timeout_ms}` 参数的普通 MCP 工具。本机 2026-08-09 那次真正跑通
+   computer-use 的会话里，**135/135** 条调用都是 `name:"js"` + `namespace:"mcp__node_repl"`
+   （短名 + 独立的 namespace 字段）。所以「freeform 不转发」从来不是它走不通的原因；
+   同日那份 freeform 修复（上一条）是另一个独立问题。
+3. 顺带修掉同类的**第三处静默丢弃**：`tools[]` 里的 `type:"namespace"` 分组
+   （Codex 的 multi-agent / `collaboration` 用这个形状）原先**整组**被丢。
+
+**改法**（桥的 Responses 层：一张路由表贯通两侧）：
+
+- 请求侧：`tool_search` 翻成同名普通函数；`namespace` 分组的内层拍平成
+  `mcp__<server>__<tool>`；`tool_search_output` 里的工具**补进上游 `tools[]`**（去重）。
+- 回包侧：模型调 `tool_search` → 回 `tool_search_call`（`execution:"client"`，
+  `arguments` 是**对象**而不是 JSON 字符串）；模型调分组工具 → 回**短名 + 独立
+  `namespace` 字段**。历史回灌同样双向还原；`tool_search_output` 转成一条工具结果消息，
+  把"检索命中了哪些工具"讲清楚（只列名字不抄描述，那些描述紧接着随 `tools[]` 发过去）。
+- 请求日志从只记**个数**改为也记**工具名**（`names=[…]`）—— 这次缺陷在日志里完全不可见，
+  就是因为只看 `tools=10` 根本看不出少了什么。
+- `lib/client-connect.mjs`：系统提示补充说明里 MCP 工具那段改为"先 `tool_search` 检索，
+  命中后以 `mcp__<server>__<tool>` 可调"，并删掉"computer use 在这里不存在"这类
+  会随桥的进度变成假话的断言（新增 1200 字符上限断言防它悄悄膨胀）。
+
+**用例**：桥 +5（tool_search 转发与回包形状 / 延迟工具补进 tools[] / 分组短名 + namespace
+的流式与非流式 / 历史拍平），**撤掉任一处修复即红**；lib 补充说明断言同步更新。
+`release:check` 全绿。
+
+**真机验证（2026-10-13 15:01，Codex Desktop 实跑，第三方模型 deepseek-v4.1-flash）**：
+
+- 上面两条原本标注「未实测」（真机对照实验因上游限流没跑成），当天下午**在真机跑通了**。
+  rollout 里的完整链路：1 次 `tool_search_call` → 1 次 `tool_search_output`（命中
+  `mcp__node_repl` 的三个工具）→ 桥补进上游 `tools[]`（日志
+  `deferred=mcp__node_repl__js_reset,mcp__node_repl__js,mcp__node_repl__js_add_node_module_dir`，
+  tools 41→44）→ 模型发出 `function_call{name:"js", namespace:"mcp__node_repl"}` →
+  node_repl 的 JS 内核真的执行并列出了全部打开的应用窗口与标题。
+- 排障中还抓到一个同类坑：**改了 `lib/client-connect.mjs` 之后必须重新
+  `npm run connect apply codex`**，否则模型目录还是旧的（里面 0 处提到 tool_search，
+  模型根本不知道要先检索）—— 与「改了桥必须重启」同属"生成物不刷新"。
+- 经验：BM25 检索吃关键词。让模型用「node_repl js execute javascript persistent kernel」
+  这类具体词去搜；模糊的"操控电脑"搜不中（实测会搜到 `codex_app` 那批去）。
+
+### Added（桥：上游 429 在桥这层等待重试，客户端无感 —— 治"说话说一半"）
+
+**用户看到的现象**：Codex 干活干到一半，回合突然断在半句话上，界面显示
+`rate limit exceeded: too many requests` / "正在重连 N/5"。
+
+**根因**（2026-10-13 16:0x 实测）：上游按账号限流回 429（code 14003，官方提示
+"等约 1 分钟再试"），桥原先原样转发失败 → Codex 1–30s 一条地重试（实测 5 连 429），
+越撞越限；重试配额耗尽后，回合就带着已说出的半截话结束。桥日志里 2 秒一条的
+ok/失败交替就是重试风暴。
+
+**改法**：桥在共用的发送层（与瞬态 400-11133 重试同一处）按 `WORKBUDDY_429_WAITS`
+计划（默认 `20000,45000,60000`，总约 2 分钟）本地等待并**原样重发**；上游带
+`retry-after` 时取较小者，单次等待上限 90s；客户端断开（abort）立刻放弃。
+上游 429 到达时流还没开始，重发没有副作用。三条协议（chat / Anthropic / Responses）
+同一处生效。
+
+**用例**：桥 +1（第一次 429 → 重试 200，断言"上游恰好被命中 2 次且两次请求体逐字节
+一致"），禁用重试即红；`.env.example` 补说明。
+
+**⚠️ 默认关闭（上线 40 分钟后改，2026-10-13 16:5x）**：默认 20s/45s/60s 实测翻车——
+上游拥塞时段等了也多半还是 429（等待 20s → 依旧 429），白白把每条请求拖慢 20–65s，
+用户直接感知为"反应好慢"。**速度优先：默认快速返回**，重试交给客户端退避；要
+"桥替你等"的显式配 `WORKBUDDY_429_WAITS=30000,60000`。教训：给"等待"类行为做
+默认值之前，先确认等待真的能等到成功。
+
+### Changed（思考强度档位：从"每模型写死三档"改成**逐模型实测**）
 
 ### Changed（思考强度档位：从"每模型写死三档"改成**逐模型实测**）
 

@@ -74,6 +74,19 @@ const child = spawn(process.execPath, [BRIDGE], {
     CODEBUDDY_API_KEY: 'stub-key',
     WORKBUDDY_AUTO_CHECKIN: '0',
     WORKBUDDY_LOG: '0',
+    /*
+     * ⚠️ 账本必须**显式**指到临时目录，`cwd: dir` 是不够的。
+     *
+     * `usageFile()` 解析的是 `WORKBUDDY_USAGE_FILE`，否则退回
+     * **桥脚本所在目录**（`dirname(fileURLToPath(import.meta.url))`）——
+     * 那是仓库里的 `bridge/usage.jsonl`，**使用者的真实账本**，与 cwd 无关。
+     * 少了这一行，每跑一次本文件就会往真实账本里写几十条 `client:"local"` 的
+     * 测试记录（实测：一次 32 用例的运行写进 36 行），而且账本到 2000 行会
+     * 截断保留最近一半 —— 等于**把用户自己的用量历史挤掉**。
+     * `bridge.test.mjs` / `bridge-startup.test.mjs` 早就设了这一项，
+     * 这里与 `bridge-responses.test.mjs` 是漏的。
+     */
+    WORKBUDDY_USAGE_FILE: join(dir, 'usage.jsonl'),
   },
 });
 let bridgeLog = '';

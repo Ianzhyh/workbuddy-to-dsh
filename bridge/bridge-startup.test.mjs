@@ -15,7 +15,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -227,5 +227,52 @@ test('桥源码里不再有裸 Number(process.env.*) 的数值读取（防止回
     offenders,
     [],
     `这些 env 读取绕过了 numEnv()，非法值会变 NaN：${offenders.join(', ')}`,
+  );
+});
+
+/**
+ * 任何**起了桥进程**的测试都必须显式隔离账本。
+ *
+ * ## 为什么是"扫源码"而不是"跑一遍看有没有写脏"
+ *
+ * 后者测的是"当前这几个文件"，新增一个测试文件时它无效 —— 而漏掉隔离的
+ * 恰恰是新增文件。扫源码能把**未来**的文件也覆盖住。
+ *
+ * ## 这条守的是什么（2026-10-13 实测的数据损失）
+ *
+ * `usageFile()` = `WORKBUDDY_USAGE_FILE`，否则退回**桥脚本所在目录**下的
+ * `usage.jsonl` —— 也就是使用者的真实账本。它**与 cwd 无关**，所以测试里
+ * 惯用的 `cwd: dir`（临时目录）根本挡不住。
+ *
+ * 实测后果：`bridge-responses.test.mjs` 一次运行就往真实账本写进 **36 行**
+ * 测试记录（真实账本里累计 914 条 `resolved-default` + 58 条 `resolved-fast`
+ * + 14 条 `stub-model`，占总量一半以上）。而账本到 `MAX_USAGE_LINES`(2000)
+ * 会**截断保留最近一半** —— 等于把用户自己的用量历史挤掉。
+ *
+ * `bridge.test.mjs` / `bridge-startup.test.mjs` 早就设了这一项，
+ * `bridge-responses.test.mjs` 与 `bridge-cors.test.mjs` 是漏的（已补）。
+ */
+test('起了桥进程的测试文件必须隔离账本（否则会写坏使用者的真实账本）', () => {
+  const files = readdirSync(HERE).filter((f) => f.endsWith('.test.mjs'));
+  const offenders = [];
+  for (const f of files) {
+    const src = readFileSync(join(HERE, f), 'utf8');
+    // 只有"真的 spawn 了桥"的文件才需要隔离；纯逻辑用例不产生上游请求
+    if (!/spawn\(\s*process\.execPath/u.test(src)) continue;
+    /*
+     * 判据必须看**赋值**，不能只搜名字。
+     *
+     * 第一版就是搜 `WORKBUDDY_USAGE_FILE` 这个字符串，结果把**注释里的解释**也算
+     * 成"已隔离" —— 反证时（把赋值删掉、注释留着）守卫照样变绿，等于这条用例
+     * 测不出它该测的东西。现在要求出现 `WORKBUDDY_USAGE_FILE:` 或
+     * `WORKBUDDY_USAGE_FILE =` 这样真正的赋值形状。
+     */
+    if (!/WORKBUDDY_USAGE_FILE\s*[:=]/u.test(src)) offenders.push(f);
+  }
+  assert.deepEqual(
+    offenders,
+    [],
+    `这些测试文件起了桥却没设 WORKBUDDY_USAGE_FILE，会往仓库 bridge/usage.jsonl `
+    + `（使用者的真实账本）里写测试记录：${offenders.join(', ')}`,
   );
 });

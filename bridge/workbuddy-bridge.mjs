@@ -71,8 +71,150 @@ const IDE_NAME = process.env.WORKBUDDY_IDE_NAME || 'VSCode';
 const CHAT_PATH = '/v2/chat/completions';
 const REFRESH_SKEW_MS = 5 * 60 * 1000;
 const REFRESH_COOLDOWN_MS = 15 * 1000;
-const TRANSIENT_400_DELAYS = [1000, 4000, 10000, 25000];
+/**
+ * 非确定性 400（code 11133）的退避表（毫秒）。
+ *
+ * `WORKBUDDY_TRANSIENT_400_DELAYS` 可覆盖（逗号分隔），空值 = 用默认。
+ * 留这个旋钮是为了**能测**：默认表跑满要 40 秒，验收用例不可能真等
+ * 40 秒去证明"瞬时 400 仍然会重试"，所以用例把它压到毫秒级。
+ * 生产上没有人需要改它，文档也不宣传 —— 它纯粹是可测性接口。
+ */
+const TRANSIENT_400_DELAYS = (() => {
+  const raw = String(process.env.WORKBUDDY_TRANSIENT_400_DELAYS ?? '').trim();
+  if (!raw) return [1000, 4000, 10000, 25000];
+  const parsed = raw.split(',').map((s) => Number(s.trim())).filter((n) => Number.isFinite(n) && n >= 0);
+  return parsed.length ? parsed : [1000, 4000, 10000, 25000];
+})();
+
+/**
+ * 上游 400 里**确定性拒绝**的识别表 —— 命中即**不重试**，立刻把错误交给客户端。
+ *
+ * ## 为什么必须有这张表（2026-10-13 实测）
+ *
+ * 桥原先对**所有** `400 code 11133` 一视同仁地退避重试
+ * （`TRANSIENT_400_DELAYS` = 1s+4s+10s+25s = 40 秒）。但 11133 只是一个
+ * **包装码**，真正的原因在 `extError.code` 里，其中多数是**确定性**的：
+ *
+ *   · `model_param_invalid` —— 文案「the request parameters were rejected by the
+ *     model provider」。参数被模型提供方拒了，**同样的参数原样重发一万次也不会变**。
+ *   · `invalid_reasoning_effort` —— 该模型不接受这个思考档位，同上。
+ *
+ * 日志取证（`bridge/bridge.log`，2026-10-12）：
+ *   · 467 条 `transient 400 (11133), retry N`，聚成 117 簇；
+ *   · 其中 **109 簇跑满 4 档退避**，最后**仍然**落 `upstream error 400`；
+ *   · `extError.code` 分布：`model_param_invalid` 116 次、`invalid_reasoning_effort` 6 次
+ *     —— **122 次全是确定性拒绝**，没有一次是真正的瞬时故障；
+ *   · 纯等待累计 **2460 秒**（41 分钟），平均每簇白等 **37.3 秒**。
+ *
+ * 用户直接感知就是「问一句，卡 40 秒，然后报错」——这正是要修的东西。
+ *
+ * ## 判据为什么用 extError.code 而不是文案匹配
+ *
+ * 文案是上游的展示文本，会随语言/版本变（实测响应里同时有 en/zh/zh-hant 三份）。
+ * `extError.code` 是**协议层枚举**，稳定得多。所以：
+ *   1. 优先看 `extError.code` / `extError.type` 是否命中表；
+ *   2. 兜底看 `displayMsg` / `msg` 里的明确措辞（应对上游漏填 extError 的情况）；
+ *   3. **两者都没有 → 视为瞬时**，照旧重试（保守：不认识的不擅自放弃）。
+ *
+ * 环境变量 `WORKBUDDY_TRANSIENT_400_RETRY=0` 可完全关闭这套 400 重试（走「快速失败」）。
+ */
+const DETERMINISTIC_400_CODES = new Set([
+  'model_param_invalid',
+  'invalid_reasoning_effort',
+  'invalid_request_error',
+  'model_not_found',
+  'model_unavailable',
+  'context_length_exceeded',
+  'content_filter',
+  'insufficient_quota',
+]);
+
+/**
+ * 上游 400 的**确定性**判定。返回拒绝理由字符串（用于日志）或 null（= 可重试）。
+ *
+ * 判据顺序刻意如此：协议码优先（稳定），文案兜底（覆盖上游漏填），
+ * 都不命中就放行去重试 —— 宁可多等，也不要误杀一个本来能救回的请求。
+ *
+ * @param {string} text 上游 400 响应体原文
+ * @returns {string|null}
+ */
+function deterministic400Reason(text) {
+  let body;
+  try { body = JSON.parse(text); } catch { return null; } // 非 JSON：无法判定，按瞬时处理
+  if (!body || typeof body !== 'object') return null;
+
+  const ext = body.extError || body.ext_error || {};
+  const extCode = String(ext.code || '').trim();
+  if (extCode && DETERMINISTIC_400_CODES.has(extCode)) return `extError.code=${extCode}`;
+
+  const extType = String(ext.type || '').trim();
+  if (extType === 'invalid_request_error') return `extError.type=${extType}`;
+
+  // 兜底：上游偶尔只给文案不给 extError。只认**明确表达"参数被拒"**的措辞，
+  // 不认 "please retry"（那句恰恰说明是瞬时的）。
+  const hay = [
+    body.msg, body.message,
+    body.displayMsg?.en, body.displayMsg?.zh,
+    ext.message,
+  ].filter((s) => typeof s === 'string').join(' ');
+  if (/rejected by the model provider|parameters were rejected/i.test(hay)) return 'message: parameters rejected by provider';
+  if (/invalid_reasoning_effort|reasoning effort/i.test(hay) && /invalid|not support|unsupported/i.test(hay)) return 'message: invalid reasoning effort';
+  return null;
+}
+
+/**
+ * `WORKBUDDY_TRANSIENT_400_RETRY=0` → 完全不重试 400（快速失败）。
+ * 默认开：非确定性 400 仍按 TRANSIENT_400_DELAYS 退避，确定性 400 一律不重试。
+ */
+const TRANSIENT_400_RETRY_ENABLED = process.env.WORKBUDDY_TRANSIENT_400_RETRY !== '0';
+
+/**
+ * 传输层（DNS / 建连）瞬时失败后、重试前的等待（毫秒）。默认 250ms。
+ *
+ * 只在失败路径上花这个时间；成功请求完全不受影响。`WORKBUDDY_TRANSPORT_RETRY_MS`
+ * 可覆盖（0 = 立刻重试），验收用例靠它把等待压到 0 以免拖慢测试。
+ */
+const TRANSPORT_RETRY_DELAY_MS = numEnv('WORKBUDDY_TRANSPORT_RETRY_MS', 250, { min: 0 });
+
+/**
+ * 上游 429（code 14003 "too many requests"）的**桥侧等待计划**（毫秒）。
+ *
+ * ⚠️ **默认关闭**（2026-10-13 16:5x 改）：默认 20s/45s/60s 上线后实测，上游拥塞时段
+ * 等了也多半还是 429（等待 20s → 依旧 429），白白把每条请求拖慢 20-65s —— 用户
+ * 直接感知为"反应好慢"。速度优先：默认快速返回，把重试交给客户端（Codex 自己
+ * 会退避重试）；想要"桥替你等"的人显式配置，如 `WORKBUDDY_429_WAITS=30000,60000`。
+ *
+ * 若上游带了 retry-after，取它与计划里较小者；单次等待上限 90s。
+ */
+const UPSTREAM_429_WAITS = String(process.env.WORKBUDDY_429_WAITS ?? '')
+  .split(',')
+  .map((s) => Number(s.trim()))
+  .filter((n) => Number.isFinite(n) && n >= 0);
+
+/** 上游 429 里带的"过多久再试"提示（`retry-after` 头或 body 里的 `retry_after*` 字段）；没有则 null。 */
+function upstreamRetryAfterMs(res, bodyText) {
+  const header = Number(res?.headers?.get?.('retry-after'));
+  if (Number.isFinite(header) && header > 0) return header * 1000;
+  try {
+    const j = JSON.parse(bodyText);
+    for (const key of ['retry_after_ms', 'retryAfterMs', 'retry_after']) {
+      const n = Number(j?.[key]);
+      if (Number.isFinite(n) && n > 0) return n;
+    }
+  } catch { /* body 不是 JSON：没有提示 */ }
+  return null;
+}
 const UPSTREAM_TIMEOUT_MS = numEnv('WORKBUDDY_TIMEOUT_MS', 0, { min: 0 }); // 0 = unlimited (long answers need it)
+
+/**
+ * Codex 的「延迟工具检索闸门」。MCP 提供的工具（含 Codex 自带 computer-use 的
+ * 唯一入口 `mcp__node_repl.js`）**不在** `tools[]` 里，模型得先调 `tool_search`
+ * 检索，命中结果下一轮才以 `namespace` 分组出现。
+ *
+ * 桥把它翻成同名普通函数；回包侧必须回 `tool_search_call`（见 closeTool），
+ * 且**不能**把它当普通 `function_call` 发回去。
+ */
+const TOOL_SEARCH_NAME = 'tool_search';
 
 // ── Upstream keep-alive connection pool ────────────────────────────────────
 // 为什么要自己管连接：Node 全局 fetch（undici）的空闲连接只保留 ~4 秒。写代码
@@ -1445,10 +1587,40 @@ async function callUpstream(bodyString, model, conversationId, clientSignal) {
     try {
       return await attempt(a);
     } catch (error) {
-      // 复用的空闲连接被上游掐断（服务器先关）→ 换新连接重试一次。
-      // 新连接必然不是 reused；首次连接就失败属于真故障，不重试。
-      if (!clientSignal?.aborted && /ECONNRESET|socket hang up|EPIPE/i.test(String(error?.message || error?.code || ''))) {
+      if (clientSignal?.aborted) throw error;
+      const msg = String(error?.message || error?.code || '');
+      /*
+       * ① 复用的空闲连接被上游掐断（服务器先关）→ 换新连接重试一次。
+       *    新连接必然不是 reused；首次连接就失败属于真故障，不重试。
+       */
+      if (/ECONNRESET|socket hang up|EPIPE/i.test(msg)) {
         log('stale keep-alive socket, retrying once on a fresh connection');
+        return attempt(a);
+      }
+      /*
+       * ② **瞬时 DNS / 建连失败**：同样换新连接重试一次。
+       *
+       * 为什么必须有（2026-10-13 实测）：账本里 20 条
+       * `getaddrinfo ENOTFOUND www.workbuddy.ai`，**17 条挤在同一个小时里** ——
+       * 典型的解析器抖动（VPN/代理切换、DNS 缓存过期、上游 LB 换 IP），
+       * 不是"域名不存在"。同一台机器随后连测 12 次解析全部成功、中位 0.2ms。
+       *
+       * 原先只认 ECONNRESET 那一族，于是这类抖动**一次都不重试**就直接
+       * 500 给客户端 —— 用户看到「本地桥连接失败」，实际只是抖了一下。
+       * 重试一次的代价是毫秒级，救回的却是一整轮对话（含已发送的上下文）。
+       *
+       * 注意 ENOTFOUND 也可能是真·域名配错；但那种情况重试一次同样立刻失败，
+       * 成本仅一次解析，不会掩盖配置错误（错误原文照旧回给客户端）。
+       */
+      if (/ENOTFOUND|EAI_AGAIN|ETIMEDOUT|ECONNREFUSED|EADDRNOTAVAIL|network|getaddrinfo/i.test(msg)) {
+        log(`transient transport failure (${shortError(msg, 80)}), retrying once in ${TRANSPORT_RETRY_DELAY_MS}ms`);
+        /*
+         * 隔一小会儿再试，而不是立刻重发：DNS 抖动往往是"这一刻的解析器不可用"，
+         * 立刻重查很可能撞上同一个坏状态。延迟只在**失败路径**上产生，
+         * 成功路径一分钱不花。
+         */
+        if (TRANSPORT_RETRY_DELAY_MS > 0) await sleep(TRANSPORT_RETRY_DELAY_MS);
+        if (clientSignal?.aborted) throw error;
         return attempt(a);
       }
       throw error;
@@ -1459,6 +1631,26 @@ async function callUpstream(bodyString, model, conversationId, clientSignal) {
   if (!API_KEY && (res.status === 401 || res.status === 403) && auth.refresh) {
     const next = await refreshAuth(auth);
     if (next) { auth = next; res = await attemptWithStaleRetry(auth); }
+  }
+
+  /*
+   * 上游 429（code 14003）：按 UPSTREAM_429_WAITS 的计划在**桥这层**等待并原样重发，
+   * 客户端没断就一直等到成功或计划用完。这期间上游还没开始流，重发没有副作用；
+   * 客户端断开（abort）就立刻放弃，把已读到的 429 原样返回。
+   */
+  for (let i = 0; res.status === 429 && i < UPSTREAM_429_WAITS.length; i++) {
+    const text = await res.text().catch(() => '');
+    if (clientSignal?.aborted) return { res, bodyText: text, upstreamStartedAt: upEnter };
+    const wait = Math.min(Math.max(upstreamRetryAfterMs(res, text) ?? UPSTREAM_429_WAITS[i], 0), 90_000);
+    log(`upstream 429, bridge waits ${Math.round(wait / 1000)}s then retries (${i + 1}/${UPSTREAM_429_WAITS.length})`);
+    await new Promise((r) => setTimeout(r, wait));
+    if (clientSignal?.aborted) return { res, bodyText: text, upstreamStartedAt: upEnter };
+    res = await attemptWithStaleRetry(auth);
+    // 重试后的响应若不再是 429/400/2xx，同样要在这里把体读掉（见下面的说明）
+    if (res.status !== 429 && res.status !== 400 && (res.status < 200 || res.status >= 300)) {
+      const t = await res.text().catch(() => '');
+      return { res, bodyText: t, upstreamStartedAt: upEnter };
+    }
   }
 
   // the gateway occasionally wraps a momentary upstream failure as 400 code 11133: retry idempotently
@@ -1482,11 +1674,24 @@ async function callUpstream(bodyString, model, conversationId, clientSignal) {
     return { res, bodyText: text, upstreamStartedAt: upEnter };
   }
 
-  for (let i = 0; res.status === 400 && i < TRANSIENT_400_DELAYS.length; i++) {
+  for (let i = 0; res.status === 400 && TRANSIENT_400_RETRY_ENABLED && i < TRANSIENT_400_DELAYS.length; i++) {
     const text = await res.text();
     let code;
     try { code = JSON.parse(text)?.code; } catch {}
     if (code !== 11133) return { res, bodyText: text, upstreamStartedAt: upEnter };
+    /*
+     * 确定性拒绝 → **立刻**返回，不进退避。
+     *
+     * 11133 只是包装码；`model_param_invalid` / `invalid_reasoning_effort` 这类
+     * 表示"参数被模型提供方拒了"，原样重发不可能成功。实测这类占了 11133 的
+     * **全部**（122/122），每次都白等 40 秒后照样报错 —— 见 DETERMINISTIC_400_CODES
+     * 的注释（含日志取证数字）。
+     */
+    const deterministic = deterministic400Reason(text);
+    if (deterministic) {
+      log(`deterministic 400 (11133, ${deterministic}), not retrying`);
+      return { res, bodyText: text, upstreamStartedAt: upEnter };
+    }
     if (clientSignal?.aborted) return { res, bodyText: text, upstreamStartedAt: upEnter };
     log(`transient 400 (11133), retry ${i + 1}`);
     await new Promise((r) => setTimeout(r, TRANSIENT_400_DELAYS[i]));
@@ -1577,6 +1782,46 @@ async function aggregateStream(res) {
 const usageOf = (u) => ({
   promptTokens: Number(u?.prompt_tokens) || 0,
   completionTokens: Number(u?.completion_tokens) || 0,
+  /*
+   * 提示缓存命中量（2026-10-13 加）。
+   *
+   * ## 为什么必须记它
+   *
+   * 提示缓存是这条链路上**最大的单因素**，而且只体现在两处、都不记账：
+   *   · **成本**：实测同一批大请求，未命中 0.0142 积分/1k tokens、
+   *     已命中 0.0005 —— 差 **26 倍**。93 条 >=40k 的请求里，
+   *     **6 条未命中就花掉 10.00 积分**，而 87 条命中合计才 10.20。
+   *     不记缓存量的话，这 10 个积分在控制台上看起来和"正常用量"毫无区别。
+   *   · **延迟**：实测冷缓存 TTFT 14.8s → 命中后 5.9s（2.5 倍）；
+   *     66k 上下文下 4.6s → 5.6s 量级的抖动也主要来自这里。
+   *
+   * ## 字段口径
+   *
+   * 上游同时给 `prompt_tokens_details.cached_tokens`（真实值）与顶层的
+   * `cached_tokens`/`prompt_cache_hit_tokens`（有时是恒 0 的占位）——
+   * 所以取**一组同义字段的最大值**，而不是 `??` 链：0 不是 nullish，
+   * 用 `??` 会被那个占位 0 挡住（`adapter.mjs` 的 `maxAlias` 是同款理由）。
+   *
+   * 缺失时**不写字段**（老账本、桩上游都没有），而不是写 0 ——
+   * 0 是"确实没命中"，与"上游没报"是两件事，混起来会让命中率统计失真。
+   */
+  ...(() => {
+    const cached = [
+      u?.prompt_tokens_details?.cached_tokens,
+      u?.prompt_cache_hit_tokens,
+      u?.cached_tokens,
+      u?.cache_read_tokens,
+    ].reduce((best, v) => {
+      const n = Number(v);
+      return Number.isFinite(n) && n > best ? n : best;
+    }, 0);
+    // 上游直接给了未命中计数时优先采信（DeepSeek 原生 prompt_cache_miss_tokens）
+    const miss = Number(u?.prompt_cache_miss_tokens);
+    const out = {};
+    if (cached > 0) out.cachedTokens = cached;
+    if (Number.isFinite(miss) && miss >= 0) out.cacheMissTokens = miss;
+    return out;
+  })(),
   // 上游在 usage 里回报本次实际扣减的积分，一并记进本地账本（只记数字）
   ...(typeof u?.credit === 'number' ? { credit: u.credit } : {}),
 });
@@ -1694,14 +1939,35 @@ function anthropicSystemText(system) {
   return '';
 }
 
-/** Anthropic 的 tool_result.content 同样有字符串 / 块数组两种形态。 */
-function anthropicToolResultText(content) {
+/**
+ * Anthropic 的 `tool_result.content` 同样有字符串 / 块数组两种形态。
+ *
+ * ⚠️ 与 Responses 侧同源的坑（那边已修，见 `responsesOutputContent`）：
+ * 这里原来**只挑 `type:"text"` 的块**，于是 `tool_result` 里的图片被**静默丢掉**。
+ * Anthropic 协议允许 `tool_result.content` 里放 image 块（Claude Code 的截图工具
+ * 就是这么回的），丢了不报错、只是模型"看不见图"，排查起来毫无线索。
+ *
+ * 这里改成返回**内容块数组**（保留 `image_url` 块），与 Responses 侧同款；
+ * 只有纯文本时才降成字符串。
+ */
+function anthropicToolResultContent(content) {
   if (typeof content === 'string') return content;
   if (Array.isArray(content)) {
-    return content
-      .filter((b) => b && b.type === 'text' && typeof b.text === 'string')
-      .map((b) => b.text)
-      .join('\n');
+    const parts = [];
+    for (const b of content) {
+      if (!b || typeof b !== 'object') continue;
+      if (b.type === 'text' && typeof b.text === 'string') {
+        parts.push({ type: 'text', text: b.text });
+        continue;
+      }
+      if (b.type === 'image') {
+        const img = anthropicImageToOpenAI(b);
+        if (img) parts.push(img);
+      }
+    }
+    if (!parts.length) return '';
+    if (parts.length === 1 && parts[0].type === 'text') return parts[0].text;
+    return parts;
   }
   if (content == null) return '';
   return JSON.stringify(content);
@@ -1768,7 +2034,12 @@ function anthropicToOpenAIMessages(body) {
         toolResults.push({
           role: 'tool',
           tool_call_id: block.tool_use_id || '',
-          content: anthropicToolResultText(block.content),
+          /*
+           * ⚠️ 用 `anthropicToolResultContent`（保留 image 块），不是 `…Text`。
+           * Claude Code 的截图工具把图放在 `tool_result.content` 里；
+           * 只取 text 块会让图片**静默消失**（不报错、模型只是"看不见"）。
+           */
+          content: anthropicToolResultContent(block.content),
         });
       }
     }
@@ -2089,6 +2360,22 @@ async function relayAnthropicStream(up, res, model, estInputTokens) {
  *    `custom_tool_call` / `custom_tool_call_output` 回传进下一轮 `input`。
  * 6. `apply_patch` 是否声明**由客户端的模型目录决定**（`apply_patch_tool_type`，
  *    本机 Codex 只认 `"freeform"`，写别的报 `unknown variant`；不写=完全不提供）。
+ * 7. **MCP / 分组工具是「延迟下发」的**（2026-10-13 实测，`codex-cli 0.162`，
+ *    证据 `.workbuddy/artifacts/capture-codex-mcp-tools.md` + 真实 rollout）：
+ *    它们**不在** `tools[]` 里，模型得先调 `type:"tool_search"` 的检索工具；
+ *    命中结果以 `tool_search_output` 出现在**下一轮请求的 `input[]`** 里，形如
+ *      `{type:"namespace", name:"mcp__node_repl", tools:[{type:"function", name:"js", …}]}`
+ *    （注意：分组靠 `type:"namespace"` 的**嵌套对象**，不是 function 上的字符串字段）。
+ *    桥三处都要做：① `tool_search` 翻成同名普通函数；② namespace 内层拍平成
+ *    `mcp__<server>__<tool>` 声明给上游；③ 把 `tool_search_output` 里的工具**补进
+ *    上游 `tools[]`**。回包侧：`tool_search` 必须回 `tool_search_call`
+ *    （`execution:"client"`，`arguments` 是**对象**），分组工具必须回
+ *    **短名 + 独立的 `namespace` 字段**（`FunctionCallResponseItem` 的可空字段；
+ *    本机 08-09 那次跑通的会话里 135/135 条 MCP 调用都是这个形状）。
+ *    少了任何一处，Codex 自带的 computer-use（唯一入口 `mcp__node_repl.js`）走桥
+ *    就用不了 —— 而且**全程不报错**，只表现为"模型说要用但用不上"。
+ * 8. `web_search` 等上游没有对应能力的内置工具**仍然丢掉**；丢的时候可以在请求日志
+ *    的 `names=[…]` 里看出来（那里列出发往上游的**全部工具名**）。
  */
 
 /**
@@ -2153,23 +2440,71 @@ function responsesPartsToOpenAI(content) {
   return parts;
 }
 
-/** `function_call_output.output` 在线上是字符串**或**内容块数组，统一成字符串。 */
-function responsesOutputText(output) {
+/**
+ * `function_call_output.output` 在线上是字符串**或**内容块数组。
+ *
+ * ⚠️ **图片块必须走视觉通道，绝不能 `JSON.stringify` 成文本。**
+ *
+ * 2026-10-13 实测（`.tmp-tool-image-degrade.mjs`，真实网关）：同一张 26 万字符的
+ * 截图，两种发法的上游 `prompt_tokens`：
+ *
+ *   | 发法 | prompt_tokens | 单图成本 |
+ *   |---|---|---|
+ *   | 作为 `image_url` 内容块（视觉通道） | 1,005 | **987** |
+ *   | `JSON.stringify` 成纯文本（原行为） | 184,736 | **184,718** |
+ *
+ * **差 187 倍。** 后果不是"慢"，而是**整轮崩掉**：Codex 自己按 ~1K 记帐，认为
+ * 上下文才用 20 万 / 95 万，于是**永不触发自动压缩**；上游实际已收到 125 万
+ * tokens → 400 `prompt is too long: 1252936 tokens > 1048576 maximum`。
+ * 用户看到的是"干到一半整个回合突然断掉"（真实 rollout + bridge.log 双证）。
+ *
+ * 该会话 4 张图的复刻实验（`.tmp-reproduce-crash.mjs`）：
+ * 降级 = 476,483 tokens；视觉通道 = 7,668 tokens（降 62 倍）。
+ *
+ * 所以这里返回**内容块数组** —— chat 协议里 `role:"tool"` 的 content 允许是数组，
+ * 实测上游 200 且按视觉通道计费。只有"纯文本"时才降成字符串（省一层包装）。
+ *
+ * `file_id` 引用式图片上游没有文件 API，换成一句明确说明（不静默丢）；
+ * 认不出的块保留 `JSON.stringify` 兜底 —— 丢内容比多花 token 更糟，
+ * 只是不再有"图片被当文本"这种量级的代价。
+ */
+function responsesOutputContent(output) {
   if (typeof output === 'string') return output;
   if (Array.isArray(output)) {
-    return output
-      .map((p) => {
-        if (typeof p === 'string') return p;
-        if (p && typeof p === 'object') {
-          if (typeof p.text === 'string') return p.text;
-          return JSON.stringify(p);
+    const parts = [];
+    for (const p of output) {
+      if (typeof p === 'string') { parts.push({ type: 'text', text: p }); continue; }
+      if (!p || typeof p !== 'object') { parts.push({ type: 'text', text: String(p) }); continue; }
+      if (typeof p.text === 'string') { parts.push({ type: 'text', text: p.text }); continue; }
+      if (p.type === 'input_image' || p.type === 'image_url') {
+        const url = typeof p.image_url === 'string' ? p.image_url : p.image_url?.url;
+        if (typeof url === 'string' && url) {
+          parts.push({ type: 'image_url', image_url: { url } });
+        } else if (p.file_id) {
+          parts.push({ type: 'text', text: '[image omitted: file_id references are not supported by this bridge]' });
         }
-        return String(p);
-      })
-      .join('\n');
+        continue;
+      }
+      parts.push({ type: 'text', text: JSON.stringify(p) });
+    }
+    if (!parts.length) return '';
+    if (parts.length === 1 && parts[0].type === 'text') return parts[0].text;
+    return parts;
   }
   if (output == null) return '';
   return JSON.stringify(output);
+}
+
+/**
+ * 只要文本的地方用它（`custom_tool_call.input` 之类**必须**是字符串的字段）。
+ *
+ * 图片在这里**降级成一句占位**而不是 `JSON.stringify` 整段 base64 —— 那些调用点
+ * 没有视觉通道可走，把 26 万字符塞进字符串参数只会重演"图当文本"的灾难。
+ */
+function responsesOutputText(output) {
+  const c = responsesOutputContent(output);
+  if (typeof c === 'string') return c;
+  return c.map((p) => (p.type === 'text' ? p.text : '[image omitted in this field]')).join('\n');
 }
 
 /**
@@ -2221,11 +2556,17 @@ function responsesToOpenAIMessages(body) {
       flushCalls();
       out.push({ role, content });
     } else if (type === 'function_call') {
+      /*
+       * 分组工具（MCP / namespace）的调用记录带 `namespace` 字段（实测：
+       * `{name:"js", namespace:"mcp__node_repl"}`）。回放给上游时必须拍平成**出站
+       * 声明过的同一个名字** `mcp__node_repl__js`，否则上游看到的是一个从没声明过的工具。
+       */
+      const ns = typeof item.namespace === 'string' ? item.namespace : '';
       pendingCalls.push({
         id: item.call_id || item.id || `call_${trace().slice(0, 20)}`,
         type: 'function',
         function: {
-          name: typeof item.name === 'string' ? item.name : '',
+          name: flattenToolName(ns, typeof item.name === 'string' ? item.name : ''),
           arguments: typeof item.arguments === 'string'
             ? item.arguments
             : JSON.stringify(item.arguments ?? {}),
@@ -2237,20 +2578,54 @@ function responsesToOpenAIMessages(body) {
        * 函数接口要 JSON —— 回传时按我们在出站时声明的同一形状（`{input}`）重新包上，
        * 否则下一轮上游会看到一条"参数不是合法 JSON"的 assistant tool_call。
        */
+      const ns = typeof item.namespace === 'string' ? item.namespace : '';
       pendingCalls.push({
         id: item.call_id || item.id || `call_${trace().slice(0, 20)}`,
         type: 'function',
         function: {
-          name: typeof item.name === 'string' ? item.name : '',
+          name: flattenToolName(ns, typeof item.name === 'string' ? item.name : ''),
           arguments: JSON.stringify({ input: responsesOutputText(item.input) }),
         },
+      });
+    } else if (type === 'tool_search_call') {
+      /*
+       * 上一轮模型做的「延迟工具检索」。上游没有这个概念，按出站声明过的名字
+       * （`tool_search`）回放成一次普通函数调用 —— 不回放的话历史里就少了一环，
+       * 模型会以为检索没做过、对同一个 query 反复重试。
+       */
+      pendingCalls.push({
+        id: item.call_id || item.id || `call_${trace().slice(0, 20)}`,
+        type: 'function',
+        function: {
+          name: TOOL_SEARCH_NAME,
+          arguments: JSON.stringify(item.arguments ?? {}),
+        },
+      });
+    } else if (type === 'tool_search_output') {
+      /*
+       * 检索结果：内容是一堆 `namespace{tools[]}` 分组定义。那些工具接下来会被
+       * 补进上游的 `tools[]`（见 withDeferredTools），所以这里只需要给模型一条
+       * **工具结果消息**，把「现在多了哪些工具」讲清楚；不回的话模型不知道检索
+       * 生效了，会反复检索。原先这里与 reasoning 一起被**静默丢弃**。
+       */
+      flushCalls();
+      out.push({
+        role: 'tool',
+        tool_call_id: typeof item.call_id === 'string' ? item.call_id : '',
+        content: describeDiscoveredTools(item.tools),
       });
     } else if (type === 'function_call_output' || type === 'custom_tool_call_output') {
       flushCalls();
       out.push({
         role: 'tool',
         tool_call_id: typeof item.call_id === 'string' ? item.call_id : '',
-        content: responsesOutputText(item.output),
+        /*
+         * ⚠️ 这里用 `responsesOutputContent`（保留图片块），**不是** `responsesOutputText`。
+         * 截图经 tool 输出回来时是 `{type:"input_image", image_url:"data:image/jpeg;base64,…"}`；
+         * 一旦降级成字符串，单图从 ~1K 变 18 万 tokens（实测 187 倍），
+         * 会话会因上游 `prompt is too long` 整轮崩掉。详见该函数的注释。
+         */
+        content: responsesOutputContent(item.output),
       });
     }
     // reasoning / 其它 item：丢弃。思维链不回传给上游（拿不到加密的
@@ -2270,15 +2645,27 @@ function responsesToOpenAIMessages(body) {
  * 只认一种的话，客户端换个写法就在桥这里静默变成「没有工具」——
  * 那会让 Agent 直接失去动手能力，且不报错。
  *
- * 三类工具的处理：
+ * 逐类工具的处理：
  *   1. `function` —— 直接翻；
  *   2. `custom`（freeform，如 Codex 的 `apply_patch`）—— **翻成 `input: string` 的
- *      普通函数**（见 `customToolDescription`）。原先这里是**静默丢掉**，结果是
+ *      普通函数**（见 `customToolFunction`）。原先这里是**静默丢掉**，结果是
  *      "系统提示让模型用 apply_patch、工具表里却没有它"：模型靠提示去蒙调用，
  *      Codex 收到 function_call 又因为该工具声明是 freeform 而判
  *      `tool apply_patch invoked with incompatible payload`，整轮白烧（2026-10-13
  *      实测现场）。回包侧按 `custom_tool_call` 回（见 relayResponsesStream）。
- *   3. 其它内置工具（web_search / tool_search 等）上游没有，丢掉。
+ *   3. `tool_search`（**延迟工具检索的闸门**，`execution:"client"`）—— 翻成同名普通
+ *      函数，回包侧必须回 `tool_search_call`（见 closeTool）。**原先这里与 web_search
+ *      一起被丢掉**：于是 Codex 的 MCP 工具（含 computer-use 的唯一入口
+ *      `mcp__node_repl.js`）走桥时永远发现不了，而且**不报错**——这是
+ *      「走桥就用不了 computer-use」的直接原因，不是"协议本来不通"。
+ *   4. `namespace` 分组（`{type:"namespace", name:"mcp__x", tools:[…]}`）—— 内层拍平成
+ *      `mcp__x__tool`（见 flattenToolName），回包侧再拆回短名 + `namespace` 字段。
+ *      原先整个分组被丢掉，组里的工具一个都到不了上游。
+ *   5. 其它内置工具（`web_search` / `local_shell` 等）上游没有对应能力，丢掉。
+ *      ⚠️ **丢掉的名字要记下来**（`dropped`），请求日志里打出来 ——
+ *      2026-10-13 的 `apply_patch`（custom）与 `tool_search` 两次翻车，
+ *      根因都是"工具被静默丢掉"，而日志只记**翻译后**的个数与名字，
+ *      于是这件事在日志里完全不可见。见 `buildToolRoutes` 的 `dropped`。
  */
 function responsesToolsToOpenAI(tools) {
   if (!Array.isArray(tools)) return null;
@@ -2288,29 +2675,28 @@ function responsesToolsToOpenAI(tools) {
     if (t.type === 'custom') {
       const name = typeof t.name === 'string' ? t.name : '';
       if (!name) continue;
+      out.push(customToolFunction(name, t));
+      continue;
+    }
+    if (t.type === TOOL_SEARCH_NAME) {
       out.push({
         type: 'function',
         function: {
-          name,
-          description: customToolDescription(t),
-          /*
-           * freeform 的 grammar 传不过去（chat/completions 没有这个字段），
-           * 退化成唯一必需的字符串参数。模型按 JSON 调，桥再把 `input` 拆出来
-           * 当 freeform 正文回给客户端。
-           */
-          parameters: {
-            type: 'object',
-            properties: {
-              input: {
-                type: 'string',
-                description: 'The complete payload for this freeform tool (e.g. the full patch text).',
-              },
-            },
-            required: ['input'],
-            additionalProperties: false,
-          },
+          name: TOOL_SEARCH_NAME,
+          description: typeof t.description === 'string' ? t.description : '',
+          parameters: t.parameters && typeof t.parameters === 'object'
+            ? t.parameters
+            : { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] },
         },
       });
+      continue;
+    }
+    if (Array.isArray(t.tools)) {
+      const ns = typeof t.name === 'string' ? t.name : '';
+      for (const child of t.tools) {
+        const decl = toolDeclarationToOpenAI(ns, child);
+        if (decl) out.push(decl);
+      }
       continue;
     }
     if (typeof t.type === 'string' && t.type !== 'function') continue;
@@ -2376,6 +2762,227 @@ function collectCustomToolNames(body) {
     }
   }
   return names;
+}
+
+/**
+ * Codex 的「分组工具」命名约定 → 上游函数名。
+ *
+ * Codex 里一组工具长这样：`{type:"namespace", name:"mcp__node_repl",
+ * tools:[{type:"function", name:"js", …}]}` —— 内层用的是**短名**；调用记录则是
+ * `{type:"function_call", name:"js", namespace:"mcp__node_repl", arguments:"{…}"}`
+ * （本机 2026-08-09 那次真正跑通的 computer-use 会话里，135 条 MCP 调用**全部**
+ * 是这个形状：短名 + 独立的 `namespace` 字段）。
+ *
+ * 上游 chat/completions 没有 namespace 概念，所以拍平成一个唯一名字
+ * `mcp__node_repl__js`（这个格式 Codex 自己的二进制里也写着）。
+ */
+function flattenToolName(namespace, name) {
+  return namespace ? `${namespace}__${name}` : name;
+}
+
+/** 出站时记下的映射：上游函数名 → Codex 的 namespace。回包时按它拆回短名。 */
+function splitWireName(routes, wireName) {
+  const namespace = routes?.namespace?.get(wireName);
+  if (!namespace) return { name: wireName, namespace: '' };
+  return { name: wireName.slice(namespace.length + 2), namespace };
+}
+
+/** `tool_search` 的实参：Codex 要的是**对象**（`{query, limit?}`），不是 JSON 字符串。 */
+function parseToolSearchArgs(args) {
+  if (args && typeof args === 'object') return args;
+  if (typeof args !== 'string') return { query: '' };
+  try {
+    const parsed = JSON.parse(args);
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed;
+  } catch { /* 不是 JSON：按原样塞进 query，别把调用整条丢掉 */ }
+  return { query: args };
+}
+
+/** custom（freeform）声明的上游函数形状：唯一必需的字符串参数 `input`。 */
+function customToolFunction(name, spec) {
+  return {
+    type: 'function',
+    function: {
+      name,
+      description: customToolDescription(spec),
+      /*
+       * freeform 的 grammar 传不过去（chat/completions 没有这个字段），
+       * 退化成唯一必需的字符串参数。模型按 JSON 调，桥再把 `input` 拆出来
+       * 当 freeform 正文回给客户端。
+       */
+      parameters: {
+        type: 'object',
+        properties: {
+          input: {
+            type: 'string',
+            description: 'The complete payload for this freeform tool (e.g. the full patch text).',
+          },
+        },
+        required: ['input'],
+        additionalProperties: false,
+      },
+    },
+  };
+}
+
+/** 一份工具声明 → 上游函数（`custom` 与 `function` 的差异只在这一处）。 */
+function toolDeclarationToOpenAI(namespace, spec) {
+  if (!spec || typeof spec !== 'object') return null;
+  const name = typeof spec.name === 'string' ? spec.name : '';
+  if (!name) return null;
+  const wire = flattenToolName(namespace, name);
+  if (spec.type === 'custom') return customToolFunction(wire, spec);
+  return {
+    type: 'function',
+    function: {
+      name: wire,
+      description: typeof spec.description === 'string' ? spec.description : '',
+      parameters: spec.parameters && typeof spec.parameters === 'object'
+        ? spec.parameters
+        : { type: 'object', properties: {} },
+    },
+  };
+}
+
+function addDeferred(map, namespace, spec) {
+  if (!spec || typeof spec !== 'object') return;
+  const name = typeof spec.name === 'string' ? spec.name : '';
+  if (!name) return;
+  const wire = flattenToolName(namespace, name);
+  if (!map.has(wire)) map.set(wire, { namespace, name, spec });
+}
+
+/**
+ * 收集**延迟下发**的工具声明。
+ *
+ * Codex 不把 MCP 工具放进顶层 `tools[]`，只给一个 `type:"tool_search"` 的检索工具；
+ * 模型检索过之后，命中结果才以 `{type:"tool_search_output", tools:[namespace…]}`
+ * 的形式出现在**下一轮请求**的 `input[]` 里（实测：`codex-cli 0.162`，见
+ * `.workbuddy/artifacts/capture-codex-mcp-tools.md`）。
+ *
+ * 桥必须把它们补进上游的 `tools[]` —— 否则模型既看不到也调不了。Codex 自带
+ * computer-use 的唯一入口 `mcp__node_repl.js` 正是走这条路：**这就是「走桥就用不了
+ * computer-use」的直接原因**，不是「协议本来不通」。
+ */
+function collectDeferredTools(body) {
+  const out = new Map();
+  const items = Array.isArray(body?.input) ? body.input : [];
+  for (const item of items) {
+    if (!item || item.type !== 'tool_search_output') continue;
+    for (const group of Array.isArray(item.tools) ? item.tools : []) {
+      if (!group || typeof group !== 'object') continue;
+      if (Array.isArray(group.tools)) {
+        const ns = typeof group.name === 'string' ? group.name : '';
+        for (const child of group.tools) addDeferred(out, ns, child);
+      } else {
+        addDeferred(out, '', group);
+      }
+    }
+  }
+  return out;
+}
+
+/**
+ * 一次 `/v1/responses` 请求的工具路由表：请求侧建好，回包侧照着还原。
+ *
+ * - `custom`     freeform 工具名 → 回 `custom_tool_call`（裸正文放 `input`）
+ * - `namespace`  上游函数名 → Codex 的 namespace → 回 `function_call` 时补 `namespace`
+ * - `deferred`   `tool_search_output` 带出来的工具定义 → 补进上游 `tools[]`
+ * - `toolSearch` 本次是否声明了 `tool_search` → 模型调它时要回 `tool_search_call`
+ * - `dropped`    **被丢掉、没转发给上游**的工具名/类型 → 只用于日志
+ *
+ * ## `dropped` 为什么必须有
+ *
+ * 请求日志原先打 `tools=N names=[…]`，而 `N` 与 `names` 都是**翻译后**的结果，
+ * 两者必然自洽 —— 于是"某个工具被静默丢掉"在日志里**完全看不出来**。
+ * 2026-10-13 连续两次翻车（`apply_patch` 的 `custom`、MCP 的 `tool_search`）
+ * 都栽在这个盲区上：日志显示 `tools=10` 看着正常，实际少了模型唯一的入口。
+ *
+ * 现在把丢掉的名字也打出来，下次同类问题**一眼可见**。
+ */
+function buildToolRoutes(body) {
+  const routes = {
+    custom: collectCustomToolNames(body),
+    namespace: new Map(),
+    deferred: collectDeferredTools(body),
+    toolSearch: false,
+    dropped: new Set(),
+  };
+  for (const [wire, entry] of routes.deferred) {
+    if (entry.namespace) routes.namespace.set(wire, entry.namespace);
+    if (entry.spec && entry.spec.type === 'custom') routes.custom.add(wire);
+  }
+  // 顶层 `tools[]` 里的分组声明（Codex 的 multi-agent / `collaboration` 用这个形状）
+  const list = Array.isArray(body?.tools) ? body.tools : [];
+  for (const t of list) {
+    if (!t || typeof t !== 'object') continue;
+    if (t.type === TOOL_SEARCH_NAME) { routes.toolSearch = true; continue; }
+    if (!Array.isArray(t.tools)) {
+      /*
+       * 判据必须与 `responsesToolsToOpenAI` **逐条一致**，否则会误报：
+       * 那里能处理的类型是 `custom`（freeform）、`function`、以及无 type 的普通函数；
+       * 其余（`web_search` / `local_shell` / `mcp` …）才是真的被丢掉。
+       *
+       * 实测教训：第一版这里漏了排除 `custom`，于是日志打出
+       * `dropped=apply_patch,web_search` —— 而同一行还写着 `freeform=apply_patch`
+       * （即它**转发成功了**）。一条自相矛盾的日志比没有日志更坏：
+       * 它会让人去查一个根本不存在的故障。
+       */
+      if (typeof t.type === 'string' && t.type !== 'function' && t.type !== 'custom') {
+        routes.dropped.add(typeof t.name === 'string' && t.name ? t.name : t.type);
+      }
+      continue;
+    }
+    const ns = typeof t.name === 'string' ? t.name : '';
+    if (!ns) continue;
+    for (const child of t.tools) {
+      const cn = child && typeof child.name === 'string' ? child.name : '';
+      if (!cn) continue;
+      routes.namespace.set(flattenToolName(ns, cn), ns);
+      if (child.type === 'custom') routes.custom.add(flattenToolName(ns, cn));
+    }
+  }
+  return routes;
+}
+
+/** 把延迟工具补进上游的 `tools[]`（已有同名声明就不重复发）。 */
+function withDeferredTools(tools, deferred) {
+  if (!deferred || !deferred.size) return tools;
+  const out = Array.isArray(tools) ? tools.slice() : [];
+  const seen = new Set(out.map((t) => t?.function?.name).filter(Boolean));
+  for (const [wire, entry] of deferred) {
+    if (seen.has(wire)) continue;
+    const decl = toolDeclarationToOpenAI(entry.namespace, entry.spec);
+    if (!decl) continue;
+    seen.add(wire);
+    out.push(decl);
+  }
+  return out.length ? out : null;
+}
+
+/**
+ * `tool_search` 检索结果 → 给模型的**工具结果正文**。
+ *
+ * 只列名字、不重复描述：这些描述紧接着会随 `tools[]` 一起发过去，抄两遍纯属烧
+ * token（本仓对上行 token 很敏感）。但没有这条消息的话，模型不知道检索生效了，
+ * 会对同一个 query 反复检索。
+ */
+function describeDiscoveredTools(groups) {
+  const names = [];
+  for (const g of Array.isArray(groups) ? groups : []) {
+    if (!g || typeof g !== 'object') continue;
+    if (Array.isArray(g.tools)) {
+      const ns = typeof g.name === 'string' ? g.name : '';
+      for (const c of g.tools) {
+        const n = c && typeof c.name === 'string' ? c.name : '';
+        if (n) names.push(flattenToolName(ns, n));
+      }
+    } else if (typeof g.name === 'string') {
+      names.push(g.name);
+    }
+  }
+  if (!names.length) return 'Tool search returned no matching tools. Try a different query.';
+  return `Tool search results. These tools are now callable: ${names.join(', ')}`;
 }
 
 /**
@@ -2471,7 +3078,22 @@ function responsesToolChoiceToOpenAI(tc) {
 function responsesErrorCode(status, message, parsedCode) {
   const text = String(message || '').toLowerCase();
   if (Number(status) === 429) return 'rate_limit_exceeded';
-  if (/context[_ ]?length|context[_ ]?window|too many tokens|maximum context/.test(text)) {
+  /*
+   * 上下文超限的措辞要认全。**上游真实原文**（2026-10-13 bridge.log 实测）：
+   *
+   *   {"code":11115,"msg":"prompt is too long: 1252936 tokens > 1048576 maximum"}
+   *
+   * 原来这条**不匹配**（旧正则只认 `context length` / `too many tokens` /
+   * `maximum context`），于是 `responsesErrorCode` 落到兜底 `upstream_error`
+   * → Codex 归到 `Retryable` → **原样重发 6 次、耗掉 249 秒**，最后给用户一句
+   * 泛化的失败；而它本可以立刻走 `ContextWindowExceeded` 去裁剪/压缩上下文。
+   * 实测同一请求连续 6 条 400 全是这个原因（08:50:33 → 08:52:16）。
+   *
+   * 所以补上 `too long` / `exceeds the maximum` 这两个真实措辞。
+   */
+  if (/context[_ ]?length|context[_ ]?window|too many tokens|maximum context/.test(text)
+    || /(prompt|input|request|message|conversation)[^.]{0,40}too long/.test(text)
+    || /exceeds? the maximum|maximum (?:number of )?tokens/.test(text)) {
     return 'context_length_exceeded';
   }
   if (/insufficient[_ ]?quota|credit[_ ]?balance|spend[_ ]?limit/.test(text)) return 'insufficient_quota';
@@ -2509,7 +3131,8 @@ function responsesUsage(u) {
 }
 
 /** 聚合后的 assistant 消息 → Responses 的 `output` 数组。 */
-function openAIToResponsesOutput(message, customTools = new Set()) {
+function openAIToResponsesOutput(message, routes = null) {
+  const customTools = routes?.custom ?? new Set();
   const items = [];
   const text = typeof message?.content === 'string' ? message.content : '';
   if (text) {
@@ -2544,12 +3167,35 @@ function openAIToResponsesOutput(message, customTools = new Set()) {
       });
       continue;
     }
+    /*
+     * 延迟工具检索：Codex 只认 `tool_search_call`（`execution:"client"`，且
+     * `arguments` 是**对象**而不是 JSON 字符串）。回 `function_call` 会被它的
+     * 工具路由器拒掉。与流式那条同形。
+     */
+    if (name === TOOL_SEARCH_NAME && routes?.toolSearch) {
+      items.push({
+        id: responsesId('tsc'),
+        type: 'tool_search_call',
+        status: 'completed',
+        execution: 'client',
+        call_id: callId,
+        arguments: parseToolSearchArgs(args),
+      });
+      continue;
+    }
+    /*
+     * 分组工具还原成 Codex 认的形状：`name` 用**短名** + 独立的 `namespace` 字段
+     * （实测 135/135 条 MCP 调用都是这个形状）。上游侧用的是拍平名
+     * `mcp__node_repl__js`，这里按出站时记下的映射拆回去。
+     */
+    const { name: emitName, namespace } = splitWireName(routes, name);
     items.push({
       id: responsesId('fc'),
       type: 'function_call',
       status: 'completed',
       call_id: callId,
-      name,
+      name: emitName,
+      ...(namespace ? { namespace } : {}),
       arguments: args,
     });
   }
@@ -2575,9 +3221,9 @@ const responsesTextOf = (output) => output
   .join('');
 
 /** 聚合结果 → 完整的 Responses 对象（非流式）。 */
-function openAIToResponsesResponse(agg, model, customTools = new Set()) {
+function openAIToResponsesResponse(agg, model, routes = null) {
   const choice = (agg.choices || [])[0] || {};
-  const output = openAIToResponsesOutput(choice.message, customTools);
+  const output = openAIToResponsesOutput(choice.message, routes);
   const truncated = choice.finish_reason === 'length';
   return {
     id: responsesId('resp'),
@@ -2619,6 +3265,11 @@ function openAIToResponsesResponse(agg, model, customTools = new Set()) {
  *          output_item.added(item.type=custom_tool_call)
  *          → custom_tool_call_input.delta → custom_tool_call_input.done
  *          → output_item.done(item.type=custom_tool_call, input=裸正文)
+ *   延迟工具检索（模型调 `tool_search`）:
+ *          output_item.done(item.type=tool_search_call, arguments=**对象**)
+ *          —— 它没有 delta 事件，所以既不发 added 也不发任何 `*_arguments.*`
+ *   分组工具（MCP，出站声明为 `mcp__node_repl__js`）:
+ *          与普通 tool 同形，但回包时把名字拆回**短名 + `namespace` 字段**
  *   收尾 : response.completed（带完整 output 与 usage）
  *
  * 文本块与工具块共用一个 **单调递增的 output_index**，且每开新块前必须先把
@@ -2626,7 +3277,8 @@ function openAIToResponsesResponse(agg, model, customTools = new Set()) {
  *
  * 返回 `{ finishReason, usage, streamError }` 供调用方记账。
  */
-async function relayResponsesStream(up, res, model, customTools = new Set()) {
+async function relayResponsesStream(up, res, model, routes = null) {
+  const customTools = routes?.custom ?? new Set();
   let backpressured = false;
   const send = (type, obj) => {
     backpressured = !res.write(`event: ${type}\ndata: ${JSON.stringify({ type, ...obj })}\n\n`);
@@ -2784,7 +3436,21 @@ async function relayResponsesStream(up, res, model, customTools = new Set()) {
     if (!slot || slot.started) return;
     slot.started = true;
     pendingTool = null;
+    /*
+     * `tool_search` 不发 `output_item.added`：它的 item 形状里 `arguments` 是
+     * **对象**（见 closeTool），参数分片过程中拼不出合法形状。它也没有 delta
+     * 事件，而「任何 `*.delta` 前必须先发 added」那条硬约束只约束
+     * `function_call_arguments.*` / `custom_tool_call_input.*`，所以直接等收尾
+     * 一次性给 `output_item.done` 是安全的。
+     */
+    if (slot.name === TOOL_SEARCH_NAME) return;
     const isCustom = customTools.has(slot.name);
+    /*
+     * 分组工具（MCP）必须还原成 Codex 认的形状：`name` 用**短名**、命名空间放
+     * 独立的 `namespace` 字段（实测 135/135 条 MCP 调用都是这个形状）。上游侧
+     * 用的是拍平名 `mcp__node_repl__js`。
+     */
+    const { name: emitName, namespace } = splitWireName(routes, slot.name);
     send('response.output_item.added', {
       output_index: slot.outputIndex,
       item: isCustom
@@ -2793,7 +3459,7 @@ async function relayResponsesStream(up, res, model, customTools = new Set()) {
           type: 'custom_tool_call',
           status: 'in_progress',
           call_id: slot.callId,
-          name: slot.name,
+          name: emitName,
           input: '',
         }
         : {
@@ -2801,7 +3467,8 @@ async function relayResponsesStream(up, res, model, customTools = new Set()) {
           type: 'function_call',
           status: 'in_progress',
           call_id: slot.callId,
-          name: slot.name,
+          name: emitName,
+          ...(namespace ? { namespace } : {}),
           arguments: '',
         },
     });
@@ -2809,6 +3476,26 @@ async function relayResponsesStream(up, res, model, customTools = new Set()) {
 
   const closeTool = (slot) => {
     flushTool(slot);
+    /*
+     * 延迟工具检索：Codex 只认 `tool_search_call`
+     * （`{type, arguments, execution:"client", call_id, status}`，且 `arguments`
+     * 是**对象**而不是 JSON 字符串）。回 `function_call` 会被它的工具路由器拒掉，
+     * 检索这一步就永远发生不了，MCP 工具也就永远发现不了 —— 而 `mcp__node_repl.js`
+     * （Codex 自带 computer-use 的唯一入口）正是只能靠检索拿到。
+     */
+    if (slot.name === TOOL_SEARCH_NAME && routes?.toolSearch) {
+      const item = {
+        id: slot.id,
+        type: 'tool_search_call',
+        status: 'completed',
+        execution: 'client',
+        call_id: slot.callId,
+        arguments: parseToolSearchArgs(slot.arguments),
+      };
+      send('response.output_item.done', { output_index: slot.outputIndex, item });
+      output[slot.outputIndex] = item;
+      return;
+    }
     if (customTools.has(slot.name)) {
       /*
        * freeform：上游给的是 JSON 参数，客户端要裸正文。`input` 在 added 里
@@ -2827,13 +3514,14 @@ async function relayResponsesStream(up, res, model, customTools = new Set()) {
         type: 'custom_tool_call',
         status: 'completed',
         call_id: slot.callId,
-        name: slot.name,
+        name: splitWireName(routes, slot.name).name,
         input,
       };
       send('response.output_item.done', { output_index: slot.outputIndex, item });
       output[slot.outputIndex] = item;
       return;
     }
+    const { name: emitName, namespace } = splitWireName(routes, slot.name);
     send('response.function_call_arguments.done', {
       item_id: slot.id, output_index: slot.outputIndex, arguments: slot.arguments,
     });
@@ -2842,7 +3530,8 @@ async function relayResponsesStream(up, res, model, customTools = new Set()) {
       type: 'function_call',
       status: 'completed',
       call_id: slot.callId,
-      name: slot.name,
+      name: emitName,
+      ...(namespace ? { namespace } : {}),
       arguments: slot.arguments,
     };
     send('response.output_item.done', { output_index: slot.outputIndex, item });
@@ -2944,8 +3633,10 @@ async function relayResponsesStream(up, res, model, customTools = new Set()) {
              * 逐片转发出去只会让客户端看到乱码般的 JSON 片段 —— 它要的是
              * 裸正文，而正文要等参数攒完才拆得出来。所以这类块**不发** delta，
              * 收尾时一次性给 `custom_tool_call_input.done` + `output_item.done`。
+             * `tool_search` 同理：它的 `arguments` 在 Codex 侧必须是**对象**，
+             * 分片拼不出合法形状，也只在收尾给一次 `output_item.done`。
              */
-            if (!customTools.has(slot.name)) {
+            if (!customTools.has(slot.name) && slot.name !== TOOL_SEARCH_NAME) {
               send('response.function_call_arguments.delta', {
                 item_id: slot.id, output_index: slot.outputIndex, delta: tc.function.arguments,
               });
@@ -2973,6 +3664,40 @@ async function relayResponsesStream(up, res, model, customTools = new Set()) {
 
   const finalOutput = output.filter(Boolean);
   const truncated = finishReason === 'length';
+  /*
+   * ⚠️ **上游在流中途断掉时，绝不能发 `response.completed`。**
+   *
+   * `streamError` 非空表示上游连接在流中间断了（被掐 / 网络故障 / 上游超时），
+   * 此时回答**已经截断在半句话上**。原来这里无条件发 `completed` + `end_turn:true`
+   * → Codex 认为"回合正常结束" → 用户看到的就是**说话说一半突然停下**，
+   * 而且不报错、不重试（它以为成功了）。
+   *
+   * 这与 `docs/TROUBLESHOOTING.md` 里记的"跑一半就断"是**两种不同成因**：
+   * 那种是模型自己决定结束回合（`model_needs_follow_up=false`），
+   * 这种是**传输层断了却被我们报成成功** —— 后者是桥的错，必须修。
+   *
+   * 正确的收尾：发 `response.failed`（Codex 认这个事件，会转成可读错误并按
+   * `error.code` 决定要不要重试），让客户端知道这一轮**没跑完**。
+   * `end_turn` 不给（失败响应没有"回合结束"语义）。
+   */
+  if (streamError && !res.writableEnded) {
+    send('response.failed', {
+      response: {
+        ...envelope('failed'),
+        output: finalOutput,
+        output_text: responsesTextOf(finalOutput),
+        usage: responsesUsage(usage),
+        error: {
+          type: 'upstream_error',
+          code: 'server_error',
+          message: `workbuddy-bridge: upstream stream interrupted before completion: ${streamError.message}`,
+        },
+      },
+    });
+    res.end();
+    return { finishReason, usage, streamError };
+  }
+
   /*
    * ⚠️ `response.incomplete` 的 `reason` **只能是 `"interrupted"`**。
    *
@@ -5005,18 +5730,28 @@ async function handleRequest(req, res) {
       const model = resolveResponsesModel(body.model);
       const messages = responsesToOpenAIMessages(body);
       /*
-       * 工具可能在两个地方：顶层的 `tools`（经典），或 `input[].additional_tools`
-       * （新版 Codex 的 code mode）。两处都收 —— 只看顶层的话，code mode 下
-       * 上游一个工具都收不到，模型会把调用写进正文，用户看到一串 DSML 标记。
+       * 工具可能出现在三个地方：
+       *   1. 顶层 `tools`（经典 function tools）；
+       *   2. `input[].additional_tools`（新版 Codex 的 code mode）；
+       *   3. `input[].tool_search_output`（**延迟下发**：Codex 把 MCP 工具藏起来，
+       *      模型得先用 `tool_search` 检索，命中结果在下一轮才以 namespace 分组出现）。
+       * 三处都收 —— 只看前两处的话，Codex 自带的 MCP 工具（含 computer-use 的唯一
+       * 入口 `mcp__node_repl.js`）走桥时一个都到不了上游，而且全程不报错。
        */
-      const tools = responsesToolsToOpenAI(body.tools) || responsesToolsFromAdditional(body);
+      const routes = buildToolRoutes(body);
+      const tools = withDeferredTools(
+        responsesToolsToOpenAI(body.tools) || responsesToolsFromAdditional(body),
+        routes.deferred,
+      );
       const toolChoice = responsesToolChoiceToOpenAI(body.tool_choice);
       /*
        * 请求里声明为 custom（freeform）的工具名 —— 回包侧要按 `custom_tool_call`
        * 回（Codex 的 apply_patch 就是这一类）。丢了这份名单，工具调用就会被当成
        * 普通 function_call 发回去，客户端判 `incompatible payload`。
+       * `routes.namespace` 同理：分组工具的调用必须带回 `namespace` 字段，否则
+       * Codex 的工具路由器认不出它属于哪个 MCP server。
        */
-      const customTools = collectCustomToolNames(body);
+      const customTools = routes.custom;
 
       const oai = { model, messages, stream: true, stream_options: { include_usage: true } };
       if (tools) oai.tools = tools;
@@ -5027,8 +5762,22 @@ async function handleRequest(req, res) {
       if (typeof body.top_p === 'number') oai.top_p = body.top_p;
 
       maybeAutoCheckin();
+      /*
+       * 工具**名字**也打出来：只记个数的话，「工具被静默丢掉」这类问题在日志里
+       * 完全不可见 —— 2026-10-13 的 `tool_search` 被丢就是这样：`tools=10` 看着
+       * 正常，实际少了 MCP 工具的唯一入口。名字属元数据，不含任何对话内容。
+       */
       log(`→ [responses] ${body.model || '(no model)'} => ${model} stream=${wantStream} msgs=${messages.length} tools=${tools?.length ?? 0}`
-        + (customTools.size ? ` freeform=${[...customTools].join(',')}` : ''));
+        + (customTools.size ? ` freeform=${[...customTools].join(',')}` : '')
+        + (routes.deferred.size ? ` deferred=${[...routes.deferred.keys()].join(',')}` : '')
+        + (routes.toolSearch ? ' tool_search=1' : '')
+        /*
+         * **被丢掉的工具**也要打出来（见 buildToolRoutes 的 `dropped` 说明）。
+         * 不打的话，"模型有个工具用不了"在日志里完全不可见 ——
+         * `apply_patch` 与 `tool_search` 两次翻车都是这么被藏起来的。
+         */
+        + (routes.dropped.size ? ` dropped=${[...routes.dropped].join(',')}` : '')
+        + ` names=[${(tools || []).map((t) => t.function?.name).filter(Boolean).join(',')}]`);
 
       const startedAt = Date.now();
       trackInflight(req, res, model, wantStream);
@@ -5112,7 +5861,7 @@ async function handleRequest(req, res) {
 
         if (wantStream) {
           res.__overheadMs = Math.max(0, upstreamStartedAt - startedAt);
-          const r = await relayResponsesStream(up, res, model, customTools);
+          const r = await relayResponsesStream(up, res, model, routes);
           if (r.streamError && !ac.signal.aborted) {
             recordRequest({ model, stream: true, ms: Date.now() - startedAt, ok: false, status: 0, code: null, error: r.streamError.message });
           } else {
@@ -5142,7 +5891,7 @@ async function handleRequest(req, res) {
           });
         }
         recordRequest({ model, stream: false, ok: true, ms: Date.now() - startedAt, ...usageOf(aggregated.usage) });
-        return json(res, 200, openAIToResponsesResponse(aggregated, model, customTools));
+        return json(res, 200, openAIToResponsesResponse(aggregated, model, routes));
       } catch (e) {
         if (e?.code === 'RATE_LIMITED') {
           const retryAfter = Math.max(1, Math.ceil((e.retryAfterMs || 1000) / 1000));

@@ -199,6 +199,19 @@ async function startStubUpstream(models = ['stub-model'], opts = {}) {
           res.writeHead(opts.chatStatus || 200, { 'content-type': opts.chatType || 'text/html' });
           return res.end(opts.chatRaw);
         }
+        /*
+         * `opts.chatSequence`：按顺序返回**不同**的响应，用于测「重试若干次后成功」。
+         * 每项 `{ status, type, raw }`；用完最后一项后**一直重复它**。
+         *
+         * 为什么需要它：`chatRaw` 是恒定响应，只能表达「永远失败」，无法表达
+         * 「前 2 次 400、第 3 次 200」—— 而后者才是「重试确实救回了请求」的证据。
+         */
+        if (Array.isArray(opts.chatSequence) && opts.chatSequence.length) {
+          const idx = Math.min(seen.length - 1, opts.chatSequence.length - 1);
+          const step = opts.chatSequence[idx];
+          res.writeHead(step.status || 200, { 'content-type': step.type || 'application/json' });
+          return res.end(step.raw ?? '{}');
+        }
         res.writeHead(200, { 'content-type': 'text/event-stream' });
         res.write('data: {"choices":[{"delta":{"content":"ok"}}]}\n\n');
         res.write('data: {"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":1,"total_tokens":4}}\n\n');
@@ -273,14 +286,39 @@ test('桥：账本是本地文件，且不写使用者的那份', { timeout: 90_
     // 临时目录里应当出现（或可创建）账本文件；关键是**工作目录隔离**
     const localLedger = join(bridge.dir, 'usage.jsonl');
     const repoLedger = join(REPO, 'bridge', 'usage.jsonl');
-    const repoLedgerBefore = existsSync(repoLedger) ? readFileSync(repoLedger, 'utf8').length : -1;
+    /*
+     * ⚠️ 判据不能是「仓库账本字节数前后相等」。
+     *
+     * 那份账本属于**正在运行的真实桥**：开发者本机跑用例时，任何并发请求
+     * （控制台轮询、另一个终端里的对话、甚至 CI 之外的实测脚本）都会往里追加一行，
+     * 于是这条断言会**误报**成"测试改到了使用者的账本"。
+     * 实测踩过：并发跑基准脚本时它报 `223443 !== 222905` —— 差的 538 字节
+     * 正好是一条真实请求的账本行，与本次 DELETE 毫无关系。
+     *
+     * 换成对**本用例动作**真正敏感、且对并发追加免疫的判据：
+     *   · DELETE 会把整份文件**清空**，所以"非空 → 空"是它造成的铁证；
+     *   · 追加**永远不会改首行**，而清空/截断一定会 —— 所以首行是可靠指纹。
+     * 这样"测试真的写坏了使用者账本"照旧会被抓住，并发流量则不再误报。
+     */
+    const repoLedgerBefore = existsSync(repoLedger) ? readFileSync(repoLedger, 'utf8') : '';
+    const firstLineBefore = repoLedgerBefore.split('\n')[0] ?? '';
 
     // 触发一次"清空账本"（不需要上游）
     const cleared = await fetch(bridge.baseUrl + '/v1/usage', { method: 'DELETE', headers: auth });
     assert.ok([200, 204].includes(cleared.status), `清空账本应当成功，实际 ${cleared.status}`);
 
-    const repoLedgerAfter = existsSync(repoLedger) ? readFileSync(repoLedger, 'utf8').length : -1;
-    assert.equal(repoLedgerAfter, repoLedgerBefore, '测试绝不能改到使用者的真实账本');
+    const repoLedgerAfter = existsSync(repoLedger) ? readFileSync(repoLedger, 'utf8') : '';
+    const firstLineAfter = repoLedgerAfter.split('\n')[0] ?? '';
+    assert.ok(!(repoLedgerBefore.length > 0 && repoLedgerAfter.length === 0),
+      '测试绝不能把使用者的真实账本清空');
+    assert.equal(firstLineAfter, firstLineBefore,
+      '测试绝不能改动使用者真实账本的内容（首行指纹变了 = 被清空/截断/重写了）');
+
+    /*
+     * 反证隔离真的生效：被清空的是**测试桥自己**那份（temp 目录里）。
+     * 少了这一条，"两边都没动"也能让上面的断言通过 —— 那就成了空转用例。
+     */
+    assert.ok(existsSync(localLedger), `测试桥的账本应当落在临时目录：${localLedger}`);
 
     // 清空后仍可读，且是空账本
     const after = await (await fetch(bridge.baseUrl + '/v1/usage', { headers: auth })).json();
@@ -1316,6 +1354,76 @@ test('桥：出站身份指纹可用 env 覆盖（上游版本漂移时的逃生
   }
 });
 
+test('桥：上游 429（14003）在桥这层等待重试，客户端无感', { timeout: 90_000 }, async () => {
+  /*
+   * 现场（2026-10-13 16:0x 实测）：上游按账号限流回 429，桥原先原样甩给 Codex，
+   * 它 1-30s 一条地重试（5 连 429），回合被砍成"说话说一半"。修法：桥按
+   * WORKBUDDY_429_WAITS 的计划在本地等待并原样重发，成功后客户端完全无感。
+   */
+  let chatHits = 0;
+  const seen = [];
+  const srv = createServer((req, res) => {
+    const path = new URL(req.url, 'http://127.0.0.1').pathname;
+    if (path === '/v2/enterprises/personal/models') {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      return res.end(JSON.stringify({
+        code: 0,
+        data: { models: [{ id: 'r429-model', maxInputTokens: 128000, maxOutputTokens: 4096 }] },
+      }));
+    }
+    if (path === '/v3/config') {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      return res.end(JSON.stringify({ code: 0, data: { models: [] } }));
+    }
+    if (path === '/v2/chat/completions') {
+      let body = '';
+      req.on('data', (c) => { body += c; });
+      req.on('end', () => {
+        seen.push(body);
+        chatHits += 1;
+        if (chatHits === 1) {
+          res.writeHead(429, { 'content-type': 'application/json', 'retry-after': '1' });
+          return res.end(JSON.stringify({ code: 14003, msg: 'too many requests', retry_policy: { retry: true } }));
+        }
+        res.writeHead(200, { 'content-type': 'text/event-stream' });
+        res.write('data: {"choices":[{"delta":{"content":"ok-after-429"}}]}\n\n');
+        res.write('data: {"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":1,"total_tokens":4}}\n\n');
+        res.end('data: [DONE]\n\n');
+      });
+      return;
+    }
+    res.writeHead(404, { 'content-type': 'application/json' });
+    res.end('{}');
+  });
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+  const bridge = await startBridge(
+    {
+      CODEBUDDY_ENDPOINT: `http://127.0.0.1:${srv.address().port}`,
+      WORKBUDDY_429_WAITS: '200',
+    },
+    { auth: READABLE_FAKE_AUTH },
+  );
+  try {
+    await fetch(bridge.baseUrl + '/v1/models?all=1'); // 预热目录
+    const res = await fetch(bridge.baseUrl + '/v1/chat/completions', {
+      method: 'POST',
+      headers: { ...auth, 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'r429-model', messages: [{ role: 'user', content: 'hi' }] }),
+      signal: AbortSignal.timeout(15000),
+    });
+    assert.equal(res.status, 200, '上游 429 必须在桥这层重试掉 —— 客户端拿到 200，而不是失败');
+    const j = await res.json();
+    assert.equal(j.choices?.[0]?.message?.content, 'ok-after-429', '重试成功后的回答要原样到达客户端');
+    assert.equal(chatHits, 2, '上游应被命中 2 次：第一次 429，桥等待后重试成功');
+    assert.equal(seen.length, 2, '两次请求体应完全一致（原样重发，不是重新组装）');
+    assert.equal(seen[0], seen[1]);
+  } finally {
+    await bridge.stop();
+    try { await srv.close(); } catch { /* 忽略 */ }
+    rmSync(bridge.dir, { recursive: true, force: true });
+  }
+});
+
 test('桥：本地限流 reject 模式 —— 上限 N 时上游恰好收到 N 条，第 N+1 条 429 + Retry-After', { timeout: 90_000 }, async () => {
   const stub = await startStubUpstream(['rl-model']);
   const bridge = await startBridge(
@@ -1768,6 +1876,72 @@ test('桥：Anthropic 流式工具名分片必须拼完整（不能只留首片�
 });
 
 /**
+ * Anthropic `tool_result` 里的图片**不能静默丢掉**。
+ *
+ * Claude Code 的截图工具把图放在 `tool_result.content` 的 image 块里。
+ * 桥原先只挑 `type:"text"` 的块（`anthropicToolResultText` 的 filter），
+ * 于是图片**不报错地消失** —— 模型"看不见图"，排查时毫无线索。
+ *
+ * 与 Responses 侧同源的坑（那边是 `JSON.stringify` 成纯文本，代价 187 倍；
+ * 这边是直接丢，代价是功能没了）。两处都已改成走内容块数组。
+ */
+test('桥：Anthropic tool_result 里的图片必须转发（不能静默丢）', { timeout: 30_000 }, async () => {
+  const stub = await startStubUpstream(['stub-model']);
+  const bridge = await startBridge({ CODEBUDDY_ENDPOINT: stub.base }, { auth: READABLE_FAKE_AUTH });
+  try {
+    const dataUri = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUg==';
+    const res = await fetch(`${bridge.baseUrl}/v1/messages`, {
+      method: 'POST',
+      headers: { ...auth, 'content-type': 'application/json', 'anthropic-version': '2023-06-01' },
+      body: JSON.stringify({
+        model: 'stub-model',
+        max_tokens: 64,
+        stream: false,
+        messages: [
+          { role: 'user', content: 'screenshot it' },
+          {
+            role: 'assistant',
+            content: [{ type: 'tool_use', id: 'toolu_1', name: 'screenshot', input: {} }],
+          },
+          {
+            role: 'user',
+            content: [
+              {
+                type: 'tool_result',
+                tool_use_id: 'toolu_1',
+                content: [
+                  { type: 'text', text: 'captured' },
+                  { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'iVBORw0KGgoAAAANSUhEUg==' } },
+                ],
+              },
+            ],
+          },
+        ],
+      }),
+    });
+    assert.equal(res.status, 200);
+
+    const sent = stub.seen.find((s) => s.body.includes('toolu_1'));
+    assert.ok(sent, '上游没收到带 tool_result 的请求');
+    const body = JSON.parse(sent.body);
+    const toolMsg = body.messages.find((m) => m.role === 'tool');
+    assert.ok(toolMsg, '缺 role:"tool" 消息');
+
+    assert.ok(Array.isArray(toolMsg.content),
+      `tool_result 含图片时必须回内容块数组，实际是 ${typeof toolMsg.content}（图片被静默丢掉了）`);
+    const img = toolMsg.content.find((p) => p.type === 'image_url');
+    assert.ok(img, '图片丢了：tool_result 里的 image 块必须转成 image_url');
+    assert.equal(img.image_url.url, dataUri, 'base64 图片要按 data URI 原样透传');
+    assert.equal(toolMsg.content.find((p) => p.type === 'text')?.text, 'captured',
+      '同一条 tool_result 里的文本块要保留');
+  } finally {
+    await bridge.stop();
+    try { await stub.close(); } catch { /* 忽略 */ }
+    rmSync(bridge.dir, { recursive: true, force: true });
+  }
+});
+
+/**
  * 令牌过期瞬间的并发请求，**只该刷新一次**（单飞）。
  *
  * 为什么必须有：响应里可能带**轮换后的 refreshToken**，后到的请求拿的是已经
@@ -1935,6 +2109,104 @@ test('桥：上游 usage 是脏数据（字符串 / NaN / 缺字段）时账本�
 });
 
 /**
+ * 提示缓存命中量必须记进账本。
+ *
+ * ## 为什么钉这条（2026-10-13 实测：26 倍的隐藏成本）
+ *
+ * 提示缓存是这条链路上**最大的单因素**，但它原先在账本里**完全不可见** ——
+ * `usageOf()` 只记 promptTokens / completionTokens / credit，于是：
+ *   · **成本**：同一批 >=40k 的请求里，未命中 **0.0142 积分/1k tokens**、
+ *     已命中 **0.0005** —— 差 **26 倍**；93 条里 **6 条未命中就花掉 10.00 积分**，
+ *     而 87 条命中合计才 10.20。这 10 个积分在控制台上与"正常用量"毫无区别。
+ *   · **延迟**：实测冷缓存 TTFT 14.8s → 命中后 5.9s（2.5 倍）。
+ *
+ * 现在账本带 `cachedTokens` / `cacheMissTokens`，控制台就能把"贵且慢"的
+ * 那几条单独标出来。
+ *
+ * ## 口径要点
+ *
+ * 上游对同一件事给了**多个别名**，且常与恒 0 的占位并存（实测 usage 里
+ * `prompt_tokens_details.cached_tokens` 与顶层 `cached_tokens`、
+ * `prompt_cache_hit_tokens` 同时存在）——所以取最大值，不是 `??` 链。
+ * 这里就把"占位 0 不能挡住真实值"钉死。
+ */
+test('桥：提示缓存命中量必须记进账本（26 倍成本差异的来源）', { timeout: 30_000 }, async () => {
+  const stub = await startStubUpstream(['stub-model'], {
+    chatRaw: 'data: {"choices":[{"delta":{"content":"hi"}}]}\n\n'
+      + 'data: {"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{'
+      // 真实值藏在 details 里；顶层两个同义字段是**恒 0 的占位**（上游实测形状）
+      + '"prompt_tokens":1000,"completion_tokens":5,"total_tokens":1005,'
+      + '"cached_tokens":0,"prompt_cache_hit_tokens":0,'
+      + '"prompt_cache_miss_tokens":120,'
+      + '"prompt_tokens_details":{"cached_tokens":880}'
+      + '}}\n\n'
+      + 'data: [DONE]\n\n',
+    chatType: 'text/event-stream',
+  });
+  const bridge = await startBridge({ CODEBUDDY_ENDPOINT: stub.base }, { auth: READABLE_FAKE_AUTH });
+  try {
+    const res = await fetch(`${bridge.baseUrl}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { ...auth, 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'stub-model', messages: [{ role: 'user', content: 'hi' }] }),
+    });
+    await res.text();
+
+    await new Promise((r) => setTimeout(r, 300));
+    const rows = readFileSync(join(bridge.dir, 'usage.jsonl'), 'utf8')
+      .split('\n').filter(Boolean).map((l) => JSON.parse(l));
+    const last = rows[rows.length - 1];
+
+    assert.equal(last.cachedTokens, 880,
+      '必须取到 prompt_tokens_details.cached_tokens 的真实值，不能被顶层占位 0 挡住');
+    assert.equal(last.cacheMissTokens, 120, '未命中计数要一并记下');
+    assert.equal(last.promptTokens, 1000, '原有字段不受影响');
+    assert.ok(!/NaN|Infinity/.test(JSON.stringify(last)), '账本行不得含 NaN/Infinity');
+  } finally {
+    await bridge.stop();
+    try { await stub.close(); } catch { /* 忽略 */ }
+    rmSync(bridge.dir, { recursive: true, force: true });
+  }
+});
+
+/**
+ * 上游**没报**缓存字段时，账本不得凭空写 0。
+ *
+ * 0 是"确实没命中"，缺字段是"上游没报"——两者混起来会让命中率统计失真
+ * （拿"没报"当"未命中"会把命中率系统性压低）。所以缺失时字段应当**不出现**。
+ */
+test('桥：上游没报缓存字段时不得写 0（缺报 ≠ 未命中）', { timeout: 30_000 }, async () => {
+  const stub = await startStubUpstream(['stub-model'], {
+    chatRaw: 'data: {"choices":[{"delta":{"content":"hi"}}]}\n\n'
+      + 'data: {"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":2,"total_tokens":12}}\n\n'
+      + 'data: [DONE]\n\n',
+    chatType: 'text/event-stream',
+  });
+  const bridge = await startBridge({ CODEBUDDY_ENDPOINT: stub.base }, { auth: READABLE_FAKE_AUTH });
+  try {
+    const res = await fetch(`${bridge.baseUrl}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { ...auth, 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'stub-model', messages: [{ role: 'user', content: 'hi' }] }),
+    });
+    await res.text();
+
+    await new Promise((r) => setTimeout(r, 300));
+    const rows = readFileSync(join(bridge.dir, 'usage.jsonl'), 'utf8')
+      .split('\n').filter(Boolean).map((l) => JSON.parse(l));
+    const last = rows[rows.length - 1];
+
+    assert.ok(!('cachedTokens' in last), '上游没报命中量时不该写 0');
+    assert.ok(!('cacheMissTokens' in last), '上游没报未命中量时不该写 0');
+    assert.equal(last.promptTokens, 10, '原有字段照常');
+  } finally {
+    await bridge.stop();
+    try { await stub.close(); } catch { /* 忽略 */ }
+    rmSync(bridge.dir, { recursive: true, force: true });
+  }
+});
+
+/**
  * 超长错误原文必须被截断并压成单行。
  *
  * 上游的 401 会返回**整段 HTML**（APISIX 网关），若不截断：
@@ -2047,6 +2319,267 @@ test('桥：完全没带凭据时也要给指引（新用户第一次接入手�
     if (real) assert.ok(!body.includes(real), '401 响应体绝不能包含真实令牌');
   } finally {
     await bridge.stop();
+    rmSync(bridge.dir, { recursive: true, force: true });
+  }
+});
+
+/**
+ * 确定性 400 必须**快速失败**，不许进退避重试。
+ *
+ * ## 为什么钉这条（2026-10-13 实测的 40 秒白等）
+ *
+ * 桥原先对所有 `400 code 11133` 一视同仁地跑 `TRANSIENT_400_DELAYS`
+ * （1s+4s+10s+25s = **40 秒**）。但 11133 只是包装码，真因在 `extError.code`：
+ * 日志取证显示 122 次 11133 **全是**确定性的
+ * （`model_param_invalid` 116 + `invalid_reasoning_effort` 6），
+ * 没有一次是瞬时故障 —— 109 个重试簇跑满 4 档后**照样**报错，
+ * 纯等待累计 2460 秒（41 分钟）。用户感知就是「问一句，卡 40 秒，然后报错」。
+ *
+ * ## 口径
+ *
+ * 退避表被 `WORKBUDDY_TRANSIENT_400_DELAYS=30,30,30,30` 压到毫秒级：
+ * 这样「不该重试」的用例能在 2 秒内证伪（真跑 40 秒的用例没人会保留）。
+ * 断言不看耗时（CI 上机器慢会假红），而是看**打到上游的对话请求次数** ——
+ * 确定性 400 必须**恰好 1 次**，一次都不许多打。
+ */
+test('桥：确定性 400（11133 + model_param_invalid）必须快速失败，不得退避重试 40 秒', { timeout: 60_000 }, async () => {
+  const stub = await startStubUpstream(['stub-model'], {
+    chatStatus: 400,
+    chatType: 'application/json',
+    chatRaw: JSON.stringify({
+      code: 11133,
+      msg: 'Invalid request parameters',
+      extError: {
+        code: 'model_param_invalid',
+        message: 'the request parameters were rejected by the model provider',
+        type: 'invalid_request_error',
+      },
+    }),
+  });
+  // 退避压到 30ms：若代码回退成"照旧重试"，本用例仍会重试 4 次，但只花 ~120ms，
+  // 于是"上游命中次数"这条断言能在毫秒级抓住回归（不必等 40 秒）。
+  const bridge = await startBridge({
+    CODEBUDDY_ENDPOINT: stub.base,
+    WORKBUDDY_SKIP_MODEL_PREFLIGHT: '1',
+    WORKBUDDY_TRANSIENT_400_DELAYS: '30,30,30,30',
+  }, { auth: READABLE_FAKE_AUTH });
+  try {
+    const res = await fetch(`${bridge.baseUrl}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { ...auth, 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'stub-model', messages: [{ role: 'user', content: 'hi' }], max_tokens: 8 }),
+      signal: AbortSignal.timeout(20_000),
+    });
+    assert.equal(res.status, 400, '确定性 400 必须原样回给客户端');
+    const text = await res.text();
+    assert.match(text, /model_param_invalid/, '错误体要带上真因，便于用户改参数');
+
+    const chatCalls = stub.seen.filter((s) => JSON.parse(s.body || '{}').model).length;
+    assert.equal(chatCalls, 1,
+      `确定性 400 只许打上游 1 次；实际 ${chatCalls} 次（重试回归了，用户会白等 40 秒）`);
+  } finally {
+    await bridge.stop();
+    stub.close();
+    rmSync(bridge.dir, { recursive: true, force: true });
+  }
+});
+
+/**
+ * 真瞬时 400（11133 但**没有** extError 判据）必须**仍然重试**，并且能救回。
+ *
+ * 这条与上一条配对，缺一不可：
+ *   · 上一条钉「不许对确定性错误瞎等」；
+ *   · 这一条钉「不许矫枉过正，把真瞬时的也一并放弃」。
+ *
+ * 桩按 `chatSequence` 前 2 次回 400、第 3 次回正常 SSE —— 断言最终 200，
+ * 证明重试链确实把请求救回来了（而不是只看日志里"有 retry"这种弱证据）。
+ */
+test('桥：真瞬时 400（11133 无 extError 判据）必须仍然重试并救回', { timeout: 60_000 }, async () => {
+  const transient400 = JSON.stringify({ code: 11133, msg: 'Invalid request parameters' });
+  const stub = await startStubUpstream(['stub-model'], {
+    chatSequence: [
+      { status: 400, type: 'application/json', raw: transient400 },
+      { status: 400, type: 'application/json', raw: transient400 },
+      {
+        status: 200,
+        type: 'text/event-stream',
+        raw: 'data: {"choices":[{"delta":{"content":"ok"}}]}\n\n'
+          + 'data: {"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":1,"total_tokens":4}}\n\n'
+          + 'data: [DONE]\n\n',
+      },
+    ],
+  });
+  const bridge = await startBridge({
+    CODEBUDDY_ENDPOINT: stub.base,
+    WORKBUDDY_SKIP_MODEL_PREFLIGHT: '1',
+    WORKBUDDY_TRANSIENT_400_DELAYS: '20,20,20,20',
+  }, { auth: READABLE_FAKE_AUTH });
+  try {
+    const res = await fetch(`${bridge.baseUrl}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { ...auth, 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'stub-model', messages: [{ role: 'user', content: 'hi' }], max_tokens: 8 }),
+      signal: AbortSignal.timeout(30_000),
+    });
+    assert.equal(res.status, 200, '瞬时 400 重试后必须成功');
+    const body = await res.json();
+    assert.equal(body.choices?.[0]?.message?.content, 'ok', '救回的响应内容要完整');
+
+    const chatCalls = stub.seen.filter((s) => JSON.parse(s.body || '{}').model).length;
+    assert.equal(chatCalls, 3, `应当恰好重试 2 次（共 3 次）；实际 ${chatCalls} 次`);
+  } finally {
+    await bridge.stop();
+    stub.close();
+    rmSync(bridge.dir, { recursive: true, force: true });
+  }
+});
+
+/**
+ * `WORKBUDDY_TRANSIENT_400_RETRY=0` 必须把 400 重试**整体**关掉（含真瞬时的）。
+ *
+ * 这是给"速度绝对优先"的用户留的出口：宁可立刻报错让客户端自己退避，
+ * 也不要桥在这里替它等。默认开，所以必须有用例证明这个开关真的有效 ——
+ * 否则它只是一个写在文档里、实际不生效的旋钮。
+ */
+test('桥：WORKBUDDY_TRANSIENT_400_RETRY=0 时连瞬时 400 也不重试', { timeout: 60_000 }, async () => {
+  const stub = await startStubUpstream(['stub-model'], {
+    chatStatus: 400,
+    chatType: 'application/json',
+    chatRaw: JSON.stringify({ code: 11133, msg: 'Invalid request parameters' }),
+  });
+  const bridge = await startBridge({
+    CODEBUDDY_ENDPOINT: stub.base,
+    WORKBUDDY_SKIP_MODEL_PREFLIGHT: '1',
+    WORKBUDDY_TRANSIENT_400_DELAYS: '20,20,20,20',
+    WORKBUDDY_TRANSIENT_400_RETRY: '0',
+  }, { auth: READABLE_FAKE_AUTH });
+  try {
+    const res = await fetch(`${bridge.baseUrl}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { ...auth, 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'stub-model', messages: [{ role: 'user', content: 'hi' }], max_tokens: 8 }),
+      signal: AbortSignal.timeout(20_000),
+    });
+    assert.equal(res.status, 400);
+    const chatCalls = stub.seen.filter((s) => JSON.parse(s.body || '{}').model).length;
+    assert.equal(chatCalls, 1, `开关关闭时必须一次就返回；实际打了 ${chatCalls} 次`);
+  } finally {
+    await bridge.stop();
+    stub.close();
+    rmSync(bridge.dir, { recursive: true, force: true });
+  }
+});
+
+/**
+ * 瞬时 DNS / 建连失败必须**重试**，而不是直接 500。
+ *
+ * ## 为什么钉这条（2026-10-13 实测）
+ *
+ * 账本里有 20 条 `getaddrinfo ENOTFOUND www.workbuddy.ai`，其中 **17 条挤在同一个
+ * 小时**——典型的解析器抖动（VPN/代理切换、DNS 缓存过期），不是域名不存在：
+ * 同一台机器随后连测 12 次解析全部成功、中位 0.2ms。
+ *
+ * 桥原先的重试只认 `ECONNRESET|socket hang up|EPIPE`（keep-alive 复用被掐），
+ * 对 DNS/建连这一族**一次都不重试**，直接把 500 丢给客户端。用户看到
+ * 「本地桥连接失败」，实际只是抖了一下。
+ *
+ * ## 判据为什么看日志标记
+ *
+ * DNS 失败**没有外部可观测的"试了几次"**：两次尝试都解析不到同一个不存在的名字，
+ * 客户端拿到的都是 500。所以判据取桥自己打的标记 ——
+ * `transient transport failure` 只在**新加的那条重试分支**里出现，
+ * 老代码（只认 ECONNRESET 那一族）永远不会打它。标记出现 = 这条分支真的生效了。
+ *
+ * 域名用 `.invalid`：RFC 2606 保留、**保证解析不了**，所以不依赖任何环境，
+ * 也不会因为"碰巧解析成功"而假绿。
+ */
+test('桥：瞬时 DNS 失败必须走重试分支（不是直接 500）', { timeout: 60_000 }, async () => {
+  const bridge = await startBridge({
+    // RFC 2606 保留域名：保证 ENOTFOUND
+    CODEBUDDY_ENDPOINT: 'http://workbuddy-bridge-test.invalid:8790',
+    WORKBUDDY_SKIP_MODEL_PREFLIGHT: '1',
+    WORKBUDDY_TRANSPORT_RETRY_MS: '0',
+    WORKBUDDY_LOG: '1',
+  }, { auth: READABLE_FAKE_AUTH });
+  try {
+    const res = await fetch(`${bridge.baseUrl}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { ...auth, 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'stub-model', messages: [{ role: 'user', content: 'hi' }], max_tokens: 8 }),
+      signal: AbortSignal.timeout(30_000),
+    });
+    // 域名确实不存在 → 最终仍然是失败（重试救不回来），但**必须**已经试过重试
+    assert.ok(res.status >= 400, '解析不了的域名最终必须报错，不能假装成功');
+    const out = bridge.out();
+    assert.match(out, /transient transport failure/,
+      `DNS 失败必须走重试分支（日志里应有 "transient transport failure"）。实际输出：\n${out.slice(-1500)}`);
+    // 且错误原文要如实回给客户端，便于用户区分"域名配错"与"网络抖动"
+    const text = await res.text();
+    assert.match(text, /ENOTFOUND|getaddrinfo|EAI_AGAIN|ENOTFOUND/i,
+      `错误体要带上真实原因，实际：${text.slice(0, 200)}`);
+  } finally {
+    await bridge.stop();
+    rmSync(bridge.dir, { recursive: true, force: true });
+  }
+});
+
+/**
+ * 传输层瞬时失败**恢复后必须救回**（端到端）：第一次连接被粗暴断开、第二次正常。
+ *
+ * 与上一条互补：上一条证明"重试分支会被走到"，这一条证明"重试真的能救回请求"
+ * （最终 200 + 正文完整，且上游恰好被打了 2 次）。
+ *
+ * 用 `req.socket.destroy()` 造错而不是"先关端口再抢时间起服务"：
+ * 后者依赖时序，在 CI 上会随机红。
+ */
+test('桥：传输层瞬时失败重试后必须救回完整响应', { timeout: 60_000 }, async () => {
+  let chatHits = 0;
+  const srv = createServer((req, res) => {
+    const p = new URL(req.url, 'http://127.0.0.1').pathname;
+    if (p === '/v2/enterprises/personal/models') {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      return res.end(JSON.stringify({ code: 0, data: { models: [{ id: 'stub-model', maxInputTokens: 128000, maxOutputTokens: 4096 }] } }));
+    }
+    if (p === '/v3/config') {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      return res.end(JSON.stringify({ code: 0, data: { models: [] } }));
+    }
+    if (p === '/v2/chat/completions') {
+      req.resume();
+      req.on('end', () => {
+        chatHits += 1;
+        if (chatHits === 1) { req.socket.destroy(); return; } // 第一次：粗暴断开
+        res.writeHead(200, { 'content-type': 'text/event-stream' });
+        res.write('data: {"choices":[{"delta":{"content":"recovered"}}]}\n\n');
+        res.write('data: {"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":1,"total_tokens":4}}\n\n');
+        res.end('data: [DONE]\n\n');
+      });
+      return;
+    }
+    res.writeHead(404, { 'content-type': 'application/json' });
+    res.end('{}');
+  });
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+
+  const bridge = await startBridge({
+    CODEBUDDY_ENDPOINT: `http://127.0.0.1:${srv.address().port}`,
+    WORKBUDDY_SKIP_MODEL_PREFLIGHT: '1',
+    WORKBUDDY_TRANSPORT_RETRY_MS: '0',
+  }, { auth: READABLE_FAKE_AUTH });
+  try {
+    const res = await fetch(`${bridge.baseUrl}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { ...auth, 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'stub-model', messages: [{ role: 'user', content: 'hi' }], max_tokens: 8 }),
+      signal: AbortSignal.timeout(30_000),
+    });
+    assert.equal(res.status, 200, '瞬时传输失败重试后必须成功（而不是 500）');
+    const body = await res.json();
+    assert.equal(body.choices?.[0]?.message?.content, 'recovered', '救回的响应内容要完整');
+    assert.equal(chatHits, 2, `应当恰好重试 1 次（共 2 次上游对话）；实际 ${chatHits} 次`);
+  } finally {
+    await bridge.stop();
+    await new Promise((r) => srv.close(r));
     rmSync(bridge.dir, { recursive: true, force: true });
   }
 });

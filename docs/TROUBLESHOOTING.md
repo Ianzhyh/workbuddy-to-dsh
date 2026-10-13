@@ -99,7 +99,26 @@ refreshToken : envelope keyId=9127dea1b44020a7 -> DECRYPTED len=698 jws-like=tru
 | `11101` | `Non-stream chat request is currently not supported` | 上游只接受流式。桥已自动转换；若仍出现，说明请求绕过了桥 |
 | `11101` | `cannot unmarshal object into Go struct field Request.tool_choice of type string` | 客户端发了 **OpenAI 对象形式**的 `tool_choice`（`{"type":"function",...}`），而上游的 Go 结构体只收字符串。桥已在 `normalizePayload` 里归一化，正常不会出现；若出现，说明请求绕过了桥 |
 | `11128` | `Illegal API invocation from an unapproved channel` | 请求结构或调用方身份不被认可。常见于 `system` 提示词被放在 `developer` 角色、User-Agent 不匹配，或 **Claude Code 的固定 system 模板被逐字拉黑**（2026-10-08 实测：带原文 `…official CLI for Claude.` 即被拒、按最小改写后放行 —— 桥已内置出站改写 `CLI`→`CLI tool`、`Main branch`→`Default branch`，正常不会再出现）。若再现：用 `node tools/dev/probe-audit-template.mjs` 复核（脚本内附三态判定与处置），改写表在桥内 `AUDIT_TEMPLATE_REWRITES` |
-| `11133` | 网关包装的瞬时上游故障 | 桥会退避重试；频繁出现请稍后再试 |
+| `11133` | 网关包装的上游故障 —— **但真因在 `extError.code` 里** | 桥会看 `extError.code` 分流（见下）：**确定性**的（`model_param_invalid` / `invalid_reasoning_effort` …）立刻返回，**瞬时**的才退避重试 |
+
+> **`11133` 为什么要分流（2026-10-13 修）**：`11133` 只是网关的**包装码**，
+> 真正原因在响应体的 `extError.code` 里。桥原先对所有 `11133` 一视同仁地退避重试
+> （1s+4s+10s+25s = **40 秒**），而实测日志里这类请求**122 次全是确定性的**
+> （`model_param_invalid` 116 + `invalid_reasoning_effort` 6）——
+> 参数被模型提供方拒了，同样的参数原样重发一万次也不会变。
+> 结果就是「问一句，卡 40 秒，然后照样报错」，纯等待累计 2460 秒（41 分钟）。
+>
+> 现在桥按 `extError.code` 分流：
+> - **确定性**（`model_param_invalid` / `invalid_reasoning_effort` / `invalid_request_error`
+>   / `model_not_found` / `context_length_exceeded` …）→ **立刻**返回错误，不退避；
+> - **认不出来**的 → 仍按原退避表重试（保守：不认识的不擅自放弃）；
+> - `WORKBUDDY_TRANSIENT_400_RETRY=0` → 连瞬时的也不重试，全部快速失败。
+>
+> 看到 `11133` 时先看 `extError.code`：
+> 若是 `model_param_invalid`，问题在**请求参数**（多来自客户端下发的
+> `reasoning_effort` / `max_tokens` 等该模型不接受的字段），换参数即可，
+> 重试无用。
+
 
 > **`tool_choice` 为什么必须归一化**：OpenAI 规范允许两种写法 —— 字符串
 > （`none` / `auto` / `required`）和对象（`{"type":"function","function":{"name":"..."}}`，
@@ -284,7 +303,7 @@ spawnSync(systemExe('netstat'), ['-ano'], {
 | `11102` | 模型不存在或未接入 —— 该 id 在上游没有配置 |
 | `11101` | 上游不接受非流式请求（桥已自动转流式，出现说明请求绕过了桥） |
 | `11128` | 请求结构或调用方身份不被认可（`system` 提示词放错角色、UA 不匹配） |
-| `11133` | 网关包装的瞬时上游故障，桥会退避重试 |
+| `11133` | 网关包装的上游故障（真因看 `extError.code`）：确定性原因立刻失败，瞬时原因桥会退避重试 |
 
 面板为空说明桥没在跑，或还没有任何请求经过桥。原始日志（含更完整的堆栈）在
 `bridge/bridge.log`。
@@ -400,6 +419,69 @@ node tools\dev\probe-codex-custom-tool.mjs
 - **生成物过期**：`~/.codex/workbuddy-model-catalog.json` 的 mtime 早于最近的桥/接入改动，
   就是它 —— Codex 一直按旧目录（旧系统提示、旧截断上限）在跑。
 - Codex Desktop **重启 / 新开对话**才会重新读目录；只重写文件不够。
+
+### Codex 里"截图/操控桌面干到一半整个回合崩掉"：`prompt is too long`
+
+**症状**：用 computer-use / 截图之类的工具时，Codex **干到一半突然整个回合崩掉**，
+界面上是：
+
+```
+stream disconnected before completion: prompt is too long: 1252936 tokens > 1048576 maximum
+```
+
+前面往往已经说了半句话（"我先把窗口激活…"），然后卡住约 4 分钟才失败。
+**与上面那条"宣布了就结束回合"是两回事**：这条是真的报错，那条是静默结束。
+
+**根因**（2026-10-13 用真实 rollout + 桥日志 + 真实网关三路对账）：
+
+截图是经**工具输出**回来的，形状是内容块数组里的
+`{type:"input_image", image_url:"data:image/jpeg;base64,…"}`。
+桥的 `responsesOutputText()` 原先对**没有 `text` 字段**的块走 `JSON.stringify(p)` ——
+于是**整段 26 万字符的 base64 变成了 tool 消息里的纯文本**。
+
+真实网关实测同一张图：
+
+| 通道 | prompt_tokens |
+|---|---|
+| 视觉通道（`image_url` 块） | **987** |
+| 降级成纯文本（旧行为） | **184,718** |
+
+**187 倍。** 后果不是"慢"，而是**账实不符**：Codex 按 ~1K 记帐，认为上下文才用了
+58.5 万（压缩线 90 万），上游实际已收到 125.3 万 → 直接 400 拒绝。
+Codex 于是重试，桥原样转发，**连撞 6 次、249 秒**，最后整轮崩掉。
+
+**怎么修**（v1.4.9 之后已修，见 CHANGELOG 的 `[Unreleased]`）：
+
+```cmd
+npm run bridge                  :: 或从控制台重启桥 —— 桥是长驻进程，改完必须重启
+```
+
+改的是桥，**不需要重新 apply 目录**。
+
+**怎么自证**（都不花额度或只花极少）：
+
+```cmd
+node tools\dev\probe-codex-tool-image-cost.mjs      :: 单图两种通道的真实代价（987 vs 184718）
+node tools\dev\probe-codex-responses-image.mjs      :: 走真实 Responses 路径，看 prompt_tokens 是不是 ~1K
+node tools\dev\probe-codex-image-crash-repro.mjs    :: 用会话里的真图复刻崩溃
+```
+
+`probe-codex-responses-image.mjs` 打印 `prompt_tokens=1281` 就是修好了；
+若是 18 万量级，说明桥没重启或改动没生效。
+
+**顺带修掉的两个相关缺陷**：
+
+- 上游超限原文 `prompt is too long: N tokens > M maximum` 原先**认不出来**
+  （桥的正则只认 `context length` / `too many tokens` / `maximum context`）→
+  落到泛化的 `upstream_error` → Codex 当"可重试"**白重试 6 次**。
+  现在映射成 `context_length_exceeded`，Codex 会立刻走 `ContextWindowExceeded`。
+- **上游在流中途断掉时，桥原先仍发 `response.completed`** → Codex 以为回合正常结束 →
+  用户看到"说话说一半突然停下"，**不报错也不重试**。现在改发 `response.failed`。
+
+> **别去改目录里的上下文窗口**：曾怀疑"声明 100 万导致 Codex 不压缩"，核对官方源码
+> （tag `rust-v0.162.0-alpha.17.2`，与本机版本精确对应）后**不成立** ——
+> 压缩线是 `context_window × 9/10` = **900,000**，**低于**上游硬上限 1,048,576，是安全的。
+> 崩溃的唯一原因是账实不符。详见 [CODEX-COMPACT-FIELDS.md](CODEX-COMPACT-FIELDS.md)。
 
 ### 勾了 N 个模型，客户端里只有 M 个（N > M），面板却一直显示 N 个
 
