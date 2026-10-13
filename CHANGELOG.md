@@ -19,6 +19,48 @@
 
 ## [Unreleased]
 
+### Fixed（Codex 接入：freeform 工具 `apply_patch` 全链路打通 + 系统提示不再一代代退化）
+
+**用户看到的现象**：Codex 里做长任务时"跑一半就断了" —— 模型说一句"我来验证一下"这一轮就结束
+（rollout 里是 `task_complete` + `model_needs_follow_up=false`，output token 极少），用户以为掉线；
+同时 `apply_patch` 全程不可用，模型反复试、反复被拒，只能退化成 shell here-string 写文件。
+
+**根因**（2026-10-13 用真实 `codex.exe` 抓包 + 桩上游对照实验逐条确认，不是猜的）：
+
+1. **freeform 工具被静默丢掉**：Codex 把 `apply_patch` 声明成 `type:"custom"`（lark 语法的
+   freeform 工具；本机 0.162 **只认** `apply_patch_tool_type:"freeform"`，写别的值直接
+   `unknown variant` 起不来，不写则完全不提供该工具）。桥的请求侧原先只翻 `function` 类型，
+   于是"系统提示让用 apply_patch、工具表里却没有它"——模型靠提示蒙调用，Codex 的工具路由器
+   再判 `tool apply_patch invoked with incompatible payload`，整轮白烧。
+2. **回包项类型**：freeform 调用在 Responses 里的项类型是 `custom_tool_call`（正文放 `input`），
+   配 `response.custom_tool_call_input.delta/.done`；发成 `function_call` 客户端不收。
+3. **生成物过期 + 模板退化**：`model_messages.instructions_template` **就是** Codex 的全量系统
+   提示（抓包：请求里没有 `instructions` 字段，`input[0]` 那条 developer 消息逐字等于模板）。
+   上一版把它整段替换成 5 行中性文案，而"模板来源"又常常是**我们自己写过的条目** —— 刷新一次
+   就把官方提示永久换掉了；用户机器上那份目录还停在 Oct-10（17KB 官方提示 + 10000 截断上限）。
+
+**改法**：
+
+- 桥：请求侧把 `custom` 工具翻成上游认的函数（唯一必需的 `input` 字符串参数；并就地改写
+  模板里"do not wrap the patch in JSON"那句与函数接口打架的说明）；回包侧按 `custom_tool_call`
+  回（流式 / 非流式同形）；历史里的 `custom_tool_call` / `custom_tool_call_output` 双向映射成
+  `assistant.tool_calls` / `role:"tool"`。请求日志多一栏 `freeform=…`（排查按它找）。
+- 目录生成：系统提示改成「**来源模板原样保留 + 末尾追加桥补充说明**」（工具集边界 /
+  freeform 的 `input` 参数 / 回合纪律："宣布要做的事必须同一回合发工具调用"）；补充说明带哨兵
+  行、**幂等**（先剥旧再追加）；模板优先级改为「别人的 > 官方 `models_cache.json` >
+  我们自己的条目」，不让自己的成品当模板。
+- 新增真机探针 `tools/dev/probe-codex-custom-tool.mjs`（真 `codex.exe` + 真桥 + 桩上游，
+  **不花额度**）：9 条断言覆盖请求翻译 / 历史双向映射 / 客户端**真的执行**了补丁 / 无
+  `incompatible payload`。
+- 用例：桥 +3（流式形状 / 请求翻译+历史 / 非流式形状，撤掉修复即红）、lib +2（补充说明幂等 /
+  模板优先级，撤掉修复即红）。`release:check` 全绿（lib 127、bridge 73、plugin 84）。
+- 本机已重新生成 `~/.codex/workbuddy-model-catalog.json` 并重启桥与控制台，真机复跑确认：
+  日志 `freeform=apply_patch`、rollout 里有 `custom_tool_call` + `custom_tool_call_output`、
+  补丁真的落盘。
+
+> 相邻但不在接管范围的一件事：`config.toml` 顶层的 `model_reasoning_effort` 是用户手写的，
+> 目录里已不声明 `ultra`，需要用户自己决定改不改（不改也不报错，只是语义与 Codex 官方不同）。
+
 ### Changed（思考强度档位：从"每模型写死三档"改成**逐模型实测**）
 
 dsh 的「推理等级」下拉原先对所有模型都只给**低 / 中 / 高**三档（adapter 里写死）。

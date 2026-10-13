@@ -2080,6 +2080,15 @@ async function relayAnthropicStream(up, res, model, estInputTokens) {
  *    `output_tokens` / `total_tokens` 就都是**必填**（`ResponseCompletedUsage`
  *    里这三个没有 Option）。漏一个会让 Codex 判「流损坏」并中断整轮。
  * 4. 未知事件与任何 `*.delta` 都是安全忽略的，所以多发的噪音事件不会炸。
+ * 5. **freeform（`type:"custom"`）工具另有项类型**：请求侧声明成 custom 的工具
+ *    （Codex 的 `apply_patch`），回包必须用 `custom_tool_call`（正文在 `input`），
+ *    配 `response.custom_tool_call_input.delta/.done` 事件；发成 `function_call`
+ *    会被 Codex 的工具路由器判 `tool … invoked with incompatible payload`。
+ *    这两条是 2026-10-13 用**真实 codex.exe**（0.162.0-alpha.17.2，临时 CODEX_HOME +
+ *    桩上游）对照实验确认的：桩按上面形状发，Codex 照常执行补丁并把
+ *    `custom_tool_call` / `custom_tool_call_output` 回传进下一轮 `input`。
+ * 6. `apply_patch` 是否声明**由客户端的模型目录决定**（`apply_patch_tool_type`，
+ *    本机 Codex 只认 `"freeform"`，写别的报 `unknown variant`；不写=完全不提供）。
  */
 
 /**
@@ -2171,8 +2180,10 @@ function responsesOutputText(output) {
  *    第一条 `role:"system"|"developer"` 的 message（**Codex 用的是后者** ——
  *    它的请求结构里根本没有 `instructions` 字段）。两处都收，合并成一条 system。
  * 2. 工具调用与结果在 Responses 里是**平铺的独立 item**
- *    （`function_call` / `function_call_output`），而 chat 要求前者嵌在
- *    assistant.tool_calls、后者是独立的 `role:"tool"` 消息。
+ *    （`function_call` / `function_call_output`，以及 freeform 工具的
+ *    `custom_tool_call` / `custom_tool_call_output`），而 chat 要求前者嵌在
+ *    assistant.tool_calls、后者是独立的 `role:"tool"` 消息。freeform 的裸正文
+ *    要按出站时声明过的 `{input}` 形状重新包成 JSON（见 `customToolDescription`）。
  * 3. 连续多个 `function_call` 必须**合成同一条** assistant 消息（chat 的语义就是
  *    "一次 assistant 回合发出多个调用"），否则上游会看到多条只带 tool_calls 的
  *    assistant 消息，与随后的 tool 结果对不上号。
@@ -2220,7 +2231,21 @@ function responsesToOpenAIMessages(body) {
             : JSON.stringify(item.arguments ?? {}),
         },
       });
-    } else if (type === 'function_call_output') {
+    } else if (type === 'custom_tool_call') {
+      /*
+       * freeform 工具（apply_patch）的调用记录：客户端手里是裸正文，而上游的
+       * 函数接口要 JSON —— 回传时按我们在出站时声明的同一形状（`{input}`）重新包上，
+       * 否则下一轮上游会看到一条"参数不是合法 JSON"的 assistant tool_call。
+       */
+      pendingCalls.push({
+        id: item.call_id || item.id || `call_${trace().slice(0, 20)}`,
+        type: 'function',
+        function: {
+          name: typeof item.name === 'string' ? item.name : '',
+          arguments: JSON.stringify({ input: responsesOutputText(item.input) }),
+        },
+      });
+    } else if (type === 'function_call_output' || type === 'custom_tool_call_output') {
       flushCalls();
       out.push({
         role: 'tool',
@@ -2245,13 +2270,49 @@ function responsesToOpenAIMessages(body) {
  * 只认一种的话，客户端换个写法就在桥这里静默变成「没有工具」——
  * 那会让 Agent 直接失去动手能力，且不报错。
  *
- * 非 `function` 类型的内置工具（web_search / file_search 等）上游没有，丢掉。
+ * 三类工具的处理：
+ *   1. `function` —— 直接翻；
+ *   2. `custom`（freeform，如 Codex 的 `apply_patch`）—— **翻成 `input: string` 的
+ *      普通函数**（见 `customToolDescription`）。原先这里是**静默丢掉**，结果是
+ *      "系统提示让模型用 apply_patch、工具表里却没有它"：模型靠提示去蒙调用，
+ *      Codex 收到 function_call 又因为该工具声明是 freeform 而判
+ *      `tool apply_patch invoked with incompatible payload`，整轮白烧（2026-10-13
+ *      实测现场）。回包侧按 `custom_tool_call` 回（见 relayResponsesStream）。
+ *   3. 其它内置工具（web_search / tool_search 等）上游没有，丢掉。
  */
 function responsesToolsToOpenAI(tools) {
   if (!Array.isArray(tools)) return null;
   const out = [];
   for (const t of tools) {
     if (!t || typeof t !== 'object') continue;
+    if (t.type === 'custom') {
+      const name = typeof t.name === 'string' ? t.name : '';
+      if (!name) continue;
+      out.push({
+        type: 'function',
+        function: {
+          name,
+          description: customToolDescription(t),
+          /*
+           * freeform 的 grammar 传不过去（chat/completions 没有这个字段），
+           * 退化成唯一必需的字符串参数。模型按 JSON 调，桥再把 `input` 拆出来
+           * 当 freeform 正文回给客户端。
+           */
+          parameters: {
+            type: 'object',
+            properties: {
+              input: {
+                type: 'string',
+                description: 'The complete payload for this freeform tool (e.g. the full patch text).',
+              },
+            },
+            required: ['input'],
+            additionalProperties: false,
+          },
+        },
+      });
+      continue;
+    }
     if (typeof t.type === 'string' && t.type !== 'function') continue;
     const fn = t.function && typeof t.function === 'object' ? t.function : t;
     const name = typeof fn.name === 'string' ? fn.name : '';
@@ -2270,15 +2331,84 @@ function responsesToolsToOpenAI(tools) {
   return out.length ? out : null;
 }
 
+/** 桥给 custom（freeform）工具补的说明：告诉模型"在这里它就是个普通函数"。 */
+const CUSTOM_TOOL_BRIDGE_NOTE = 'Local bridge note: this tool is exposed here as an ordinary '
+  + 'function — put the complete payload text (not a JSON-wrapped copy) in the string argument `input`.';
+
+/**
+ * custom/freeform 工具的描述改写。
+ *
+ * 原文是给 freeform 通道写的（Codex 的 apply_patch 明说 "do not wrap the patch in
+ * JSON"），而桥这边**必须**让模型包一层 JSON —— 两句话直接打架，模型就会犹豫或
+ * 蒙调用。把那一句就地改写成事实（用 `input` 参数），再补一条桥说明。
+ */
+function customToolDescription(t) {
+  const raw = typeof t.description === 'string' ? t.description : '';
+  const fixed = raw.replace(
+    /do not wrap the (?:patch|payload|tool input|input) in json/gi,
+    'pass the patch text in the `input` argument',
+  );
+  return fixed ? `${fixed}\n\n${CUSTOM_TOOL_BRIDGE_NOTE}` : CUSTOM_TOOL_BRIDGE_NOTE;
+}
+
+/**
+ * 请求里声明为 `custom`（freeform）的工具名集合 —— 回包侧要靠它决定**项类型**
+ * （`custom_tool_call` 还是 `function_call`），错了客户端就判
+ * `incompatible payload`。
+ *
+ * 两种摆放位置都扫（与 `responsesToolsToOpenAI` / `responsesToolsFromAdditional`
+ * 同一套遍历规则）：顶层 `tools`，以及 code mode 的 `input[].additional_tools`（可嵌套 namespace）。
+ */
+function collectCustomToolNames(body) {
+  const names = new Set();
+  const walk = (list) => {
+    if (!Array.isArray(list)) return;
+    for (const t of list) {
+      if (!t || typeof t !== 'object') continue;
+      if (Array.isArray(t.tools)) { walk(t.tools); continue; }
+      if (t.type === 'custom' && typeof t.name === 'string' && t.name) names.add(t.name);
+    }
+  };
+  walk(body?.tools);
+  if (Array.isArray(body?.input)) {
+    for (const it of body.input) {
+      if (it && it.type === 'additional_tools') walk(it.tools);
+    }
+  }
+  return names;
+}
+
+/**
+ * 模型回给 custom 工具的调用参数 → freeform 正文。
+ *
+ * 模型按上游的函数接口调用，参数是 JSON（`{"input":"*** Begin Patch…"}`）；
+ * 客户端要的是**裸正文**。认几个常见键名，都没有就原样回 —— 至少不会丢内容，
+ * 客户端那边会给出"补丁格式不对"的明确报错，比静默乱猜好。
+ */
+function customToolInput(argumentsText) {
+  const raw = typeof argumentsText === 'string' ? argumentsText : '';
+  let parsed;
+  try { parsed = JSON.parse(raw); } catch { return raw; }
+  if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+    for (const key of ['input', 'patch', 'text', 'content', 'body']) {
+      if (typeof parsed[key] === 'string') return parsed[key];
+    }
+  }
+  return raw;
+}
+
 /**
  * 新版 Codex 的 **code mode** 把工具定义塞在 `input[]` 的 `additional_tools` 条目里
  * （顶层**没有** `tools`），形状是 `namespace` 套 `function`，外加一个 freeform 的
  * `custom` 工具（`exec`：让模型写 JavaScript 去编排工具调用，shell / apply_patch
  * 都收在它后面）。
  *
- * 桥的上游是 chat/completions，**接不了 freeform 那套**。这里把能翻的
- * `function` 工具翻出来（至少 collaboration 那几个还能用），并在碰到 `custom` 时
- * **说清楚**：否则用户看到的是"模型把工具调用写进正文"（一串
+ * 桥的上游是 chat/completions，**接不了 freeform 那套**：`exec` 是"让模型写 JS
+ * 去编排工具"的**编排协议**，不是普通工具调用（与 `apply_patch` 那种独立
+ * freeform 工具不同 —— 后者在经典 function tools 路径上已经支持，见
+ * `responsesToolsToOpenAI` 的 `custom` 分支）。这里把能翻的 `function` 工具
+ * 翻出来（至少 collaboration 那几个还能用），并在碰到 `custom` 时**说清楚**：
+ * 否则用户看到的是"模型把工具调用写进正文"（一串
  * `<||DSML||invoke name="exec_command">` 标记），完全不知道问题出在哪。
  * 正解是让客户端的模型目录里 `use_responses_lite: false`（见 lib/client-connect.mjs
  * 的 makeCatalogEntry）——那会走经典 function tools，也就是这条兜底路径没被触发的状态。
@@ -2304,7 +2434,7 @@ function responsesToolsFromAdditional(body) {
   if (freeform.length) {
     log(
       `code-mode 工具协议：客户端把工具放在 input[].additional_tools 里，其中 `
-      + `${freeform.join('/')} 是 freeform 工具（模型要写 JS 去编排），桥这层不翻译 `
+      + `${freeform.join('/')} 是 freeform 编排工具（模型要写 JS 去编排），桥这层不翻译 `
       + `—— 只转发了 ${flat.length} 个 classic function 工具。`
       + `解决办法：让该客户端的模型目录里 use_responses_lite=false（回到经典 function tools）。`,
     );
@@ -2379,7 +2509,7 @@ function responsesUsage(u) {
 }
 
 /** 聚合后的 assistant 消息 → Responses 的 `output` 数组。 */
-function openAIToResponsesOutput(message) {
+function openAIToResponsesOutput(message, customTools = new Set()) {
   const items = [];
   const text = typeof message?.content === 'string' ? message.content : '';
   if (text) {
@@ -2393,15 +2523,34 @@ function openAIToResponsesOutput(message) {
   }
   for (const tc of message?.tool_calls || []) {
     if (!tc) continue;
+    const name = tc.function?.name || '';
+    const callId = tc.id || `call_${trace().slice(0, 20)}`;
+    const args = typeof tc.function?.arguments === 'string'
+      ? tc.function.arguments
+      : JSON.stringify(tc.function?.arguments ?? {});
+    /*
+     * 形状必须与**流式那条一致**：请求里声明为 custom（freeform）的工具回
+     * `custom_tool_call`（裸正文），普通工具回 `function_call`（JSON 字符串）。
+     * 两边不一致时，非流式客户端的工具路由器会判 `incompatible payload`。
+     */
+    if (customTools.has(name)) {
+      items.push({
+        id: responsesId('ctc'),
+        type: 'custom_tool_call',
+        status: 'completed',
+        call_id: callId,
+        name,
+        input: customToolInput(args),
+      });
+      continue;
+    }
     items.push({
       id: responsesId('fc'),
       type: 'function_call',
       status: 'completed',
-      call_id: tc.id || `call_${trace().slice(0, 20)}`,
-      name: tc.function?.name || '',
-      arguments: typeof tc.function?.arguments === 'string'
-        ? tc.function.arguments
-        : JSON.stringify(tc.function?.arguments ?? {}),
+      call_id: callId,
+      name,
+      arguments: args,
     });
   }
   // 空回答也要给一条 message：output 是空数组时 Codex 会当成「没有任何输出」，
@@ -2426,9 +2575,9 @@ const responsesTextOf = (output) => output
   .join('');
 
 /** 聚合结果 → 完整的 Responses 对象（非流式）。 */
-function openAIToResponsesResponse(agg, model) {
+function openAIToResponsesResponse(agg, model, customTools = new Set()) {
   const choice = (agg.choices || [])[0] || {};
-  const output = openAIToResponsesOutput(choice.message);
+  const output = openAIToResponsesOutput(choice.message, customTools);
   const truncated = choice.finish_reason === 'length';
   return {
     id: responsesId('resp'),
@@ -2466,6 +2615,10 @@ function openAIToResponsesResponse(agg, model) {
  *          → output_item.done
  *   tool : output_item.added → function_call_arguments.delta×
  *          → function_call_arguments.done → output_item.done
+ *   freeform 工具（`customTools`，如 Codex 的 apply_patch）:
+ *          output_item.added(item.type=custom_tool_call)
+ *          → custom_tool_call_input.delta → custom_tool_call_input.done
+ *          → output_item.done(item.type=custom_tool_call, input=裸正文)
  *   收尾 : response.completed（带完整 output 与 usage）
  *
  * 文本块与工具块共用一个 **单调递增的 output_index**，且每开新块前必须先把
@@ -2473,7 +2626,7 @@ function openAIToResponsesResponse(agg, model) {
  *
  * 返回 `{ finishReason, usage, streamError }` 供调用方记账。
  */
-async function relayResponsesStream(up, res, model) {
+async function relayResponsesStream(up, res, model, customTools = new Set()) {
   let backpressured = false;
   const send = (type, obj) => {
     backpressured = !res.write(`event: ${type}\ndata: ${JSON.stringify({ type, ...obj })}\n\n`);
@@ -2622,26 +2775,65 @@ async function relayResponsesStream(up, res, model) {
    *
    * 注意 `added` 里 arguments 给空串（真实 API 就是这么发的），
    * 完整参数靠 `output_item.done` —— Codex 只认后者。
+   *
+   * **项类型按请求侧的声明定**：`custom`（freeform）工具回 `custom_tool_call`
+   * + `input`，否则 Codex 的工具路由器判 `incompatible payload`（2026-10-13
+   * 用真实 codex.exe 对照实验确认过：`custom_tool_call` 它照常执行）。
    */
   const flushTool = (slot) => {
     if (!slot || slot.started) return;
     slot.started = true;
     pendingTool = null;
+    const isCustom = customTools.has(slot.name);
     send('response.output_item.added', {
       output_index: slot.outputIndex,
-      item: {
-        id: slot.id,
-        type: 'function_call',
-        status: 'in_progress',
-        call_id: slot.callId,
-        name: slot.name,
-        arguments: '',
-      },
+      item: isCustom
+        ? {
+          id: slot.id,
+          type: 'custom_tool_call',
+          status: 'in_progress',
+          call_id: slot.callId,
+          name: slot.name,
+          input: '',
+        }
+        : {
+          id: slot.id,
+          type: 'function_call',
+          status: 'in_progress',
+          call_id: slot.callId,
+          name: slot.name,
+          arguments: '',
+        },
     });
   };
 
   const closeTool = (slot) => {
     flushTool(slot);
+    if (customTools.has(slot.name)) {
+      /*
+       * freeform：上游给的是 JSON 参数，客户端要裸正文。`input` 在 added 里
+       * 是空串（真实 API 同款），正文靠 delta/done 送到 —— 一次给全即可，
+       * 反正参数在桥这边已经攒完整了。
+       */
+      const input = customToolInput(slot.arguments);
+      send('response.custom_tool_call_input.delta', {
+        item_id: slot.id, output_index: slot.outputIndex, delta: input,
+      });
+      send('response.custom_tool_call_input.done', {
+        item_id: slot.id, output_index: slot.outputIndex, input,
+      });
+      const item = {
+        id: slot.id,
+        type: 'custom_tool_call',
+        status: 'completed',
+        call_id: slot.callId,
+        name: slot.name,
+        input,
+      };
+      send('response.output_item.done', { output_index: slot.outputIndex, item });
+      output[slot.outputIndex] = item;
+      return;
+    }
     send('response.function_call_arguments.done', {
       item_id: slot.id, output_index: slot.outputIndex, arguments: slot.arguments,
     });
@@ -2747,9 +2939,17 @@ async function relayResponsesStream(up, res, model) {
           if (typeof tc.function?.arguments === 'string' && tc.function.arguments) {
             flushTool(slot);
             slot.arguments += tc.function.arguments;
-            send('response.function_call_arguments.delta', {
-              item_id: slot.id, output_index: slot.outputIndex, delta: tc.function.arguments,
-            });
+            /*
+             * custom（freeform）工具的参数是 JSON 外壳（`{"input":…}`），
+             * 逐片转发出去只会让客户端看到乱码般的 JSON 片段 —— 它要的是
+             * 裸正文，而正文要等参数攒完才拆得出来。所以这类块**不发** delta，
+             * 收尾时一次性给 `custom_tool_call_input.done` + `output_item.done`。
+             */
+            if (!customTools.has(slot.name)) {
+              send('response.function_call_arguments.delta', {
+                item_id: slot.id, output_index: slot.outputIndex, delta: tc.function.arguments,
+              });
+            }
           }
         }
       }
@@ -4811,6 +5011,12 @@ async function handleRequest(req, res) {
        */
       const tools = responsesToolsToOpenAI(body.tools) || responsesToolsFromAdditional(body);
       const toolChoice = responsesToolChoiceToOpenAI(body.tool_choice);
+      /*
+       * 请求里声明为 custom（freeform）的工具名 —— 回包侧要按 `custom_tool_call`
+       * 回（Codex 的 apply_patch 就是这一类）。丢了这份名单，工具调用就会被当成
+       * 普通 function_call 发回去，客户端判 `incompatible payload`。
+       */
+      const customTools = collectCustomToolNames(body);
 
       const oai = { model, messages, stream: true, stream_options: { include_usage: true } };
       if (tools) oai.tools = tools;
@@ -4821,7 +5027,8 @@ async function handleRequest(req, res) {
       if (typeof body.top_p === 'number') oai.top_p = body.top_p;
 
       maybeAutoCheckin();
-      log(`→ [responses] ${body.model || '(no model)'} => ${model} stream=${wantStream} msgs=${messages.length} tools=${tools?.length ?? 0}`);
+      log(`→ [responses] ${body.model || '(no model)'} => ${model} stream=${wantStream} msgs=${messages.length} tools=${tools?.length ?? 0}`
+        + (customTools.size ? ` freeform=${[...customTools].join(',')}` : ''));
 
       const startedAt = Date.now();
       trackInflight(req, res, model, wantStream);
@@ -4905,7 +5112,7 @@ async function handleRequest(req, res) {
 
         if (wantStream) {
           res.__overheadMs = Math.max(0, upstreamStartedAt - startedAt);
-          const r = await relayResponsesStream(up, res, model);
+          const r = await relayResponsesStream(up, res, model, customTools);
           if (r.streamError && !ac.signal.aborted) {
             recordRequest({ model, stream: true, ms: Date.now() - startedAt, ok: false, status: 0, code: null, error: r.streamError.message });
           } else {
@@ -4935,7 +5142,7 @@ async function handleRequest(req, res) {
           });
         }
         recordRequest({ model, stream: false, ok: true, ms: Date.now() - startedAt, ...usageOf(aggregated.usage) });
-        return json(res, 200, openAIToResponsesResponse(aggregated, model));
+        return json(res, 200, openAIToResponsesResponse(aggregated, model, customTools));
       } catch (e) {
         if (e?.code === 'RATE_LIMITED') {
           const retryAfter = Math.max(1, Math.ceil((e.retryAfterMs || 1000) / 1000));

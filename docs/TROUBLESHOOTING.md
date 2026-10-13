@@ -347,6 +347,60 @@ code-mode 工具协议：客户端把工具放在 input[].additional_tools 里�
 （桥会尽量把 `additional_tools` 里的 `function` 工具救回来，但 `exec` 这种 freeform
 的翻不了，所以**必须**从目录那一侧修。）
 
+### Codex 里"跑一半就断了"：`apply_patch` 用不了 / 模型说完'我来跑一下'就结束回合
+
+**症状**（两种常常一起出现）：
+
+1. 模型宣布"我来验证一下 / 我准备跑第一次实测"，**这一轮就结束了** —— 用户那边看着像掉线，
+   发消息问"怎么跑一半断联了"；这类"宣布了却没发工具调用"的回合在 rollout 里表现为
+   `task_complete` + `model_needs_follow_up=false`，且该轮 output tokens 极少。
+2. 编辑文件时 `apply_patch` 反复失败（Codex 日志里是
+   `[ERROR] codex_tools::router … tool apply_patch invoked with incompatible payload`），
+   模型只好退化成 shell here-string 写文件。
+
+**根因**（2026-10-13 用真实 `codex.exe` + 桩上游抓包逐条确认）：
+
+- Codex 把 `apply_patch` 声明为 **freeform（`type:"custom"`，lark 语法）** —— 本机 0.162
+  只认 `apply_patch_tool_type: "freeform"`（写 `"function"`/`"json"` 一律
+  `unknown variant` 直接起不来；**不写**这个字段则完全不提供 apply_patch）。
+  桥的请求侧原先只翻 `function` 类型，**静默丢掉** custom 工具：模型看不到它，
+  却因为系统提示写着"Use `apply_patch`"而去蒙调用 → Codex 判 payload 不符。
+- freeform 调用在 Responses 里的项类型是 `custom_tool_call`（正文在 `input`），
+  配 `response.custom_tool_call_input.delta/.done`；发成 `function_call` 客户端不收。
+- 系统提示**整段替换**的旧做法还会一边用着一边退化：`instructions_template` 就是 Codex 的
+  全量系统提示（请求里没有 `instructions` 字段，`input[0]` 那条 developer 消息逐字等于它），
+  而"模板来源"可能是我们自己上一次写进去的成品 —— 换掉一次，官方提示就再也回不来。
+
+**怎么修**（本次修复后，见 CHANGELOG 的 `[Unreleased]`）：
+
+```cmd
+npm run connect apply codex     :: 重写目录（系统提示=官方模板+桥补充说明）
+npm run bridge                  :: 或从控制台重启桥（桥是长驻进程，改完必须重启才生效）
+```
+
+**怎么自证**：
+
+- 桥日志里出现 `freeform=apply_patch` → 请求侧认出了 freeform 工具（`tools=` 计数里也包含它）；
+- 真机探针（不花额度，需要本机有 `codex.exe`）：
+
+```cmd
+node tools\dev\probe-codex-custom-tool.mjs
+```
+
+它会起一个桩上游 + 真桥 + 临时 `CODEX_HOME`，断言 9 条：请求翻译、历史双向映射、
+**客户端真的执行了补丁**（目标文件被创建、内容一字不差）、没有 `incompatible payload`。
+
+- 若"宣布了却没执行"仍然偶发：那属于模型自身的回合纪律问题，目录里的桥补充说明已明确写死
+  "宣布要做的事必须同一回合发工具调用；正在跑的命令要用 `write_stdin` 继续等"。
+  检查该模型条目的系统提示里有没有 `[workbuddy-bridge-notes]` 那一段（没有就跑一次
+  `npm run connect apply codex`）。
+
+⚠️ 顺带两条排查线索：
+
+- **生成物过期**：`~/.codex/workbuddy-model-catalog.json` 的 mtime 早于最近的桥/接入改动，
+  就是它 —— Codex 一直按旧目录（旧系统提示、旧截断上限）在跑。
+- Codex Desktop **重启 / 新开对话**才会重新读目录；只重写文件不够。
+
 ### 勾了 N 个模型，客户端里只有 M 个（N > M），面板却一直显示 N 个
 
 **症状**：控制台「一键接入」里勾了 5 个模型，点「重新写入」后客户端的选择器里只有

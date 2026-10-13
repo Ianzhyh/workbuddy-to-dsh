@@ -126,6 +126,17 @@ const upstream = createServer((req, res) => {
       res.write(sse({ id: 'c1', model: 'm', choices: [{ index: 0, delta: { tool_calls: [{ index: 0, function: { name: 'weather' } }] } }] }));
       res.write(sse({ id: 'c1', model: 'm', choices: [{ index: 0, delta: { tool_calls: [{ index: 0, function: { arguments: '{"city"' } }] } }] }));
       res.write(sse({ id: 'c1', model: 'm', choices: [{ index: 0, delta: { tool_calls: [{ index: 0, function: { arguments: ':"SH"}' } }] } }] }));
+    } else if (scenario.kind === 'customTool') {
+      /*
+       * freeform（`type:"custom"`）工具的调用 —— 上游按我们声明的函数接口回，
+       * 参数是 JSON（`{"input":"…"}`）而且**分片**到达（真实网关就这么发）。
+       * 桥要做两件事：把 JSON 外壳拆掉取 `input` 正文，并把项类型换成
+       * `custom_tool_call`（发成 function_call 会被 Codex 判 incompatible payload）。
+       */
+      res.write(sse({ id: 'c1', model: 'm', choices: [{ index: 0, delta: { content: 'editing' } }] }));
+      res.write(sse({ id: 'c1', model: 'm', choices: [{ index: 0, delta: { tool_calls: [{ index: 0, id: 'call_patch', type: 'function', function: { name: 'apply_patch' } }] } }] }));
+      res.write(sse({ id: 'c1', model: 'm', choices: [{ index: 0, delta: { tool_calls: [{ index: 0, function: { arguments: '{"input":"*** Begin Patch\\n' } }] } }] }));
+      res.write(sse({ id: 'c1', model: 'm', choices: [{ index: 0, delta: { tool_calls: [{ index: 0, function: { arguments: '*** Add File: a.txt\\n+hi\\n*** End Patch\\n"}' } }] } }] }));
     } else if (scenario.kind === 'reasoning') {
       /*
        * 上游先给思维链、再给正文 —— 这是**真实顺序**（实测日志里就是这样），
@@ -340,6 +351,113 @@ test('工具调用：名字分片必须拼回完整名字，且在 done 里带�
     .map((e) => e.data.output_index);
   assert.deepEqual(indices, [...new Set(indices)], `output_index 有重复：${indices}`);
   assert.deepEqual(indices, indices.slice().sort((a, b) => a - b), `output_index 必须单调递增：${indices}`);
+});
+
+test('freeform（custom）工具：回 custom_tool_call + 裸正文，不发 function_call 那套', async () => {
+  await waitReady();
+  scenario = { kind: 'customTool' };
+  const { text } = await post({
+    model: 'gpt-5.1-codex', stream: true,
+    input: [{ type: 'message', role: 'user', content: 'edit the file' }],
+    tools: [
+      { type: 'function', name: 'exec_command', description: 'run', parameters: { type: 'object', properties: { cmd: { type: 'string' } } } },
+      {
+        type: 'custom',
+        name: 'apply_patch',
+        description: 'The `apply_patch` tool can be used to edit files. This is a FREEFORM tool, so do not wrap the patch in JSON.',
+        format: { type: 'grammar', syntax: 'lark', definition: 'start: begin_patch' },
+      },
+    ],
+  });
+  const evs = parseSse(text);
+
+  const done = evs.find((e) => e.event === 'response.output_item.done' && e.data.item.type === 'custom_tool_call');
+  assert.ok(done, 'apply_patch 必须回 custom_tool_call —— 发成 function_call 时 Codex 的工具路由器判 '
+    + '`tool apply_patch invoked with incompatible payload`（2026-10-13 真机实测）');
+  assert.equal(done.data.item.name, 'apply_patch');
+  assert.equal(done.data.item.call_id, 'call_patch');
+  assert.equal(done.data.item.status, 'completed');
+  assert.equal(done.data.item.input, '*** Begin Patch\n*** Add File: a.txt\n+hi\n*** End Patch\n',
+    'done 里必须是拆掉 JSON 外壳的裸正文（分片也要拼完整）');
+
+  // 项类型二选一：不能同时出现 function_call 块
+  assert.equal(evs.some((e) => e.data?.item?.type === 'function_call'), false,
+    '同一个工具块不能既当 custom_tool_call 又当 function_call');
+  // 参数 delta 是 JSON 外壳（对客户端是乱码）—— 这类块不该逐片转发
+  assert.equal(evs.some((e) => e.event === 'response.function_call_arguments.delta'), false,
+    'custom 块不能发 function_call_arguments.delta');
+
+  const added = evs.find((e) => e.event === 'response.output_item.added' && e.data.item.type === 'custom_tool_call');
+  assert.ok(added, '缺 custom_tool_call 的 output_item.added（delta 之前必须先有 active item）');
+  assert.equal(added.data.item.input, '', 'added 里 input 给空串，完整正文靠 done（真实 API 同款）');
+  assert.equal(added.data.item.id, done.data.item.id, 'added 与 done 的 item id 要一致');
+
+  const inputDone = evs.find((e) => e.event === 'response.custom_tool_call_input.done');
+  assert.ok(inputDone, '缺 response.custom_tool_call_input.done');
+  assert.equal(inputDone.data.input, done.data.item.input);
+  assert.equal(inputDone.data.item_id, done.data.item.id);
+
+  const aIdx = evs.findIndex((e) => e.event === 'response.output_item.added' && e.data.item.type === 'custom_tool_call');
+  const dIdx = evs.findIndex((e) => e.event === 'response.custom_tool_call_input.delta');
+  assert.ok(aIdx > -1 && dIdx > aIdx, 'output_item.added 必须先于 input delta');
+});
+
+test('请求翻译：custom 工具翻成函数（input 参数），custom 调用记录双向映射', async () => {
+  await waitReady();
+  scenario = { kind: 'text' };
+  await post({
+    model: 'gpt-5.1-codex', stream: true,
+    input: [
+      { type: 'message', role: 'developer', content: [{ type: 'input_text', text: 'sys' }] },
+      { type: 'message', role: 'user', content: 'edit it' },
+      { type: 'custom_tool_call', call_id: 'call_p1', name: 'apply_patch', input: '*** Begin Patch\n*** End Patch\n' },
+      { type: 'custom_tool_call_output', call_id: 'call_p1', output: 'Success. Updated the following files:\nA a.txt\n' },
+    ],
+    tools: [
+      {
+        type: 'custom',
+        name: 'apply_patch',
+        description: 'The `apply_patch` tool can be used to edit files. This is a FREEFORM tool, so do not wrap the patch in JSON.',
+        format: { type: 'grammar', syntax: 'lark', definition: 'start: begin_patch' },
+      },
+    ],
+  });
+
+  const tool = (lastUpstreamBody?.tools || []).find((t) => t?.function?.name === 'apply_patch');
+  assert.ok(tool, 'custom 工具必须转发给上游 —— 原先这里是**静默丢弃**，模型只能靠系统提示蒙调用');
+  assert.equal(tool.type, 'function', '上游不认 freeform，翻成普通函数');
+  assert.deepEqual(tool.function.parameters.required, ['input'], 'freeform 正文走唯一必需的字符串参数 input');
+  assert.doesNotMatch(tool.function.description, /do not wrap the patch in JSON/i,
+    '模板里"别包 JSON"那句必须改掉 —— 与这里的函数接口直接打架');
+  assert.match(tool.function.description, /string argument `input`/, '要明确告诉模型正文放哪个参数');
+
+  const msgs = lastUpstreamBody.messages;
+  const assistant = msgs.find((m) => Array.isArray(m.tool_calls));
+  assert.ok(assistant, 'custom_tool_call 要转成 assistant.tool_calls');
+  const call = assistant.tool_calls.find((c) => c.id === 'call_p1');
+  assert.ok(call, 'call_id 必须原样带过去（否则下一轮 tool 结果对不上号）');
+  assert.equal(call.function.name, 'apply_patch');
+  assert.deepEqual(JSON.parse(call.function.arguments), { input: '*** Begin Patch\n*** End Patch\n' },
+    '裸正文要按出站时声明的 {input} 形状重新包成 JSON');
+  const toolMsg = msgs.find((m) => m.role === 'tool' && m.tool_call_id === 'call_p1');
+  assert.ok(toolMsg, 'custom_tool_call_output 要转成 role:"tool" 消息');
+  assert.match(String(toolMsg.content), /Success\. Updated the following files/);
+});
+
+test('非流式：custom 工具同样回 custom_tool_call（与流式形状一致）', async () => {
+  await waitReady();
+  scenario = { kind: 'customTool' };
+  const { status, text } = await post({
+    model: 'gpt-5.1-codex', stream: false,
+    input: [{ type: 'message', role: 'user', content: 'edit' }],
+    tools: [{ type: 'custom', name: 'apply_patch', description: 'edit files' }],
+  });
+  assert.equal(status, 200);
+  const j = JSON.parse(text);
+  const item = j.output.find((i) => i.type === 'custom_tool_call');
+  assert.ok(item, '非流式的 output 里也必须是 custom_tool_call（两边形状不一致客户端会判 payload 不符）');
+  assert.equal(item.input, '*** Begin Patch\n*** Add File: a.txt\n+hi\n*** End Patch\n');
+  assert.equal(j.output.some((i) => i.type === 'function_call'), false);
 });
 
 test('非流式：回完整的 Responses 对象（output / output_text / usage）', async () => {

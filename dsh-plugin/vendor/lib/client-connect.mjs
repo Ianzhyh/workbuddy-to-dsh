@@ -867,23 +867,34 @@ function readCatalogSource(client) {
   const cfgPath = clientPath(client);
   const dir = dirname(cfgPath);
   const ref = tomlTopLevelValue((readText(cfgPath) ?? '').split('\n'), 'model_catalog_json');
+  // Codex 自己抓下来的上游目录（登录过就有）：只借它的**模板形状**，不抄它的模型 ——
+  // 抄进来等于宣称"这些模型也能通过桥用"，而它们只能走官方账号。
+  const cache = readJsonFile(join(dir, 'models_cache.json'));
+  const cacheTemplate = Array.isArray(cache?.models) && cache.models.length ? cache.models[0] : null;
   if (ref) {
     const refPath = isAbsolute(ref) ? ref : join(dir, ref);
     const parsed = readJsonFile(refPath);
     if (Array.isArray(parsed?.models) && parsed.models.length) {
       /*
-       * 模板优先取**别人的**条目：cc-switch 那种面向"第三方 chat/completions 上游"
-       * 写出来的条目，比 Codex 官方模型（code mode）更接近我们要的形状。
+       * 模板按可靠性排序：
+       *   1. **别人的**条目 —— cc-switch 那种面向"第三方 chat/completions 上游"写出来的，
+       *      比 Codex 官方模型（code mode）更接近我们要的形状；
+       *   2. Codex 官方那份（`models_cache.json`）—— 形状与系统提示都是"原厂"的；
+       *   3. 兜底才用**我们自己写过的**条目。
+       *
+       * 第 3 优先级必须垫底：我们自己那条里装着**上一版写进去的系统提示**，
+       * 拿它当模板会让下一次生成在上一版的基础上继续退化（真实翻车：
+       * Oct-12 那版把 17KB 官方提示换成了 5 行中性文案，之后无论怎么刷新，
+       * 官方提示都再也回不来了）。实测 2026-10-13。
        */
       const foreign = parsed.models.find((m) => m && !isOwnCatalogEntry(m));
-      return { template: foreign || parsed.models[0], models: parsed.models, from: refPath, fromKey: true };
+      const template = foreign || cacheTemplate || parsed.models[0];
+      return { template, models: parsed.models, from: refPath, fromKey: true };
     }
   }
-  // Codex 自己抓下来的上游目录（登录过就有）：只借它的**模板形状**，不抄它的模型 ——
-  // 抄进来等于宣称"这些模型也能通过桥用"，而它们只能走官方账号。
-  const cache = readJsonFile(join(dir, 'models_cache.json'));
-  if (Array.isArray(cache?.models) && cache.models.length) {
-    return { template: cache.models[0], models: [], from: join(dir, 'models_cache.json'), fromKey: false };
+  // 只借它的**模板形状**，不抄它的模型（同上）
+  if (cacheTemplate) {
+    return { template: cacheTemplate, models: [], from: join(dir, 'models_cache.json'), fromKey: false };
   }
   return null;
 }
@@ -925,18 +936,10 @@ function reasoningLevels(efforts) {
 }
 
 /**
- * 我们自己写的系统提示（**不复用模板里那份 GPT-5 Codex 官方提示**，理由见
- * `makeCatalogEntry` 里 `instructions_template` 那一段）。
+ * 模板**没有**系统提示时的兜底文案（正常路径用不上，见 `catalogInstructions`）。
  *
- * 只写这条链路真正成立的事实：
- *   - 工具是 Codex 提供的那套（`shell` 等，见桥的请求翻译）—— 桥会把它们
- *     转成上游认的 `tools`；freeform / custom 工具（`exec`）**转不了**，别去调。
- *   - 上游是 chat/completions 形态的模型，不是 GPT-5 原生 Responses。
- *   - 不点名任何我们没提供的工具（模板原文点名的 `notes` / `history` /
- *     `functions.new_context` / `apply_patch` 走桥时都不存在）。
- *
- * 刻意**不**写行为规范/人设（那是 Codex 自己的默认提示的职责）——
- * 这里只做一件事：把"工具集与协议"这个事实讲对，避免模型去调幽灵工具。
+ * 只写这条链路真正成立的事实：工具由客户端声明、桥把它们转成上游认的 `tools`，
+ * 模型照工具接口调用即可。行为规范一概不写 —— 那是来源模板（Codex 官方提示）的职责。
  */
 function neutralInstructions(model) {
   const name = model?.name || model?.id || 'this model';
@@ -945,11 +948,79 @@ function neutralInstructions(model) {
     '',
     'The tools available to you are exactly the ones defined in the request. Call them',
     'through the normal tool-calling interface; do not write tool calls into your reply text.',
-    '',
-    'Some tools the client may advertise as freeform/custom scripts are not forwarded by the',
-    'bridge. If a tool is not listed in the request, it does not exist — do not invent or',
-    'mention tools such as `notes`, `history`, `functions.new_context`, or `apply_patch`.',
   ].join('\n');
+}
+
+/**
+ * 桥补充说明的**哨兵行**。
+ *
+ * 目录里的系统提示是「来源模板 + 这段补充」拼出来的，而"来源模板"本身可能就是
+ * 我们上一次写进去的成品（`readCatalogSource` 会拿现有目录里我们自己那条当模板）。
+ * 每次重算都先按这个哨兵把旧的那段**切掉再追加**，否则每接一次就叠一层：
+ * 提示越滚越长，而且旧那层还带着过时的事实。
+ */
+const BRIDGE_NOTES_MARK = '[workbuddy-bridge-notes]';
+
+/**
+ * 追加在系统提示末尾的"桥补充说明"。
+ *
+ * ## 为什么是**追加**，不是把模板整段换掉（2026-10-13 改）
+ *
+ * 上一版是整段替换成一句中性文案（旧理由：模板点名了走桥不存在的工具）。
+ * 用真实 codex.exe 抓包复核后发现两件事，都指向"别整段换":
+ *   1. 模板（`models_cache.json` / 已有目录里那份）**就是 Codex 的全量系统提示** ——
+ *      抓到的请求里 `instructions` 字段缺失，`input[0]` 的那条 developer 消息
+ *      一字不差地等于模板（17730 字符）。整段换掉 = 模型丢掉 Codex 全部的
+ *      行为规范（工具纪律、文件编辑规矩、自主性/持久性那几节）。
+ *   2. 官方那份模板并没有点名 `notes` / `functions.new_context`（那是 cc-switch
+ *      那份才有的字），点到的 `apply_patch` / `exec_command` / `write_stdin` /
+ *      `view_image` 走桥时都能用（`apply_patch` 自 2026-10-13 起桥按
+ *      `custom_tool_call` 全链路支持）。
+ *
+ * 所以保留来源模板、只在末尾补一段**这条链路上真的会错**的事实：
+ * 工具集边界、freeform 的参数形状、以及回合纪律（用户实际踩到的"话说一半就断了"）。
+ */
+function bridgeNotes() {
+  return [
+    BRIDGE_NOTES_MARK,
+    '',
+    'This session runs through a local OpenAI-compatible bridge, so two things differ from a',
+    'stock setup:',
+    '',
+    '- The tools declared in the request are the complete set. Anything not declared (web search,',
+    '  sub-agents, computer use, `notes` / `history` / `functions.*`) does not exist here — do not',
+    '  call it, and do not tell the user you did.',
+    '- Freeform tools (`apply_patch`, and any other `custom` tool) are exposed as ordinary',
+    '  functions: pass the whole payload as the string argument `input`, not wrapped in more JSON.',
+    '',
+    'The user only sees your messages and tool calls — never your intent. So:',
+    '',
+    '- If you are about to run, read, check, or verify something, issue that tool call in the same',
+    '  turn. A turn that ends on "let me …" / "I will …" looks to the user like the assistant went',
+    '  silent, and the work simply stops.',
+    '- If a command you started is still running, keep waiting on it with `write_stdin` and a',
+    '  generous `yield_time_ms` instead of handing the turn back with a promise to wait.',
+    '- End the turn only when the task is done, when you need input from the user, or when you are',
+    '  blocked and must say so.',
+  ].join('\n');
+}
+
+/**
+ * 目录条目的系统提示 = **来源模板（原样保留）+ 桥补充说明**（幂等）。
+ *
+ * `templateEntry` 是 `readCatalogSource` 挑出来的模板条目：优先"别人的"（cc-switch 那类
+ * 面向第三方上游写的条目），其次现有目录里我们自己写过的条目，最后 `models_cache.json`。
+ * 模板里没有系统提示时才退到 `neutralInstructions`。
+ */
+function catalogInstructions(templateEntry, model) {
+  const raw = templateEntry?.model_messages?.instructions_template;
+  let base = typeof raw === 'string' ? raw : '';
+  // 幂等：先剪掉上一次追加的那段（连同哨兵行），再拼新的
+  const cut = base.indexOf(BRIDGE_NOTES_MARK);
+  if (cut >= 0) base = base.slice(0, cut);
+  base = base.trimEnd();
+  if (!base) base = neutralInstructions(model);
+  return `${base}\n\n${bridgeNotes()}`;
 }
 
 /**
@@ -973,13 +1044,12 @@ function neutralInstructions(model) {
  *   - `max_output_tokens` / `truncation_policy.limit`：桥的 `/v1/models` 明确报了
  *     单次输出上限（如 deepseek 128000），模板里没有这个字段或值不对时，
  *     Codex 就按自己的默认值规划输出与截断 —— 长回答会被提前砍掉。
- *   - `model_messages.instructions_template`：模板里是 **GPT-5 Codex 的官方系统提示**
- *     （"You are Codex, an agent based on GPT-5"），里面点名要求用 `notes` /
- *     `history` / `functions.new_context` / `apply_patch` 这些工具。走我们的桥时
- *     **这些工具一个都不存在**（上游是 chat/completions，工具由 Codex 自己那套
- *     `shell` / `read_file` 提供）——照抄等于教模型去调幽灵工具：它要么把工具调用
- *     写进正文，要么反复尝试不存在的 `notes`，白烧 token。
- *     我们**不用模板的正文**，换成一句中性说明（见 `neutralInstructions`）。
+ *   - `model_messages.instructions_template`：**保留模板正文，末尾追加桥补充说明**
+ *     （`catalogInstructions`）。为什么不再整段替换：抓包证明模板就是 Codex 的
+ *     **全量系统提示**（`input[0]` 的 developer 消息逐字等于模板），整段换掉等于
+ *     连行为规范一起删掉；而模板点名的工具（`apply_patch` / `exec_command` /
+ *     `write_stdin` / `view_image`）走桥时都成立。只补"这条链路上真的会错"的
+ *     三件事：工具集边界、freeform 的 `input` 参数形状、回合纪律。
  */
 function makeCatalogEntry(template, model) {
   const window = Number(model.context) || 128000;
@@ -1025,9 +1095,9 @@ function makeCatalogEntry(template, model) {
     }
   }
 
-  // 系统提示换成中性文案（理由见上面那段 `instructions_template` 的说明）
+  // 系统提示 = 来源模板（原样保留）+ 桥补充说明（理由见 `catalogInstructions`）
   if (entry.model_messages && typeof entry.model_messages === 'object') {
-    entry.model_messages = { ...entry.model_messages, instructions_template: neutralInstructions(model) };
+    entry.model_messages = { ...entry.model_messages, instructions_template: catalogInstructions(template, model) };
   }
 
   return entry;
