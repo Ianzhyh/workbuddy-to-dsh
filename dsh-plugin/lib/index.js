@@ -508,15 +508,63 @@ export function apply(ctx, rawConfig = {}) {
     if (service) fn(service, ctx);
   };
 
-  /** 图片附件 → data URL（多模态消息用；失败就退化成文字占位）。 */
+  /**
+   * 图片附件 → data URL（多模态消息用）。
+   *
+   * ## 为什么必须**原样**传 ref（2026-10-13 修：图读不了）
+   *
+   * 原先这一行是：
+   *   `attachments.readImage({ attachmentId: ref.attachmentId, mediaType: ref.mediaType })`
+   * —— 把 dsh 给的完整 `ImageAttachmentRef` 拆成两个字段再传。
+   * 但 dsh 的 `readImage(ref)` 会用它做**元数据核对**（`@deepseek-ai/dsh-attachment-local`）：
+   *
+   *   const metadata = await probeImage(data);
+   *   if (metadata.mediaType !== ref.mediaType
+   *    || data.byteLength !== ref.bytes      // ← 拆完后 ref.bytes 是 undefined
+   *    || metadata.width  !== ref.width      // ← undefined
+   *    || metadata.height !== ref.height)    // ← undefined
+   *     throw new AttachmentError('...', 'ATTACHMENT_CORRUPT');
+   *
+   * 于是**每一次**读图都抛 ATTACHMENT_CORRUPT，被这个函数的调用方
+   * `.catch(() => null)` 吞掉 → adapter 把图换成文字占位
+   * `[图片：无法读取该附件]` → **模型完全看不到图，且全程不报错**。
+   *
+   * `ImageAttachmentRef` 的真实形状（从 dsh 的类型声明里核出来的，不是猜的）：
+   *   { attachmentId, mediaType, bytes, width, height, name?, originalDimensions? }
+   * 注意 `bytes/width/height` 是**必填**，缺了核对必失败。
+   *
+   * 所以修法是**把 ref 原样传下去**（它本来就是那个接口要的形状），
+   * 不要自己重建一个"看起来够用"的对象。
+   *
+   * ## 顺带修掉两处让问题更难查的地方
+   *
+   *   1. `stored.mediaType` 不存在 —— 返回值是 `{ ref, data }`，媒体类型在
+   *      `stored.ref.mediaType`。取不到就回退 `ref.mediaType`，行为不变；
+   *   2. 失败**不再静默**：原先一律 `return null`，用户只能看到"图没传上去"，
+   *      日志里一个字都没有。现在读失败会把原因打出来（只打错误信息，
+   *      不含图片内容），下次这类问题一眼可见。
+   */
   const resolveImage = async (ref) => {
     if (!ref?.attachmentId) return null;
     const attachments = ctx.get('attachments');
-    if (!attachments) return null;
-    const stored = await attachments.readImage({ attachmentId: ref.attachmentId, mediaType: ref.mediaType });
+    if (!attachments) {
+      log('图片附件：dsh 没有挂载 attachments 服务，无法读取图片', String(ref.attachmentId).slice(0, 24));
+      return null;
+    }
+    let stored;
+    try {
+      // ⚠️ 原样传 ref —— 见上面注释，dsh 要用 bytes/width/height 做元数据核对
+      stored = await attachments.readImage(ref);
+    } catch (error) {
+      log('图片附件读取失败', `${error?.code || ''} ${error?.message || error}`.trim());
+      return null;
+    }
     const bytes = stored?.data ?? stored?.bytes ?? stored?.buffer;
-    if (!bytes) return null;
-    const mediaType = stored?.mediaType || ref.mediaType || 'image/png';
+    if (!bytes) {
+      log('图片附件：readImage 返回里没有数据', String(ref.attachmentId).slice(0, 24));
+      return null;
+    }
+    const mediaType = stored?.ref?.mediaType || ref.mediaType || 'image/png';
     const base64 = Buffer.from(bytes).toString('base64');
     return `data:${mediaType};base64,${base64}`;
   };

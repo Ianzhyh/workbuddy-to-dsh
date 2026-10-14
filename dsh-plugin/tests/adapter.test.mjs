@@ -301,6 +301,60 @@ test('wire 请求：developer→system、工具表、图片、max_tokens', async
   } finally { await stub.close(); }
 });
 
+/**
+ * 助手历史里的图片必须保住，而且**整条助手消息**不能被当成"空轮"丢掉。
+ *
+ * ## 为什么钉这条（2026-10-13 用户报「读不了图」，这是同一族的第二个洞）
+ *
+ * 第一版只修了 user 侧。但助手消息也可能带 image 块（模型自己截图/产图后，
+ * 用户下一轮追问 —— 历史要重发）。当时有两处会把它弄丢：
+ *
+ *   1. `toWireMessage` 的 assistant 分支只处理 `text` 与 `tool-call`，
+ *      `image` 块被**静默丢掉**；
+ *   2. 更隐蔽：`sanitizeWire` 判"这条助手轮有没有内容"时只认
+ *      `typeof content === 'string'`。而带图的助手消息 content 是**数组**，
+ *      于是被判成"空助手轮"→ **整条消息（连文字一起）被删掉**。
+ *      实测表现：助手轮从历史里直接消失，模型"忘了自己刚说过什么"。
+ *
+ * 判据放在这里而不是 plugin.test：这两处都在 adapter 层，桩上游能直接看到
+ * 最终 wire 形态，是这条链路上最贴近事实的观测点。
+ */
+test('wire 请求：助手消息里的图片必须保留，且不得被当成空轮丢弃', async () => {
+  const capture = {};
+  const stub = await startStub({
+    sseFrames: [delta({ content: 'ok' }), { choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] }],
+    capture,
+  });
+  try {
+    const adapter = makeAdapter(stub.baseUrl);
+    for await (const _ of adapter.stream({
+      provider: 'workbuddy',
+      model: 'stub-model',
+      messages: [
+        { role: 'user', content: [{ type: 'text', text: '看看这张图' }, { type: 'image', attachment: { attachmentId: 'a1', mediaType: 'image/png' } }] },
+        // 助手轮：文字 + 图（截图场景）。文字非空，所以最坏情况下也该留下文字
+        { role: 'assistant', content: [{ type: 'text', text: '这是截图：' }, { type: 'image', attachment: { attachmentId: 'a2', mediaType: 'image/png' } }] },
+        { role: 'user', content: [{ type: 'text', text: '刚才截图里有什么？' }] },
+      ],
+    })) { /* drain */ }
+
+    const body = capture.body;
+    // 三条消息一条都不能少（曾经助手轮会被整条丢掉 → 这里会变成 2 条）
+    assert.equal(body.messages.length, 3, '带图的助手轮不得被 sanitizeWire 当成空轮丢掉');
+
+    const asst = body.messages[1];
+    assert.equal(asst.role, 'assistant');
+    assert.ok(Array.isArray(asst.content), '带图的助手消息 content 应为多段数组');
+
+    const textPart = asst.content.find((p) => p.type === 'text');
+    const imgPart = asst.content.find((p) => p.type === 'image_url');
+    assert.ok(textPart, '助手轮的文字必须保留');
+    assert.equal(textPart.text, '这是截图：');
+    assert.ok(imgPart, '助手轮里的图片必须保留（丢图会让模型"忘了看过什么"）');
+    assert.match(imgPart.image_url.url, /^data:image\/png;base64,/, '图必须是 data URL');
+  } finally { await stub.close(); }
+});
+
 test('wire 净化：空助手轮与孤儿 tool 结果被剔除，成对的工具调用保留', async () => {
   const capture = {};
   const stub = await startStub({

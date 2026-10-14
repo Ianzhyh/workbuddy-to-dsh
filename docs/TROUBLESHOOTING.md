@@ -224,7 +224,49 @@ claude
 | `401` | 令牌不对。桥同时接受 `Authorization: Bearer <token>` 和 `x-api-key: <token>` 两种写法 |
 | 模型名被「换掉」了 | **这是设计行为**：Claude Code 发的 `claude-sonnet-4-…` 在上游不存在，桥会映射到真实模型。默认 `glm-5.3`（小快模型走 `glm-5.3-flash`）。想指定就用 `WORKBUDDY_ANTHROPIC_MODEL=<上游真实模型 id>`，桥会优先精确匹配 |
 
-### 客户端里模型显示「上下文 0」
+### dsh 里发图片，模型像没看见（"读不了图"）
+
+**症状**：在 dsh 里贴图/发截图，模型答非所问，或直接说看不到图。
+**全程不报错** —— 界面上没有任何异常，所以最难查的就是这一类。
+
+**先分清是哪一段断了**（三段各有各的现象）：
+
+| 现象 | 断在哪 | 怎么确认 |
+|---|---|---|
+| 模型完全无视图 | dsh 插件 → 桥（**曾经的主因**） | 看 `bridge/bridge.log`：有请求但 `promptTokens` 很小（图没进去） |
+| 模型能看到图但答错 | 上游/模型本身 | `promptTokens` 明显变大（图进去了），换模型试 |
+| 提示 `model ... does not support` | 模型不支持视觉 | `GET /v1/models?all=1` 看该模型 `supports_images` |
+
+**2026-10-13 修掉的主因**（若你用的是旧版插件，症状正是"完全不报错但看不见"）：
+插件把 dsh 的图片附件引用拆成两个字段传给 `readImage`，而 dsh 要用
+`bytes/width/height` 做**元数据核对**，缺字段必然抛 `ATTACHMENT_CORRUPT`，
+异常被吞掉后图片被替换成文字占位 `[图片：无法读取该附件]`。
+
+**自查命令**（不需要看代码，直接打桥，验证"桥 + 上游"这一段是否正常）：
+
+```bash
+# 一张 1×1 红点图，问模型颜色；答"红色"就说明桥和上游都没问题，问题在插件侧
+node -e "
+const t=require('fs').readFileSync('dsh-plugin/.bridge-token','utf8').trim();
+const png='data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg==';
+fetch('http://127.0.0.1:8790/v1/chat/completions',{method:'POST',
+ headers:{authorization:'Bearer '+t,'content-type':'application/json'},
+ body:JSON.stringify({model:'deepseek-v4.1-flash',max_tokens:20,messages:[{role:'user',
+  content:[{type:'text',text:'这张图什么颜色？只答颜色两个字。'},
+           {type:'image_url',image_url:{url:png}}]}]})})
+ .then(r=>r.json()).then(j=>console.log(j.choices?.[0]?.message?.content||JSON.stringify(j).slice(0,200)));
+"
+```
+
+**升级到含修复的版本后**，若仍读不了图，日志里会有明确原因（不再静默）：
+`bridge/bridge.log` 里搜 `图片附件` —— 会写清是"dsh 没挂载 attachments 服务"
+还是"readImage 返回里没有数据"。
+
+> **附带一个容易忽略的点**：**助手消息**里带的图（模型自己截图/产图后你再追问）
+> 也曾被丢弃。它更隐蔽 —— 表现不是"看不见图"，而是**整条助手消息从历史里消失**，
+> 模型像"忘了自己刚说过什么"。同一次修复一并解决。
+
+
 
 **这不是桥的问题，也不是你填错了。**
 
@@ -247,6 +289,21 @@ curl -H "Authorization: Bearer $WB_TOKEN" "http://127.0.0.1:8790/v1/models?all=1
 ```
 
 每个模型都带 `context_window` 与 `max_output_tokens`。
+
+### 客户端里模型显示「上下文 0」
+
+**这不是桥的问题，也不是你填错了。**
+
+桥返回的模型元数据里上下文长度是有的（`context_window`），但**客户端不会去问**——
+尤其对「自定义 provider」，多数客户端只认自己内置的模型表（models.dev 之类），
+自定义模型的上下文一律按 0 处理。
+
+所以它必须在**客户端侧**声明：
+
+| 客户端 | 在哪里声明 |
+|---|---|
+| opencode | `opencode.json` 里每个模型的 `limit: { context, output }`。**界面表单里没有这两格**，只能写文件 |
+| 其他 GUI 表单 | 表单里若有「上下文长度 / 输出上限」就填；没有就找该客户端的配置文件 |
 
 ### 客户端报「知识库 / RAG 不可用」
 

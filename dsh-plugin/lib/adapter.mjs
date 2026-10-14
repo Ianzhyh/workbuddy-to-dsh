@@ -190,7 +190,22 @@ function sanitizeWire(messages) {
   const declaredCallIds = new Set();
   for (const message of messages) {
     if (message.role === 'assistant') {
-      const hasText = typeof message.content === 'string' && message.content.length > 0;
+      /*
+       * ⚠️ "有内容"的判据必须同时认**字符串**与**多段数组**。
+       *
+       * 原先只判 `typeof content === 'string'`。而助手消息一旦带图，content 就是
+       * `[{type:'text'},{type:'image_url'}]` 这种数组 —— 被这里判成"空助手轮"
+       * **整条丢掉**：不光丢图，连文字也一起没了（实测：助手轮直接从历史里消失，
+       * 表现为模型"忘了自己刚说过什么"）。
+       *
+       * 数组形态要求至少有一个真有内容的段（text 非空，或有 image_url）。
+       */
+      const c = message.content;
+      const hasText = (typeof c === 'string' && c.length > 0)
+        || (Array.isArray(c) && c.some((p) => (
+          (p?.type === 'text' && typeof p.text === 'string' && p.text.length > 0)
+          || p?.type === 'image_url'
+        )));
       const hasCalls = Array.isArray(message.tool_calls) && message.tool_calls.length > 0;
       if (!hasText && !hasCalls) continue; // 空的助手轮：丢掉
       if (hasCalls) for (const call of message.tool_calls) declaredCallIds.add(String(call.id));
@@ -226,6 +241,18 @@ async function toWireMessage(message, resolveImage) {
   if (role === 'assistant') {
     const textParts = [];
     const toolCalls = [];
+    /*
+     * ⚠️ 助手消息里的**图片块**也要带上（2026-10-13 修）。
+     *
+     * 原先这里只处理 `text` 与 `tool-call`，`image` 块被**静默丢掉**。
+     * 影响的是「模型自己产出过图（截图/绘图）后、用户下一轮追问」：
+     * 历史被重发时图没了 → 模型只能凭记忆答，或直接说"我看不到那张图"。
+     * 与 user 侧同因：丢了不报错，只是"看不见"。
+     *
+     * 注意 assistant 的 content 允许为 `null`（只有 tool_calls 时），
+     * 所以"有图"时必须换成数组形态，不能仍走 `content: null`。
+     */
+    const imageParts = [];
     for (const block of blocks) {
       if (block?.type === 'text') textParts.push(block.text || '');
       else if (block?.type === 'tool-call') {
@@ -234,10 +261,21 @@ async function toWireMessage(message, resolveImage) {
           type: 'function',
           function: { name: String(block.name || ''), arguments: String(block.arguments ?? '{}') },
         });
+      } else if (block?.type === 'image' && block.offloaded !== true) {
+        const url = await resolveImage(block.attachment).catch(() => null);
+        if (url) imageParts.push({ type: 'image_url', image_url: { url } });
       }
       // reasoning 块不回灌：兼容端点对 reasoning 字段的接受度不一致，上游也不需要。
     }
-    const out = { role: 'assistant', content: textParts.join('') || null };
+    const text = textParts.join('');
+    if (imageParts.length) {
+      // 多段内容：文字在前、图在后（与 user 侧同序，读起来自然）
+      const content = [...(text ? [{ type: 'text', text }] : []), ...imageParts];
+      const out = { role: 'assistant', content };
+      if (toolCalls.length) out.tool_calls = toolCalls;
+      return out;
+    }
+    const out = { role: 'assistant', content: text || null };
     if (toolCalls.length) out.tool_calls = toolCalls;
     return out;
   }

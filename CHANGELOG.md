@@ -19,6 +19,74 @@
 
 ## [Unreleased]
 
+### Fixed（读不了图：插件把附件引用拆开传，dsh 每次读图都抛错后被静默吞掉）
+
+**用户看到的现象**：在 dsh 里发图片，模型像没看见一样 —— 要么答非所问，
+要么直接说看不到图。**全程不报错**，界面上也没有任何异常。
+
+**根因**（从 dsh 的 asar 里核出的权威契约，不是猜的）：
+dsh 的 `ImageAttachmentRef` 是
+
+```ts
+interface ImageAttachmentRef {
+  attachmentId: string; mediaType: ImageMediaType;
+  bytes: number; width: number; height: number;   // ← 必填
+  name?: string;
+}
+```
+
+而 `readImage(ref)` 内部会用它做**元数据核对**：
+
+```js
+const metadata = await probeImage(data);
+if (metadata.mediaType !== ref.mediaType || data.byteLength !== ref.bytes
+ || metadata.width !== ref.width || metadata.height !== ref.height)
+  throw new AttachmentError('...', 'ATTACHMENT_CORRUPT');
+```
+
+插件却把完整 ref **拆成两个字段**再传：
+
+```js
+attachments.readImage({ attachmentId: ref.attachmentId, mediaType: ref.mediaType })
+```
+
+→ `ref.bytes / width / height` 全变 `undefined` → 核对必然失败 →
+抛 `ATTACHMENT_CORRUPT` → 被 `.catch(() => null)` 吞掉 →
+adapter 把图替换成文字占位 `[图片：无法读取该附件]` → **模型看不到图**。
+
+**改法**：把 ref **原样**传下去（它本来就是那个接口要的形状）。
+顺带修两处让问题更难查的地方：
+
+- `stored.mediaType` 不存在（返回值是 `{ ref, data }`）→ 改读 `stored.ref.mediaType`；
+- 失败**不再静默**：原先一律 `return null`，日志里一个字都没有；
+  现在把失败原因打出来（只打错误信息，不含图片内容）。
+
+**同族的第二个洞（助手历史里的图被整条丢掉）**：修完 user 侧后复测发现，
+助手消息带图时有两处会把它弄丢：
+
+1. `toWireMessage` 的 assistant 分支只处理 `text` 与 `tool-call`，
+   `image` 块被静默丢弃；
+2. 更隐蔽：`sanitizeWire` 判"这条助手轮有没有内容"时只认
+   `typeof content === 'string'`。带图的助手消息 content 是**数组**，
+   于是被判成"空助手轮"→ **整条消息（连文字一起）被删掉**。
+   实测表现：助手轮从历史里直接消失，模型"忘了自己刚说过什么"。
+
+**验证**（每一层都单独证明，最后串起来打真上游）：
+
+| 层次 | 证据 |
+|---|---|
+| 桥 + 上游能读图吗 | 64×64 纯红图 → 模型答 `"红色"`，prompt 15→205 tokens |
+| 拆 ref 是否必然失败 | 复刻 dsh 核对逻辑 → 抛 `ATTACHMENT_CORRUPT`，图变文字占位 |
+| 真实 `apply()` 修后行为 | `readImage` 收到**完整** ref（`bytes:73,width:4,height:4`），payload 里出现 `image_url` |
+| 助手历史 | 修前助手轮**整条消失**；修后 `[text, IMAGE]` 都在 |
+| **全链路** | 真实 apply → 真实桥 → 真实上游：8×8 纯蓝图 → 模型答 `"蓝色"` ✅ |
+
+新增 2 条回归用例（`plugin.test.mjs` 一条走真实 `apply()`、`adapter.test.mjs`
+一条盯 wire 形态），都做了**反证**：把代码改回旧写法，用例立刻变红。
+
+**另**：`inject` 声明无需改动 —— `ctx.get('attachments')` 是 dsh 自己的惯用写法
+（asar 里 4 处在用），不是"没声明就取不到"。
+
 ### Fixed（测试在写坏使用者的真实账本 —— 每跑一次挤掉几十行用量历史）
 
 **现象**：`bridge/usage.jsonl`（使用者的真实账本）里 57% 是测试记录 ——

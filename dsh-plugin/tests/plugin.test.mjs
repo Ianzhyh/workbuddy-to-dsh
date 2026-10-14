@@ -864,3 +864,127 @@ test('apply() 的 migrateLegacy 默认会清理指向的文件（用临时目录
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+/**
+ * 图片必须真的送达上游 —— 用**真实 apply()** 走完整条链路。
+ *
+ * ## 为什么必须钉这条（2026-10-13 用户报「读不了图」）
+ *
+ * 插件把 dsh 给的完整 `ImageAttachmentRef` **拆成两个字段**再调 readImage：
+ *
+ *   attachments.readImage({ attachmentId: ref.attachmentId, mediaType: ref.mediaType })
+ *
+ * 而 dsh 的 `readImage(ref)` 会做**元数据核对**
+ * （`@deepseek-ai/dsh-attachment-local` 的 `readImageFile`）：
+ *
+ *   if (metadata.mediaType !== ref.mediaType || data.byteLength !== ref.bytes
+ *    || metadata.width !== ref.width || metadata.height !== ref.height)
+ *     throw new AttachmentError('...', 'ATTACHMENT_CORRUPT');
+ *
+ * 拆完 `ref.bytes/width/height` 全是 undefined → **每次都抛** → 被
+ * `.catch(() => null)` 吞掉 → adapter 把图换成文字占位
+ * `[图片：无法读取该附件]` → **模型完全看不到图，且全程不报错**。
+ *
+ * ## 这条用例为什么能抓住回归
+ *
+ * 桩里的 `readImage` **严格复刻 dsh 的核对逻辑**（缺字段就抛 ATTACHMENT_CORRUPT）。
+ * 所以只要有人再把 ref 拆开，用例立刻变红 —— 而不是像原来那样静默降级。
+ *
+ * 走**真实 apply()** 而不是复刻：resolveImage 是 apply 的闭包，import 不到，
+ * 只能装配完之后从注册的 adapter 上把它驱动起来。
+ */
+test('图片：插件必须把完整 ref 交给 dsh，否则图会被静默降级成文字', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'wb-img-'));
+  try {
+    // 一张 1×1 真 PNG（dsh 会核对 bytes/width/height，所以尺寸必须自洽）
+    const png = Buffer.from(
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg==',
+      'base64',
+    );
+    const ref = {
+      attachmentId: `sha256:${'a'.repeat(64)}`,
+      mediaType: 'image/png',
+      bytes: png.length,
+      width: 1,
+      height: 1,
+      name: 'dot.png',
+    };
+
+    const seenRefs = [];
+    /** 严格按 dsh 契约核对；缺字段即抛（= 生产里那次失败）。 */
+    const attachments = {
+      imageLimits: { mediaTypes: ['image/png', 'image/jpeg', 'image/webp', 'image/gif'], maxImageBytes: 4 * 1024 * 1024 },
+      async readImage(got) {
+        seenRefs.push(got);
+        if (got?.bytes !== png.length || got?.width !== 1 || got?.height !== 1 || got?.mediaType !== 'image/png') {
+          throw Object.assign(new Error('Stored attachment metadata does not match its reference.'), { code: 'ATTACHMENT_CORRUPT' });
+        }
+        return { ref: got, data: new Uint8Array(png) };
+      },
+    };
+
+    const { ctx } = fakeCtx();
+    const baseGet = ctx.get.bind(ctx);
+    ctx.get = (name) => (name === 'attachments' ? attachments : baseGet(name));
+    const baseInject = ctx.inject;
+    ctx.inject = (names, cb) => {
+      for (const n of names) {
+        const s = ctx.get(n);
+        if (s) cb({ [n]: s, get: (x) => ctx.get(x) });
+      }
+      if (typeof baseInject === 'function') baseInject.call(ctx, names, cb);
+    };
+
+    const result = apply(ctx, {
+      projectRoot: 'E:/workbuddy-to-dsh',
+      autoStart: false, consoleAutoStart: false, migrateLegacy: false,
+      tools: false, commands: false, routes: false, panel: false,
+    });
+    const adapter = result.adapter;
+    assert.ok(adapter, 'apply() 应当返回 adapter');
+
+    /*
+     * 只替换 `ensureReady`，**不能**只改 `adapter.client` ——
+     * `stream()` 走的是 `await this.ensureReady()`，返回的是闭包里那个 client。
+     * （验证脚本第一版就栽在这儿：sent 恒为 null。）
+     */
+    let sent = null;
+    const fakeClient = {
+      chat: async (payload) => {
+        sent = payload;
+        return new Response(
+          'data: {"choices":[{"delta":{"content":"ok"}}]}\n\n'
+          + 'data: {"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}\n\n'
+          + 'data: [DONE]\n\n',
+          { status: 200, headers: { 'content-type': 'text/event-stream' } },
+        );
+      },
+      models: async () => ({ data: [] }),
+    };
+    adapter.ensureReady = async () => fakeClient;
+
+    const message = { role: 'user', content: [{ type: 'text', text: '什么颜色？' }, { type: 'image', attachment: ref }] };
+    for await (const _ of adapter.stream({ model: 'deepseek-v4.1-flash', messages: [message] })) { /* 跑完 */ }
+
+    // ① ref 必须**原样**送达（这是修复的核心）
+    assert.deepEqual(
+      seenRefs[0],
+      ref,
+      'readImage 必须收到完整 ref（含 bytes/width/height）；拆字段会触发 dsh 的 ATTACHMENT_CORRUPT',
+    );
+
+    // ② 图必须以 image_url 形态出现在发给上游的 payload 里
+    const content = sent?.messages?.[0]?.content;
+    assert.ok(Array.isArray(content), '带图消息的 content 应当是数组');
+    const img = content.find((p) => p.type === 'image_url');
+    assert.ok(img, '必须发出 image_url 块 —— 否则图被降级成了文字，模型看不到');
+    assert.match(img.image_url.url, /^data:image\/png;base64,/, '必须是 data URL');
+    // ③ 绝不能出现"读不出附件"的占位
+    assert.ok(
+      !content.some((p) => typeof p.text === 'string' && p.text.includes('无法读取该附件')),
+      '不该出现"无法读取该附件"占位（说明 readImage 失败了）',
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
