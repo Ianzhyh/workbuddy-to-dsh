@@ -194,6 +194,43 @@ const upstream = createServer((req, res) => {
       res.write(sse({ id: 'c1', model: 'm', choices: [{ index: 0, delta: { content: '——这句话说到一半' } }] }));
       setTimeout(() => res.destroy(), 20);
       return;   // 不走下面的正常收尾
+    } else if (scenario.kind === 'undeclaredToolSearch') {
+      /*
+       * 模型调了 `tool_search`，但**当前请求没有声明**该工具
+       * （Codex 在轮次之间丢掉/改名它、或历史回放时会出现）。
+       *
+       * 此时 `closeTool` 的 `routes?.toolSearch` 判据为假，会落到普通
+       * `function_call` 分支 —— 那条分支**会**发 `function_call_arguments.done`
+       * 与 `output_item.done`。而 `flushTool` 原先**无条件**为 `tool_search`
+       * 跳过 `output_item.added`，于是客户端收到一个「从未 announced 过的 item
+       * 在收参数」——正好违反桥自己文档化的「added 必须先于第一个 delta」硬约束。
+       */
+      res.write(sse({ id: 'c1', model: 'm', choices: [{ index: 0, delta: { tool_calls: [{ index: 0, id: 'call_ts', function: { name: 'tool_search' } }] } }] }));
+      res.write(sse({ id: 'c1', model: 'm', choices: [{ index: 0, delta: { tool_calls: [{ index: 0, function: { arguments: '{"query":"mcp"}' } }] } }] }));
+    } else if (scenario.kind === 'lateToolArgs') {
+      /*
+       * 工具参数被**文本块打断**，之后还有该工具的迟到参数分片。
+       *
+       * 文本块一开就会把当时的工具块强制收尾（`output_item.done` 已交给客户端），
+       * 而 Responses 的 item 是按**顺序递增且互不重叠**的 output_index 解析的，
+       * 所以迟到分片**不能**再往那个已完成的 item 上拼 —— 拼了客户端就会拿到
+       * 被截断的 arguments（`{"cmd":` 这种非法 JSON，工具必然执行失败）。
+       */
+      res.write(sse({ id: 'c1', model: 'm', choices: [{ index: 0, delta: { tool_calls: [{ index: 0, id: 'call_a', function: { name: 'exec_command' } }] } }] }));
+      res.write(sse({ id: 'c1', model: 'm', choices: [{ index: 0, delta: { tool_calls: [{ index: 0, function: { arguments: '{"cmd":"ls"}' } }] } }] }));
+      res.write(sse({ id: 'c1', model: 'm', choices: [{ index: 0, delta: { content: '顺带说一句' } }] }));
+      // 迟到分片：必须在守卫处被丢弃，绝不能污染上面那个已完成的 item
+      res.write(sse({ id: 'c1', model: 'm', choices: [{ index: 0, delta: { tool_calls: [{ index: 0, function: { arguments: '" --extra"}' } }] } }] }));
+    } else if (scenario.kind === 'newIndexAfterText') {
+      /*
+       * 工具块被文本收尾之后，上游**换一个 index** 继续发新工具调用。
+       * 这种是合法形状，新调用必须照常成为独立 item（不能连它一起丢）。
+       */
+      res.write(sse({ id: 'c1', model: 'm', choices: [{ index: 0, delta: { tool_calls: [{ index: 0, id: 'call_1', function: { name: 'first_tool' } }] } }] }));
+      res.write(sse({ id: 'c1', model: 'm', choices: [{ index: 0, delta: { tool_calls: [{ index: 0, function: { arguments: '{"a":1}' } }] } }] }));
+      res.write(sse({ id: 'c1', model: 'm', choices: [{ index: 0, delta: { content: '中间插一句' } }] }));
+      res.write(sse({ id: 'c1', model: 'm', choices: [{ index: 0, delta: { tool_calls: [{ index: 1, id: 'call_2', function: { name: 'second_tool' } }] } }] }));
+      res.write(sse({ id: 'c1', model: 'm', choices: [{ index: 0, delta: { tool_calls: [{ index: 1, function: { arguments: '{"b":2}' } }] } }] }));
     }
     res.write(sse({
       id: 'c1',
@@ -1309,6 +1346,176 @@ test('流中途断开：必须发 response.failed，不能发 completed（否则
   // 已经收到的半截内容仍要带出去（便于排查，但不代表成功）
   assert.match(JSON.stringify(failed.data.response.output), /说到一半/,
     '已收到的半截内容应保留在 output 里');
+});
+
+/*
+ * ── Responses 层的两条回归（2026-10-15 实测暴露）────────────────────────
+ *
+ * ① **多段 developer 消息不能被丢掉**。
+ *    `responsesPartsToOpenAI` 对多段内容返回**数组**，而 system 分支原先只认
+ *    字符串（`typeof content === 'string' ? content : ''`）—— 数组一律变空串。
+ *    Codex Desktop 的 system prompt 正是**一个 developer 项挂 5 个 part**
+ *    （app-context / skills / permissions / collaboration_mode / plugins，
+ *    实测 24,273 字符、约占 system 的 65%）。丢掉之后走兜底，模型拿到的是
+ *    一句 `"You are a helpful assistant."`：agent 人设、技能清单、沙箱与权限
+ *    规则全没了。实测 5 个 part 到达 0 个。
+ */
+test('多段 developer 消息必须全部转成 system 文本（否则 Codex 的 system prompt 被换成通用兜底）', async () => {
+  await waitReady();
+  scenario = { kind: 'text' };
+  const parts = [
+    'APP_CONTEXT: you are Codex',
+    'SKILLS_INSTRUCTIONS: skills below',
+    'PERMISSIONS: sandbox=workspace-write',
+    'COLLABORATION_MODE: default',
+    'PLUGINS_INSTRUCTIONS: plugins available',
+  ];
+  await post({
+    model: 'gpt-5.1-codex',
+    stream: false,
+    input: [
+      { type: 'message', role: 'developer', content: parts.map((text) => ({ type: 'input_text', text })) },
+      { type: 'message', role: 'user', content: 'go' },
+    ],
+    max_output_tokens: 64,
+  });
+
+  const sys = lastUpstreamBody.messages.find((m) => m.role === 'system');
+  assert.ok(sys, '必须有 system 消息');
+  assert.equal(typeof sys.content, 'string', 'system 内容应当是文本（多段要拍平）');
+  for (const p of parts) {
+    assert.ok(sys.content.includes(p),
+      `developer 的 part 被丢了：「${p}」\n实际 system 内容：${JSON.stringify(sys.content)}`);
+  }
+  assert.notEqual(sys.content, 'You are a helpful assistant.',
+    '整个 system 退化成兜底问候语 —— Codex 的人设/技能/权限规则全部丢失');
+});
+
+test('多段 developer 与 instructions 共存时两者都要保留', async () => {
+  await waitReady();
+  scenario = { kind: 'text' };
+  await post({
+    model: 'gpt-5.1-codex',
+    stream: false,
+    instructions: 'FROM-INSTRUCTIONS',
+    input: [
+      { type: 'message', role: 'developer', content: [{ type: 'input_text', text: 'P1' }, { type: 'input_text', text: 'P2' }] },
+      { type: 'message', role: 'user', content: 'go' },
+    ],
+    max_output_tokens: 64,
+  });
+  const sys = lastUpstreamBody.messages.find((m) => m.role === 'system');
+  assert.match(sys.content, /FROM-INSTRUCTIONS/, 'instructions 要保留');
+  assert.match(sys.content, /P1/, 'developer 的第一个 part 要保留');
+  assert.match(sys.content, /P2/, 'developer 的第二个 part 要保留');
+});
+
+/*
+ * ② **已收尾的工具 item 不得再收 delta**。
+ *
+ * 文本块一开就把当时的工具块强制收尾（`output_item.done` 已发给客户端），
+ * 而 Responses 的 item 是按顺序递增、互不重叠的 output_index 解析的 ——
+ * 迟到分片不能往那个已完成的 item 上拼。
+ *
+ * ⚠️ 断言必须盯**事件序列**，不能盯 `output_item.done` 里的快照：
+ * 那个事件在迟到分片**之前**就发出去了，有没有守卫拿到的都是同一份（正确的）
+ * 快照 —— 第一版用例就是这么写的，结果恒真（反向验证时才发现）。
+ * 真正的差异是：没有守卫时，`output_item.done` **之后**还会冒出一个
+ * `response.function_call_arguments.delta`（实测无守卫 1 个、有守卫 0 个），
+ * 也就是"已完成的 item 还在收参数" —— Codex 的解析器要判流损坏的形状。
+ */
+test('工具被文本打断后的迟到参数分片：不得在 output_item.done 之后继续发 delta', async () => {
+  await waitReady();
+  scenario = { kind: 'lateToolArgs' };
+  const { status, text } = await post({
+    model: 'gpt-5.1-codex', stream: true,
+    input: [{ type: 'message', role: 'user', content: 'go' }],
+  });
+  assert.equal(status, 200);
+  const events = parseSse(text);
+
+  // 核心断言：任何 item 的 done 之后，都不能再有属于它的 arguments delta
+  const doneAt = new Map();
+  const strays = [];
+  events.forEach((e, i) => {
+    if (e.event === 'response.output_item.done' && e.data.item?.id) doneAt.set(e.data.item.id, i);
+    if (e.event === 'response.function_call_arguments.delta' && doneAt.has(e.data.item_id)
+      && doneAt.get(e.data.item_id) < i) {
+      strays.push(e.data.item_id);
+    }
+  });
+  assert.deepEqual(strays, [],
+    `有 ${strays.length} 个 arguments delta 落在该 item 的 output_item.done 之后 —— `
+    + 'Codex 会判流损坏（已完成 item 不该再收参数）');
+
+  // 顺带：交付的 arguments 仍要完整合法
+  const toolItems = events
+    .filter((e) => e.event === 'response.output_item.done' && e.data.item?.type === 'function_call')
+    .map((e) => e.data.item);
+  assert.equal(toolItems.length, 1, `应当只有一次工具调用，实际 ${toolItems.length}`);
+  assert.doesNotThrow(() => JSON.parse(toolItems[0].arguments),
+    `交付的 arguments 不是合法 JSON（${JSON.stringify(toolItems[0].arguments)}）`);
+  assert.equal(JSON.parse(toolItems[0].arguments).cmd, 'ls');
+});
+
+test('工具被文本收尾后换 index 的新调用：必须照常成为独立 item（不能连它一起丢）', async () => {
+  await waitReady();
+  scenario = { kind: 'newIndexAfterText' };
+  const { status, text } = await post({
+    model: 'gpt-5.1-codex', stream: true,
+    input: [{ type: 'message', role: 'user', content: 'go' }],
+  });
+  assert.equal(status, 200);
+  const events = parseSse(text);
+  const names = events
+    .filter((e) => e.event === 'response.output_item.done' && e.data.item?.type === 'function_call')
+    .map((e) => e.data.item.name);
+  assert.deepEqual(names, ['first_tool', 'second_tool'],
+    `换 index 的新工具调用丢了。实际交付：${JSON.stringify(names)}`);
+  // output_index 必须互不重复且递增（Codex 按它拼 item）
+  const idxs = events
+    .filter((e) => e.event === 'response.output_item.done')
+    .map((e) => e.data.output_index);
+  assert.equal(new Set(idxs).size, idxs.length, `output_index 重复：${JSON.stringify(idxs)}`);
+});
+
+/*
+ * ③ **`output_item.added` 必须先于该 item 的任何参数事件**（桥自己文档化的
+ *    Codex 硬约束：Codex 要求有 active item 才接受 `*.delta`）。
+ *
+ *    模型调了 `tool_search`、而当前请求**没有声明**它时，`closeTool` 的
+ *    `routes?.toolSearch` 判据为假 → 落到普通 `function_call` 分支 → 会发
+ *    `function_call_arguments.done` + `output_item.done`。而 `flushTool` 原先
+ *    **无条件**为 `tool_search` 跳过 `output_item.added`，于是这些事件属于一个
+ *    从未 announced 过的 item。修法：两处判据必须一致。
+ */
+test('未声明的 tool_search 被调用：不得发出没有 added 的孤立 item 事件', async () => {
+  await waitReady();
+  scenario = { kind: 'undeclaredToolSearch' };
+  const { status, text } = await post({
+    model: 'gpt-5.1-codex',
+    stream: true,
+    // 故意**不声明** tool_search
+    tools: [{ type: 'function', name: 'exec_command', parameters: { type: 'object', properties: {} } }],
+    input: [{ type: 'message', role: 'user', content: 'find tools' }],
+  });
+  assert.equal(status, 200);
+  const events = parseSse(text);
+
+  const addedIds = new Set(events
+    .filter((e) => e.event === 'response.output_item.added' && e.data.item?.id)
+    .map((e) => e.data.item.id));
+  const orphanArgs = events.filter((e) => e.event === 'response.function_call_arguments.delta'
+    || e.event === 'response.function_call_arguments.done')
+    .filter((e) => !addedIds.has(e.data.item_id));
+  const orphanDone = events
+    .filter((e) => e.event === 'response.output_item.done' && e.data.item?.id)
+    .filter((e) => !addedIds.has(e.data.item.id));
+
+  assert.deepEqual(orphanArgs.map((e) => e.event), [],
+    '有参数事件属于一个从未 output_item.added 过的 item —— Codex 要求先有 active item');
+  assert.deepEqual(orphanDone.map((e) => e.data.item.id), [],
+    '有 output_item.done 属于一个从未 output_item.added 过的 item');
 });
 
 test('被丢掉的工具必须在请求日志里可见（否则「模型有个工具用不了」永远查不出来）', async () => {

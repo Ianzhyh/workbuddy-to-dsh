@@ -108,6 +108,7 @@ function maxAlias(values) {
  */
 export function mapUsage(raw) {
   if (!raw || typeof raw !== 'object') return null;
+  const hasPrompt = raw.prompt_tokens != null || raw.input_tokens != null;
   const promptTokens = Number(raw.prompt_tokens ?? raw.input_tokens ?? 0) || 0;
   const output = Number(raw.completion_tokens ?? raw.output_tokens ?? 0) || 0;
   // 缓存读（命中）/ 缓存写：字段名与内置适配器同一套，另兼容 Anthropic 风格别名
@@ -123,13 +124,35 @@ export function mapUsage(raw) {
     raw.prompt_cache_write_tokens,
     raw.cache_creation_input_tokens,
   ]);
-  // 上游若直接给了未命中计数（DeepSeek 原生 prompt_cache_miss_tokens），优先采信它 ——
-  // 但只在与另外两个桶**自洽**（相加等于 prompt_tokens）时才采信，避免上游漏报时倒推。
-  const miss = Number(raw.prompt_cache_miss_tokens);
-  const missSelfConsistent = Number.isFinite(miss) && miss >= 0
-    && miss + cacheRead + cacheWrite === promptTokens;
-  const input = missSelfConsistent ? miss : Math.max(0, promptTokens - cacheRead - cacheWrite);
-  const total = Number(raw.total_tokens ?? 0) || input + output + cacheRead + cacheWrite;
+  /*
+   * ⚠️ 桶之和**必须**等于 `totalTokens`。
+   *
+   * 契约（`docs/dsh-llm-adapter-contract.md` §6）要求
+   * `totalTokens = input + output + cacheRead + cacheWrite`，并且明确写着：
+   * 数字不可信 / 总数冲突时，`dsh-token-meter` 的整次测量会**直接丢弃**
+   * （"returns no result when … counts are unsafe, or exact totals conflict"）。
+   *
+   * 上游**只给 `total_tokens`、不给 `prompt_tokens`** 时，原实现把 prompt 当 0，
+   * 于是产出自相矛盾的对象：`{inputTokens:0, outputTokens:0, totalTokens:1050}`
+   * （桶和 0 ≠ 1050）—— 既触发上面的"冲突即丢弃"，又形同一个
+   * **"这次请求没花钱"的零点声明**（契约 §6 特别点名：零点声明比不给更糟）。
+   *
+   * 所以缺 prompt 时按恒等式**从 total 反推** input：这样桶和永远自洽、
+   * `totalTokens` 这个锚点仍是上游原值，不会丢测量。
+   */
+  const totalRaw = Number(raw.total_tokens ?? 0) || 0;
+  let input;
+  if (!hasPrompt && totalRaw > 0) {
+    input = Math.max(0, totalRaw - output - cacheRead - cacheWrite);
+  } else {
+    // 上游若直接给了未命中计数（DeepSeek 原生 prompt_cache_miss_tokens），优先采信它 ——
+    // 但只在与另外两个桶**自洽**（相加等于 prompt_tokens）时才采信，避免上游漏报时倒推。
+    const miss = Number(raw.prompt_cache_miss_tokens);
+    const missSelfConsistent = Number.isFinite(miss) && miss >= 0
+      && miss + cacheRead + cacheWrite === promptTokens;
+    input = missSelfConsistent ? miss : Math.max(0, promptTokens - cacheRead - cacheWrite);
+  }
+  const total = totalRaw || input + output + cacheRead + cacheWrite;
   const reasoning = Number(raw.completion_tokens_details?.reasoning_tokens ?? raw.reasoning_tokens ?? 0) || 0;
   const usage = { inputTokens: input, outputTokens: output, totalTokens: total };
   if (cacheRead > 0) usage.cacheReadTokens = cacheRead;
@@ -676,8 +699,18 @@ export class WorkBuddyAdapter {
     const translator = new StreamTranslator();
     const decoder = new TextDecoder();
     let tail = '';
+    /*
+     * ⚠️ 取 reader 必须在 try **内部**。
+     *
+     * `res.body` 理论上总是有 `getReader()`（`client.chat` 走 fetch，200 且
+     * 有体时一定有流），但适配器的硬契约是「任何失败都以 finish 块收尾、
+     * 绝不向调用方抛」。放在 try 外面时，一个不合形状的响应（替身 / 中间层 /
+     * 将来换传输）会让 `getReader is not a function` 直接冒泡出去，
+     * 契约当场破裂 —— 实测被打桩测试抓到。
+     */
+    let reader = null;
     try {
-      const reader = res.body.getReader();
+      reader = res.body.getReader();
       for (;;) {
         const { done, value } = await reader.read();
         if (done) break;
@@ -714,6 +747,22 @@ export class WorkBuddyAdapter {
           ? { kind: 'aborted', failure: { message: '已取消', code: CODE.ABORTED } }
           : { kind: 'error', failure: { message: `流中断：${error?.message || error}`, code: CODE.TRANSPORT } },
       };
+    } finally {
+      /*
+       * 消费方**提前退出**（不再 next()，dsh 会对迭代器调 `return()`）时，这个
+       * 生成器在 yield 点被就地恢复并跑 finally —— 此时上游的响应体还开着。
+       * 契约要求适配器主动收掉它（`docs/dsh-llm-adapter-contract.md` §4.6：
+       * "adapters abort the underlying fetch from their own `finally` so the
+       * socket does not leak"），否则每次"用户停止"都白留一条上游连接，
+       * 直到上游把整段回答吐完。
+       *
+       * `cancel()` 会一路传到被包装的源流，进而 abort 掉 fetch —— 与调用方
+       * signal 那条路径互补：signal 管"上层要取消"，这里管"消费者不要了"。
+       *
+       * `reader` 为 null 表示连 `getReader()` 都没成功（响应体不合形状）：
+       * 那种情况已在 catch 里报过错，这里无事可做。
+       */
+      if (reader) await reader.cancel().catch(() => {});
     }
   }
 }

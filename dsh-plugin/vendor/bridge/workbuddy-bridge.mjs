@@ -188,13 +188,43 @@ const TRANSPORT_RETRY_DELAY_MS = numEnv('WORKBUDDY_TRANSPORT_RETRY_MS', 250, { m
  */
 const UPSTREAM_429_WAITS = String(process.env.WORKBUDDY_429_WAITS ?? '')
   .split(',')
-  .map((s) => Number(s.trim()))
+  /*
+   * ⚠️ 先**按字符串**过滤空项，再转数字。
+   *
+   * 原先直接 `.map(Number).filter(n => n >= 0)`：未设置时
+   * `''.split(',')` = `['']` → `Number('')` = **0** → `0 >= 0` 通过 ⇒ 计划变成
+   * `[0]`。于是"默认关闭"（注释写得很清楚）实际是**每个 429 都立刻原样重发一次**：
+   * 对拥塞中的上游做零退避重试，是最差的反应（只会加重拥塞），还多烧一次请求。
+   * 实测：未设置 / 空串都得到 `[0]`；日志里 148 条 `bridge waits` 有 133 条是
+   * `waits 0s … (1/1)` —— 这就是它的现场。
+   */
+  .map((s) => s.trim())
+  .filter((s) => s !== '')
+  .map(Number)
   .filter((n) => Number.isFinite(n) && n >= 0);
 
-/** 上游 429 里带的"过多久再试"提示（`retry-after` 头或 body 里的 `retry_after*` 字段）；没有则 null。 */
+/**
+ * 上游 429 里带的"过多久再试"提示（`retry-after` 头或 body 里的 `retry_after*` 字段）；没有则 null。
+ *
+ * ⚠️ `res` 是 `shimResponse` 的产物，它的 `headers` 就是 Node
+ * `IncomingMessage.headers` —— 一个**普通对象，没有 `.get()`**。
+ * 原先写的是 `res?.headers?.get?.('retry-after')`，可选链把"没有这个方法"
+ * 静默吞掉，于是这个头**从来没被读到过**（实测返回 null）。同文件里
+ * Responses 那条路径早就用 `up.headers?.['retry-after']` 并留了注释，
+ * 这里漏了。两种形状都认：Node 普通对象优先，fetch Response 也兼容。
+ */
 function upstreamRetryAfterMs(res, bodyText) {
-  const header = Number(res?.headers?.get?.('retry-after'));
-  if (Number.isFinite(header) && header > 0) return header * 1000;
+  const rawHeader = res?.headers?.['retry-after'] ?? res?.headers?.get?.('retry-after');
+  // `retry-after` 允许是秒数，也允许是 HTTP 日期（RFC 7231）
+  const asNumber = Number(rawHeader);
+  if (Number.isFinite(asNumber) && asNumber > 0) return asNumber * 1000;
+  if (typeof rawHeader === 'string' && rawHeader) {
+    const asDate = Date.parse(rawHeader);
+    if (Number.isFinite(asDate)) {
+      const delta = asDate - Date.now();
+      if (delta > 0) return delta;
+    }
+  }
   try {
     const j = JSON.parse(bodyText);
     for (const key of ['retry_after_ms', 'retryAfterMs', 'retry_after']) {
@@ -1734,6 +1764,18 @@ async function aggregateStream(res) {
    * `parsed === 0` 就是「这一坨根本不是 SSE」，据此按失败处理。
    */
   let parsed = 0;
+  /*
+   * 是否看到了「这一轮正常结束」的信号：`finish_reason` 或 `[DONE]`。
+   *
+   * 为什么与 `parsed` 分开：`parsed > 0` 只说明"解析出了 SSE 块"，不代表流**跑完了**。
+   * 上游在吐了几段内容之后**干净地半关**（代理超时后正常收尾、chunked 结束但没给
+   * finish_reason / usage / [DONE]）时，原先这个函数照样返回
+   * `finish_reason: "stop"` 的完整对象 → 调用方回 200 并记 `ok:true`，客户端以为
+   * 回答说完了（其实是半句），账本上还是一条健康的 0/0 tokens 记录。
+   * 实测：只喂一帧 content、然后干净 EOF → `parsed=1, finish_reason="stop", usage=undefined`。
+   */
+  let sawDone = false;
+  let sawFinishReason = false;
   const toolCalls = [];
   for (;;) {
     const { done, value } = await reader.read();
@@ -1744,18 +1786,40 @@ async function aggregateStream(res) {
     for (const line of lines) {
       if (!line.startsWith('data:')) continue;
       const payload = line.slice(5).trim();
-      if (!payload || payload === '[DONE]') continue;
+      if (!payload) continue;
+      if (payload === '[DONE]') { sawDone = true; continue; }
       let j; try { j = JSON.parse(payload); } catch { continue; }
       parsed += 1;
       id ??= j.id; model ??= j.model; created ??= j.created;
       if (j.usage) usage = j.usage;
       const choice = j.choices?.[0];
       if (!choice) continue;
-      if (choice.finish_reason) finishReason = choice.finish_reason;
+      if (choice.finish_reason) { finishReason = choice.finish_reason; sawFinishReason = true; }
       const d = choice.delta || {};
       if (typeof d.content === 'string') content += d.content;
       if (typeof d.reasoning_content === 'string') reasoning += d.reasoning_content;
       if (d.tool_calls) mergeToolCallDelta(toolCalls, d.tool_calls);
+    }
+  }
+  // 收尾：最后一行可能没有换行符结尾（干净结束但缺 `\n`），别把它丢掉
+  if (buffer.trim()) {
+    const payload = buffer.trim().startsWith('data:') ? buffer.trim().slice(5).trim() : '';
+    if (payload === '[DONE]') sawDone = true;
+    else if (payload) {
+      try {
+        const j = JSON.parse(payload);
+        parsed += 1;
+        id ??= j.id; model ??= j.model; created ??= j.created;
+        if (j.usage) usage = j.usage;
+        const choice = j.choices?.[0];
+        if (choice) {
+          if (choice.finish_reason) { finishReason = choice.finish_reason; sawFinishReason = true; }
+          const d = choice.delta || {};
+          if (typeof d.content === 'string') content += d.content;
+          if (typeof d.reasoning_content === 'string') reasoning += d.reasoning_content;
+          if (d.tool_calls) mergeToolCallDelta(toolCalls, d.tool_calls);
+        }
+      } catch { /* 半截 JSON：丢弃 */ }
     }
   }
   const message = { role: 'assistant', content: content || null };
@@ -1763,6 +1827,13 @@ async function aggregateStream(res) {
   if (toolCalls.length) message.tool_calls = toolCalls.filter(Boolean);
   return {
     parsed,
+    /*
+     * 「这一轮真的跑完了吗」。`parsed === 0` 是"根本不是 SSE"；这里再补一条
+     * "是 SSE、但流在半路干净地断了" —— 调用方据此按失败处理，不要伪装成成功。
+     * 工具调用也算终止信号：上游给了完整 tool_calls 就会带 finish_reason，
+     * 但万一只给工具不给 finish_reason，我们也不该把它判成截断。
+     */
+    completed: sawDone || sawFinishReason || toolCalls.length > 0,
     id: id || `chatcmpl-${trace().slice(0, 24)}`,
     object: 'chat.completion',
     created: created || Math.floor(Date.now() / 1000),
@@ -1862,10 +1933,19 @@ function resolveAnthropicModel(requested) {
   return ANTHROPIC_MODEL;
 }
 
-/** Anthropic 的 stop_reason 与 OpenAI 的 finish_reason 不是一一对应，需显式映射。 */
-function anthropicStopReason(finishReason) {
+/**
+ * Anthropic 的 stop_reason 与 OpenAI 的 finish_reason 不是一一对应，需显式映射。
+ *
+ * ⚠️ `sawToolUse` 这一路是必要的兜底，不能只认 `finish_reason`：
+ * Anthropic 的协议不变量是「有 `tool_use` 内容块 ⇒ `stop_reason: "tool_use"`」。
+ * 而上游偶尔以 `stop` 收尾却已经把工具块发了出来（工具块已经在 wire 上了），
+ * 此时报 `end_turn` 会让客户端把工具块当成**装饰性内容**、直接结束回合 ——
+ * 工具调用被静默丢掉。既然块已经发出去了，stop_reason 就必须与之一致。
+ */
+function anthropicStopReason(finishReason, sawToolUse = false) {
   if (finishReason === 'tool_calls') return 'tool_use';
   if (finishReason === 'length') return 'max_tokens';
+  if (sawToolUse) return 'tool_use';
   return 'end_turn';
 }
 
@@ -1899,6 +1979,71 @@ function estimateTokens(text) {
 }
 
 /**
+ * 一张图片折算多少 token。
+ *
+ * 图片按**像素**计价，与 base64 长度无关（Anthropic 官方口径：约 `宽×高/750`，
+ * 单图大致落在 1,000–1,600）。我们没有解码尺寸的依赖（零依赖项目），
+ * 所以取一个居中的常数。
+ *
+ * 为什么必须单独有这个常数：原先 `estimateRequestTokens` **完全没有图片分支**，
+ * 于是同一张 260KB 的截图按放置位置得到两个都错的结果 ——
+ *   ① 放在 `tool_result.content`（数组）里：走 `JSON.stringify` → 按字符数计价
+ *      得 **66,584** tokens（真实约 1,000–1,600，**高估约 40–60 倍**）；
+ *   ② 放在顶层 `{type:'image'}` 块里：既无 `.text` 无 `.content` 无 `.input`
+ *      → 计 **0–4** tokens（**几乎不计**）。
+ *
+ * 这两个数字都直接喂给 Claude Code 的 `/context` 占用条与自动压缩阈值：
+ * ① 会让它在每个截图工具的后续回合**过早压缩/拒绝历史**；② 则相反，
+ * 让它**低估到溢出**。同一张图两种答案本身就说明口径不一致。
+ */
+const IMAGE_TOKEN_ALLOWANCE = 1200;
+
+/** 这个内容块是不是一张图（Anthropic image / OpenAI image_url 两种形状）。 */
+function isImagePart(part) {
+  return part.type === 'image' || part.type === 'image_url';
+}
+
+/**
+ * 从 `tool_result.content` / 工具输入等**任意嵌套结构**里估 token：
+ * 文本按字符计价，图片按常数计价，**裸 base64 载荷不按字符算**。
+ *
+ * 递归是必要的：`tool_result.content` 可能是
+ * `[{type:'text'}, {type:'image'}]`，也可能被再套一层（`{content:[...]}`）。
+ * 只要在任意深度认出 `type:'image'` 就按图片计价（`isImagePart` 已经提前返回，
+ * 连它的 `source.data` 都不会走到）。
+ */
+function estimateStructuredTokens(value, depth = 0) {
+  if (value == null || depth > 8) return 0;
+  if (typeof value === 'string') {
+    // data URL 整串按一张图算；其余按字符
+    return /^data:[^;,]+;base64,/i.test(value) ? IMAGE_TOKEN_ALLOWANCE : estimateTokens(value);
+  }
+  if (typeof value !== 'object') return 0;
+  if (Array.isArray(value)) {
+    let sum = 0;
+    for (const item of value) sum += estimateStructuredTokens(item, depth + 1);
+    return sum;
+  }
+  if (isImagePart(value)) return IMAGE_TOKEN_ALLOWANCE;
+  let sum = 0;
+  for (const [key, v] of Object.entries(value)) {
+    /*
+     * 兜底：没有 `type:'image'` 标记、但挂着**一长串 base64** 的载荷
+     * （`{data: "iVBORw0..."}` 这类）。只对"长且是 base64 字符集"的值按图片算 ——
+     * 不能无条件跳过 `data` / `base64` 键：工具输入里完全可能有个正经的短字段
+     * 就叫 `data`，无条件跳过会把它的内容算丢。
+     */
+    if ((key === 'data' || key === 'base64') && typeof v === 'string'
+      && v.length >= 512 && /^[A-Za-z0-9+/=\s]+$/.test(v)) {
+      sum += IMAGE_TOKEN_ALLOWANCE;
+      continue;
+    }
+    sum += estimateStructuredTokens(v, depth + 1);
+  }
+  return sum;
+}
+
+/**
  * 估算一条 /v1/messages 请求的输入 token：system + messages + tools 的文本面。
  * 供 `POST /v1/messages/count_tokens` 与流式首帧的 input_tokens 兜底使用。
  */
@@ -1914,9 +2059,12 @@ function estimateRequestTokens(body) {
       for (const part of c) {
         if (!part || typeof part !== 'object') continue;
         if (typeof part.text === 'string') total += estimateTokens(part.text);
-        if (typeof part.content === 'string') total += estimateTokens(part.content); // tool_result
-        else if (part.content && typeof part.content === 'object') total += estimateTokens(JSON.stringify(part.content));
-        if (part.input && typeof part.input === 'object') total += estimateTokens(JSON.stringify(part.input)); // tool_use
+        // 图片块：整块计价（不能再落到下面按字符算）
+        if (isImagePart(part)) { total += IMAGE_TOKEN_ALLOWANCE; continue; }
+        // tool_result（字符串 / 块数组）与 tool_use 的 input：递归估，
+        // 图片按常数、base64 不计字符 —— 见 estimateStructuredTokens 的说明。
+        if (part.content !== undefined) total += estimateStructuredTokens(part.content);
+        if (part.input !== undefined) total += estimateStructuredTokens(part.input);
       }
     }
   }
@@ -2122,7 +2270,7 @@ function openAIToAnthropicMessage(agg, model) {
     role: 'assistant',
     model,
     content,
-    stop_reason: anthropicStopReason(choice.finish_reason),
+    stop_reason: anthropicStopReason(choice.finish_reason, content.some((b) => b.type === 'tool_use')),
     stop_sequence: null,
     usage: {
       input_tokens: Number(agg.usage?.prompt_tokens) || 0,
@@ -2180,28 +2328,21 @@ async function relayAnthropicStream(up, res, model, estInputTokens) {
   });
 
   let blockIndex = -1;
-  let openKind = null; // null | 'text' | 'tool'
-  const toolSlots = new Map(); // 上游 tool_calls 的 index -> { blockIndex, id, name, started }
   /**
-   * 已分配索引、但 `content_block_start` 还没发出去的工具块。
+   * 正文块。**同一时刻至多一个**：文本流是连续的，遇到工具块就收尾。
    *
-   * 为什么要拖后发：`function.name` **可能分片到达**（上游把名字拆成多帧，
-   * 见下面 `slot.name += ...` 的 `+=`）。而 `content_block_start` 一旦发出，
-   * 里面的 name 就定死了 —— 先发就会把半截名字（如 `get_`）交给客户端，
-   * 工具调用必然失败。
-   *
-   * OpenAI 的流式协议里名字总在 arguments 之前到齐，所以「等第一个
-   * arguments 分片来了再发」是安全的；没有任何 arguments 的调用则在
-   * 收尾时（`closeOpen()`）补发。
+   * `toolSlots` 里的工具块则**允许同时打开多个** —— 这正是 Anthropic 自己
+   * 流式下发并行工具调用的形状（客户端不受"只有一个块是打开的"这个假设约束，
+   * 它按 index 组装）。原先用一个 `openKind` 表示"当前打开的块"，
+   * 于是任何新块到来都得先把上一个关掉，见下面 `toolSlots` 处的事故说明。
    */
-  let pendingTool = null;
+  let textBlock = null; // { index, open }
+  const toolSlots = new Map(); // 上游 tool_calls 的 index -> { blockIndex, id, name, started, closed }
 
   /** 补发工具块的 content_block_start（幂等）。 */
   const flushTool = (slot) => {
     if (!slot || slot.started) return;
     slot.started = true;
-    pendingTool = null;
-    openKind = 'tool';
     write('content_block_start', {
       type: 'content_block_start',
       index: slot.blockIndex,
@@ -2209,13 +2350,41 @@ async function relayAnthropicStream(up, res, model, estInputTokens) {
     });
   };
 
-  const closeOpen = () => {
-    // 还没发 start 的工具块必须先补发，否则 content_block_stop 会落在一个
-    // 从未 start 过的 index 上（Anthropic 会判协议错），而且块的顺序也乱了
-    if (pendingTool && !pendingTool.started) flushTool(pendingTool);
-    if (openKind !== null) {
-      write('content_block_stop', { type: 'content_block_stop', index: blockIndex });
-      openKind = null;
+  /** 收尾正文块（工具块不受影响 —— 它们可以同时开着）。 */
+  const closeText = () => {
+    if (!textBlock || !textBlock.open) return;
+    textBlock.open = false;
+    write('content_block_stop', { type: 'content_block_stop', index: textBlock.index });
+  };
+
+  /**
+   * 收尾**全部**仍打开的块，按 index 升序发出 `content_block_stop`。
+   *
+   * 为什么必须按 index 升序、且不能提前关：见下面新工具块分支的长注释。
+   *
+   * 未发过 start 的块要先补 start：否则 stop 会落在一个从未 start 过的 index 上
+   * （Anthropic 判协议错）。补发必须是**对每个未 start 的块**，不能只补"最后
+   * 一个"—— 用一个 `pendingTool` 变量记"待发块"曾在这里出过事故：
+   * **两个工具都只有 name、没有 arguments** 时（模型决定不传参数），
+   * 第二个块创建时把 pendingTool 覆盖掉，于是第一个块永远没 start，
+   * 收尾却仍给它补了一个 stop —— 实测 starts=[1] / stops=[0,1]，
+   * 客户端那边第一个工具调用**根本不存在**（被静默吞掉）。
+   * 现在直接遍历 toolSlots 逐个补，不存在"被覆盖"的状态。
+   */
+  const closeAll = () => {
+    for (const slot of toolSlots.values()) {
+      if (!slot.started) flushTool(slot);
+    }
+    const closes = [];
+    if (textBlock && textBlock.open) closes.push({ index: textBlock.index, kind: 'text' });
+    for (const slot of toolSlots.values()) {
+      if (!slot.closed) closes.push({ index: slot.blockIndex, kind: 'tool', slot });
+    }
+    closes.sort((a, b) => a.index - b.index);
+    for (const entry of closes) {
+      if (entry.kind === 'text') textBlock.open = false;
+      else entry.slot.closed = true;
+      write('content_block_stop', { type: 'content_block_stop', index: entry.index });
     }
   };
 
@@ -2247,10 +2416,10 @@ async function relayAnthropicStream(up, res, model, estInputTokens) {
         const d = choice.delta || {};
 
         if (typeof d.content === 'string' && d.content) {
-          if (openKind !== 'text') {
-            closeOpen();
+          if (!textBlock || !textBlock.open) {
+            closeText(); // 理论上已关；留一道幂等保险
             blockIndex++;
-            openKind = 'text';
+            textBlock = { index: blockIndex, open: true };
             write('content_block_start', {
               type: 'content_block_start',
               index: blockIndex,
@@ -2259,7 +2428,7 @@ async function relayAnthropicStream(up, res, model, estInputTokens) {
           }
           write('content_block_delta', {
             type: 'content_block_delta',
-            index: blockIndex,
+            index: textBlock.index,
             delta: { type: 'text_delta', text: d.content },
           });
         }
@@ -2269,18 +2438,51 @@ async function relayAnthropicStream(up, res, model, estInputTokens) {
           const upIdx = typeof tc.index === 'number' ? tc.index : 0;
           let slot = toolSlots.get(upIdx);
           if (!slot) {
-            // 新工具块：必须先把上一个块关掉，索引才能前进
-            closeOpen();
+            /*
+             * 新工具块：**不能**在这里把上一个工具块关掉。
+             *
+             * 原先这里调 `closeOpen()`（把唯一"打开的块"收尾）再 `blockIndex++`。
+             * 而 OpenAI 的并行工具调用**允许多个调用交错下发** —— 典型形状是
+             * "先把所有 name/id 发完，再逐个发 arguments"。此时第二个工具的
+             * name 一到，第一个工具块就被提前 stop，紧接着它的 arguments 分片
+             * 变成"stop 之后的 delta"：
+             *
+             *   content_block_start idx=0 {name:"Read"}
+             *   content_block_stop  idx=0            ← 提前关闭
+             *   content_block_delta idx=0 {partial_json:'{"file_path":"/a.ts"}'}  ← 落在 stop 之后
+             *   content_block_start idx=1 {name:"Grep"}
+             *
+             * 按 Anthropic 协议，块关闭后的 delta 会被客户端丢弃，于是第一个
+             * 工具调用的 input 变成空对象；更糟的是参数可能被算到"当前打开的块"
+             * 头上。并行工具调用在 Claude Code 里是常态，代价很大。
+             *
+             * 实测（合成交错 SSE 驱动本函数）：修复前 `index 0 在
+             * content_block_stop 之后又收到了 delta`；修复后无违规。
+             *
+             * 所以工具块改为**各自独立**打开，只在真正的收尾点（读完 / 出错）
+             * 统一按 index 升序关闭。正文块仍然独占（文本是连续的，遇到工具
+             * 就该收尾），见上面的 closeText()。
+             */
+            closeText();
             blockIndex++;
             slot = {
               blockIndex,
               id: tc.id || `toolu_${trace().slice(0, 24)}`,
               name: '',
               started: false,
+              closed: false,
             };
             toolSlots.set(upIdx, slot);
-            pendingTool = slot; // 先不发 content_block_start，等名字收齐
+            /*
+             * 先不发 `content_block_start`，等名字收齐再发：`function.name`
+             * **可能分片到达**，而 start 一旦发出，里面的 name 就定死了 ——
+             * 先发会把半截名字（如 `get_`）交给客户端，工具调用必然失败。
+             * OpenAI 的流式协议里名字总在 arguments 之前到齐，所以"等第一个
+             * arguments 分片来了再发"是安全的（见下面 flushTool 的调用点）；
+             * 完全没有 arguments 的调用由 `closeAll()` 遍历补发。
+             */
           }
+          if (slot.closed) continue; // 已收尾的块不再接受 delta（幂等）
           /*
            * 名字**累加**，不是「只在为空时取一次」。
            *
@@ -2306,10 +2508,44 @@ async function relayAnthropicStream(up, res, model, estInputTokens) {
     log('anthropic stream interrupted', e.message);
   }
 
-  closeOpen();
+  closeAll();
+
+  /*
+   * ⚠️ **上游在流中途断掉时，绝不能以「干净的 end_turn + message_stop」收尾。**
+   *
+   * `streamError` 非空表示上游连接在流中间断了（被掐 / 网络故障 / 上游超时），
+   * 此时回答**已经截断在半句话上**。原来这里无条件写 `message_delta`
+   * （stop_reason 落到 `end_turn`）+ `message_stop` → Claude Code 认为
+   * "回合正常结束" → 用户看到的就是**说话说一半突然停下**，而且不报错、
+   * 不重试（它以为成功了）。`streamError` 当时只被用来记一笔账，从未影响
+   * 发给客户端的事件流。
+   *
+   * 这与 Responses 那条路径是**同一个坑**（见 `response.failed` 处的长注释），
+   * 那边已经修好，Anthropic 这条漏了 —— 同一个坑出现在两条路径上时，
+   * 改完一处要顺手搜另一处（项目里已记过这条教训）。
+   *
+   * Anthropic 流式协议里表达"这一轮没跑完"的方式是 `event: error`：客户端
+   * 认它、会转成可读错误并按错误类型决定是否重试。所以这里改发 error 并
+   * **不发 `message_stop`** —— 一个失败的消息不该有"消息结束"信号。
+   * 用法与形状对齐官方流式错误事件：
+   *   event: error
+   *   data: {"type":"error","error":{"type":"api_error","message":"..."}}
+   */
+  if (streamError && !res.writableEnded) {
+    write('error', {
+      type: 'error',
+      error: {
+        type: 'api_error',
+        message: `workbuddy-bridge: upstream stream interrupted before completion: ${streamError.message}`,
+      },
+    });
+    res.end();
+    return { finishReason, usage, streamError };
+  }
+
   write('message_delta', {
     type: 'message_delta',
-    delta: { stop_reason: anthropicStopReason(finishReason), stop_sequence: null },
+    delta: { stop_reason: anthropicStopReason(finishReason, toolSlots.size > 0), stop_sequence: null },
     usage: {
       input_tokens: Number(usage?.prompt_tokens) || estInputTokens,
       output_tokens: Number(usage?.completion_tokens) || 0,
@@ -2549,8 +2785,34 @@ function responsesToOpenAIMessages(body) {
         : (item.role === 'system' || item.role === 'developer') ? 'system' : 'user';
       const content = responsesPartsToOpenAI(item.content);
       if (role === 'system') {
-        const text = typeof content === 'string' ? content : '';
-        systemText = systemText ? `${systemText}\n${text}` : text;
+        /*
+         * ⚠️ **多段 content 必须拍成文本，不能因为"不是字符串"就整段丢掉。**
+         *
+         * `responsesPartsToOpenAI` 的返回值有两种形态：纯文本时是 string，
+         * 多段时是**内容块数组**。原先这里写的是
+         *   `const text = typeof content === 'string' ? content : ''`
+         * —— 数组一律变成空串，于是**整个 system 提示被静默丢弃**。
+         *
+         * 这不是理论问题：Codex Desktop 的 system prompt 正是
+         * **一个 developer 项里挂 5 个 part**（app-context / skills_instructions /
+         * permissions / collaboration_mode / plugins_instructions，实测 24,273 字符、
+         * 占整个 system 的约 65%）。丢掉之后走下面的兜底
+         * （`systemText || 'You are a helpful assistant.'`），模型拿到的是**一句
+         * 通用问候语**：agent 人设、技能清单、沙箱与权限规则、协作模式全没了。
+         *
+         * 实测（假上游抓桥真正转发的 messages）：5 个 part 到达 0 个，
+         * 转发的 system 就是 `"You are a helpful assistant."`。
+         *
+         * 所以这里按块拍平：文本块取 `text`，图片块给一句**明确说明**
+         * （与 `file_id` 图片同一套处理 —— 不静默丢，也绝不把 base64 塞进 system）。
+         * 空块跳过，避免拼出多余的空行。
+         */
+        const text = Array.isArray(content)
+          ? content.map((p) => (p?.type === 'text' ? (p.text || '')
+            : p?.type === 'image_url' ? '[image omitted: system messages carry text only]'
+              : '')).filter(Boolean).join('\n')
+          : (typeof content === 'string' ? content : '');
+        if (text) systemText = systemText ? `${systemText}\n${text}` : text;
         continue;
       }
       flushCalls();
@@ -2611,14 +2873,26 @@ function responsesToOpenAIMessages(body) {
       flushCalls();
       out.push({
         role: 'tool',
-        tool_call_id: typeof item.call_id === 'string' ? item.call_id : '',
+        /*
+         * ⚠️ 必须与上面 push `pendingCalls` 时**用同一个表达式**取 id。
+         *
+         * assistant 侧写的是 `item.call_id || item.id || call_…`，而这里原先只认
+         * `item.call_id` —— 于是历史里出现「调用 id = `fc_1`、结果 id = ""」的
+         * 不对称：上游拿这个 tool 消息对不上任何一次调用，只能把它当孤儿丢掉，
+         * 模型表现为"忘了自己刚才查过什么"、然后重复做同一件事。
+         *
+         * `call_id` 在客户端 schema 里是可选的（桥自己发出的每一项都带 `id`），
+         * 所以 `item.id` 这条回退是必需的 —— 与 assistant 侧保持一致。
+         */
+        tool_call_id: item.call_id || item.id || '',
         content: describeDiscoveredTools(item.tools),
       });
     } else if (type === 'function_call_output' || type === 'custom_tool_call_output') {
       flushCalls();
       out.push({
         role: 'tool',
-        tool_call_id: typeof item.call_id === 'string' ? item.call_id : '',
+        // 同上：与 assistant 侧同款回退，避免出现对不上号的 tool 结果
+        tool_call_id: item.call_id || item.id || '',
         /*
          * ⚠️ 这里用 `responsesOutputContent`（保留图片块），**不是** `responsesOutputText`。
          * 截图经 tool 输出回来时是 `{type:"input_image", image_url:"data:image/jpeg;base64,…"}`；
@@ -3442,8 +3716,18 @@ async function relayResponsesStream(up, res, model, routes = null) {
      * 事件，而「任何 `*.delta` 前必须先发 added」那条硬约束只约束
      * `function_call_arguments.*` / `custom_tool_call_input.*`，所以直接等收尾
      * 一次性给 `output_item.done` 是安全的。
+     *
+     * ⚠️ 但**必须与 `closeTool` 的判据完全一致**：`closeTool` 只在
+     * `routes?.toolSearch` 为真时才发 `tool_search_call`，否则会落到普通
+     * `function_call` 分支 —— 那条分支**会**发 `function_call_arguments.done`
+     * 与 `output_item.done`。此时若这里仍然 `return`（跳过 added），客户端收到的
+     * 就是一个**从未 announced 过的 item** 在收参数，正好违反桥自己文档化的
+     * 「added 必须先于第一个 delta」硬约束（Codex 要求有 active item）。
+     *
+     * 触发条件：模型这一轮调了 `tool_search`，而当前请求**没有**声明它
+     * （Codex 在轮次之间丢掉/改名该工具、或历史回放）。所以判据要与 closeTool 同款。
      */
-    if (slot.name === TOOL_SEARCH_NAME) return;
+    if (slot.name === TOOL_SEARCH_NAME && routes?.toolSearch) return;
     const isCustom = customTools.has(slot.name);
     /*
      * 分组工具（MCP）必须还原成 Codex 认的形状：`name` 用**短名**、命名空间放
@@ -3622,6 +3906,30 @@ async function relayResponsesStream(up, res, model, routes = null) {
             toolSlots.set(upIdx, slot);
             pendingTool = slot; // 先不发 added，等名字收齐
           }
+          /*
+           * ⚠️ **已收尾的块绝不能再接受 delta。**
+           *
+           * 文本块一开就会把当时所有工具块强制收尾（上面 `closeText()` 前那段
+           * `s.closed = true; closeTool(s)`）—— 而 `closeTool` 会发出
+           * `output_item.done` 并把 item 钉进 `output[slot.outputIndex]`。
+           * 如果之后还有同一个 `index` 的 tool_calls 分片（上游在文本之后
+           * 继续补参数、或把该 index 复用给下一个调用），原先这里**没有守卫**：
+           *
+           *   - 参数继续累加进那个**已经完成**的 slot，而发出去的 item 是收尾
+           *     那一刻的快照 → 客户端拿到**被截断的 arguments**（实测
+           *     `{"cmd":` 这种非法 JSON，工具直接执行失败）；
+           *   - 该 index 若是被复用成**新的一次调用**，新调用的 name/arguments
+           *     全部挂到旧 item 上，**永远不会成为 output item** —— 模型的工具
+           *     调用凭空消失，而 `response.completed` 里少一次调用。
+           *
+           * Anthropic 那层刚修过同一类问题（那边允许多块同时打开，做法是让工具块
+           * 各自独立）；**但 Responses 这条不能照搬**：Codex 按**顺序递增且互不
+           * 重叠**的 `output_index` 解析 item（见上面 `closeText()` 那句
+           * "工具块先关掉，output_index 才能安全前进"），所以这里保持"文本一开
+           * 就收尾工具块"的行为，只补上守卫：宁可**显式丢弃**迟到的分片，
+           * 也绝不让它污染一个已经交给客户端的 item。
+           */
+          if (slot.closed) continue;
           // 名字**累加**（与 Anthropic 层同款修复：首片写入 + `!slot.name` 守卫
           // 会让后续分片全被丢掉）
           if (tc.function?.name) slot.name += tc.function.name;
@@ -5425,7 +5733,19 @@ async function handleRequest(req, res) {
 
       // the backend is streaming-only: always stream upstream, aggregate for non-streaming clients
       const upstream = normalizePayload({ ...payload, stream: true, stream_options: { include_usage: true } });
-      delete upstream.max_completion_tokens; // avoid conflicting with max_tokens semantics
+      /*
+       * `max_completion_tokens` 是**新式写法**（OpenAI 现行字段），上游 Go 结构体只认
+       * `max_tokens`。原先这里直接 `delete` —— 于是客户端给的**输出上限静默消失**：
+       * 它预算了 500 token，实际拿到的是一次**无上限**的回合（模型跑自己的默认值）。
+       * 而 `max_tokens` 是原样转发的，两种写法行为完全不同，用户只会觉得"设了没用"。
+       *
+       * 正确做法是**翻译**而不是丢弃：两个都给时以 `max_tokens` 为准（保留原注释
+       * 里"避免语义冲突"的意图），只给新式字段时把它挪过去，然后再删掉旧键。
+       */
+      if (upstream.max_completion_tokens != null && upstream.max_tokens == null) {
+        upstream.max_tokens = upstream.max_completion_tokens;
+      }
+      delete upstream.max_completion_tokens;
       const conversationId = req.headers['x-conversation-id'] || trace();
 
       const ac = new AbortController();
@@ -5510,6 +5830,34 @@ async function handleRequest(req, res) {
               code: null,
               error: streamError.message,
             });
+            /*
+             * ⚠️ **截断必须让客户端知道**，不能只记一笔账就 `res.end()`。
+             *
+             * 原先这条路径**一个字节都不写**就结束响应：客户端在 200 事件流上看到
+             * 一个干净的 EOF。dsh 的适配器据此判定"上游说完了"（
+             * `mapFinishReason(undefined, sawToolCall, sawContent)` 在**有内容**时
+             * 返回 `{kind:'stop'}`），于是 agent 被告知"这一轮正常完成" ——
+             * 用户看到的就是**说话说一半突然停下**，既不报错也不重试。
+             *
+             * 另两条路径早就修过同一个坑（Anthropic 发 `event: error`、Responses 发
+             * `response.failed`，注释里都写着"绝不能伪装成干净回合"），只有 chat
+             * 这条漏了。日志取证：`stream interrupted` 在这条路径上有 21 条，
+             * 另两条各 0 条 —— 说明真实流量就在走这里。
+             *
+             * OpenAI 的流式协议里表达"出错"就是发一个 `error` 对象再 `[DONE]`；
+             * 客户端（含本项目自己的适配器）认它并按错误处理。
+             */
+            if (!res.writableEnded) {
+              try {
+                res.write(`data: ${JSON.stringify({
+                  error: {
+                    message: `workbuddy-bridge: upstream stream interrupted before completion: ${streamError.message}`,
+                    type: 'upstream_error',
+                  },
+                })}\n\n`);
+                res.write('data: [DONE]\n\n');
+              } catch { /* 客户端已经走了：写不进去也没关系 */ }
+            }
           } else {
             recordRequest({ model, stream: true, ok: true, ms: Date.now() - startedAt, ...usageOf(usageSeen) });
           }
@@ -5523,7 +5871,19 @@ async function handleRequest(req, res) {
          * 典型场景：网关把错误包成 200 的 HTML。原先这里无条件记 ok:true 并回 200，
          * 用户看到空白回答、控制台把它算作成功 —— 静默错数据。
          */
-        if (!aggregated.parsed) {
+        /*
+         * 上游在吐了内容之后**干净地半关**（没有 finish_reason / usage / [DONE]）
+         * 同样是失败，不能报成"完整回答"。
+         *
+         * 与上面 `parsed === 0`（根本不是 SSE）是**两条不同的**判据：
+         * `parsed > 0` 只说明解析出了 SSE 块。实测：只喂一帧 content 然后干净 EOF →
+         * `parsed=1, finish_reason="stop"`，客户端拿到半句却以为说完了、不重试，
+         * 账本还记成 ok:true 的 0/0 tokens 健康记录。
+         */
+        if (!aggregated.parsed || aggregated.completed === false) {
+          const reason = !aggregated.parsed
+            ? 'upstream returned 200 but no parseable SSE data'
+            : 'upstream stream ended before completion (no finish_reason / usage / [DONE])';
           recordRequest({
             model,
             stream: false,
@@ -5531,11 +5891,11 @@ async function handleRequest(req, res) {
             ok: false,
             status: up.status,
             code: null,
-            error: 'upstream returned 200 but no parseable SSE data',
+            error: reason,
           });
           return json(res, 502, {
             error: {
-              message: 'workbuddy-bridge: upstream returned 200 but no parseable SSE data',
+              message: `workbuddy-bridge: ${reason}`,
               type: 'upstream_error',
             },
           });
@@ -5672,8 +6032,12 @@ async function handleRequest(req, res) {
 
         const aggregated = await aggregateStream(up);
         res.__overheadMs = Math.max(0, upstreamStartedAt - startedAt);
-        // 同 OpenAI 路径：上游 200 但解析不出任何 SSE 块 = 失败，不是「空回答」
-        if (!aggregated.parsed) {
+        // 同 OpenAI 路径：上游 200 但解析不出任何 SSE 块 = 失败，不是「空回答」；
+        // 解析出了块但流在半路干净地断了（`completed === false`）同样是失败。
+        if (!aggregated.parsed || aggregated.completed === false) {
+          const reason = !aggregated.parsed
+            ? 'upstream returned 200 but no parseable SSE data'
+            : 'upstream stream ended before completion (no finish_reason / usage / [DONE])';
           recordRequest({
             model,
             stream: false,
@@ -5681,14 +6045,11 @@ async function handleRequest(req, res) {
             ok: false,
             status: up.status,
             code: null,
-            error: 'upstream returned 200 but no parseable SSE data',
+            error: reason,
           });
           return json(res, 502, {
             type: 'error',
-            error: {
-              type: 'api_error',
-              message: 'workbuddy-bridge: upstream returned 200 but no parseable SSE data',
-            },
+            error: { type: 'api_error', message: `workbuddy-bridge: ${reason}` },
           });
         }
         recordRequest({ model, stream: false, ok: true, ms: Date.now() - startedAt, ...usageOf(aggregated.usage) });
@@ -5872,8 +6233,12 @@ async function handleRequest(req, res) {
 
         const aggregated = await aggregateStream(up);
         res.__overheadMs = Math.max(0, upstreamStartedAt - startedAt);
-        // 同另两条路径：上游 200 但解析不出任何 SSE 块 = 失败，不是「空回答」
-        if (!aggregated.parsed) {
+        // 同另两条路径：上游 200 但解析不出任何 SSE 块 = 失败，不是「空回答」；
+        // 解析出了块但流在半路干净地断了（`completed === false`）同样是失败。
+        if (!aggregated.parsed || aggregated.completed === false) {
+          const reason = !aggregated.parsed
+            ? 'upstream returned 200 but no parseable SSE data'
+            : 'upstream stream ended before completion (no finish_reason / usage / [DONE])';
           recordRequest({
             model,
             stream: false,
@@ -5881,13 +6246,10 @@ async function handleRequest(req, res) {
             ok: false,
             status: up.status,
             code: null,
-            error: 'upstream returned 200 but no parseable SSE data',
+            error: reason,
           });
           return json(res, 502, {
-            error: {
-              type: 'upstream_error',
-              message: 'workbuddy-bridge: upstream returned 200 but no parseable SSE data',
-            },
+            error: { type: 'upstream_error', message: `workbuddy-bridge: ${reason}` },
           });
         }
         recordRequest({ model, stream: false, ok: true, ms: Date.now() - startedAt, ...usageOf(aggregated.usage) });

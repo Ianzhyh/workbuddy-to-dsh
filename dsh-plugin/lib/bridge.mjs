@@ -50,11 +50,45 @@ export class BridgeClient {
     // 显式传 0 表示「不设超时」（chat 的流式响应不能有整体超时），
     // 注意不能用 `??`：0 是合法值，会被 ?? 保留下来变成「立刻超时」。
     const budget = timeoutMs ?? this.timeoutMs;
-    const timer = budget > 0 ? setTimeout(() => ac.abort(new Error('timeout')), budget) : null;
+    /*
+     * ⚠️ 超时与调用方取消**必须活到响应体读完为止**，不能在拿到响应头时就摘掉。
+     *
+     * `fetch()` 一旦 resolve，AbortSignal 依然控制着**响应体流**的读取 —— 取消
+     * 一个正在流式返回的请求，靠的正是这个 signal。原先 `finally` 在 fetch 解决
+     * 的瞬间就 `removeEventListener` 并清掉定时器，于是：
+     *
+     *   - 调用方 abort（dsh 里点「停止」/ 上层取消）**再也传不进那个流**；
+     *   - 本机继续把上游整段回答读完，只为了把结果丢掉 —— 白烧额度与并发。
+     *
+     * 实测（假上游 100 帧 × 60ms，400ms 处 abort）：
+     *   现状        → read 循环 5 秒仍未结束，abort 后上游又写了 93 帧，且跑完了整条流
+     *   保留监听    → read 2ms 结束，上游残余 0 帧，socket 5ms 内关闭
+     *
+     * 真实链路实测（真实桥 + 真实上游，1.5s 处 abort）：abort 后生成器**又跑了
+     * 9477ms**、期间仍收到 4447 字，最后以 `max-tokens` 收尾（把「用户取消」
+     * 报成了「输出超限」）。
+     *
+     * 所以清理动作挂到**响应体结束**（正常读完 / 被取消 / 出错）上，而不是挂在
+     * 「拿到响应头」上。用一个把 `pull`/`cancel` 都接住的 `ReadableStream` 包一层，
+     * 三种出口都能清理，且背压语义不变。
+     */
+    const cleanup = [];
+    const runCleanup = () => { while (cleanup.length) { try { cleanup.pop()(); } catch { /* 忽略 */ } } };
     const onAbort = () => ac.abort(signal?.reason);
-    signal?.addEventListener('abort', onAbort, { once: true });
+    if (signal) {
+      signal.addEventListener('abort', onAbort, { once: true });
+      cleanup.push(() => signal.removeEventListener('abort', onAbort));
+      // 进来时就已经取消：让 fetch 走正常的 abort 失败路径，不静默改成别的语义
+      if (signal.aborted) ac.abort(signal.reason);
+    }
+    if (budget > 0) {
+      const timer = setTimeout(() => ac.abort(new Error('timeout')), budget);
+      cleanup.push(() => clearTimeout(timer));
+    }
+
+    let res;
     try {
-      const res = await fetch(`${this.baseUrl}${pathname}`, {
+      res = await fetch(`${this.baseUrl}${pathname}`, {
         method,
         headers: {
           ...authHeaders(this.token),
@@ -63,10 +97,57 @@ export class BridgeClient {
         body: body === undefined ? undefined : JSON.stringify(body),
         signal: ac.signal,
       });
+    } catch (error) {
+      runCleanup(); // 连响应头都没拿到：立刻释放监听与定时器
+      throw error;
+    }
+
+    // 204/205/304 按规范必须无体，`new Response(stream)` 会直接抛；无体响应没有
+    // 「读完」这个时机，当场清理即可。
+    if (!res.body || res.status === 204 || res.status === 205 || res.status === 304) {
+      runCleanup();
       return res;
-    } finally {
-      if (timer) clearTimeout(timer);
-      signal?.removeEventListener('abort', onAbort);
+    }
+
+    /*
+     * 重新包一个 Response，让 `.body` / `.text()` / `.json()` 全部走被追踪的流。
+     * 只改 `res.body` 不行：`.text()` 读的是 Response 内部的原始流，包装会失效。
+     *
+     * 三种出口都要清理，缺一个就会漏掉监听或定时器：
+     *   ① 读完（done）—— 正常路径；
+     *   ② 读出错 —— 上游被掐断 / 调用方 abort / 超时；
+     *   ③ cancel —— 消费方主动放弃（例如 adapter 提前退出循环后 reader.cancel()）。
+     * 只用 `pipeThrough(new TransformStream({flush,cancel}))` 会漏掉 ②：
+     * 源流 error 时 flush 不触发，abort 监听与超时定时器就留在那里了。
+     */
+    const reader = res.body.getReader();
+    try {
+      const tracked = new ReadableStream({
+        async pull(controller) {
+          try {
+            const { done, value } = await reader.read();
+            if (done) { runCleanup(); controller.close(); return; }
+            controller.enqueue(value);
+          } catch (error) {
+            runCleanup();
+            controller.error(error);
+          }
+        },
+        cancel(reason) {
+          runCleanup();
+          return reader.cancel(reason).catch(() => {});
+        },
+      });
+      return new Response(tracked, {
+        status: res.status,
+        statusText: res.statusText,
+        headers: res.headers,
+      });
+    } catch (error) {
+      // 构造 Response 失败（响应状态不合规范等）：源流与监听一并收掉，别泄漏
+      runCleanup();
+      await reader.cancel(error).catch(() => {});
+      throw error;
     }
   }
 

@@ -237,6 +237,44 @@ test('usage 映射：字段别名、缓存写、脏数据防御', () => {
   assert.equal(mapUsage(null), null);
 });
 
+/*
+ * 桶之和必须等于 `totalTokens`（契约 §6 的硬要求）。
+ *
+ * 契约写明：数字不可信 / 总数冲突时，`dsh-token-meter` 会把**整次测量丢掉**
+ * （"returns no result when … counts are unsafe, or exact totals conflict"），
+ * 并且特别点名「零点声明比不给更糟 —— 那是一个声称本次请求没花钱的 provider 锚点」。
+ *
+ * 原实现在上游**只给 `total_tokens`、不给 `prompt_tokens`** 时把 prompt 当 0，
+ * 产出自相矛盾的 `{inputTokens:0, outputTokens:0, totalTokens:1050}`
+ * （桶和 0 ≠ 1050）—— 同时踩中"冲突"与"零点声明"两条。
+ * 触发场景真实存在：网关精简 usage、或中间层剥掉 prompt 字段。
+ */
+test('usage 映射：缺 prompt_tokens 时桶之和必须仍等于 totalTokens（否则 dsh 丢弃整次测量）', () => {
+  const cases = [
+    ['只有 total_tokens', { total_tokens: 1050 }],
+    ['缺 prompt、有 completion', { completion_tokens: 50, total_tokens: 1050 }],
+    ['缺 prompt、有缓存', { completion_tokens: 50, total_tokens: 1050, prompt_cache_hit_tokens: 400 }],
+  ];
+  for (const [label, raw] of cases) {
+    const u = mapUsage(raw);
+    const sum = (u.inputTokens || 0) + (u.outputTokens || 0) + (u.cacheReadTokens || 0) + (u.cacheWriteTokens || 0);
+    assert.equal(u.totalTokens, sum,
+      `${label}：桶和必须等于 totalTokens（input ${u.inputTokens} + output ${u.outputTokens}`
+      + ` + cacheRead ${u.cacheReadTokens || 0} + cacheWrite ${u.cacheWriteTokens || 0} = ${sum}，totalTokens ${u.totalTokens}）`);
+    assert.ok(u.inputTokens >= 0, `${label}：inputTokens 不得为负`);
+  }
+
+  // 反证：不能因此把"真·零用量"编造成正数
+  const realZero = mapUsage({ prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 });
+  assert.equal(realZero.inputTokens, 0, '上游明确说 prompt_tokens=0 时不许倒推');
+  assert.equal(realZero.totalTokens, 0);
+
+  // 有 prompt 时仍以 prompt 为准（不得被倒推覆盖）
+  const withPrompt = mapUsage({ prompt_tokens: 1000, completion_tokens: 50, total_tokens: 1050 });
+  assert.equal(withPrompt.inputTokens, 1000, '有 prompt_tokens 时必须照原样用');
+  assert.equal(withPrompt.totalTokens, 1050);
+});
+
 test('工具调用：tool-call-delta 累积出完整的 JSON 参数，finish 为 tool-calls', async () => {
   const stub = await startStub({
     sseFrames: [
@@ -465,9 +503,172 @@ test('取消：abort 后以 aborted finish 收尾', async () => {
     }
     const finish = out.at(-1);
     assert.equal(finish.type, 'finish');
-    assert.ok(['aborted', 'stop'].includes(finish.reason.kind) || finish.reason.kind === 'error');
-    if (finish.reason.kind === 'aborted') assert.equal(finish.reason.failure.code, 'ABORTED');
+    /*
+     * ⚠️ 这条断言原先写成 `['aborted','stop'].includes(kind) || kind === 'error'` ——
+     * 等于**什么都能通过**，所以「abort 根本没传下去」这个真 bug 一直躲在这里：
+     * 取消之后桥仍把上游整段流读完（实测又跑了 9.5 秒、多收 4447 字），
+     * 而 finish 落在 `max-tokens`/`stop` 上被这条宽松断言放行。
+     * 现在收紧：**取消就必须报 aborted**。
+     */
+    assert.equal(finish.reason.kind, 'aborted',
+      `取消后必须以 aborted 收尾，实际是 ${finish.reason.kind}`
+      + `（落在 stop/max-tokens 上说明取消被当成了正常结束）`);
+    assert.equal(finish.reason.failure.code, 'ABORTED');
   } finally { await stub.close(); }
+});
+
+/**
+ * 取消必须**真的**中断上游，而不只是「不再产出块」。
+ *
+ * 这是上一条的加强版：上面只看 finish 的类型，而一个"读完全部再报 aborted"
+ * 的实现同样能通过它。这里直接量**服务器侧**的行为 ——
+ * abort 之后上游还被写出去多少帧、连接是否被关。
+ *
+ * 背景（实测）：`BridgeClient` 原先在 `fetch()` 一 resolve 就
+ * `removeEventListener('abort', …)`，而 fetch 拿到响应头**不等于**流读完了 ——
+ * 调用方的取消从此再也传不进那个响应体。对真实桥实测：abort 后生成器又跑了
+ * 9477ms、期间仍收到 4447 字，最后以 `max-tokens` 收尾。
+ *
+ * 现在 `BridgeClient` 把清理挂到「响应体结束」上，适配器也在 finally 里
+ * `reader.cancel()`，两条路径都堵住。
+ */
+test('取消必须真的切断上游：abort 后服务器不再写帧、连接被关闭', async () => {
+  const FRAME_MS = 40;
+  const TOTAL = 100;
+  let framesWritten = 0;
+  let finished = false;
+  let closedAt = null;
+
+  const server = createServer((req, res) => {
+    if (req.url.startsWith('/v1/models')) {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      return res.end(JSON.stringify({ object: 'list', data: [{ id: 'stub-model', name: 'Stub' }] }));
+    }
+    res.writeHead(200, { 'content-type': 'text/event-stream' });
+    let i = 0;
+    const timer = setInterval(() => {
+      if (i >= TOTAL) {
+        clearInterval(timer);
+        res.write('data: [DONE]\n\n');
+        res.end();
+        finished = true;
+        return;
+      }
+      i += 1;
+      framesWritten = i;
+      res.write(`data: ${JSON.stringify(delta({ content: 'x' }))}\n\n`);
+    }, FRAME_MS);
+    res.on('close', () => { if (closedAt === null) closedAt = Date.now(); clearInterval(timer); });
+  });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  const baseUrl = `http://127.0.0.1:${server.address().port}`;
+
+  try {
+    const adapter = makeAdapter(baseUrl);
+    const controller = new AbortController();
+    const started = Date.now();
+    let abortedAtMs = null;
+    let framesAtAbort = 0;
+    let aborted = false;
+    let finish = null;
+
+    const pump = (async () => {
+      for await (const chunk of adapter.stream({ provider: 'workbuddy', model: 'stub-model', messages: [], signal: controller.signal })) {
+        if (chunk.type === 'finish') finish = chunk.reason;
+        if (!aborted && Date.now() - started > 300) {
+          aborted = true;
+          abortedAtMs = Date.now() - started;
+          // 记下"取消那一刻上游已经写出多少帧"——之后不能再有增长
+          framesAtAbort = framesWritten;
+          controller.abort();
+        }
+      }
+    })();
+
+    const outcome = await Promise.race([
+      pump.then(() => 'ended'),
+      new Promise((r) => setTimeout(() => r('__PENDING__'), 5000)),
+    ]);
+    const endMs = Date.now() - started;
+    await new Promise((r) => setTimeout(r, 400)); // 留出传播时间
+
+    assert.equal(outcome, 'ended',
+      `abort 之后生成器 5 秒仍未结束 —— 取消没有传进响应体`);
+    assert.equal(finish?.kind, 'aborted', `finish 应为 aborted，实际 ${finish?.kind}`);
+    assert.ok(endMs - abortedAtMs < 1500,
+      `abort 后又跑了 ${endMs - abortedAtMs}ms —— 取消应当立刻生效，不该读完剩余的上游数据`);
+    /*
+     * 关键断言：上游侧必须**停止被消费**。
+     *
+     * 允许 1–2 帧的余量 —— 取消那一刻可能已有一帧在网络上（已写出但还没被读到），
+     * 那不属于"取消没生效"。真正要钉死的是**不再持续增长**（旧实现在这之后
+     * 又写了 93 帧、并把整条 100 帧的流跑完）。
+     */
+    assert.ok(framesWritten - framesAtAbort <= 2,
+      `abort 之后上游又被写了 ${framesWritten - framesAtAbort} 帧 —— 上游连接没被真正切断（白烧额度）`);
+    assert.equal(finished, false, '上游把整条流跑完了 —— 取消没有生效');
+    assert.ok(closedAt !== null, 'abort 之后上游连接始终没被关闭');
+  } finally {
+    await new Promise((r) => server.close(r));
+  }
+});
+
+/**
+ * 消费方**提前退出**（对生成器 break → dsh 调 `return()`）时，
+ * 上游连接必须被立刻收掉 —— 契约 §4.6 明确要求适配器在自己的 finally 里
+ * "abort the underlying fetch so the socket does not leak"。
+ *
+ * 这条路径与"调用方 signal 取消"是两件不同的事：signal 管「上层要取消」，
+ * 这里管「消费者不要了」。两条都堵住才算不泄漏。
+ */
+test('消费方提前 break：上游连接必须被立刻收掉（不留幽灵连接）', async () => {
+  const TOTAL = 100;
+  let framesWritten = 0;
+  let finished = false;
+  let closedAt = null;
+
+  const server = createServer((req, res) => {
+    if (req.url.startsWith('/v1/models')) {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      return res.end(JSON.stringify({ object: 'list', data: [{ id: 'stub-model', name: 'Stub' }] }));
+    }
+    res.writeHead(200, { 'content-type': 'text/event-stream' });
+    let i = 0;
+    const timer = setInterval(() => {
+      if (i >= TOTAL) {
+        clearInterval(timer);
+        res.write('data: [DONE]\n\n');
+        res.end();
+        finished = true;
+        return;
+      }
+      i += 1;
+      framesWritten = i;
+      res.write(`data: ${JSON.stringify(delta({ content: 'x' }))}\n\n`);
+    }, 30);
+    res.on('close', () => { if (closedAt === null) closedAt = Date.now(); clearInterval(timer); });
+  });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  const baseUrl = `http://127.0.0.1:${server.address().port}`;
+
+  try {
+    const adapter = makeAdapter(baseUrl);
+    let got = 0;
+    for await (const chunk of adapter.stream({ provider: 'workbuddy', model: 'stub-model', messages: [] })) {
+      if (chunk.type === 'text-delta') got += 1;
+      if (got >= 2) break; // 消费者不想要了
+    }
+    const framesAtBreak = framesWritten;
+    await new Promise((r) => setTimeout(r, 600)); // 给传播留时间
+
+    assert.equal(finished, false,
+      '消费方 break 之后上游仍把整条流跑完了 —— 连接泄漏，白烧额度与并发');
+    assert.equal(framesWritten, framesAtBreak,
+      `break 之后上游又被写了 ${framesWritten - framesAtBreak} 帧 —— 没被切断`);
+    assert.ok(closedAt !== null, 'break 之后上游连接始终没被关闭');
+  } finally {
+    await new Promise((r) => server.close(r));
+  }
 });
 
 test('模型不在白名单：直接以 INVALID_REQUEST 收尾，不打上游', async () => {
@@ -482,4 +683,31 @@ test('模型不在白名单：直接以 INVALID_REQUEST 收尾，不打上游', 
   assert.equal(out.length, 1);
   assert.equal(out[0].reason.kind, 'error');
   assert.equal(out[0].reason.failure.code, 'INVALID_REQUEST');
+});
+
+/*
+ * 响应体不合形状时也必须走 finish 块，**不能向外抛**。
+ *
+ * 适配器的硬契约是「任何失败都以 finish 块收尾」（见文件头与
+ * `docs/dsh-llm-adapter-contract.md` §5.3）。取消/清理那轮改动里，
+ * 取 reader 的语句被放到了 try **外面** —— 于是一个没有 `getReader()` 的
+ * 响应体会让 `TypeError: res.body.getReader is not a function` 直接冒泡，
+ * 契约当场破裂（由 `model-prefs.test.mjs` 的 payload 打桩抓到）。
+ * 这条用例把「取 reader 必须在 try 内」钉死。
+ */
+test('响应体没有 getReader()：也必须以 error finish 收尾，不得向外抛', async () => {
+  const adapter = new WorkBuddyAdapter({
+    provider: 'workbuddy',
+    displayName: 'WorkBuddy',
+    client: { chat: async () => ({ ok: true, status: 200, body: null }) },
+    ensureReady: async () => adapter.client,
+    log: () => {},
+  });
+  const out = [];
+  await assert.doesNotReject(async () => {
+    for await (const chunk of adapter.stream({ provider: 'workbuddy', model: 'model-a', messages: [] })) out.push(chunk);
+  }, '响应体不合形状时向外抛异常 —— 契约要求失败也走 finish 块');
+  assert.equal(out.length, 1, `应当只有一个终止块，实际 ${out.length} 个：${JSON.stringify(out.map((c) => c.type))}`);
+  assert.equal(out[0].type, 'finish');
+  assert.equal(out[0].reason.kind, 'error');
 });

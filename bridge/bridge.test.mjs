@@ -2583,3 +2583,152 @@ test('桥：传输层瞬时失败重试后必须救回完整响应', { timeout: 
     rmSync(bridge.dir, { recursive: true, force: true });
   }
 });
+
+/*
+ * ═══ 聊天路径的两条「不能把失败伪装成成功」═══════════════════════════════
+ *
+ * 另两条路径（Anthropic / Responses）早就修过同一类坑，只有 chat 这条漏了。
+ * 日志取证：`stream interrupted` 在这条路径上有 21 条，另两条各 0 条 ——
+ * 真实流量就在走这里。
+ */
+
+test('桥：流中途断掉时必须告诉客户端（不能只记一笔账就干净 EOF）', { timeout: 60_000 }, async () => {
+  const srv = createServer((req, res) => {
+    const path = new URL(req.url, 'http://127.0.0.1').pathname;
+    if (path !== '/v2/chat/completions') {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      return res.end(JSON.stringify({ code: 0, data: { models: [] } }));
+    }
+    res.writeHead(200, { 'content-type': 'text/event-stream' });
+    res.write('data: {"id":"c1","model":"m","choices":[{"delta":{"content":"说到一半"}}]}\n\n');
+    // 粗暴掐断：没有 finish_reason、没有 usage、没有 [DONE]
+    setTimeout(() => res.destroy(), 30);
+  });
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+
+  const bridge = await startBridge({
+    CODEBUDDY_ENDPOINT: `http://127.0.0.1:${srv.address().port}`,
+    WORKBUDDY_SKIP_MODEL_PREFLIGHT: '1',
+    WORKBUDDY_TRANSPORT_RETRY_MS: '0',
+  }, { auth: READABLE_FAKE_AUTH });
+  try {
+    const res = await fetch(`${bridge.baseUrl}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { ...auth, 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'stub-model', messages: [{ role: 'user', content: 'hi' }], stream: true }),
+      signal: AbortSignal.timeout(30_000),
+    });
+    assert.equal(res.status, 200, '已经答应过是事件流，只能 200 + SSE');
+    const text = await res.text();
+
+    /*
+     * 核心断言：客户端必须能看出"这一轮没跑完"。
+     * 原先这条路径**一个字节都不写**就 res.end() —— 客户端在 200 事件流上看到
+     * 一个干净的 EOF，dsh 的适配器把"有内容 + 无 finish_reason"判成
+     * `{kind:'stop'}`，于是 agent 被告知"正常完成"，用户看到半句话就停、
+     * 不报错也不重试。
+     */
+    assert.match(text, /"error"/,
+      `流中途断了却没有任何错误信号（客户端只会看到一个干净的 EOF）。实际响应体：${JSON.stringify(text.slice(-300))}`);
+    assert.match(text, /interrupted/i, '错误信息要说清是"上游流中途断了"');
+    // 已收到的半截内容仍要带出去（便于排查）
+    assert.match(text, /说到一半/, '已经收到的内容不该被丢掉');
+    // 收尾信号：给了 error 之后补 [DONE]，客户端才好干净地结束解析
+    assert.match(text, /\[DONE\]/, '错误之后要有 [DONE]，否则有的客户端会一直等');
+  } finally {
+    await bridge.stop();
+    await new Promise((r) => srv.close(r));
+    rmSync(bridge.dir, { recursive: true, force: true });
+  }
+});
+
+test('桥：非流式聚合遇到「有内容但没跑完」必须回 502，不能报成完整回答', { timeout: 60_000 }, async () => {
+  const srv = createServer((req, res) => {
+    const path = new URL(req.url, 'http://127.0.0.1').pathname;
+    if (path !== '/v2/chat/completions') {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      return res.end(JSON.stringify({ code: 0, data: { models: [] } }));
+    }
+    res.writeHead(200, { 'content-type': 'text/event-stream' });
+    // **干净地**半关：有内容，但没有 finish_reason / usage / [DONE]
+    res.end('data: {"id":"c1","model":"m","choices":[{"delta":{"content":"The answer is 4"}}]}\n\n');
+  });
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+
+  const bridge = await startBridge({
+    CODEBUDDY_ENDPOINT: `http://127.0.0.1:${srv.address().port}`,
+    WORKBUDDY_SKIP_MODEL_PREFLIGHT: '1',
+    WORKBUDDY_TRANSPORT_RETRY_MS: '0',
+  }, { auth: READABLE_FAKE_AUTH });
+  try {
+    const res = await fetch(`${bridge.baseUrl}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { ...auth, 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'stub-model', messages: [{ role: 'user', content: 'hi' }] }),
+      signal: AbortSignal.timeout(30_000),
+    });
+    /*
+     * 原先：`parsed > 0` 就放过 → 回 200 + `finish_reason:"stop"` + 半句内容，
+     * 客户端以为回答说完了、不重试；账本还记成 ok:true 的 0/0 tokens 健康记录。
+     */
+    assert.equal(res.status, 502,
+      '上游在吐了内容后干净地半关，必须按失败处理（回 200 会让客户端以为回答完整）');
+    const j = await res.json();
+    assert.match(JSON.stringify(j), /before completion|no parseable SSE data/i,
+      `错误信息要指出"流没跑完"。实际：${JSON.stringify(j).slice(0, 300)}`);
+  } finally {
+    await bridge.stop();
+    await new Promise((r) => srv.close(r));
+    rmSync(bridge.dir, { recursive: true, force: true });
+  }
+});
+
+test('桥：max_completion_tokens 必须翻译成 max_tokens（不能静默丢掉输出上限）', { timeout: 60_000 }, async () => {
+  let seen = null;
+  const srv = createServer((req, res) => {
+    const chunks = [];
+    req.on('data', (c) => chunks.push(c));
+    req.on('end', () => {
+      const path = new URL(req.url, 'http://127.0.0.1').pathname;
+      if (path !== '/v2/chat/completions') {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        return res.end(JSON.stringify({ code: 0, data: { models: [] } }));
+      }
+      try { seen = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch { seen = null; }
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      res.end('data: {"id":"c1","model":"m","choices":[{"delta":{"content":"ok"}}]}\n\ndata: {"id":"c1","model":"m","choices":[{"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n');
+    });
+  });
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+
+  const bridge = await startBridge({
+    CODEBUDDY_ENDPOINT: `http://127.0.0.1:${srv.address().port}`,
+    WORKBUDDY_SKIP_MODEL_PREFLIGHT: '1',
+    WORKBUDDY_TRANSPORT_RETRY_MS: '0',
+  }, { auth: READABLE_FAKE_AUTH });
+  try {
+    // 只给新式字段：上限必须被翻译过去，而不是丢掉
+    await fetch(`${bridge.baseUrl}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { ...auth, 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'stub-model', messages: [{ role: 'user', content: 'hi' }], max_completion_tokens: 500 }),
+      signal: AbortSignal.timeout(30_000),
+    }).then((r) => r.text());
+    assert.equal(seen?.max_tokens, 500,
+      `max_completion_tokens=500 必须翻译成上游认的 max_tokens（否则输出上限静默消失，回合变成无上限）。实际 payload：${JSON.stringify(seen)?.slice(0, 200)}`);
+    assert.equal('max_completion_tokens' in (seen || {}), false, '翻译后不该再把新式字段原样转发');
+
+    // 两个都给时：以 max_tokens 为准（保留"避免语义冲突"的原意）
+    await fetch(`${bridge.baseUrl}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { ...auth, 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'stub-model', messages: [{ role: 'user', content: 'hi' }], max_tokens: 128, max_completion_tokens: 500 }),
+      signal: AbortSignal.timeout(30_000),
+    }).then((r) => r.text());
+    assert.equal(seen?.max_tokens, 128, '两个都给时以 max_tokens 为准');
+  } finally {
+    await bridge.stop();
+    await new Promise((r) => srv.close(r));
+    rmSync(bridge.dir, { recursive: true, force: true });
+  }
+});
