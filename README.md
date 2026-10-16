@@ -27,8 +27,36 @@ Base URL 的客户端都能直连。
 |---|---|
 | 把 WorkBuddy 用起来 | WorkBuddy · WorkBuddy 本地 API · WorkBuddy 模型桥 · WorkBuddy 中转 · WorkBuddy 插件 |
 | 接某个客户端 | **WorkBuddy 接入 Claude Code** · **WorkBuddy 接入 Codex** · WorkBuddy OpenAI 兼容 API · WorkBuddy Anthropic Messages 兼容 · WorkBuddy Responses 兼容 · Claude Code 自定义 API · opencode / Cursor / Trae / Cherry Studio / NextChat / LobeChat / ChatBox / Open WebUI 接入 |
-| 接 DeepSeek Harness | DeepSeek Harness 插件 · dsh 插件 · dsh 模型路由 · provider workbuddy |
+| 接 DeepSeek Harness | DeepSeek Harness 插件 · **在 DSH 里用 WorkBuddy** · WorkBuddy 接入 dsh · dsh workbuddy · dsh 模型路由 · provider workbuddy |
 | 技术特性 | openai-compatible · anthropic-compatible · llm proxy · local model bridge · 零依赖 Node.js · 仅监听 127.0.0.1 · 本机凭据自用 |
+
+### DeepSeek Harness 用户：一个插件装下全部能力
+
+在 **DeepSeek Harness（dsh）** 里用上 WorkBuddy 的模型，本仓库提供的是
+**原生 dsh 插件 + 本地 API 桥 + 可视化控制台**的完整组合 —— 装完模型直接出现在
+dsh 的模型选择器里，日常需要的接入、管理、监控、运维能力也全在同一个插件内：
+
+| 能力 | 说明 |
+|---|---|
+| 零配置接入 | 不需要 API Key、不需要手填端点 —— 复用桌面端已登录态，凭据现取现解、不落盘 |
+| 原生模型路由 | 运行时注册 `provider: workbuddy`，**不写任何配置文件**；上游加减模型自动跟随 |
+| 模型管理 | 勾选启用 / 禁用、同步到 dsh、**体检**（可用性 · 消耗倍率 · 实测成本）、详情与 CSV 导出 |
+| 账号切换 | 登录目录下多个账号快照一键切换（自动重启桥、清缓存） |
+| 积分与用量 | 积分余额；1 / 7 / 30 天趋势（次数 / tokens / 积分）、积分排行、CSV 导出 |
+| 请求明细 | 逐条记录（模型 / 耗时 / token / 积分 / 结果），失败标红、上游错误码一键复制 |
+| 环境诊断 | 8 项检查按优先级排序（红色项不解决，模型就不会出现）；另有 CLI 自检 `doctor.mjs` |
+| 对话测试 | 多轮流式对话，按轮次显示 token / 扣分 / 耗时，附桥日志 |
+| 每日签到 | 自动签到（不开控制台也会签）+ 手动领取 |
+| 同时服务其它客户端 | 桥讲 OpenAI / Anthropic / Responses 三套协议 —— Claude Code、Codex、opencode、Cherry Studio 等直接接入 |
+| 中英双语 | 控制台与 dsh 设置页（9 个标签页）全部双语，右上角 `EN` / `中` 切换 |
+
+一个命令装进 dsh（安装路线、验收清单与故障排查见 [docs/INSTALL.md](docs/INSTALL.md)）：
+
+```sh
+dsh plugin --profile desktop add github:Ianzhyh/workbuddy-to-dsh
+```
+
+装完**重启一次 dsh**，模型选择器里直接多出 WorkBuddy。
 
 > ### ⚠️ 请先读这一段（免责与边界）
 >

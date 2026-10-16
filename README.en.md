@@ -24,6 +24,22 @@ native plugin**.
 > The console itself has a complete English UI — the `EN` toggle sits next to the
 > theme switch.
 
+## For DSH users: one install, everything included
+
+Use WorkBuddy models in **DeepSeek Harness (dsh)** and this repo gives you the complete
+set: a **native dsh plugin + local API bridge + web console**. One command installs the
+plugin; after restarting dsh, WorkBuddy models appear in the model picker — and everything
+else lives in the same plugin: model management (enable / disable, health checks with cost
+multipliers), account switching, credit & usage tracking with trends and CSV export,
+per-request details (failures highlighted with upstream error codes), 8-point environment
+diagnostics, multi-turn chat test, and automatic daily check-in. The bridge also speaks
+OpenAI / Anthropic / Responses, so Claude Code, Codex, opencode, Cherry Studio and other
+clients can connect directly.
+
+```sh
+dsh plugin --profile desktop add github:Ianzhyh/workbuddy-to-dsh
+```
+
 ## ⚠️ Read this first (disclaimer & boundaries)
 
 - **Unofficial path.** This relies on the undocumented credential storage of the
