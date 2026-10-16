@@ -507,7 +507,7 @@ stream disconnected before completion: prompt is too long: 1252936 tokens > 1048
 58.5 万（压缩线 90 万），上游实际已收到 125.3 万 → 直接 400 拒绝。
 Codex 于是重试，桥原样转发，**连撞 6 次、249 秒**，最后整轮崩掉。
 
-**怎么修**（v1.4.9 之后已修，见 CHANGELOG 的 `[Unreleased]`）：
+**怎么修**（v1.5.0 起已修，见 CHANGELOG）：
 
 ```cmd
 npm run bridge                  :: 或从控制台重启桥 —— 桥是长驻进程，改完必须重启
