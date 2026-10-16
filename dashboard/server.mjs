@@ -43,7 +43,7 @@ import {
   verifyAgainstBridge,
   verifyWritten,
 } from '../lib/client-connect.mjs';
-import { effectiveAuthFile, readState, writeState } from '../lib/state.mjs';
+import { effectiveAuthFile, readState, writeAccountAlias, writeState } from '../lib/state.mjs';
 
 // ── 基础工具 ────────────────────────────────────────────────────────────
 
@@ -1475,6 +1475,38 @@ const server = createServer(async (req, res) => {
       } catch (err) {
         if (err.code === 'BODY_TOO_LARGE') return bodyTooLarge(req, res);
         sendJson(res, 400, { switched: false, error: err.message });
+      }
+      return;
+    }
+
+    /*
+     * 给账号起个自定义名字（**只影响显示**，不碰任何凭据文件）。
+     *
+     * `file` 用登录文件名，与 `/api/account/switch` 同一套校验：必须是列举结果里的
+     * 那一个，避免构造任意路径。**键由服务端现读文件决定**（uin → userId → 文件名）——
+     * 让客户端传键，就等于让它决定"这个名字属于哪个账号"，换号后会贴错。
+     */
+    if (route === '/api/account/alias' && req.method === 'POST') {
+      try {
+        const { file, alias } = JSON.parse(await readBody(req));
+        if (typeof file !== 'string' || !file) throw new Error('缺少 file');
+        if (alias !== undefined && alias !== null && typeof alias !== 'string') {
+          throw new Error('alias 必须是字符串（留空 = 恢复默认显示）');
+        }
+        const listed = await listAccounts();
+        const hit = listed.accounts.find((a) => a.name === file);
+        if (!hit) throw new Error(`未知账号：${file}`);
+        if (!hit.aliasKey) throw new Error('这个账号读不出标识（uin），无法命名');
+        const accountAliases = writeAccountAlias(hit.aliasKey, alias ?? '');
+        sendJson(res, 200, {
+          ok: true,
+          key: hit.aliasKey,
+          alias: accountAliases[hit.aliasKey] || '',
+          accountAliases,
+        });
+      } catch (err) {
+        if (err.code === 'BODY_TOO_LARGE') return bodyTooLarge(req, res);
+        sendJson(res, 400, { ok: false, error: err.message });
       }
       return;
     }

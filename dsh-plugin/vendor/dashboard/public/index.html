@@ -934,6 +934,14 @@ const I18N_EN = {
   '切换失败：': 'Switch failed: ',
   '切换会自动重启桥，并**清空上一个账号的体检结论**（结论只对被测时的账号成立）。':
     'Switching restarts the bridge and **clears the previous account\'s probe results** (they only hold for the account they were measured on).',
+  '改名': 'Rename',
+  '给这个账号起个名字，便于区分': 'Give this account a name so you can tell them apart',
+  '给这个账号起个名字（留空 = 恢复默认显示）': 'Name this account (leave empty to reset)',
+  '例如：工作号 / 个人号': 'e.g. work / personal',
+  '保存': 'Save',
+  '账号名字已保存': 'Account name saved',
+  '已恢复默认显示': 'Reset to the default label',
+  '改名失败：': 'Rename failed: ',
 
   // ---- 用量面板 ----
   '用量统计': 'Usage',
@@ -2103,6 +2111,13 @@ const I18N_RULES_EN = [
   [/^(.+) 等 (\d+) 个$/, (m, ids, n) => ids + ' … (' + n + ' total)'],
   [/^每日签到 (\d+)\/(\d+)$/, 'Daily check-in $1/$2'],
   [/^路由 (.) 凭据 (.) bundle (.)$/, 'Route $1 Credentials $2 bundle $3'],
+  /*
+   * 账号卡片副行。有自定义名字时多一段 uin（`文件 · 域名 · 剩余` 之外再多一段），
+   * **四段规则必须排在三段规则之前** —— 三段那条的 `(.+)` 是贪婪的，
+   * 会自己把多出来的 ` · ` 吞进第二段，照样"匹配成功"，于是顺序反了也不报错、
+   * 只是悄悄按错的切法翻。这类规则顺序坑本项目踩过（见 `docs/ARCHITECTURE.md`）。
+   */
+  [/^(.+) · (.+) · (.+) · 剩余 (.+)$/, (m, a, b, c, d) => a + ' · ' + b + ' · ' + c + ' · ' + translateText(d) + ' left'],
   [/^(.+) · (.+) · 剩余 (.+)$/, (m, a, b, d) => a + ' · ' + b + ' · ' + translateText(d) + ' left'],
   [/^最近 (\d+) 天$/, 'Last $1 days'],
   [/^已回报 (\d+)\/(\d+) 次 平均 (.+) 上游按两位小数回报$/,
@@ -2459,6 +2474,84 @@ function appConfirm(text, opts = {}) {
     scrim.onclick = (e) => { if (e.target === scrim) done(false); };
     document.addEventListener('keydown', onKey, true);
     okBtn.focus();
+  });
+}
+
+/**
+ * 自绘输入框（替代原生 `prompt`）。返回 `Promise<string|null>`：确定给字符串，取消给 null。
+ *
+ * 与 `appConfirm` 同一套理由（样式统一、不阻塞主线程），外加一条本项目特有的：
+ * 原生 `prompt` 不在 DOM 里，i18n 的翻译层够不着它 —— 而这里要显示标题、占位符、
+ * 按钮三处文案。弹窗是运行时新建的，DOM 翻译层的 `MutationObserver` 会在插入后
+ * 扫到它，所以字面量过 `t()` 属于双保险；但按钮文案**必须**过（与 `appConfirm`
+ * 一致），别只做一半。
+ *
+ * 行为与原生对齐：Esc = 取消、点遮罩 = 取消、Enter = 确定、打开即选中原值。
+ */
+function appPrompt(title, defaultValue = '', opts = {}) {
+  return new Promise((resolve) => {
+    const prevFocus = document.activeElement;
+    const scrim = document.createElement('div');
+    scrim.className = 'modal-scrim';
+
+    const dlg = document.createElement('div');
+    dlg.className = 'modal';
+    dlg.setAttribute('role', 'dialog');
+    dlg.setAttribute('aria-modal', 'true');
+    dlg.setAttribute('aria-label', t(title));
+
+    const body = document.createElement('div');
+    body.className = 'modal-body';
+    const p = document.createElement('p');
+    p.textContent = t(title);
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.className = 'modal-input';
+    input.value = String(defaultValue == null ? '' : defaultValue);
+    input.maxLength = opts.maxLength || 24;
+    if (opts.placeholder) input.placeholder = t(opts.placeholder);
+    body.append(p, input);
+
+    const actions = document.createElement('div');
+    actions.className = 'modal-actions';
+    const cancelBtn = document.createElement('button');
+    cancelBtn.type = 'button';
+    cancelBtn.className = 'mini';
+    cancelBtn.textContent = t('取消');
+    const okBtn = document.createElement('button');
+    okBtn.type = 'button';
+    okBtn.className = 'mini primary';
+    okBtn.textContent = t(opts.okText || '保存');
+    actions.append(cancelBtn, okBtn);
+
+    dlg.append(body, actions);
+    scrim.append(dlg);
+    document.body.append(scrim);
+
+    const done = (val) => {
+      document.removeEventListener('keydown', onKey, true);
+      scrim.remove();
+      // 焦点归还：否则关闭后焦点掉到 body，键盘用户得重新 Tab 一大圈
+      if (prevFocus && prevFocus.focus) { try { prevFocus.focus(); } catch { /* 元素可能已被重建 */ } }
+      resolve(val);
+    };
+    function onKey(e) {
+      if (e.key === 'Escape') { e.preventDefault(); done(null); return; }
+      if (e.key === 'Enter' && document.activeElement === input) { e.preventDefault(); done(input.value); return; }
+      // 焦点困在弹窗里（输入框 ↔ 取消 ↔ 保存，循环很便宜）
+      if (e.key === 'Tab') {
+        e.preventDefault();
+        const order = [input, cancelBtn, okBtn];
+        const i = order.indexOf(document.activeElement);
+        order[(i + 1) % order.length].focus();
+      }
+    }
+    cancelBtn.onclick = () => done(null);
+    okBtn.onclick = () => done(input.value);
+    scrim.onclick = (e) => { if (e.target === scrim) done(null); };
+    document.addEventListener('keydown', onKey, true);
+    input.focus();
+    input.select();
   });
 }
 
@@ -4247,20 +4340,60 @@ async function loadAccounts() {
     const switchBtn = a.active
       ? ''
       : '<button data-switch="' + escapeAttr(a.name) + '"' + (a.usable ? '' : ' disabled') + '>切换</button>';
+    /*
+     * 自定义名字（`.state.json` 的 `accountAliases`）。
+     *
+     * 起了名字就把名字当主标题、uin 挪到副行 —— 光看 uin（十几个数字）用户分不清
+     * 谁是谁，而这正是多账号用户唯一的痛点。**没起名字时渲染结果与从前逐字相同**，
+     * 所以旧截图/旧用例不受影响。
+     */
+    const label = a.alias || a.account || a.name;
+    const sub = (a.alias && a.account ? a.account + ' · ' : '')
+      + a.name + ' · ' + (a.domain || '—') + ' · 剩余 ' + expire;
     return '<div class="acct">' +
       '<div>' +
-        '<div class="acct-name">' + escapeAttr(a.account || a.name) +
+        '<div class="acct-name">' + escapeAttr(label) +
           (a.active ? ' <span class="tag ok">使用中</span>' : '') + '</div>' +
-        '<div class="acct-sub mono">' + escapeAttr(a.name) + ' · ' + escapeAttr(a.domain || '—')
-          + ' · 剩余 ' + expire + '</div>' +
+        '<div class="acct-sub mono">' + escapeAttr(sub) + '</div>' +
       '</div>' +
-      '<div class="acct-act">' + status + switchBtn + '</div>' +
+      '<div class="acct-act">' + status +
+        '<button class="mini" data-alias="' + escapeAttr(a.name) + '"'
+          + ' title="给这个账号起个名字，便于区分">改名</button>' +
+        switchBtn + '</div>' +
     '</div>';
   }).join('');
 
   el.querySelectorAll('[data-switch]').forEach(btn => {
     btn.onclick = () => switchAccount(btn.dataset.switch);
   });
+  el.querySelectorAll('[data-alias]').forEach(btn => {
+    btn.onclick = () => renameAccount(d.accounts.find(x => x.name === btn.dataset.alias));
+  });
+}
+
+/**
+ * 给账号起个自定义名字（只改显示，不碰凭据文件）。
+ *
+ * 传的是**登录文件名**，键由服务端现读文件决定（uin → userId → 文件名）——
+ * 客户端换账号会把同名文件原地覆盖，让前端传键就会把名字贴到另一个账号上。
+ */
+async function renameAccount(a) {
+  if (!a) return;
+  const name = await appPrompt('给这个账号起个名字（留空 = 恢复默认显示）', a.alias || '', {
+    placeholder: '例如：工作号 / 个人号',
+  });
+  if (name === null) return; // 取消
+  const r = await api('/api/account/alias', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ file: a.name, alias: name }),
+  });
+  if (!r.ok) {
+    setMsg(t('改名失败：') + (r.error || ''), 'err');
+    return;
+  }
+  setMsg(r.alias ? '账号名字已保存' : '已恢复默认显示', 'good');
+  await loadAccounts();
 }
 
 async function switchAccount(file) {
@@ -4851,8 +4984,9 @@ function renderCards() {
     cfgOk ? 'ok' : 'muted'));
 
   cards.push(card('账号',
-    a ? (a.account || '—') : '—',
-    a ? 'uid ' + (a.userId || '').slice(0, 8) + '…' : (d.credentials.error || '未取到'),
+    a ? (a.alias || a.account || '—') : '—',
+    // 起了名字就把 uin 挪到副行；没起名字时与从前逐字相同
+    a ? (a.alias && a.account ? a.account + ' · ' : '') + 'uid ' + (a.userId || '').slice(0, 8) + '…' : (d.credentials.error || '未取到'),
     false,
     'muted'));
 

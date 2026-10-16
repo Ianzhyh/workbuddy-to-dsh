@@ -27,6 +27,7 @@ export const CONSOLE_API_ALLOWLIST = {
   '/diagnose': ['GET'],
   '/accounts': ['GET'],
   '/account/switch': ['POST'],
+  '/account/alias': ['POST'],
   '/probe': ['POST'],
   '/probe-results': ['GET', 'POST', 'DELETE'],
   '/checkin': ['GET', 'POST'],

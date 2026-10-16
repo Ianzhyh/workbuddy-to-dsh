@@ -268,6 +268,9 @@ export function accountsFixture({ accounts = null } = {}) {
       active: true, usable: true, account: '330000000000', domain: 'copilot.tencent.com',
       encrypted: true, expiresAt: NOW + 37 * 86400000, remainingMs: 37 * 86400000,
       modifiedAt: NOW - 3600000, userId: '00000000-0000-0000-0000-000000000000',
+      // 自定义名字（`.state.json` 的 accountAliases）。默认空串 = 显示 uin，
+      // 与改动前逐字相同；要验"有名字"的渲染就显式传 alias。
+      aliasKey: '330000000000', alias: '',
     }],
     keyError: null,
   };

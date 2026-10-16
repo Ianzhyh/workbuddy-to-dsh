@@ -900,6 +900,8 @@ header {
 }
 /* 空行只作间隔，不要撑出一行文字的高度 */
 .modal-body p.modal-gap { height: 8px; }
+/* 自绘输入框（appPrompt）里的文本框：撑满弹窗，与上面那行标题留出间距 */
+.modal-input { width: 100%; margin-top: 12px; }
 .modal-actions {
   display: flex;
   justify-content: flex-end;

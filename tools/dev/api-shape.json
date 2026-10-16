@@ -228,6 +228,9 @@
       "$.credentials.active.userId": {
         "type": "string"
       },
+      "$.credentials.active.alias": {
+        "type": "string"
+      },
       "$.credentials.active.domain": {
         "type": "string"
       },
@@ -359,6 +362,13 @@
         "type": "boolean",
         "optional": true
       },
+      "$.models[].reasoning_efforts": {
+        "type": "array",
+        "optional": true
+      },
+      "$.models[].reasoning_efforts[]": {
+        "type": "string"
+      },
       "$.models[].only_reasoning": {
         "type": "boolean",
         "optional": true
@@ -392,13 +402,6 @@
       "$.models[].free": {
         "type": "boolean",
         "optional": true
-      },
-      "$.models[].reasoning_efforts": {
-        "type": "array",
-        "optional": true
-      },
-      "$.models[].reasoning_efforts[]": {
-        "type": "string"
       }
     },
     "/api/clients": {
@@ -537,10 +540,31 @@
         "type": "string"
       },
       "$.clients[].catalog": {
-        "type": "null"
+        "type": "mixed"
+      },
+      "$.clients[].catalog.path": {
+        "type": "string"
+      },
+      "$.clients[].catalog.name": {
+        "type": "string"
+      },
+      "$.clients[].catalog.added": {
+        "type": "array"
+      },
+      "$.clients[].catalog.refreshed": {
+        "type": "array"
+      },
+      "$.clients[].catalog.refreshed[]": {
+        "type": "string"
+      },
+      "$.clients[].catalog.kept": {
+        "type": "number"
+      },
+      "$.clients[].catalog.from": {
+        "type": "string"
       },
       "$.clients[].catalogSkipped": {
-        "type": "mixed"
+        "type": "null"
       },
       "$.clients[].skippedKeys": {
         "type": "array"
@@ -612,7 +636,7 @@
         "type": "string"
       },
       "$.clients[].changes[].from": {
-        "type": "null"
+        "type": "mixed"
       },
       "$.clients[].changes[].to": {
         "type": "mixed"
@@ -635,6 +659,33 @@
       "$.clients[].changes[].to.replaceBuiltInOptions": {
         "type": "boolean"
       },
+      "$.clients[].changes[].from.name": {
+        "type": "string"
+      },
+      "$.clients[].changes[].from.npm": {
+        "type": "string"
+      },
+      "$.clients[].changes[].from.options": {
+        "type": "object"
+      },
+      "$.clients[].changes[].from.options.baseURL": {
+        "type": "string"
+      },
+      "$.clients[].changes[].from.models": {
+        "type": "object"
+      },
+      "$.clients[].changes[].from.models.deepseek-v4.1-flash": {
+        "type": "object"
+      },
+      "$.clients[].changes[].from.models.deepseek-v4.1-flash.name": {
+        "type": "string"
+      },
+      "$.clients[].changes[].from.models.glm-5.3-flash": {
+        "type": "object"
+      },
+      "$.clients[].changes[].from.models.glm-5.3-flash.name": {
+        "type": "string"
+      },
       "$.clients[].changes[].to.npm": {
         "type": "string"
       },
@@ -649,21 +700,6 @@
       },
       "$.clients[].changes[].to.models": {
         "type": "object"
-      },
-      "$.clients[].changes[].to.models.glm-5.3": {
-        "type": "object"
-      },
-      "$.clients[].changes[].to.models.glm-5.3.name": {
-        "type": "string"
-      },
-      "$.clients[].changes[].to.models.glm-5.3.limit": {
-        "type": "object"
-      },
-      "$.clients[].changes[].to.models.glm-5.3.limit.context": {
-        "type": "number"
-      },
-      "$.clients[].changes[].to.models.glm-5.3.limit.output": {
-        "type": "number"
       },
       "$.clients[].changes[].to.models.deepseek-v4.1-flash": {
         "type": "object"
@@ -680,19 +716,34 @@
       "$.clients[].changes[].to.models.deepseek-v4.1-flash.limit.output": {
         "type": "number"
       },
-      "$.clients[].changes[].to.models.deepseek-v4-pro": {
+      "$.clients[].changes[].to.models.glm-5.3-flash": {
         "type": "object"
       },
-      "$.clients[].changes[].to.models.deepseek-v4-pro.name": {
+      "$.clients[].changes[].to.models.glm-5.3-flash.name": {
         "type": "string"
       },
-      "$.clients[].changes[].to.models.deepseek-v4-pro.limit": {
+      "$.clients[].changes[].to.models.glm-5.3-flash.limit": {
         "type": "object"
       },
-      "$.clients[].changes[].to.models.deepseek-v4-pro.limit.context": {
+      "$.clients[].changes[].to.models.glm-5.3-flash.limit.context": {
         "type": "number"
       },
-      "$.clients[].changes[].to.models.deepseek-v4-pro.limit.output": {
+      "$.clients[].changes[].to.models.glm-5.3-flash.limit.output": {
+        "type": "number"
+      },
+      "$.clients[].changes[].to.models.glm-5.3": {
+        "type": "object"
+      },
+      "$.clients[].changes[].to.models.glm-5.3.name": {
+        "type": "string"
+      },
+      "$.clients[].changes[].to.models.glm-5.3.limit": {
+        "type": "object"
+      },
+      "$.clients[].changes[].to.models.glm-5.3.limit.context": {
+        "type": "number"
+      },
+      "$.clients[].changes[].to.models.glm-5.3.limit.output": {
         "type": "number"
       },
       "$.token": {
@@ -740,32 +791,24 @@
       "$.backupDir": {
         "type": "string"
       },
-      "$.clients[].catalog.path": {
+      "$.clients[].changes[].to.models.deepseek-v4-pro": {
+        "type": "object",
+        "optional": true
+      },
+      "$.clients[].changes[].to.models.deepseek-v4-pro.name": {
         "type": "string",
         "optional": true
       },
-      "$.clients[].catalog.name": {
-        "type": "string",
+      "$.clients[].changes[].to.models.deepseek-v4-pro.limit": {
+        "type": "object",
         "optional": true
       },
-      "$.clients[].catalog.added": {
-        "type": "array",
-        "optional": true
-      },
-      "$.clients[].catalog.refreshed": {
-        "type": "array",
-        "optional": true
-      },
-      "$.clients[].catalog.refreshed[]": {
-        "type": "string",
-        "optional": true
-      },
-      "$.clients[].catalog.kept": {
+      "$.clients[].changes[].to.models.deepseek-v4-pro.limit.context": {
         "type": "number",
         "optional": true
       },
-      "$.clients[].catalog.from": {
-        "type": "string",
+      "$.clients[].changes[].to.models.deepseek-v4-pro.limit.output": {
+        "type": "number",
         "optional": true
       }
     },
@@ -990,12 +1033,6 @@
       "$.bridge.body.process.byStatus.200": {
         "type": "number"
       },
-      "$.bridge.body.process.byStatus.401": {
-        "type": "number"
-      },
-      "$.bridge.body.process.byStatus.429": {
-        "type": "number"
-      },
       "$.bridge.body.process.rateLimited": {
         "type": "number"
       },
@@ -1072,6 +1109,9 @@
         "type": "string"
       },
       "$.credentials.active.userId": {
+        "type": "string"
+      },
+      "$.credentials.active.alias": {
         "type": "string"
       },
       "$.credentials.active.domain": {
@@ -1157,6 +1197,14 @@
       },
       "$.dsh.routeSource": {
         "type": "string"
+      },
+      "$.bridge.body.process.byStatus.401": {
+        "type": "number",
+        "optional": true
+      },
+      "$.bridge.body.process.byStatus.429": {
+        "type": "number",
+        "optional": true
       }
     },
     "/api/usage": {
@@ -1324,6 +1372,21 @@
       "$.requests[].ok": {
         "type": "boolean"
       },
+      "$.requests[].promptTokens": {
+        "type": "number"
+      },
+      "$.requests[].completionTokens": {
+        "type": "number"
+      },
+      "$.requests[].credit": {
+        "type": "number"
+      },
+      "$.active": {
+        "type": "array"
+      },
+      "$.activeAlertMs": {
+        "type": "number"
+      },
       "$.requests[].status": {
         "type": "number",
         "optional": true
@@ -1336,39 +1399,27 @@
         "type": "string",
         "optional": true
       },
-      "$.requests[].promptTokens": {
-        "type": "number",
-        "optional": true
-      },
-      "$.requests[].completionTokens": {
-        "type": "number",
-        "optional": true
-      },
-      "$.active": {
-        "type": "array"
-      },
       "$.active[]": {
-        "type": "object"
+        "type": "object",
+        "optional": true
       },
       "$.active[].id": {
-        "type": "string"
+        "type": "string",
+        "optional": true
       },
       "$.active[].startedAt": {
-        "type": "number"
+        "type": "number",
+        "optional": true
       },
       "$.active[].model": {
-        "type": "string"
+        "type": "string",
+        "optional": true
       },
       "$.active[].stream": {
-        "type": "boolean"
+        "type": "boolean",
+        "optional": true
       },
       "$.active[].runningMs": {
-        "type": "number"
-      },
-      "$.activeAlertMs": {
-        "type": "number"
-      },
-      "$.requests[].credit": {
         "type": "number",
         "optional": true
       }
@@ -1420,6 +1471,12 @@
         "type": "number"
       },
       "$.accounts[].userId": {
+        "type": "string"
+      },
+      "$.accounts[].aliasKey": {
+        "type": "string"
+      },
+      "$.accounts[].alias": {
         "type": "string"
       },
       "$.keyError": {

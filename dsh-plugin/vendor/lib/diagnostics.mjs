@@ -15,7 +15,7 @@ import {
   openEncryptedField,
 } from './atrest.mjs';
 import config from '../config.mjs';
-import { effectiveAuthFile } from './state.mjs';
+import { effectiveAuthFile, readAccountAliases } from './state.mjs';
 import { readDshStatus } from './dsh.mjs';
 /*
  * 与 `client-connect.mjs` 是**循环引用**（那边也 import 本模块的 bridgeHealth /
@@ -225,6 +225,19 @@ export async function listAccounts() {
         : String(err.message || err);
     }
     out.accounts.push(entry);
+  }
+
+  /*
+   * 自定义名字（`.state.json` 的 `accountAliases`）。
+   *
+   * 键取 uin（读不出退回 `claims.sub`，再退回文件名）—— **不能用文件名当主键**：
+   * 客户端换账号时会把同名登录文件原地覆盖，按文件名记的名字会贴到另一个账号上。
+   * 同一个账号的多份快照因此共用一个名字（那正是用户想要的）。
+   */
+  const aliases = readAccountAliases();
+  for (const entry of out.accounts) {
+    entry.aliasKey = entry.account || entry.userId || entry.name;
+    entry.alias = aliases[entry.aliasKey] || '';
   }
 
   // 生效中的排最前，其次可用的
@@ -445,14 +458,17 @@ export async function credentialStatus() {
     const token = encrypted ? openEncryptedField(field, key) : String(field || '');
     const claims = decodeJwtClaims(token);
     const expiresAt = Number(raw.auth?.expiresAt || claims.exp * 1000 || 0);
+    const accountId = raw.account?.uin ? String(raw.account.uin) : (claims.sub || '');
 
     out.active = {
       keyId,
       envelopeKeyId: encrypted ? fileKeyId : keyId,
       keyIdMatches: encrypted ? fileKeyId === keyId : true,
       encrypted,
-      account: raw.account?.uin ? String(raw.account.uin) : (claims.sub || ''),
+      account: accountId,
       userId: claims.sub || '',
+      // 自定义名字：键与 listAccounts 同一套（uin → userId → 文件名）
+      alias: readAccountAliases()[accountId || String(effectiveAuthFile()).split(/[\\/]/).pop()] || '',
       domain: raw.auth?.domain || '',
       tokenLen: token.length,
       expiresAt,

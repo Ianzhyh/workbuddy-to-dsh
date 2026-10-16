@@ -130,7 +130,13 @@ try {
   {
     setDialogHandler(() => false);
     await resetCalls();
-    await click('#accountList button');
+    /*
+     * 必须**指名**切换按钮（`[data-switch]`），不能写裸的 `#accountList button`。
+     * 账号卡片上不止一个按钮（后来加了「改名」），裸选择器取到的是第一个 ——
+     * 实测：加了「改名」之后这条用例点开了改名弹窗，报的却是「切换账号确认文案异常」，
+     * 看着像产品坏了，其实是选择器太宽。
+     */
+    await click('#accountList [data-switch]');
     await sleep(400);
     const msg = await lastDialog();
     const list = await calls();

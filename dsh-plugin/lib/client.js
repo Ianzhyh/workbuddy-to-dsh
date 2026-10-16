@@ -475,10 +475,16 @@ body.dark .wb-root,
       '积分已更新。': 'Credits updated.',
       '（积分正在后台刷新，稍后自动显示新账号的值。）': ' (credits are refreshing in the background; the new account\'s values will appear automatically.)',
       '切换失败：': 'Switch failed: ',
+      '改名': 'Rename',
+      '保存': 'Save',
+      '账号名字已保存': 'Account name saved',
+      '已恢复默认显示': 'Reset to the default label',
+      '改名失败：': 'Rename failed: ',
+      '例如：工作号 / 个人号': 'e.g. work / personal',
       'AtRest 密钥获取失败：': 'Failed to get the AtRest key: ',
       '（无法逐个验证账号可用性）': ' (cannot verify each account\'s availability)',
-      '登录目录下存在多个账号快照时可在此切换。切换会自动重启桥、清空上一个账号的体检结论与余额缓存 —— 与控制器里点「切换」完全等价。':
-        'When the login directory holds several account snapshots you can switch here. Switching restarts the bridge and clears the previous account\'s probe results and credit cache — exactly equivalent to clicking Switch in the controller.',
+      '登录目录下存在多个账号快照时可在此切换。切换会自动重启桥、清空上一个账号的体检结论与余额缓存 —— 与控制器里点「切换」完全等价。想给账号起个便于区分的名字，点这一行的「改名」。':
+        'When the login directory holds several account snapshots you can switch here. Switching restarts the bridge and clears the previous account\'s probe results and credit cache — exactly equivalent to clicking Switch in the controller. To give an account a friendlier name, use Rename on its row.',
       '登录目录：': 'Login directory: ',
       '使用中': 'In use',
       '可用': 'Available',
@@ -915,6 +921,7 @@ body.dark .wb-root,
       [/^原生 provider=(.+)（插件运行时注册，无需 settings.yaml）$/,
         'native provider=$1 (registered at plugin runtime; no settings.yaml needed)'],
       [/^登录目录：(.+)$/, 'Login directory: $1'],
+      [/^改名失败：(.+)$/, 'Rename failed: $1'],
       [/^剩余 (.+) · 凭据 (.+)$/, (m, dur, kind) => 'Remaining ' + translateText(dur) + ' · credential ' + translateText(kind)],
       [/^剩余 (.+)$/, (m, rest) => 'Remaining ' + translateText(rest)],
       [/^可用模型（(\d+)）$/, 'Available models ($1)'],
@@ -2126,6 +2133,10 @@ body.dark .wb-root,
       const { data, error, status, reload } = api;
       const [working, setWorking] = useState('');
       const [message, setMessage] = useState('');
+      // 改名是**就地编辑**（窄列里再开一层弹窗更挤）：editing 记着正在编辑哪个文件
+      const [editing, setEditing] = useState('');
+      const [draft, setDraft] = useState('');
+      const [saving, setSaving] = useState(false);
       if (api.availability.state !== 'ok' && (status === 503 || status === 404)) {
         return h(ConsoleGate, { availability: api.availability, onStartConsole, onProbe: api.probeConsole, busy, feature: '账号' });
       }
@@ -2154,11 +2165,30 @@ body.dark .wb-root,
         reload();
         reloadStatus();
       };
+      const startEdit = (a) => { setEditing(a.name); setDraft(a.alias || ''); setMessage(''); };
+      /*
+       * 保存自定义名字。**必须走控制台**（`/account/alias` 在透传白名单里）——
+       * `.state.json` 有且只有一个写者，插件自己写会让控制台那份带进程内缓存的
+       * 副本过期，两边显示会不一致（与切账号、签到开关同一条理由，见 consoleApi.mjs）。
+       */
+      const saveAlias = async (a) => {
+        setSaving(true);
+        setMessage('');
+        const res = await postJson(CONSOLE_API + '/account/alias', { file: a.name, alias: draft });
+        setSaving(false);
+        if (res.data?.ok) {
+          setEditing('');
+          setMessage(res.data.alias ? '账号名字已保存' : '已恢复默认显示');
+        } else {
+          setMessage('改名失败：' + (res.data?.error || res.status));
+        }
+        reload();
+      };
       return h(Card, { title: '账号' },
         error ? h(Alert, { bad: true }, error) : null,
         message ? h(Alert, null, message) : null,
         data?.keyError ? h(Alert, null, 'AtRest 密钥获取失败：' + data.keyError + '（无法逐个验证账号可用性）') : null,
-        h('p', { className: 'wb-note', style: { marginTop: 0 } }, '登录目录下存在多个账号快照时可在此切换。切换会自动重启桥、清空上一个账号的体检结论与余额缓存 —— 与控制器里点「切换」完全等价。'),
+        h('p', { className: 'wb-note', style: { marginTop: 0 } }, '登录目录下存在多个账号快照时可在此切换。切换会自动重启桥、清空上一个账号的体检结论与余额缓存 —— 与控制器里点「切换」完全等价。想给账号起个便于区分的名字，点这一行的「改名」。'),
         data?.dir ? h('p', { className: 'wb-note' }, '登录目录：' + data.dir) : null,
         /* 账号是"每账号一行"的卡片式列表，不是表格。
            设置页是窄列（常见 600~700px），5~7 列的表格在这里必然被挤压 ——
@@ -2167,17 +2197,40 @@ body.dark .wb-root,
         h('div', { style: { marginTop: '10px' } },
           accounts.map((a) => h('div', { key: a.name, className: 'wb-account' + (a.usable ? '' : ' bad') },
             h('div', { className: 'wb-account-head' },
-              h('b', { title: a.path || a.name }, a.name),
+              // 有自定义名字就用它当标题（光看 uin 分不清谁是谁）；原名进 title，悬停仍可查
+              h('b', { title: a.path || a.name }, a.alias || a.name),
               a.active
-                ? h(Pill, { tone: 'ok', text: '使用中' })
+                ? h('span', { className: 'wb-status-cell' },
+                  h(Pill, { tone: 'ok', text: '使用中' }),
+                  h(Btn, { disabled: saving, onClick: () => startEdit(a) }, '改名'))
                 : h('span', { className: 'wb-status-cell' },
                   a.usable ? h(Pill, { tone: '', text: '可用' }) : h(Pill, { tone: 'bad', text: a.error ? '不可用' : '未验证' }),
+                  h(Btn, { disabled: saving, onClick: () => startEdit(a) }, '改名'),
                   h(Btn, { disabled: !!working || busy || !a.usable, onClick: () => switchTo(a.name), title: a.error || '' }, working === a.name ? '切换中…' : '切换'))),
             h('div', { className: 'wb-note', style: { margin: '4px 0 0' } },
-              (a.account || a.userId || '(未识别账号)') + (a.domain ? ' · ' + a.domain : '')),
+              // 起了名字就把 uin 摆在副行（名字代替了它原本的位置）；没起名字时逐字不变
+              (a.alias && a.account ? a.account : (a.account || a.userId || '(未识别账号)'))
+                + (a.domain ? ' · ' + a.domain : '')),
             h('div', { className: 'wb-note', style: { margin: '2px 0 0' } },
               '剩余 ' + (a.expiresAt ? fmtRemaining(a.expiresAt) : '未知')
-              + ' · 凭据 ' + (a.encrypted ? 'AtRest 信封' : '明文'))))),
+              + ' · 凭据 ' + (a.encrypted ? 'AtRest 信封' : '明文')),
+            editing === a.name
+              ? h('div', { className: 'wb-actions', style: { margin: '6px 0 0' } },
+                h('input', {
+                  className: 'wb-input',
+                  value: draft,
+                  maxLength: 24,
+                  placeholder: '例如：工作号 / 个人号',
+                  style: { flex: '1 1 auto', minWidth: '110px' },
+                  onChange: (e) => setDraft(e.target.value),
+                  onKeyDown: (e) => {
+                    if (e.key === 'Enter') saveAlias(a);
+                    if (e.key === 'Escape') setEditing('');
+                  },
+                }),
+                h(Btn, { primary: true, disabled: saving, onClick: () => saveAlias(a) }, saving ? '保存中…' : '保存'),
+                h(Btn, { disabled: saving, onClick: () => setEditing('') }, '取消'))
+              : null))),
         // 不可用的账号把原因**写在页面上**，不要只藏在 tooltip 里
         accounts.some((a) => !a.usable)
           ? h('div', { style: { marginTop: '10px' } },
