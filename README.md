@@ -162,7 +162,13 @@ WorkBuddy 的上游后端本身就讲 OpenAI 协议，官方只是没有开放�
 | Node.js | **18 或更高**（开发验证于 22.22.2）。无 npm 依赖，无需 `npm install` |
 | WorkBuddy 桌面端 | **已安装且已登录**，进程可用（模型由它铸造的令牌驱动） |
 | DeepSeek Harness | 可选。只有要接入 dsh 时才需要；桥本身对任意 OpenAI 客户端都可用 |
-| 操作系统 | Windows 已验证；macOS / Linux 的路径与调用逻辑已实现但未实测 |
+| 操作系统 | **Windows**（已验证）。macOS / Linux 的路径与调用逻辑已实现、也在 CI 矩阵里跑过单测，但**凭据解密未实测** |
+
+> **目前只支持 Windows**，卡在凭据那一步：解密的密钥**不在本包里**，每次由 WorkBuddy 客户端
+> 自己的 Electron 原生绑定现取，这条路只在 Windows 上验过。插件包虽然声明了 `os: ["win32"]`，
+> 但那个字段**只对 npm 生效**（`npm install` 会报 `EBADPLATFORM`）；dsh 的插件安装走它自带的
+> pnpm，**pnpm 不检查 `os`**（实测 11.7.0）—— 所以非 Windows 上**装是装得上的**，
+> 只是大概率卡在「读不出登录凭据」。要试请按实验对待。
 
 > 桥只驱动**本机已登录**的账号，不绕过任何鉴权，也不提供任何绕过方式。
 
@@ -548,7 +554,7 @@ tools/
   verify-atrest.mjs        凭据解密自检
   dev/                     开发期探查脚本，日常无需使用
 scripts/
-  start.sh                 一键启动（macOS / Linux）
+  start.sh                 一键启动（macOS / Linux；仅源码自建，凭据解密未实测）
 docs/                      架构、配置、排错、安全、接入链路审计、界面规范
 ```
 

@@ -12,7 +12,8 @@ on:
 
 jobs:
   check:
-    # 桥要用 Windows DPAPI 解 WorkBuddy 的 AtRest 凭据；测试本身跨平台，
+    # 凭据解密的密钥来自 WorkBuddy 客户端自己的 Electron 原生绑定（**不是 DPAPI**，
+    # 包里不含任何密钥）；这条路只有 Windows 上实测过。测试本身跨平台，
     # 但独立演练会真的起桥，所以主门禁固定 Windows 更贴近真实使用环境。
     runs-on: windows-latest
     steps:

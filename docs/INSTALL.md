@@ -12,7 +12,7 @@
 
 | 需要 | 说明 | 怎么确认 |
 |---|---|---|
-| **Windows** | 桥要解密 WorkBuddy 桌面端的 AtRest 凭据（Windows DPAPI），目前只支持 Windows | — |
+| **Windows** | 凭据解密的密钥**不在本包里**：每次由客户端自己的 Electron 原生绑定现取（以 `ELECTRON_RUN_AS_NODE=1` 跑客户端可执行文件）。目前只在 Windows 实测过 | — |
 | **Node.js 18+** | 桥与控制台都是纯 Node 脚本；dsh 自带的 runtime 也行 | `node -v` |
 | **WorkBuddy 桌面端，且已登录** | 模型来自它的登录态；登录文件在 `%LOCALAPPDATA%\CodeBuddyExtension\Data\Public\auth\*.info` | 打开 WorkBuddy 能正常对话 |
 | **DeepSeek Harness（dsh）桌面版** | 插件宿主 | 能打开 dsh 界面 |
@@ -63,6 +63,20 @@ dsh plugin --profile desktop add D:\path\to\dsh-plugin-workbuddy-1.0.0.tgz
 ```
 > `package.json` 里是 `"private": true`，这是有意的：防止误发到公共 npm。
 > 本项目按非公开分发的定位维护，直接用 tgz 或文件夹拷贝即可。
+
+### 路线 C：从 GitHub 直装（一条命令，仓库根已声明 `dsh.bundle`）
+
+```sh
+dsh plugin --profile desktop add github:Ianzhyh/workbuddy-to-dsh
+```
+
+> ⚠️ **关于 `os` 字段（实测结论）**：只有 `dsh-plugin/package.json` 声明了 `"os": ["win32"]`，
+> 仓库根的 `package.json` 没有。这个字段**只对 npm 生效**（`npm install` 会报
+> `EBADPLATFORM: wanted {"os":"win32"}`）；而 **dsh 的插件安装走它自带的 pnpm**
+> （`<dsh>/pnpm/bin/pnpm.mjs`，实测 11.7.0）——**pnpm 不检查 `os`**，在 win32 上装
+> `os: ["darwin"]` 的包也不报错。所以 macOS / Linux 上**三条路线都装得上**。
+> 真正拦住非 Windows 的不是安装，而是**凭据解密没有实测**（见第一节）：
+> 装上去大概率卡在「读不出登录凭据」。要试请按实验对待。
 
 ---
 
