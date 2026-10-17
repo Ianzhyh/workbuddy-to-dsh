@@ -184,6 +184,27 @@ body.dark .wb-root,
 .wb-input,.wb-select{background:transparent;border:0;border-bottom:.5px solid var(--dsw-alias-border-l2,light-dark(#0000001a,#ffffff1f));color:inherit;font:inherit;font-size:12.5px;padding:4px 4px;min-width:0;max-width:100%;transition:border-color var(--wb-anim-fast)}
 .wb-input:focus{outline:none;border-bottom-color:var(--dsw-alias-brand-primary,light-dark(#0f1115,#f9fafb))}
 .wb-input{width:200px}
+/* 拖拽手柄（账号排序）：握这里才拖动，避开行内按钮与文本选择 */
+.wb-grip{
+  cursor:grab;
+  color:var(--dsw-alias-text-weak,light-dark(#8a8f9a,#8a8f9a));
+  font-size:14px;
+  line-height:1;
+  letter-spacing:-1px;
+  user-select:none;
+  flex:0 0 auto;
+  /* 保证手柄本身在键盘/读屏下也能被聚焦（aria-label 已带名称） */
+  touch-action:none;
+}
+.wb-grip:active{cursor:grabbing}
+.wb-grip:focus-visible{outline:2px solid var(--dsw-alias-brand-primary,light-dark(#0f1115,#f9fafb));outline-offset:2px;border-radius:4px}
+/* 被拖着的行：半透明，别让它在原位挡着落点 */
+.wb-account-dragging{opacity:.45}
+/* 落点指示线：上/下半插到目标行前/后 */
+.wb-account-drop-top{box-shadow:inset 0 2px 0 0 var(--dsw-alias-brand-primary,light-dark(#0f1115,#f9fafb))}
+.wb-account-drop-bottom{box-shadow:inset 0 -2px 0 0 var(--dsw-alias-brand-primary,light-dark(#0f1115,#f9fafb))}
+/* 已隐藏的账号：压暗 + 虚线边，一眼看出它不在默认列表里 */
+.wb-account-hidden{opacity:.62;border-style:dashed}
 .wb-select{background:var(--dsw-alias-bg-module-platform,light-dark(#ffffff,#202226));color:var(--dsw-alias-label-primary,light-dark(#0f1115,#f9fafb));border:.5px solid var(--dsw-alias-border-l2,light-dark(#0000001f,#ffffff2e));border-radius:8px;padding:4px 8px;cursor:pointer;transition:all var(--wb-anim-fast)}
 .wb-select:hover{background:var(--dsw-alias-interactive-bg-hover,light-dark(#2631480f,#ffffff14))}
 .wb-select:focus{outline:none;border-color:var(--dsw-alias-brand-primary,light-dark(#0f1115,#f9fafb))}
@@ -477,14 +498,27 @@ body.dark .wb-root,
       '切换失败：': 'Switch failed: ',
       '改名': 'Rename',
       '保存': 'Save',
+      '拖动排序': 'Drag to reorder',
+      '上移': 'Move up',
+      '下移': 'Move down',
+      '隐藏': 'Hide',
+      '恢复': 'Restore',
       '账号名字已保存': 'Account name saved',
       '已恢复默认显示': 'Reset to the default label',
       '改名失败：': 'Rename failed: ',
       '例如：工作号 / 个人号': 'e.g. work / personal',
+      '排序保存失败：': 'Failed to save the order: ',
+      '操作失败：': 'Action failed: ',
+      '已恢复显示': 'Shown again',
+      '已隐藏': 'Hidden',
+      '同账号': 'Same account',
+      '显示已隐藏': 'Show hidden',
+      '全部账号都被隐藏了 —— 勾选下方「显示已隐藏」可以恢复。':
+        'All accounts are hidden — tick "Show hidden" below to restore them.',
       'AtRest 密钥获取失败：': 'Failed to get the AtRest key: ',
       '（无法逐个验证账号可用性）': ' (cannot verify each account\'s availability)',
-      '登录目录下存在多个账号快照时可在此切换。切换会自动重启桥、清空上一个账号的体检结论与余额缓存 —— 与控制器里点「切换」完全等价。想给账号起个便于区分的名字，点这一行的「改名」。':
-        'When the login directory holds several account snapshots you can switch here. Switching restarts the bridge and clears the previous account\'s probe results and credit cache — exactly equivalent to clicking Switch in the controller. To give an account a friendlier name, use Rename on its row.',
+      '登录目录下存在多个账号快照时可在此切换。切换会自动重启桥、清空上一个账号的体检结论与余额缓存 —— 与控制器里点「切换」完全等价。可以改名、上移/下移排序，也可以直接拖动；不想看到的可以隐藏（只记在 .state.json 里，不动登录目录的文件）。':
+        'When the login directory holds several account snapshots you can switch here. Switching restarts the bridge and clears the previous account\'s probe results and credit cache — exactly equivalent to clicking Switch in the controller. You can rename accounts, reorder them with Move up / Move down or by dragging, and hide the ones you do not care about (recorded only in .state.json — no file in the login directory is touched).',
       '登录目录：': 'Login directory: ',
       '使用中': 'In use',
       '可用': 'Available',
@@ -922,6 +956,7 @@ body.dark .wb-root,
         'native provider=$1 (registered at plugin runtime; no settings.yaml needed)'],
       [/^登录目录：(.+)$/, 'Login directory: $1'],
       [/^改名失败：(.+)$/, 'Rename failed: $1'],
+      [/^同账号 ×(\d+)$/, (m, n) => 'Same account ×' + n],
       [/^剩余 (.+) · 凭据 (.+)$/, (m, dur, kind) => 'Remaining ' + translateText(dur) + ' · credential ' + translateText(kind)],
       [/^剩余 (.+)$/, (m, rest) => 'Remaining ' + translateText(rest)],
       [/^可用模型（(\d+)）$/, 'Available models ($1)'],
@@ -2137,10 +2172,20 @@ body.dark .wb-root,
       const [editing, setEditing] = useState('');
       const [draft, setDraft] = useState('');
       const [saving, setSaving] = useState(false);
+      // 是否连"已隐藏"的账号一起显示（只影响显示，不改任何文件）
+      const [showHidden, setShowHidden] = useState(false);
+      // 拖拽排序：dragFile 记着被拖的是哪个文件，dropTarget 记着落点（画指示线）
+      const [dragFile, setDragFile] = useState('');
+      const [dropTarget, setDropTarget] = useState(null);
       if (api.availability.state !== 'ok' && (status === 503 || status === 404)) {
         return h(ConsoleGate, { availability: api.availability, onStartConsole, onProbe: api.probeConsole, busy, feature: '账号' });
       }
       const accounts = data?.accounts || [];
+      const visible = showHidden ? accounts : accounts.filter((a) => !a.hidden);
+      const hiddenCount = accounts.filter((a) => a.hidden).length;
+      /** 同一账号的多份登录文件：给出计数，别让用户以为"记重了"（不擅自合并，切换按文件走）。 */
+      const sameAccount = new Map();
+      for (const a of accounts) sameAccount.set(a.aliasKey || a.name, (sameAccount.get(a.aliasKey || a.name) || 0) + 1);
       // 账号页的 loading 来自 api（useConsoleApi 透传了底层 useJson 的 loading）
       if (api.loading && data === null) return h(Card, { title: '账号' }, h(Loading, { text: '正在读取登录账号…' }));
       const switchTo = async (name) => {
@@ -2166,6 +2211,75 @@ body.dark .wb-root,
         reloadStatus();
       };
       const startEdit = (a) => { setEditing(a.name); setDraft(a.alias || ''); setMessage(''); };
+      /**
+       * 保存一整个顺序数组。
+       *
+       * 提交的是**整个顺序**，不是"挪到谁前面"：两边手里都是同一份列表，直接给结果
+       * 就不会因为各算一套插入规则而对不上。
+       */
+      const postOrder = async (names) => {
+        setMessage('');
+        const res = await postJson(CONSOLE_API + '/account/order', { order: names });
+        if (!res.data?.ok) setMessage('排序保存失败：' + (res.data?.error || res.status));
+        reload();
+      };
+      /*
+       * 上移 / 下移（键盘可达的那条路 —— 拖拽满足鼠标，按钮满足键盘与读屏）。
+       */
+      const move = (file, delta) => {
+        const names = accounts.map((a) => a.name);
+        const i = names.indexOf(file);
+        const j = i + delta;
+        if (i < 0 || j < 0 || j >= names.length) return;
+        [names[i], names[j]] = [names[j], names[i]];
+        postOrder(names);
+      };
+      /** 拖拽落点：target 之前/之后插入 file，然后整表提交。 */
+      const place = (file, target, before) => {
+        const rest = accounts.map((a) => a.name).filter((n) => n !== file);
+        const i = rest.indexOf(target);
+        if (i < 0) return;
+        rest.splice(before ? i : i + 1, 0, file);
+        postOrder(rest);
+      };
+      const onDragStart = (e, name) => {
+        if (!e.dataTransfer) return;
+        e.dataTransfer.setData('text/plain', name);
+        e.dataTransfer.effectAllowed = 'move';
+        setDragFile(name);
+        setDropTarget(null);
+      };
+      /** 指针在目标行上半 = 插到它前面，下半 = 插到它后面。 */
+      const onDragOver = (e, name) => {
+        if (!dragFile || dragFile === name || !e.dataTransfer) return;
+        e.preventDefault();
+        e.dataTransfer.dropEffect = 'move';
+        const r = e.currentTarget.getBoundingClientRect();
+        const before = e.clientY < r.top + r.height / 2;
+        if (!dropTarget || dropTarget.file !== name || dropTarget.before !== before) setDropTarget({ file: name, before });
+      };
+      const onDrop = (e, name) => {
+        e.preventDefault();
+        if (dragFile && dragFile !== name && dropTarget) place(dragFile, name, dropTarget.before);
+        setDragFile('');
+        setDropTarget(null);
+      };
+      const onDragEnd = () => { setDragFile(''); setDropTarget(null); };
+      /*
+       * 隐藏 / 恢复。**不删登录目录里的文件** —— 那份 `.info` 是 WorkBuddy 客户端的
+       * 登录态，我们只是它的读者（见 `docs/SECURITY.md` 的硬约束）；删掉等于把人家
+       * 的客户端登出，不可逆。隐藏只写我们自己的 `.state.json`，随时可恢复。
+       */
+      const toggleHidden = async (a) => {
+        setMessage('');
+        const res = await postJson(CONSOLE_API + '/account/hidden', { file: a.name, hidden: !a.hidden });
+        if (res.data?.ok) {
+          setMessage(a.hidden ? '已恢复显示' : '已隐藏（登录目录里的文件没动，勾「显示已隐藏」可恢复）');
+        } else {
+          setMessage('操作失败：' + (res.data?.error || res.status));
+        }
+        reload();
+      };
       /*
        * 保存自定义名字。**必须走控制台**（`/account/alias` 在透传白名单里）——
        * `.state.json` 有且只有一个写者，插件自己写会让控制台那份带进程内缓存的
@@ -2188,57 +2302,90 @@ body.dark .wb-root,
         error ? h(Alert, { bad: true }, error) : null,
         message ? h(Alert, null, message) : null,
         data?.keyError ? h(Alert, null, 'AtRest 密钥获取失败：' + data.keyError + '（无法逐个验证账号可用性）') : null,
-        h('p', { className: 'wb-note', style: { marginTop: 0 } }, '登录目录下存在多个账号快照时可在此切换。切换会自动重启桥、清空上一个账号的体检结论与余额缓存 —— 与控制器里点「切换」完全等价。想给账号起个便于区分的名字，点这一行的「改名」。'),
+        h('p', { className: 'wb-note', style: { marginTop: 0 } }, '登录目录下存在多个账号快照时可在此切换。切换会自动重启桥、清空上一个账号的体检结论与余额缓存 —— 与控制器里点「切换」完全等价。可以改名、上移/下移排序，也可以直接拖动；不想看到的可以隐藏（只记在 .state.json 里，不动登录目录的文件）。'),
         data?.dir ? h('p', { className: 'wb-note' }, '登录目录：' + data.dir) : null,
         /* 账号是"每账号一行"的卡片式列表，不是表格。
            设置页是窄列（常见 600~700px），5~7 列的表格在这里必然被挤压 ——
            要么逐字折断、要么被卡片裁掉（用户截图里的样子）。账号通常就 2~3 个，
            列表既能容纳长域名，也不会有列宽问题。 */
         h('div', { style: { marginTop: '10px' } },
-          accounts.map((a) => h('div', { key: a.name, className: 'wb-account' + (a.usable ? '' : ' bad') },
-            h('div', { className: 'wb-account-head' },
-              // 有自定义名字就用它当标题（光看 uin 分不清谁是谁）；原名进 title，悬停仍可查
-              h('b', { title: a.path || a.name }, a.alias || a.name),
-              a.active
-                ? h('span', { className: 'wb-status-cell' },
-                  h(Pill, { tone: 'ok', text: '使用中' }),
-                  h(Btn, { disabled: saving, onClick: () => startEdit(a) }, '改名'))
-                : h('span', { className: 'wb-status-cell' },
-                  a.usable ? h(Pill, { tone: '', text: '可用' }) : h(Pill, { tone: 'bad', text: a.error ? '不可用' : '未验证' }),
-                  h(Btn, { disabled: saving, onClick: () => startEdit(a) }, '改名'),
-                  h(Btn, { disabled: !!working || busy || !a.usable, onClick: () => switchTo(a.name), title: a.error || '' }, working === a.name ? '切换中…' : '切换'))),
-            h('div', { className: 'wb-note', style: { margin: '4px 0 0' } },
-              // 起了名字就把 uin 摆在副行（名字代替了它原本的位置）；没起名字时逐字不变
-              (a.alias && a.account ? a.account : (a.account || a.userId || '(未识别账号)'))
-                + (a.domain ? ' · ' + a.domain : '')),
-            h('div', { className: 'wb-note', style: { margin: '2px 0 0' } },
-              '剩余 ' + (a.expiresAt ? fmtRemaining(a.expiresAt) : '未知')
-              + ' · 凭据 ' + (a.encrypted ? 'AtRest 信封' : '明文')),
-            editing === a.name
-              ? h('div', { className: 'wb-actions', style: { margin: '6px 0 0' } },
-                h('input', {
-                  className: 'wb-input',
-                  value: draft,
-                  maxLength: 24,
-                  placeholder: '例如：工作号 / 个人号',
-                  style: { flex: '1 1 auto', minWidth: '110px' },
-                  onChange: (e) => setDraft(e.target.value),
-                  onKeyDown: (e) => {
-                    if (e.key === 'Enter') saveAlias(a);
-                    if (e.key === 'Escape') setEditing('');
-                  },
-                }),
-                h(Btn, { primary: true, disabled: saving, onClick: () => saveAlias(a) }, saving ? '保存中…' : '保存'),
-                h(Btn, { disabled: saving, onClick: () => setEditing('') }, '取消'))
-              : null))),
+          visible.length === 0
+            ? h('p', { className: 'wb-note' }, '全部账号都被隐藏了 —— 勾选下方「显示已隐藏」可以恢复。')
+            : null,
+          visible.map((a) => {
+            const cls = 'wb-account'
+              + (a.usable ? '' : ' bad')
+              + (a.hidden ? ' wb-account-hidden' : '')
+              + (dragFile === a.name ? ' wb-account-dragging' : '')
+              + (dropTarget && dropTarget.file === a.name && dragFile && dragFile !== a.name
+                ? (dropTarget.before ? ' wb-account-drop-top' : ' wb-account-drop-bottom') : '');
+            return h('div', { key: a.name, className: cls,
+              onDragOver: (e) => onDragOver(e, a.name),
+              onDrop: (e) => onDrop(e, a.name) },
+              h('div', { className: 'wb-account-head' },
+                // 拖拽手柄：只有握这里才拖动，避开行内的按钮与文本选择
+                h('span', {
+                  className: 'wb-grip',
+                  draggable: true,
+                  title: '拖动排序',
+                  'aria-label': '拖动排序',
+                  onDragStart: (e) => onDragStart(e, a.name),
+                  onDragEnd,
+                }, '⋮⋮'),
+                // 有自定义名字就用它当标题（光看 uin 分不清谁是谁）；原名进 title，悬停仍可查
+                h('b', { title: a.path || a.name }, a.alias || a.name),
+                a.active
+                  ? h('span', { className: 'wb-status-cell' },
+                    h(Pill, { tone: 'ok', text: '使用中' }),
+                    h(Btn, { disabled: saving, onClick: () => startEdit(a) }, '改名'))
+                  : h('span', { className: 'wb-status-cell' },
+                    a.usable ? h(Pill, { tone: '', text: '可用' }) : h(Pill, { tone: 'bad', text: a.error ? '不可用' : '未验证' }),
+                    h(Btn, { disabled: saving, onClick: () => startEdit(a) }, '改名'),
+                    h(Btn, { disabled: !!working || busy || !a.usable, onClick: () => switchTo(a.name), title: a.error || '' }, working === a.name ? '切换中…' : '切换')),
+                a.hidden ? h(Pill, { tone: '', text: '已隐藏' }) : null,
+                sameAccount.get(a.aliasKey || a.name) > 1 ? h(Pill, { tone: '', text: '同账号 ×' + sameAccount.get(a.aliasKey || a.name) }) : null),
+              h('div', { className: 'wb-note', style: { margin: '4px 0 0' } },
+                // 起了名字就把 uin 摆在副行（名字代替了它原本的位置）；没起名字时逐字不变
+                (a.alias && a.account ? a.account : (a.account || a.userId || '(未识别账号)'))
+                  + (a.domain ? ' · ' + a.domain : '')),
+              h('div', { className: 'wb-note', style: { margin: '2px 0 0' } },
+                '剩余 ' + (a.expiresAt ? fmtRemaining(a.expiresAt) : '未知')
+                + ' · 凭据 ' + (a.encrypted ? 'AtRest 信封' : '明文')),
+              editing === a.name
+                ? h('div', { className: 'wb-actions', style: { margin: '6px 0 0' } },
+                  h('input', {
+                    className: 'wb-input',
+                    value: draft,
+                    maxLength: 24,
+                    placeholder: '例如：工作号 / 个人号',
+                    style: { flex: '1 1 auto', minWidth: '110px' },
+                    onChange: (e) => setDraft(e.target.value),
+                    onKeyDown: (e) => {
+                      if (e.key === 'Enter') saveAlias(a);
+                      if (e.key === 'Escape') setEditing('');
+                    },
+                  }),
+                  h(Btn, { primary: true, disabled: saving, onClick: () => saveAlias(a) }, saving ? '保存中…' : '保存'),
+                  h(Btn, { disabled: saving, onClick: () => setEditing('') }, '取消'))
+                : h('div', { className: 'wb-actions', style: { margin: '6px 0 0' } },
+                  h(Btn, { disabled: saving || !!dragFile, onClick: () => move(a.name, -1), title: '上移' }, '上移'),
+                  h(Btn, { disabled: saving || !!dragFile, onClick: () => move(a.name, 1), title: '下移' }, '下移'),
+                  // 生效中的那个不能隐藏（服务端也会拒），所以不渲染这个按钮
+                  a.active ? null : h(Btn, { disabled: saving || !!dragFile, onClick: () => toggleHidden(a) }, a.hidden ? '恢复' : '隐藏')));
+          })),
         // 不可用的账号把原因**写在页面上**，不要只藏在 tooltip 里
-        accounts.some((a) => !a.usable)
+        (showHidden ? accounts : visible).some((a) => !a.usable)
           ? h('div', { style: { marginTop: '10px' } },
             h('p', { className: 'wb-note', style: { marginTop: 0 } }, '不可用的账号及原因：'),
-            ...accounts.filter((a) => !a.usable).map((a) => h('p', { key: a.name, className: 'wb-note', style: { margin: '2px 0 0' } },
+            ...(showHidden ? accounts : visible).filter((a) => !a.usable).map((a) => h('p', { key: a.name, className: 'wb-note', style: { margin: '2px 0 0' } },
               '· ' + a.name + '：' + (a.error || '未能解开凭据（可能是另一个 build 写入的）'))))
           : null,
-        h('div', { className: 'wb-actions', style: { marginTop: '10px' } }, h(Btn, { onClick: reload }, '刷新')));
+        h('div', { className: 'wb-actions', style: { marginTop: '10px' } },
+          h('label', { className: 'wb-check' },
+            h('input', { type: 'checkbox', checked: showHidden, onChange: (e) => setShowHidden(e.target.checked) }),
+            '显示已隐藏',
+            hiddenCount ? h(Pill, { tone: '', text: String(hiddenCount) }) : null),
+          h(Btn, { onClick: reload }, '刷新')));
     }
 
     // ─────────────────────────── 用量 ───────────────────────────

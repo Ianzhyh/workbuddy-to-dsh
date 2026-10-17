@@ -1479,6 +1479,12 @@
       "$.accounts[].alias": {
         "type": "string"
       },
+      "$.accounts[].hidden": {
+        "type": "boolean"
+      },
+      "$.accounts[].sameAccount": {
+        "type": "number"
+      },
       "$.keyError": {
         "type": "null"
       }

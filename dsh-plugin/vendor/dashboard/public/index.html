@@ -136,7 +136,12 @@
 
   <section class="panel" data-section="overview">
     <h2>账号 <span class="spacer"></span><span class="stamp" id="accountsStamp"></span></h2>
-    <p class="hint">登录目录下有多个账号快照时，可切换桥使用哪一个。切换会自动重启桥，并清空上一个账号的体检结论。</p>
+    <p class="hint">登录目录下有多个账号快照时，可切换桥使用哪一个。切换会自动重启桥，并清空上一个账号的体检结论。列表可以上移/下移调整顺序，也可以隐藏不想看到的 —— 隐藏只记在我们自己的 .state.json 里，不动登录目录里的任何文件。</p>
+    <!-- 控件与提示单独一行（与用量面板同一套做法）：一行塞不下就乱换行 -->
+    <div class="panel-tools">
+      <label class="check"><input type="checkbox" id="acctShowHidden"> 显示已隐藏 <span class="tag" id="acctHiddenCount" hidden>0</span></label>
+      <span class="spacer"></span>
+    </div>
     <div id="accountList"><div class="skeleton" role="status" aria-label="正在读取…"><i style="width:70%"></i><i style="width:92%"></i><i style="width:58%"></i></div></div>
   </section>
 
@@ -924,8 +929,22 @@ const I18N_EN = {
   '消耗积分': 'Credit spent',
 
   // ---- 账号面板 ----
-  '登录目录下有多个账号快照时，可切换桥使用哪一个。切换会自动重启桥，并清空上一个账号的体检结论。':
-    'When the login directory holds several account snapshots, you can pick which one the bridge uses. Switching restarts the bridge and clears the previous account\'s probe results.',
+  '登录目录下有多个账号快照时，可切换桥使用哪一个。切换会自动重启桥，并清空上一个账号的体检结论。列表可以上移/下移调整顺序，也可以隐藏不想看到的 —— 隐藏只记在我们自己的 .state.json 里，不动登录目录里的任何文件。':
+    'When the login directory holds several account snapshots, you can pick which one the bridge uses. Switching restarts the bridge and clears the previous account\'s probe results. Rows can be reordered with Move up / Move down, and ones you do not care about can be hidden — hiding is recorded only in our own .state.json and never touches any file in the login directory.',
+  '显示已隐藏': 'Show hidden',
+  '上移': 'Move up',
+  '下移': 'Move down',
+  '拖动排序': 'Drag to reorder',
+  '隐藏': 'Hide',
+  '恢复': 'Restore',
+  '已隐藏': 'Hidden',
+  '全部账号都被隐藏了 —— 勾选上方「显示已隐藏」可以恢复。':
+    'All accounts are hidden — tick "Show hidden" above to restore them.',
+  '排序保存失败：': 'Failed to save the order: ',
+  '操作失败：': 'Action failed: ',
+  '已隐藏（登录目录里的文件没动，勾「显示已隐藏」可恢复）':
+    'Hidden (the file in the login directory is untouched; tick "Show hidden" to restore)',
+  '已恢复显示': 'Shown again',
   '未找到账号快照。': 'No account snapshot found.',
   '切换': 'Switch',
   '使用中': 'In use',
@@ -2119,6 +2138,8 @@ const I18N_RULES_EN = [
    */
   [/^(.+) · (.+) · (.+) · 剩余 (.+)$/, (m, a, b, c, d) => a + ' · ' + b + ' · ' + c + ' · ' + translateText(d) + ' left'],
   [/^(.+) · (.+) · 剩余 (.+)$/, (m, a, b, d) => a + ' · ' + b + ' · ' + translateText(d) + ' left'],
+  // 账号卡片上的「同账号 ×2」标记（同一个账号的另一份登录文件）
+  [/^同账号 ×(\d+)$/, (m, n) => 'Same account ×' + n],
   [/^最近 (\d+) 天$/, 'Last $1 days'],
   [/^已回报 (\d+)\/(\d+) 次 平均 (.+) 上游按两位小数回报$/,
     'Reported $1/$2 calls · avg $3 · upstream reports two decimals'],
@@ -4323,16 +4344,33 @@ function copyFailText(r) {
   return head.join(' · ') + (err ? '\n' + err : '');
 }
 
+/**
+ * 账号面板：是否连"已隐藏"的账号一起显示。**只影响显示**，不改任何文件。
+ */
+let showHiddenAccounts = false;
+
 async function loadAccounts() {
   const el = $('accountList');
   const d = await api('/api/accounts');
   setStamp('accountsStamp');
-  if (!d.accounts || !d.accounts.length) {
+  const all = d.accounts || [];
+  const hiddenCount = all.filter(a => a.hidden).length;
+  const badge = $('acctHiddenCount');
+  if (badge) {
+    badge.textContent = String(hiddenCount);
+    badge.hidden = hiddenCount === 0;
+  }
+  if (!all.length) {
     el.innerHTML = '<div class="empty">' + escapeAttr(d.error || '未找到账号快照。') + '</div>';
     return;
   }
+  const list = showHiddenAccounts ? all : all.filter(a => !a.hidden);
+  if (!list.length) {
+    el.innerHTML = '<div class="empty">全部账号都被隐藏了 —— 勾选上方「显示已隐藏」可以恢复。</div>';
+    return;
+  }
 
-  el.innerHTML = d.accounts.map(a => {
+  el.innerHTML = list.map(a => {
     const status = a.usable
       ? '<span class="tag ok">可用</span>'
       : '<span class="tag fail" title="' + escapeAttr(a.error || '') + '">不可用</span>';
@@ -4350,13 +4388,36 @@ async function loadAccounts() {
     const label = a.alias || a.account || a.name;
     const sub = (a.alias && a.account ? a.account + ' · ' : '')
       + a.name + ' · ' + (a.domain || '—') + ' · 剩余 ' + expire;
-    return '<div class="acct">' +
+    /*
+     * 同一个账号的多份登录文件：**标出来**，别让用户以为"记重了"。
+     * 不擅自合并 —— 切换是按文件切的，两行各有各的用途（比如一份是旧快照）。
+     */
+    const dup = a.sameAccount > 1
+      ? '<span class="tag" title="同一个账号的另一份登录文件（客户端每次「登出」会留一份快照）">同账号 ×' + a.sameAccount + '</span>'
+      : '';
+    /*
+     * 上移 / 下移：顺序是"行"的顺序，按文件名存进 `.state.json` 的 `accountOrder`。
+     * 用两个字形按钮而不是文字，是因为一行里已经有状态、改名、切换了。
+     */
+    const moveBtns =
+      '<button class="mini" data-up="' + escapeAttr(a.name) + '" title="上移" aria-label="上移">↑</button>' +
+      '<button class="mini" data-down="' + escapeAttr(a.name) + '" title="下移" aria-label="下移">↓</button>';
+    // 生效中的那个不能隐藏（服务端也会拒）：它正被桥用来读凭据
+    const hideBtn = a.active
+      ? ''
+      : '<button class="mini" data-hide="' + escapeAttr(a.name) + '" data-hidden="' + (a.hidden ? '1' : '') + '">'
+        + (a.hidden ? '恢复' : '隐藏') + '</button>';
+    return '<div class="acct' + (a.hidden ? ' acct-hidden' : '') + '" data-acct="' + escapeAttr(a.name) + '">' +
       '<div>' +
         '<div class="acct-name">' + escapeAttr(label) +
-          (a.active ? ' <span class="tag ok">使用中</span>' : '') + '</div>' +
+          (a.active ? ' <span class="tag ok">使用中</span>' : '') +
+          (a.hidden ? ' <span class="tag">已隐藏</span>' : '') + dup + '</div>' +
         '<div class="acct-sub mono">' + escapeAttr(sub) + '</div>' +
       '</div>' +
-      '<div class="acct-act">' + status +
+      '<div class="acct-act">' +
+        '<span class="acct-grip" draggable="true" data-grip="' + escapeAttr(a.name) + '"'
+          + ' title="拖动排序" aria-label="拖动排序">⋮⋮</span>' +
+        status + moveBtns + hideBtn +
         '<button class="mini" data-alias="' + escapeAttr(a.name) + '"'
           + ' title="给这个账号起个名字，便于区分">改名</button>' +
         switchBtn + '</div>' +
@@ -4367,8 +4428,129 @@ async function loadAccounts() {
     btn.onclick = () => switchAccount(btn.dataset.switch);
   });
   el.querySelectorAll('[data-alias]').forEach(btn => {
-    btn.onclick = () => renameAccount(d.accounts.find(x => x.name === btn.dataset.alias));
+    btn.onclick = () => renameAccount(all.find(x => x.name === btn.dataset.alias));
   });
+  el.querySelectorAll('[data-up]').forEach(btn => {
+    btn.onclick = () => moveAccount(btn.dataset.up, -1);
+  });
+  el.querySelectorAll('[data-down]').forEach(btn => {
+    btn.onclick = () => moveAccount(btn.dataset.down, 1);
+  });
+  el.querySelectorAll('[data-hide]').forEach(btn => {
+    btn.onclick = () => hideAccount(all.find(x => x.name === btn.dataset.hide), btn.dataset.hidden !== '1');
+  });
+  wireAccountDrag(el);
+}
+
+/**
+ * 把一整个顺序数组提交到服务端。上移/下移和拖拽共用它 —— 两边提交的都是
+ * **完整顺序**（不是"挪到谁前面"），所以不会因为各算一套插入规则而对不上。
+ */
+async function postAccountOrder(names) {
+  const r = await api('/api/account/order', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ order: names }),
+  });
+  if (!r.ok) { setMsg(t('排序保存失败：') + (r.error || ''), 'err'); return false; }
+  return true;
+}
+
+/** 拖拽落点：把 file 插到 target 之前/之后，然后提交整表。 */
+async function reorderAccount(file, target, before) {
+  const d = await api('/api/accounts');
+  const rest = (d.accounts || []).map(a => a.name).filter(n => n !== file);
+  const i = rest.indexOf(target);
+  if (i < 0) { await loadAccounts(); return; }
+  rest.splice(before ? i : i + 1, 0, file);
+  if (await postAccountOrder(rest)) await loadAccounts();
+}
+
+/**
+ * 上移 / 下移一个账号（只改显示顺序）。
+ *
+ * 提交的是**整个顺序数组**而不是"把它挪到谁前面"：前端手里就是完整列表，直接给结果，
+ * 两边不会因为各算一套插入规则而对不上。顺序按当前**全部**账号（含隐藏）算，
+ * 这样隐藏/显示切换时顺序不会跳。
+ */
+async function moveAccount(file, delta) {
+  const d = await api('/api/accounts');
+  const names = (d.accounts || []).map(a => a.name);
+  const i = names.indexOf(file);
+  const j = i + delta;
+  if (i < 0 || j < 0 || j >= names.length) return; // 已经在头/尾
+  [names[i], names[j]] = [names[j], names[i]];
+  if (await postAccountOrder(names)) await loadAccounts();
+}
+
+/**
+ * 拖拽排序（鼠标那条路；上移/下移按钮是键盘与读屏那条路，两条都得能排）。
+ *
+ * **只有握手柄才拖动**：行内还有按钮与可选中文本，整行可拖会和它们打架。
+ *
+ * 为什么用**模块级变量**记被拖的文件、不信 `ev.dataTransfer`：某些合成事件
+ * （无头验收里就是手工 `new DragEvent(...)` 派发的）拿不到 dataTransfer ——
+ * 实测依赖它会让 dragstart 直接 return，页面看起来"没接拖拽"，其实只是读不到。
+ */
+let draggedAccountFile = '';
+
+function wireAccountDrag(el) {
+  const clearMarks = () => {
+    draggedAccountFile = '';
+    Array.from(el.querySelectorAll('.acct')).forEach(r => r.classList.remove('acct-dragging', 'acct-drop-top', 'acct-drop-bottom'));
+  };
+
+  el.querySelectorAll('[data-grip]').forEach(grip => {
+    grip.ondragstart = (ev) => {
+      draggedAccountFile = grip.dataset.grip || '';
+      try {
+        if (ev.dataTransfer) { ev.dataTransfer.setData('text/plain', draggedAccountFile); ev.dataTransfer.effectAllowed = 'move'; }
+      } catch { /* 合成事件可能不允许写 —— 不影响，文件信息已在变量里 */ }
+      const row = grip.closest('.acct');
+      if (row) row.classList.add('acct-dragging');
+    };
+    // dragend 绑在每个手柄上（行是每次重建的，绑容器会越叠越多）
+    grip.ondragend = clearMarks;
+  });
+
+  el.querySelectorAll('.acct').forEach(row => {
+    const name = row.getAttribute('data-acct');
+    row.ondragover = (ev) => {
+      if (!draggedAccountFile || draggedAccountFile === name) return;
+      ev.preventDefault(); // 否则浏览器不放行 drop
+      const r = row.getBoundingClientRect();
+      Array.from(el.querySelectorAll('.acct')).forEach(x => x.classList.remove('acct-drop-top', 'acct-drop-bottom'));
+      row.classList.add(ev.clientY < r.top + r.height / 2 ? 'acct-drop-top' : 'acct-drop-bottom');
+    };
+    row.ondrop = async (ev) => {
+      ev.preventDefault();
+      const file = draggedAccountFile;
+      clearMarks();
+      if (!file || file === name) return;
+      const r = row.getBoundingClientRect();
+      const before = ev.clientY < r.top + r.height / 2;
+      await reorderAccount(file, name, before);
+    };
+  });
+}
+
+/**
+ * 隐藏 / 恢复一个账号。
+ *
+ * **不删登录目录里的文件** —— 那份 `.info` 是 WorkBuddy 客户端的登录态，我们只是它的
+ * 读者（`docs/SECURITY.md` 的硬约束）。删掉等于把人家的客户端登出，不可逆，
+ * 不该由一个"整理列表"的按钮触发。隐藏只写我们自己的 `.state.json`，随时可恢复。
+ */
+async function hideAccount(a, hidden) {
+  if (!a) return;
+  const r = await api('/api/account/hidden', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ file: a.name, hidden }),
+  });
+  if (!r.ok) { setMsg(t('操作失败：') + (r.error || ''), 'err'); return; }
+  setMsg(hidden ? '已隐藏（登录目录里的文件没动，勾「显示已隐藏」可恢复）' : '已恢复显示', 'good');
+  await loadAccounts();
 }
 
 /**
@@ -5680,6 +5862,11 @@ $('exportReqBtn').onclick = exportRequestsCsv;
 
 // 「仅看失败」只重绘表格（数据已在内存）；条数变化才重新请求
 $('reqFailOnly').onchange = renderRequests;
+// 账号面板：显示/隐藏"已隐藏"的那些（只影响显示）
+$('acctShowHidden').onchange = () => {
+  showHiddenAccounts = $('acctShowHidden').checked;
+  loadAccounts();
+};
 $('reqModelFilter').onchange = (e) => setReqModelFilter(e.target.value, { noScroll: true });
 $('reqLimit').onchange = loadRequests;
 // 「暂停自动刷新」：只影响 20 秒轮询，手动刷新照常

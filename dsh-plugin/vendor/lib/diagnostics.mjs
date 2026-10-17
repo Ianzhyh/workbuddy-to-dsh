@@ -15,7 +15,7 @@ import {
   openEncryptedField,
 } from './atrest.mjs';
 import config from '../config.mjs';
-import { effectiveAuthFile, readAccountAliases } from './state.mjs';
+import { effectiveAuthFile, readAccountAliases, readAccountOrder, readHiddenAccounts } from './state.mjs';
 import { readDshStatus } from './dsh.mjs';
 /*
  * 与 `client-connect.mjs` 是**循环引用**（那边也 import 本模块的 bridgeHealth /
@@ -235,13 +235,33 @@ export async function listAccounts() {
    * 同一个账号的多份快照因此共用一个名字（那正是用户想要的）。
    */
   const aliases = readAccountAliases();
+  const hidden = new Set(readHiddenAccounts());
+  const rank = new Map(readAccountOrder().map((name, i) => [name, i]));
+  /*
+   * 同一个账号可能有多份登录文件（客户端每次「登出」留一份快照）。两行长得一模一样
+   * 会让用户以为"记重了" —— 这里给出计数，让界面能把它标成「同账号的另一份快照」，
+   * 而不是装作没这回事（也不擅自合并：切换是按文件切的，两行各有各的用途）。
+   */
+  const perAccount = new Map();
   for (const entry of out.accounts) {
     entry.aliasKey = entry.account || entry.userId || entry.name;
     entry.alias = aliases[entry.aliasKey] || '';
+    entry.hidden = hidden.has(entry.name);
+    perAccount.set(entry.aliasKey, (perAccount.get(entry.aliasKey) || 0) + 1);
   }
+  for (const entry of out.accounts) entry.sameAccount = perAccount.get(entry.aliasKey) || 1;
 
-  // 生效中的排最前，其次可用的
-  out.accounts.sort((a, b) => Number(b.active) - Number(a.active) || Number(b.usable) - Number(a.usable));
+  /*
+   * 排序：**自定义顺序优先**（`.state.json` 的 `accountOrder`），没列进去的排在后面，
+   * 再按「生效中 → 可用」。顺序是"行"的顺序，所以按文件名记，不按账号。
+   */
+  out.accounts.sort((a, b) => {
+    const ra = rank.has(a.name) ? rank.get(a.name) : Number.MAX_SAFE_INTEGER;
+    const rb = rank.has(b.name) ? rank.get(b.name) : Number.MAX_SAFE_INTEGER;
+    return ra - rb
+      || Number(b.active) - Number(a.active)
+      || Number(b.usable) - Number(a.usable);
+  });
   return out;
 }
 

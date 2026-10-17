@@ -672,8 +672,9 @@ async function verifyNarrow() {
       dir: 'C:\\Users\\demo\\AppData\\Local\\CodeBuddyExtension\\Data\\Public\\auth',
       active: 'C:\\Users\\demo\\AppData\\Local\\CodeBuddyExtension\\Data\\Public\\auth\\workbuddy-desktop.info',
       accounts: [
-        { name: 'workbuddy-desktop-ai.info', path: 'C:\\auth\\workbuddy-desktop-ai.info', active: false, usable: true, account: '450000000000', domain: 'www.workbuddy.ai', encrypted: true, expiresAt: Date.now() + 342 * 86400000, remainingMs: 342 * 86400000, aliasKey: '450000000000', alias: '' },
-        { name: 'workbuddy-desktop.info', path: 'C:\\auth\\workbuddy-desktop.info', active: true, usable: true, account: '330000000000', domain: 'copilot.tencent.com', encrypted: true, expiresAt: Date.now() + 44 * 86400000, remainingMs: 44 * 86400000, aliasKey: '330000000000', alias: '工作号' },
+        { name: 'workbuddy-desktop-ai.info', path: 'C:\\auth\\workbuddy-desktop-ai.info', active: false, usable: true, account: '450000000000', domain: 'www.workbuddy.ai', encrypted: true, expiresAt: Date.now() + 342 * 86400000, remainingMs: 342 * 86400000, aliasKey: '450000000000', alias: '', hidden: false, sameAccount: 1 },
+        { name: 'workbuddy-desktop.info', path: 'C:\\auth\\workbuddy-desktop.info', active: true, usable: true, account: '330000000000', domain: 'copilot.tencent.com', encrypted: true, expiresAt: Date.now() + 44 * 86400000, remainingMs: 44 * 86400000, aliasKey: '330000000000', alias: '工作号', hidden: false, sameAccount: 2 },
+        { name: 'workbuddy-desktop.2026-10-12.info', path: 'C:\\auth\\workbuddy-desktop.2026-10-12.info', active: false, usable: true, account: '330000000000', domain: 'copilot.tencent.com', encrypted: true, expiresAt: Date.now() + 44 * 86400000, remainingMs: 44 * 86400000, aliasKey: '330000000000', alias: '工作号', hidden: false, sameAccount: 2 },
       ],
     },
   };

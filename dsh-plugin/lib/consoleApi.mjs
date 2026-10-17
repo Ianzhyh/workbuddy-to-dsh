@@ -28,6 +28,8 @@ export const CONSOLE_API_ALLOWLIST = {
   '/accounts': ['GET'],
   '/account/switch': ['POST'],
   '/account/alias': ['POST'],
+  '/account/order': ['POST'],
+  '/account/hidden': ['POST'],
   '/probe': ['POST'],
   '/probe-results': ['GET', 'POST', 'DELETE'],
   '/checkin': ['GET', 'POST'],

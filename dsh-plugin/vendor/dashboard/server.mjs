@@ -43,7 +43,7 @@ import {
   verifyAgainstBridge,
   verifyWritten,
 } from '../lib/client-connect.mjs';
-import { effectiveAuthFile, readState, writeAccountAlias, writeState } from '../lib/state.mjs';
+import { effectiveAuthFile, readState, writeAccountAlias, writeAccountHidden, writeAccountOrder, writeState } from '../lib/state.mjs';
 
 // ── 基础工具 ────────────────────────────────────────────────────────────
 
@@ -1504,6 +1504,56 @@ const server = createServer(async (req, res) => {
           alias: accountAliases[hit.aliasKey] || '',
           accountAliases,
         });
+      } catch (err) {
+        if (err.code === 'BODY_TOO_LARGE') return bodyTooLarge(req, res);
+        sendJson(res, 400, { ok: false, error: err.message });
+      }
+      return;
+    }
+
+    /*
+     * 账号列表的自定义顺序（**只影响显示顺序**）。
+     *
+     * 收的是**整个顺序数组**，不是"把 A 移到 B 前面"这种指令：前端手里就有完整列表，
+     * 直接给结果，两边不会因为各算一套插入规则而对不上。服务端只接受**列举结果里
+     * 真实存在**的文件名，其余丢弃 —— 不让这个接口变成往 `.state.json` 里塞任意字符串的口子。
+     */
+    if (route === '/api/account/order' && req.method === 'POST') {
+      try {
+        const { order } = JSON.parse(await readBody(req));
+        if (!Array.isArray(order)) throw new Error('order 必须是数组');
+        const listed = await listAccounts();
+        const known = new Set(listed.accounts.map((a) => a.name));
+        const clean = order.filter((f) => typeof f === 'string' && known.has(f));
+        sendJson(res, 200, { ok: true, order: writeAccountOrder(clean) });
+      } catch (err) {
+        if (err.code === 'BODY_TOO_LARGE') return bodyTooLarge(req, res);
+        sendJson(res, 400, { ok: false, error: err.message });
+      }
+      return;
+    }
+
+    /*
+     * 隐藏 / 恢复一个账号 —— **只写我们自己的 `.state.json`，不碰登录目录里的文件**。
+     *
+     * 为什么不删文件：那份 `.info` 就是 WorkBuddy 客户端的登录态，我们只是它的读者
+     * （见 `docs/SECURITY.md` 的硬约束）。删掉等于把人家的客户端登出，不可逆 ——
+     * 不该由一个"整理列表"的按钮触发。隐藏随时可恢复。
+     */
+    if (route === '/api/account/hidden' && req.method === 'POST') {
+      try {
+        const { file, hidden } = JSON.parse(await readBody(req));
+        if (typeof file !== 'string' || !file) throw new Error('缺少 file');
+        if (typeof hidden !== 'boolean') throw new Error('hidden 必须是布尔值');
+        const listed = await listAccounts();
+        const hit = listed.accounts.find((a) => a.name === file);
+        if (!hit) throw new Error(`未知账号：${file}`);
+        /*
+         * **当前生效中的那个不允许隐藏**：它正被桥用来读凭据，藏起来只会让用户在列表里
+         * 找不到自己正在用的账号。要停用它得先切到别的账号。
+         */
+        if (hidden && hit.active) throw new Error('当前生效中的账号不能隐藏，请先切换到别的账号');
+        sendJson(res, 200, { ok: true, hidden: writeAccountHidden(file, hidden) });
       } catch (err) {
         if (err.code === 'BODY_TOO_LARGE') return bodyTooLarge(req, res);
         sendJson(res, 400, { ok: false, error: err.message });

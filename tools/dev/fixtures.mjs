@@ -271,6 +271,8 @@ export function accountsFixture({ accounts = null } = {}) {
       // 自定义名字（`.state.json` 的 accountAliases）。默认空串 = 显示 uin，
       // 与改动前逐字相同；要验"有名字"的渲染就显式传 alias。
       aliasKey: '330000000000', alias: '',
+      // 排序 / 隐藏（`.state.json` 的 accountOrder / hiddenAccounts）
+      hidden: false, sameAccount: 1,
     }],
     keyError: null,
   };
