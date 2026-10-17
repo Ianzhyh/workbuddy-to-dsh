@@ -3,7 +3,7 @@
  *
  *   node tools/dev/test-account-order.mjs
  *
- * 盯六件事：
+ * 盯八件事：
  *   1. 上移 / 下移提交的是**整个顺序数组**（不是"挪到谁前面"）—— 两边手里同一份列表，
  *      直接给结果才不会因为各算一套插入规则而对不上。
  *   2. 拖拽排序：dragstart 只能从**手柄**发起；落点看指针在目标行的上/下半 → 插前/插后。
@@ -12,6 +12,11 @@
  *      勾「显示已隐藏」又能看见，并且该行带"已隐藏"标记。
  *   5. **当前生效中的那个没有隐藏按钮**（服务端也会拒：它正被桥读着）。
  *   6. 拖到自己身上 / 到头或尾的移动：不发请求、不出红字。
+ *   7. **同一个账号的多份登录文件只显示一行**（用户报的"账号被记重了"）：
+ *      服务端已合并，但前端也要兜住"控制台进程还是旧代码"的情况 ——
+ *      同一个 uin 只渲染一行，保留"更该被看到"的那份（生效中 > 可用 > 最近），
+ *      排序提交的整表里也不能出现同一账号的两行。
+ *   8. 新文案在英文模式下全部翻掉。
  */
 import { startStaticServer, openPage, waitFor, q, sleep } from './ui-harness.mjs';
 import { baseRoutes } from './fixtures.mjs';
@@ -230,27 +235,79 @@ try {
     else fail(`恢复请求不对：${JSON.stringify(await posts('/api/account/hidden'))}`);
   }
 
-  // ── 9. 同一个账号两份快照：标「同账号 ×2」 ────────────────────────
+  // ── 9. 同账号多份快照：只显示一行（前端兜底，旧服务端也看不到重复） ──
   {
-    await setAccounts([A, { ...B, sameAccount: 2 }, { ...C, account: B.account, aliasKey: B.aliasKey, sameAccount: 2 }]);
+    /*
+     * 服务端 `listAccounts()` 已经合并同一账号的多份登录文件；这里模拟**旧服务端**
+     * （控制台进程没重启、lib/ 还是旧代码）仍回两行的情况 —— 界面必须兜住：
+     * 同一个 uin 只渲染一行，且留下"更该被看到"的那份（这里是更新的快照）。
+     */
+    const B2 = { ...B, name: 'b-snapshot-2.info', modifiedAt: now - 1000 };
+    await setAccounts([A, B, B2, C]);
     await reloadAccounts();
-    await sleep(300);
-    const marks = await q(cdp, `Array.from(document.querySelectorAll('#accountList .acct-name .tag')).map((t) => t.textContent.trim())`);
-    const dups = marks.filter((t) => /^同账号 ×2$/.test(t));
-    if (dups.length === 2) pass('同一账号的两份快照各自带「同账号 ×2」（不再像"记重了"）');
-    else fail(`同账号标记不对：${JSON.stringify(marks)}`);
-    // 三行互不相同时不该出现这个标记
+    await sleep(350);
+    const list = await rows();
+    if (list.length === 3) pass('同一账号的两份登录文件只显示 1 行（4 个文件 → 3 行）');
+    else fail(`应 3 行，实际 ${list.length}：${JSON.stringify(list.map(r => r.file))}`);
+    const sameAcctRows = list.filter(r => r.file === B.name || r.file === B2.name);
+    if (sameAcctRows.length === 1) pass('同一个账号没有出现两行（用户不会看到两个一样的账号）');
+    else fail(`同一账号仍渲染 ${sameAcctRows.length} 行：${JSON.stringify(sameAcctRows.map(r => r.file))}`);
+    if (sameAcctRows[0] && sameAcctRows[0].file === B2.name) pass('留下的是更新的那份快照（生效中 > 可用 > 最近）');
+    else fail(`留下的快照不对：${sameAcctRows[0] && sameAcctRows[0].file}`);
+    if (list.filter(r => r.file === A.name || r.file === C.name).length === 2) pass('其它账号不受影响');
+    else fail('其它账号被误合并了');
+
+    // 三个不同账号：不出现重复行，也不需要任何"合并"提示
     await setAccounts([A, B, C]);
     await reloadAccounts();
     await sleep(300);
-    const again = await q(cdp, `Array.from(document.querySelectorAll('#accountList .acct-name .tag')).map((t) => t.textContent.trim())`);
-    if (!again.some((t) => /^同账号/.test(t))) pass('三个不同账号：不出现「同账号」标记');
-    else fail(`不该出现同账号标记：${JSON.stringify(again)}`);
+    const again = await rows();
+    if (again.length === 3) pass('三个不同账号：三行都在');
+    else fail(`三个不同账号应 3 行，实际 ${again.length}`);
+    // 生效中的账号必须留下（哪怕另一份快照更新）
+    await setAccounts([A, B2, { ...A, name: 'a-snapshot-2.info', active: false, modifiedAt: now }]);
+    await reloadAccounts();
+    await sleep(350);
+    const activeKept = (await rows()).filter(r => r.file === A.name || r.file === 'a-snapshot-2.info');
+    if (activeKept.length === 1 && activeKept[0].file === A.name) pass('合并时保留生效中的那份（active 优先于"更新"）');
+    else fail(`生效中的账号没被留下：${JSON.stringify(activeKept.map(r => r.file))}`);
   }
 
-  // ── 10. 英文：新文案都翻了 ────────────────────────────────────────
+  // ── 10. 合并后排序：提交的整表里不能出现同一账号的两行 ────────────────
   {
-    await q(cdp, `(() => { const t = document.querySelector('#acctShowHidden'); t.checked = false; t.dispatchEvent(new Event('change')); return true; })()`);
+    const B2 = { ...B, name: 'b-snapshot-2.info', modifiedAt: now - 1000 };
+    await setAccounts([A, B, B2, C]);
+    await reloadAccounts();
+    await sleep(300);
+    await resetReqs();
+    // 点 C 的「上移」：桩里有 4 个文件 / 3 个账号，提交的顺序里只能有 3 个文件名
+    await clickSel(`#accountList .acct[data-acct="${C.name}"] [data-up]`);
+    await sleep(400);
+    const one = (await posts('/api/account/order'))[0];
+    const body = one && one.body;
+    if (body && JSON.stringify(body.order) === JSON.stringify([A.name, C.name, B2.name])) {
+      pass('合并后「上移」提交的整表顺序只有一行一个账号（跳过被合并的快照）');
+    } else fail(`合并后上移提交顺序不对：${JSON.stringify(body && body.order)}`);
+    // 拖拽同理
+    await setAccounts([A, C, B, B2]);
+    await reloadAccounts();
+    await sleep(250);
+    await resetReqs();
+    await dragFromTo(`#accountList .acct[data-acct="${A.name}"] [data-grip]`, `#accountList .acct[data-acct="${C.name}"]`, 'bottom');
+    await sleep(500);
+    const dragOne = (await posts('/api/account/order'))[0];
+    const dragOrder = dragOne && dragOne.body && dragOne.body.order;
+    if (dragOrder && JSON.stringify(dragOrder) === JSON.stringify([C.name, A.name, B2.name])) {
+      pass('合并后拖拽提交的顺序同样只有一行一个账号（A 拖到 C 后面 → [C, A, B]）');
+    } else fail(`合并后拖拽提交顺序不对：${JSON.stringify(dragOrder)}`);
+  }
+
+  // ── 11. 英文：新文案都翻了 ────────────────────────────────────────
+  {
+    const B2 = { ...B, name: 'b-snapshot-2.info' };
+    await setAccounts([A, B, B2, C]);
+    await reloadAccounts();
+    await sleep(300);
     await q(cdp, `document.getElementById('langToggle').click()`);
     await sleep(400);
     const cjk = await q(cdp, `(() => {

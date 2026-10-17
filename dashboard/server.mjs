@@ -19,6 +19,7 @@ import {
   credentialStatus,
   diagnose,
   invalidateQuotaCache,
+  listAccountFiles,
   listAccounts,
   probeModel,
   readBridgeLog,
@@ -1450,8 +1451,12 @@ const server = createServer(async (req, res) => {
         const { file } = JSON.parse(await readBody(req));
         if (typeof file !== 'string' || !file) throw new Error('缺少 file');
 
-        // 用已列举的结果校验，避免构造任意路径
-        const listed = await listAccounts();
+        /*
+         * 用**未折叠**的登录文件列表校验：列表页已经一个账号一行，但版本错配时
+         * （旧插件/旧页面还在跑）它可能传来同一账号里被合并掉的那份快照文件名 ——
+         * 那也是一份真实存在的登录文件，切过去同样有效，不该报"未知账号"。
+         */
+        const listed = await listAccountFiles();
         const hit = listed.accounts.find((a) => a.name === file);
         if (!hit) throw new Error(`未知账号：${file}`);
         if (!hit.usable) throw new Error(`该账号当前不可用：${hit.error || '无法解开凭据'}`);
@@ -1493,7 +1498,9 @@ const server = createServer(async (req, res) => {
         if (alias !== undefined && alias !== null && typeof alias !== 'string') {
           throw new Error('alias 必须是字符串（留空 = 恢复默认显示）');
         }
-        const listed = await listAccounts();
+        // alias 也按**未折叠**列表校验：旧页面可能拿着被合并掉的那份快照文件名来改名，
+        // 键由服务端现读该文件决定（同一账号自然得到同一个键），结果是对的。
+        const listed = await listAccountFiles();
         const hit = listed.accounts.find((a) => a.name === file);
         if (!hit) throw new Error(`未知账号：${file}`);
         if (!hit.aliasKey) throw new Error('这个账号读不出标识（uin），无法命名');
@@ -1545,7 +1552,7 @@ const server = createServer(async (req, res) => {
         const { file, hidden } = JSON.parse(await readBody(req));
         if (typeof file !== 'string' || !file) throw new Error('缺少 file');
         if (typeof hidden !== 'boolean') throw new Error('hidden 必须是布尔值');
-        const listed = await listAccounts();
+        const listed = await listAccountFiles();
         const hit = listed.accounts.find((a) => a.name === file);
         if (!hit) throw new Error(`未知账号：${file}`);
         /*
@@ -1553,7 +1560,17 @@ const server = createServer(async (req, res) => {
          * 找不到自己正在用的账号。要停用它得先切到别的账号。
          */
         if (hidden && hit.active) throw new Error('当前生效中的账号不能隐藏，请先切换到别的账号');
-        sendJson(res, 200, { ok: true, hidden: writeAccountHidden(file, hidden) });
+        /*
+         * 列表是"一个账号一行"（同一号的几份登录文件由 lib/diagnostics.mjs 合并），
+         * 但 `.state.json` 里的隐藏清单仍按**登录文件名**记。所以这里把这个账号名下的
+         * **全部文件**一起写：否则隐藏后另一份快照仍算"可见"，整行就藏不住。
+         */
+        const group = listed.accounts
+          .filter((a) => (a.aliasKey || a.name) === (hit.aliasKey || hit.name))
+          .map((a) => a.name);
+        let list = writeAccountHidden(file, hidden);
+        for (const name of group) if (name !== file) list = writeAccountHidden(name, hidden);
+        sendJson(res, 200, { ok: true, hidden: list, files: group });
       } catch (err) {
         if (err.code === 'BODY_TOO_LARGE') return bodyTooLarge(req, res);
         sendJson(res, 400, { ok: false, error: err.message });

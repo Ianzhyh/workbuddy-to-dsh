@@ -2035,18 +2035,14 @@ input[type="checkbox"]:active {
 /* ── 11. 账号与签到条目 Account / Checkin Rows ───────────────────────── */
 .acct {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-3);
+  flex-direction: column;
+  gap: 6px;
   padding: 12px 14px;
   border-radius: var(--radius);
   border: 1px solid var(--border);
   background: var(--panel-subtle);
   margin-bottom: var(--space-2);
   transition: var(--transition-fast);
-  /* 一行里现在有状态、改名、切换、排序、隐藏五个控件：窄屏必须允许换行，
-     否则操作区（flex-shrink:0）会把整行顶出面板 —— 390px 视口下实测溢出 21px。 */
-  flex-wrap: wrap;
 }
 .acct:hover {
   background: var(--panel);
@@ -2056,6 +2052,19 @@ input[type="checkbox"]:active {
 }
 .acct:last-child { margin-bottom: 0; }
 /* 已隐藏的账号：压暗 + 虚线边 —— 一眼看出它不在默认列表里（勾「显示已隐藏」才出现） */
+.acct-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+.acct-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  flex-wrap: wrap;
+}
 .acct-hidden {
   opacity: 0.62;
   border-style: dashed;
@@ -2097,10 +2106,8 @@ input[type="checkbox"]:active {
 .acct-act {
   display: flex;
   align-items: center;
-  gap: var(--space-2);
+  gap: 6px;
   flex-shrink: 0;
-  flex-wrap: wrap;
-  justify-content: flex-end;
 }
 
 /* ── 12. 环境诊断 Diag ───────────────────────────────────────────────── */

@@ -749,7 +749,32 @@ async function verifyNarrow() {
       if (accountsFit.widest) {
         problems.push(`账号卡片内有元素溢出/被裁 ${accountsFit.widest.over}px（${accountsFit.widest.cls || '元素'}：${accountsFit.widest.text}）`);
       }
-      console.log(`窄列账号列表：${accountsFit.rows} 个账号，卡片内无溢出，无需横向滚动`);
+      console.log(`窄列账号列表：${accountsFit.rows} 行账号，卡片内无溢出，无需横向滚动`);
+    }
+    /*
+     * 同一个账号只显示一行（用户报的"账号被记重了"）：服务端会合并，面板自己也
+     * 兜一道（控制台进程可能还是旧代码）。夹具故意给了 3 个登录文件 / 2 个账号 ——
+     * 这里断言**只渲染 2 行**、同一个 uin 只出现一次，而且没有任何"展开抽屉"。
+     */
+    const problemsBeforeDedup = problems.length;
+    const dedup = await page3.cdp.evaluate(`(() => {
+      const card = [...document.querySelectorAll('.wb-card')].find((c) => /账号/.test(c.querySelector('h3') ? c.querySelector('h3').textContent : ''));
+      if (!card) return null;
+      const rows = [...card.querySelectorAll('.wb-account')];
+      const texts = rows.map((r) => r.innerText);
+      return {
+        rows: rows.length,
+        uin330: texts.filter((t) => t.includes('330000000000')).length,
+        dupToggle: card.querySelectorAll('.wb-dup-toggle, [data-dup-toggle]').length,
+        titles: texts.map((t) => t.split('\\n')[0]),
+      };
+    })()`);
+    if (!dedup) problems.push('窄列下找不到账号卡片（合并断言）');
+    else {
+      if (dedup.rows !== 2) problems.push(`同一账号的多份登录文件应合并成 1 行（共 2 行），实际 ${dedup.rows} 行`);
+      if (dedup.uin330 !== 1) problems.push(`uin 330000000000 出现了 ${dedup.uin330} 行（用户会看到两个一样的账号）`);
+      if (dedup.dupToggle !== 0) problems.push('账号列表里出现了"展开重复项"的开关（不要抽屉式交互）');
+      if (problems.length === problemsBeforeDedup) console.log('窄列账号列表：同一账号的 2 份登录文件合并成 1 行，没有折叠/展开开关');
     }
     const shot = await page3.cdp.send('Page.captureScreenshot', { format: 'png', captureBeyondViewport: true });
     writeFileSync(join(OUT_DIR, 'plugin-panel-narrow-accounts.png'), Buffer.from(shot.result.data, 'base64'));

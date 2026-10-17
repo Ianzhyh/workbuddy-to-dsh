@@ -136,7 +136,7 @@
 
   <section class="panel" data-section="overview">
     <h2>账号 <span class="spacer"></span><span class="stamp" id="accountsStamp"></span></h2>
-    <p class="hint">登录目录下有多个账号快照时，可切换桥使用哪一个。切换会自动重启桥，并清空上一个账号的体检结论。列表可以上移/下移调整顺序，也可以隐藏不想看到的 —— 隐藏只记在我们自己的 .state.json 里，不动登录目录里的任何文件。</p>
+    <p class="hint">登录目录下有多个账号快照时，可切换桥使用哪一个。切换会自动重启桥，并清空上一个账号的体检结论。列表可以上移/下移调整顺序，也可以隐藏不想看到的 —— 隐藏只记在我们自己的 .state.json 里，不动登录目录里的任何文件。同一个账号的多份登录快照只显示一行（自动合并，不影响切换）。</p>
     <!-- 控件与提示单独一行（与用量面板同一套做法）：一行塞不下就乱换行 -->
     <div class="panel-tools">
       <label class="check"><input type="checkbox" id="acctShowHidden"> 显示已隐藏 <span class="tag" id="acctHiddenCount" hidden>0</span></label>
@@ -929,8 +929,8 @@ const I18N_EN = {
   '消耗积分': 'Credit spent',
 
   // ---- 账号面板 ----
-  '登录目录下有多个账号快照时，可切换桥使用哪一个。切换会自动重启桥，并清空上一个账号的体检结论。列表可以上移/下移调整顺序，也可以隐藏不想看到的 —— 隐藏只记在我们自己的 .state.json 里，不动登录目录里的任何文件。':
-    'When the login directory holds several account snapshots, you can pick which one the bridge uses. Switching restarts the bridge and clears the previous account\'s probe results. Rows can be reordered with Move up / Move down, and ones you do not care about can be hidden — hiding is recorded only in our own .state.json and never touches any file in the login directory.',
+  '登录目录下有多个账号快照时，可切换桥使用哪一个。切换会自动重启桥，并清空上一个账号的体检结论。列表可以上移/下移调整顺序，也可以隐藏不想看到的 —— 隐藏只记在我们自己的 .state.json 里，不动登录目录里的任何文件。同一个账号的多份登录快照只显示一行（自动合并，不影响切换）。':
+    'When the login directory holds several account snapshots, you can pick which one the bridge uses. Switching restarts the bridge and clears the previous account\'s probe results. Rows can be reordered with Move up / Move down, and ones you do not care about can be hidden — hiding is recorded only in our own .state.json and never touches any file in the login directory. Multiple login snapshots of the same account are shown as a single row (merged automatically; switching is unaffected).',
   '显示已隐藏': 'Show hidden',
   '上移': 'Move up',
   '下移': 'Move down',
@@ -4349,11 +4349,36 @@ function copyFailText(r) {
  */
 let showHiddenAccounts = false;
 
+/**
+ * 同一个账号只留一行。
+ *
+ * 服务端（`lib/diagnostics.mjs` 的 `listAccounts`）已经合并；这里再兜一道是因为
+ * **控制台进程可能是旧代码**：`dashboard/public/` 改完刷新就生效，而 `lib/` 要重启
+ * 控制台才进内存 —— 旧服务端仍会回同一账号的多行。兜底后用户在重启之前也不会看到
+ * "两个一样的账号"。
+ *
+ * 保留哪一行与服务端同一套规则：生效中 > 可用 > 最近；顺序按第一次出现的位置。
+ * 键与 `listAccounts` 一致（uin → userId → 文件名）。
+ */
+function distinctAccounts(list) {
+  const byKey = new Map();
+  for (const a of list || []) {
+    const key = a.aliasKey || a.account || a.userId || a.name;
+    const cur = byKey.get(key);
+    if (!cur) { byKey.set(key, a); continue; }
+    const better = Number(!!a.active) - Number(!!cur.active)
+      || Number(!!a.usable) - Number(!!cur.usable)
+      || (Number(a.modifiedAt) || 0) - (Number(cur.modifiedAt) || 0);
+    if (better > 0) byKey.set(key, a);
+  }
+  return [...byKey.values()];
+}
+
 async function loadAccounts() {
   const el = $('accountList');
   const d = await api('/api/accounts');
   setStamp('accountsStamp');
-  const all = d.accounts || [];
+  const all = distinctAccounts(d.accounts);
   const hiddenCount = all.filter(a => a.hidden).length;
   const badge = $('acctHiddenCount');
   if (badge) {
@@ -4389,13 +4414,6 @@ async function loadAccounts() {
     const sub = (a.alias && a.account ? a.account + ' · ' : '')
       + a.name + ' · ' + (a.domain || '—') + ' · 剩余 ' + expire;
     /*
-     * 同一个账号的多份登录文件：**标出来**，别让用户以为"记重了"。
-     * 不擅自合并 —— 切换是按文件切的，两行各有各的用途（比如一份是旧快照）。
-     */
-    const dup = a.sameAccount > 1
-      ? '<span class="tag" title="同一个账号的另一份登录文件（客户端每次「登出」会留一份快照）">同账号 ×' + a.sameAccount + '</span>'
-      : '';
-    /*
      * 上移 / 下移：顺序是"行"的顺序，按文件名存进 `.state.json` 的 `accountOrder`。
      * 用两个字形按钮而不是文字，是因为一行里已经有状态、改名、切换了。
      */
@@ -4408,19 +4426,22 @@ async function loadAccounts() {
       : '<button class="mini" data-hide="' + escapeAttr(a.name) + '" data-hidden="' + (a.hidden ? '1' : '') + '">'
         + (a.hidden ? '恢复' : '隐藏') + '</button>';
     return '<div class="acct' + (a.hidden ? ' acct-hidden' : '') + '" data-acct="' + escapeAttr(a.name) + '">' +
-      '<div>' +
+      // head：拖拽手柄 | 名字 + 身份徽标 | 状态 + 改名 (+ 切换)
+      '<div class="acct-head">' +
+        '<span class="acct-grip" draggable="true" data-grip="' + escapeAttr(a.name) + '"' +
+          ' title="拖动排序" aria-label="拖动排序">⋮⋮</span>' +
         '<div class="acct-name">' + escapeAttr(label) +
           (a.active ? ' <span class="tag ok">使用中</span>' : '') +
-          (a.hidden ? ' <span class="tag">已隐藏</span>' : '') + dup + '</div>' +
-        '<div class="acct-sub mono">' + escapeAttr(sub) + '</div>' +
+          (a.hidden ? ' <span class="tag">已隐藏</span>' : '') + '</div>' +
+        '<div class="acct-act">' + status +
+          '<button class="mini" data-alias="' + escapeAttr(a.name) + '"' +
+            ' title="给这个账号起个名字，便于区分">改名</button>' +
+          switchBtn + '</div>' +
       '</div>' +
-      '<div class="acct-act">' +
-        '<span class="acct-grip" draggable="true" data-grip="' + escapeAttr(a.name) + '"'
-          + ' title="拖动排序" aria-label="拖动排序">⋮⋮</span>' +
-        status + moveBtns + hideBtn +
-        '<button class="mini" data-alias="' + escapeAttr(a.name) + '"'
-          + ' title="给这个账号起个名字，便于区分">改名</button>' +
-        switchBtn + '</div>' +
+      // sub：身份 + 凭据
+      '<div class="acct-sub mono">' + escapeAttr(sub) + '</div>' +
+      // toolbar：次要操作（排序 / 隐藏），与 head 拆开独占一行就不挤
+      '<div class="acct-toolbar">' + moveBtns + hideBtn + '</div>' +
     '</div>';
   }).join('');
 
@@ -4459,7 +4480,7 @@ async function postAccountOrder(names) {
 /** 拖拽落点：把 file 插到 target 之前/之后，然后提交整表。 */
 async function reorderAccount(file, target, before) {
   const d = await api('/api/accounts');
-  const rest = (d.accounts || []).map(a => a.name).filter(n => n !== file);
+  const rest = distinctAccounts(d.accounts).map(a => a.name).filter(n => n !== file);
   const i = rest.indexOf(target);
   if (i < 0) { await loadAccounts(); return; }
   rest.splice(before ? i : i + 1, 0, file);
@@ -4470,12 +4491,12 @@ async function reorderAccount(file, target, before) {
  * 上移 / 下移一个账号（只改显示顺序）。
  *
  * 提交的是**整个顺序数组**而不是"把它挪到谁前面"：前端手里就是完整列表，直接给结果，
- * 两边不会因为各算一套插入规则而对不上。顺序按当前**全部**账号（含隐藏）算，
+ * 两边不会因为各算一套插入规则而对不上。顺序按当前**全部账号**（含隐藏）算，
  * 这样隐藏/显示切换时顺序不会跳。
  */
 async function moveAccount(file, delta) {
   const d = await api('/api/accounts');
-  const names = (d.accounts || []).map(a => a.name);
+  const names = distinctAccounts(d.accounts).map(a => a.name);
   const i = names.indexOf(file);
   const j = i + delta;
   if (i < 0 || j < 0 || j >= names.length) return; // 已经在头/尾
