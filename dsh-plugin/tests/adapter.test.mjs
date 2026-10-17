@@ -711,3 +711,71 @@ test('响应体没有 getReader()：也必须以 error finish 收尾，不得向
   assert.equal(out[0].type, 'finish');
   assert.equal(out[0].reason.kind, 'error');
 });
+
+/**
+ * 回归：适配器必须实现 `imageRequestPricing` / `imageRequestTarget`。
+ *
+ * 用户侧症状（2026-10-17 实测，dsh Desktop 0.2.1-rc.2）：
+ *
+ *   command.execute failed: gateway/internal:
+ *   this.adapters.get(...)?.adapter.imageRequestPricing is not a function
+ *
+ * 触发点是**压缩上下文（compact）**：它要重建历史并给历史里的图片计价。
+ * 平时的纯文本对话不走这条路径，所以只有 compact 才炸。
+ *
+ * 根因不是 dsh 的 bug，而是"普通对象适配器"不继承 `LlmAdapter` 基础类：
+ * 基础类里这两个方法都有默认实现（`imageRequestPricing` 返回 undefined、
+ * `imageRequestTarget` 原样透传），而 dsh 的注册表只对**适配器**判空：
+ *
+ *   return this.adapters.get(provider)?.adapter.imageRequestPricing(provider, model);
+ *   //                                  ^ 到此为止，对"方法"没有可选链
+ *
+ * 所以适配器注册上了、方法却没有 → TypeError。0.2.1-rc.2 的三处调用点都还没加判空。
+ *
+ * 注意：`docs/dsh-llm-adapter-contract.md` §6 说"纯文本端点省略它即可"，与运行时不符。
+ * 这条用例按**运行时的实际要求**钉死方法必须存在。
+ */
+test('compact 回归：imageRequestPricing / imageRequestTarget 必须存在且可被 dsh 的调用式调用', () => {
+  const adapter = new WorkBuddyAdapter({
+    provider: 'workbuddy',
+    displayName: 'WorkBuddy',
+    client: { models: async () => ({ data: [] }) },
+  });
+
+  // 完全照 dsh 注册表的调用式调用：只对 adapter 判空，对方法不判。
+  const registry = new Map([['workbuddy', { adapter }]]);
+  const callLikeDsh = (name, ...args) => {
+    const entry = registry.get('workbuddy');
+    assert.ok(entry, '适配器必须已注册');
+    // 这里刻意不写 ?.[] —— 复刻 dsh 的写法，缺方法就让它抛
+    return entry.adapter[name](...args);
+  };
+
+  assert.equal(
+    typeof adapter.imageRequestPricing,
+    'function',
+    'imageRequestPricing 缺失 → compact 时报 "... is not a function"',
+  );
+  assert.equal(
+    callLikeDsh('imageRequestPricing', 'workbuddy', 'deepseek-v4.1-flash'),
+    undefined,
+    '不声明图片计价时应当返回 undefined（token meter 退回中性估算）',
+  );
+
+  assert.equal(
+    typeof adapter.imageRequestTarget,
+    'function',
+    'imageRequestTarget 缺失 → 带图请求同样会 "... is not a function"',
+  );
+  const target = callLikeDsh('imageRequestTarget', 'workbuddy', 'glm-5.3', { width: 640, height: 480, bytes: 1234 });
+  assert.deepEqual(
+    target,
+    { width: 640, height: 480, maxBytes: 1234 },
+    '应当原样透传图片尺寸（不预缩放），与 LlmAdapter 基础类的默认实现一致',
+  );
+
+  // 契约要求这两个方法同步、无 I/O
+  assert.ok(!(adapter.imageRequestPricing('workbuddy', 'x') instanceof Promise), 'imageRequestPricing 必须同步');
+  assert.ok(!(adapter.imageRequestTarget('workbuddy', 'x', {}) instanceof Promise), 'imageRequestTarget 必须同步');
+});
+

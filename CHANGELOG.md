@@ -17,6 +17,49 @@
 
 只支持最近 2 个 minor 版本。
 
+## [Unreleased]
+
+### Fixed（compact 崩溃：适配器缺 `imageRequestPricing` / `imageRequestTarget`）
+
+**用户看到的现象**：压缩上下文（compact）时整条命令失败，报
+
+```
+command.execute failed: gateway/internal:
+this.adapters.get(...)?.adapter.imageRequestPricing is not a function
+```
+
+普通对话完全正常 —— 因为只有 compact 会去重算历史（含图片）的计价。
+
+**根因**：`WorkBuddyAdapter` 是**普通对象**，不继承 dsh 的 `LlmAdapter` 抽象类，于是拿不到
+基础类那两个方法的默认实现。而 dsh 的注册表只对**适配器**做可选链、**对方法不做**：
+
+```js
+return this.adapters.get(provider)?.adapter.imageRequestPricing(provider, model);
+//                                  ^ 只到这里，方法不存在就是 TypeError
+```
+
+0.2.1-rc.2 的三处调用点均未加 `?.`。
+
+**`docs/dsh-llm-adapter-contract.md` §6 原本写的是「纯文本端点省略它即可」—— 正是这句把人带沟里了。**
+已按运行时事实改写为「必须存在，返回 `undefined` 表示不声明计价」，并补充了
+`imageRequestTarget`（同样必填、同样无判空）的说明。
+
+**改法**（各一行，均同步、无 I/O）：
+
+```js
+imageRequestPricing() { return undefined }
+imageRequestTarget(_p, _m, image) {
+  return { width: image.width, height: image.height, maxBytes: image.bytes }  // 原样透传
+}
+```
+
+`imageRequestTarget` 照抄基础类的默认实现（不预缩放），桥把图片按 `image_url` 原样转发，
+语义一致。
+
+**验证**：`dsh-plugin/tests/adapter.test.mjs` 新增「compact 回归」用例，按 dsh 的真实调用式
+（对方法不判空）调用这两个方法；**反证**：去掉方法后该用例立刻变红，报错文案与用户截图一致。
+全套插件测试 91 项全绿。
+
 ## [1.6.1] - 2026-10-17
 
 ### Added（环境诊断新增「客户端安装布局体检」—— 两个 WorkBuddy 客户端被装进同一目录会被点名）
