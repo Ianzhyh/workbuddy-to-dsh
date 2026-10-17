@@ -1,5 +1,5 @@
 /**
- * 环境诊断：把「为什么用不了」拆成 8 项可判定的事实。
+ * 环境诊断：把「为什么用不了」拆成一组可判定的事实。
  *
  * 控制台页面与命令行 `tools/doctor.mjs` 共用本模块，保证两处结论一致。
  * 所有函数都只读凭据用于判定，绝不返回令牌明文。
@@ -14,6 +14,7 @@ import {
   isEncryptedFieldWrapper,
   openEncryptedField,
 } from './atrest.mjs';
+import { inspectClientInstalls } from './find-workbuddy.mjs';
 import config from '../config.mjs';
 import { effectiveAuthFile, readAccountAliases, readAccountOrder, readHiddenAccounts } from './state.mjs';
 import { readDshStatus } from './dsh.mjs';
@@ -551,7 +552,45 @@ export async function credentialStatus() {
 // ── 汇总诊断 ────────────────────────────────────────────────────────────
 
 /**
- * 9 项诊断，按 fail > warn > ok 排序。
+ * 「WorkBuddy 客户端」诊断项的判据（纯函数，便于单测三种分支）。
+ *
+ * 除了"找不找得到 exe"，还要看「两个产品是不是被装进了同一目录」——这不是
+ * 理论问题：WorkBuddy 国内版 / WorkBuddy AI 国际版是两个独立 Electron 应用，
+ * 却共用同一份 `resources/app.asar`。自动更新会跑完整安装器（静默卸载 + 重装），
+ * 目标目录记在共享的更新器状态里，于是更新一个可能把另一个装进同一目录 ——
+ * 后装的覆盖前一套的 resources，前一套的 exe 就变成"跑错版本的壳"，
+ * 表现为客户端行为诡异 / AtRest 取密钥对不上，而界面上完全看不出原因。
+ * 这一项把它变成一次自检就能看见的结论（真实案例与修法见 docs/TROUBLESHOOTING.md）。
+ *
+ * @param {string[]} exeCandidates 已确认存在的客户端 exe 路径
+ * @returns {{ status: 'ok'|'fail', detail: string, hint: string }}
+ */
+export function describeClientInstall(exeCandidates) {
+  const exe = exeCandidates[0];
+  const mergedInstall = inspectClientInstalls(exeCandidates).merged[0];
+  if (!exe) {
+    return {
+      status: 'fail',
+      detail: '未找到 WorkBuddy 客户端（已探测默认位置并扫描常见安装目录）',
+      hint: '客户端似乎未安装；若装在非常规目录，设置 WORKBUDDY_APP_EXECUTABLE 指向其 WorkBuddy.exe',
+    };
+  }
+  if (mergedInstall) {
+    return {
+      status: 'fail',
+      detail: `两个客户端被装进了同一个目录：${mergedInstall.dir}（后装的会覆盖前一套的 resources，客户端会跑错版本）`,
+      hint: '把国内版与国际版分别重装到两个不同目录，并清掉共用的更新缓存'
+        + '（%TEMP%\\workbuddy-update-x64*、%LOCALAPPDATA%\\@genieworkbuddy-desktop-updater）'
+        + '—— 残留着对方的安装包时，客户端会把它当成自己的更新装进当前目录；'
+        + '卸载重装不会丢账号（登录态在共享数据目录）；'
+        + '详见 docs/TROUBLESHOOTING.md 的「两个客户端被装进同一目录」',
+    };
+  }
+  return { status: 'ok', detail: exe, hint: '' };
+}
+
+/**
+ * 环境诊断，按 fail > warn > ok 排序。
  * 返回 { items, summary, bridge, credentials, dsh }，供页面与 CLI 各自渲染。
  */
 export async function diagnose() {
@@ -559,10 +598,9 @@ export async function diagnose() {
   const push = (id, label, status, detail, hint = '') =>
     items.push({ id, label, status, detail, hint });
 
-  const exe = defaultExecutableCandidates().find((p) => p && existsSync(p));
-  push('exe', 'WorkBuddy 客户端', exe ? 'ok' : 'fail',
-    exe || '未找到 WorkBuddy 客户端（已探测默认位置并扫描常见安装目录）',
-    exe ? '' : '客户端似乎未安装；若装在非常规目录，设置 WORKBUDDY_APP_EXECUTABLE 指向其 WorkBuddy.exe');
+  const exeCandidates = defaultExecutableCandidates().filter((p) => p && existsSync(p));
+  const clientInstall = describeClientInstall(exeCandidates);
+  push('exe', 'WorkBuddy 客户端', clientInstall.status, clientInstall.detail, clientInstall.hint);
 
   const dir = join(effectiveAuthFile(), '..');
   let names = [];

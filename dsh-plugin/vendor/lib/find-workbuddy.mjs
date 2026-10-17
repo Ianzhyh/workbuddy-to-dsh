@@ -354,3 +354,47 @@ export function findWorkBuddyExe() {
   lastMissAt = Date.now();
   return '';
 }
+
+/**
+ * 客户端产品标识（同一目录里两个不同产品 = 安装被覆盖/合并了）。
+ *
+ * 国内版是 `WorkBuddy.exe`、国际版是 `WorkBuddyAI.exe`、旧版叫 `CodeBuddy*.exe`。
+ * 它们各自是独立 Electron 应用，但共用同一个 `resources/app.asar` —— 装进同一目录时
+ * **后装的会把前一套的 resources 覆盖掉**，前一套的 exe 就成了跑错版本的壳。
+ */
+function clientProductOf(exePath) {
+  const base = basename(String(exePath || '')).toLowerCase();
+  if (/^workbuddy\s*ai\.exe$/.test(base)) return 'workbuddy-ai';
+  if (/^workbuddy\.exe$/.test(base)) return 'workbuddy';
+  if (/^codebuddy(?:\s*ai)?\.exe$/.test(base)) return 'codebuddy';
+  return '';
+}
+
+/**
+ * 检查客户端安装布局：把一组 exe 路径按目录分组，找出「两个产品装进同一目录」。
+ *
+ * 纯函数（不读磁盘）：调用方负责先过滤出**真实存在**的 exe。单测直接喂假路径。
+ *
+ * @param {string[]} exePaths 已确认存在的客户端 exe 路径
+ * @returns {{ installs: Array<{dir: string, exes: string[], products: string[]}>,
+ *             merged: Array<{dir: string, exes: string[], products: string[]}> }}
+ *   `installs` 每套安装一行；`merged` 是其中「同目录多产品」的那些（正常应为空）
+ */
+export function inspectClientInstalls(exePaths) {
+  /** Windows 路径大小写不敏感：按小写去重/分组，避免同一个文件被探针报两次。 */
+  const norm = (p) => (process.platform === 'win32' ? p.toLowerCase() : p);
+  const byDir = new Map();
+  for (const p of exePaths || []) {
+    if (!p) continue;
+    const product = clientProductOf(p);
+    if (!product) continue;
+    const dir = dirname(p);
+    const key = norm(dir);
+    if (!byDir.has(key)) byDir.set(key, { dir, exes: [], products: [] });
+    const rec = byDir.get(key);
+    if (!rec.exes.some((e) => norm(e) === norm(p))) rec.exes.push(p);
+    if (!rec.products.includes(product)) rec.products.push(product);
+  }
+  const installs = [...byDir.values()];
+  return { installs, merged: installs.filter((r) => r.products.length > 1) };
+}

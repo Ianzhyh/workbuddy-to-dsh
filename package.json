@@ -45,7 +45,7 @@
   "connect": "node tools/connect.mjs",
     "doctor": "node tools/doctor.mjs",
     "verify": "node tools/verify-atrest.mjs",
-    "test:lib": "node --test lib/find-workbuddy.test.mjs lib/find-dsh.test.mjs lib/dsh.test.mjs lib/state.test.mjs lib/atrest.test.mjs lib/config.test.mjs lib/diagnostics.quota.test.mjs lib/diagnostics.auth.test.mjs lib/diagnostics.fold.test.mjs lib/config.token-perm.test.mjs lib/client-connect.test.mjs",
+    "test:lib": "node --test lib/find-workbuddy.test.mjs lib/find-dsh.test.mjs lib/dsh.test.mjs lib/state.test.mjs lib/atrest.test.mjs lib/config.test.mjs lib/diagnostics.quota.test.mjs lib/diagnostics.auth.test.mjs lib/diagnostics.fold.test.mjs lib/diagnostics.install.test.mjs lib/config.token-perm.test.mjs lib/client-connect.test.mjs",
     "test:bridge": "node --test bridge/bridge.test.mjs bridge/bridge-startup.test.mjs bridge/bridge-responses.test.mjs bridge/bridge-anthropic.test.mjs bridge/bridge-cors.test.mjs",
     "test:plugin": "node --test \"dsh-plugin/tests/*.test.mjs\"",
     "panel:shot": "node dsh-plugin/tests/panel-render.mjs",

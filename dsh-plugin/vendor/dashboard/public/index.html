@@ -1744,6 +1744,8 @@ const I18N_EN = {
     'Other users on this machine may be able to read the local token and call the bridge, burning your account quota. Common causes: icacls disabled by group policy, a restricted sandbox, or a missing USERNAME environment variable. Manual fix: icacls "<token file>" /inheritance:r /grant:r "%USERNAME%:F"',
   '未找到 WorkBuddy 客户端（已探测默认位置并扫描常见安装目录）':
     'WorkBuddy client not found (probed the default location and scanned common install dirs)',
+  '把国内版与国际版分别重装到两个不同目录，并清掉共用的更新缓存（%TEMP%\\workbuddy-update-x64*、%LOCALAPPDATA%\\@genieworkbuddy-desktop-updater）—— 残留着对方的安装包时，客户端会把它当成自己的更新装进当前目录；卸载重装不会丢账号（登录态在共享数据目录）；详见 docs/TROUBLESHOOTING.md 的「两个客户端被装进同一目录」':
+    'Reinstall the domestic and international builds into two different directories and clear the shared update cache (%TEMP%\\workbuddy-update-x64*, %LOCALAPPDATA%\\@genieworkbuddy-desktop-updater) — a leftover package from the other product is treated as this product\'s update and installed into the current directory. Uninstalling does not lose your accounts (login state lives in the shared data directory); see "Two clients installed into the same directory" in docs/TROUBLESHOOTING.md',
   '未取得密钥，跳过': 'no key obtained, skipped',
   '缺少占位凭据': 'placeholder credential missing',
   'settings.yaml 存在，但缺少 workbuddy 路由': 'settings.yaml exists, but the workbuddy route is missing',
@@ -2169,6 +2171,13 @@ const I18N_RULES_EN = [
   [/^目录为空：(.+)$/, 'directory is empty: $1'],
   [/^keyId=(.+)（与信封一致）$/, 'keyId=$1 (matches the envelope)'],
   [/^keyId=(.+)（与信封不一致）$/, 'keyId=$1 (does NOT match the envelope)'],
+  /*
+   * 客户端安装布局（两个 WorkBuddy 产品被装进同一目录）。detail 里带安装路径，
+   * 是拼接串，整串查不到词条 —— 必须用规则；hint 是整段固定文案，走词条表。
+   */
+  [/^两个客户端被装进了同一个目录：(.+)（后装的会覆盖前一套的 resources，客户端会跑错版本）$/,
+    (m, dir) => 'Two clients are installed into the same directory: ' + dir
+      + ' (the later install overwrites the other\'s resources, so the client runs the wrong build)'],
   [/^账号 (.+) · 剩余 (.+)$/, (m, acct, d) => 'account ' + acct + ' · ' + translateText(d) + ' left'],
   [/^(.+) 已响应$/, '$1 responding'],
   [/^(.+) 未监听$/, '$1 not listening'],

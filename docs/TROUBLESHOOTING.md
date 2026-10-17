@@ -385,6 +385,74 @@ WORKBUDDY_AUTH_FILE=C:\Users\<you>\AppData\Local\CodeBuddyExtension\Data\Public\
 
 用「最近修改时间」判断哪个是当前活跃的：在客户端里登录一次，看哪个文件的 `mtime` 变了。
 
+### 两个客户端被装进同一目录（国内版 + 国际版「合并」了）
+
+**症状**：安装目录里同时出现 `WorkBuddy.exe`（国内版）和 `WorkBuddyAI.exe`（国际版），
+其中一个客户端行为诡异（启动后变成另一个产品 / 版本对不上），或者取 AtRest 密钥、
+解密登录文件时好时坏。控制台「环境诊断 → WorkBuddy 客户端」会直接判 fail：
+
+> 两个客户端被装进了同一个目录：`<目录>`（后装的会覆盖前一套的 resources，客户端会跑错版本）
+
+**根因**：国内版与国际版是两个独立的 Electron 应用，但真正的程序都在
+`resources/app.asar`，exe 只是外壳 —— **同一个目录只能有一套 `resources/`**，
+两套安装各自跑一次就会互相覆盖。自动更新不是原地打补丁，而是**下载完整安装包 →
+静默卸载 → 重装**（客户端日志里是 `install mode: silent-update` + `install target dir`），
+目标目录的记忆/默认值不保证与你原安装目录一致；而两个产品的默认目录名都叫 `WorkBuddy`，
+所以很容易落到同一处。
+
+**更隐蔽的一层（2026-10-17 本机实证）**：两个产品还**共用更新缓存目录**
+（`%TEMP%\workbuddy-update-x64*`、`%LOCALAPPDATA%\@genieworkbuddy-desktop-updater`）。
+旧版本更新器留下的安装包不带"产品标识"校验，客户端恢复缓存时只看版本号 ——
+于是**国内版会把缓存里国际版的 5.8.4 安装包当成自己的更新**，启动时静默装进自己的目录。
+日志原话是 `Restored downloaded update from cache: version=5.8.4.41366630` 之后
+`installerPath=…WorkBuddy-Setup-5.8.4…exe`。这会造成**反复合并**：修好一次，
+下次启动又合并。症状就是"两个快捷方式打开都是 WorkBuddy AI"——因为国内版 exe
+加载的是被覆盖后的国际版 `resources/`。
+
+> 注意：两个产品**共用登录数据目录**（`%LOCALAPPDATA%\CodeBuddyExtension`），
+> 只有**安装目录**必须分开。
+
+**怎么修**（不改登录数据，账号不会丢）：
+
+1. 关掉两个客户端；把要用的安装包先复制到别处（更新器缓存和 `%TEMP%` 里的会被清理）。
+2. **清掉共用的更新缓存**（这一步不做，重装完下次启动可能又合并回去）：
+
+   ```bat
+   rmdir /s /q "%TEMP%\workbuddy-update-x64"
+   rmdir /s /q "%TEMP%\workbuddy-update-x64-workbuddy-ai"
+   rmdir /s /q "%LOCALAPPDATA%\@genieworkbuddy-desktop-updater"
+   ```
+
+3. 「设置 → 应用 → 已安装的应用」里**两个都卸载**（WorkBuddy / WorkBuddy AI）。
+   卸载只删程序文件，`%LOCALAPPDATA%\CodeBuddyExtension\Data\Public\auth\*.info`
+   里的登录态会保留。
+4. 重新安装到**两个不同的固定目录**，例如国内版 → `E:\App\WB\CN`、国际版 → `E:\App\WB\AI`。
+   两个安装包都支持 NSIS 静默安装并指定目录（`/D=` 必须是**最后一个参数**、路径不加引号）：
+
+   ```bat
+   WorkBuddy-win32-x64-user-<版本>.exe /S /D=E:\App\WB\CN
+   WorkBuddy-Setup-<版本>.exe /S /D=E:\App\WB\AI
+   ```
+
+   如果安装器装完会自动拉起客户端，可以先把它关掉再检查目录（避免它立刻做更新检查）。
+5. 各启动一次并观察更新日志：**国内版应该查 `www.workbuddy.cn`、国际版查
+   `www.workbuddy.ai`**，版本号分别是 5.8.3 / 5.8.4；两边都应回 `No update available`。
+   同时确认安装目录没有被塞进对方的 exe、控制台「环境诊断 → WorkBuddy 客户端」变回 `ok`。
+6. 以后每次自动更新后瞄一眼安装目录有没有又变。若又变了，重复"清缓存 → 分别重装"；
+   也可以把常用客户端的 exe 钉住（写进 `.env`）：
+
+   ```ini
+   WORKBUDDY_APP_EXECUTABLE=E:\App\WB\CN\WorkBuddy.exe
+   ```
+
+> 只用一个客户端的话最省事：卸掉另一个即可。两个账号（国内 / 国际）的登录文件都在
+> 共享数据目录里，控制台与插件里照样能切换，不需要两个客户端都装。
+>
+> 排查时最有用的是客户端自己的安装日志：
+> `%USERPROFILE%\.workbuddy\logs\installer.log`（国内版）、
+> `%USERPROFILE%\.workbuddy-ai\logs\installer.log`（国际版）——
+> 每次安装都有 `install target dir` / `final install directory` 两行，一眼看出这次装到了哪。
+
 ### Codex 里模型把工具调用写成正文（一串 `<||DSML||invoke …>`），一个回合就此结束
 
 **症状**：Codex 走桥时，回答里出现 `exec_command` 之类的**文本标记**而不是真的执行工具，

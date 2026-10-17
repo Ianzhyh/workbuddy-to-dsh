@@ -648,6 +648,8 @@ body.dark .wb-root,
         'WorkBuddy executable not found (probed the default location and scanned common install dirs)',
       '客户端似乎未安装；若装在非常规目录，设置 WORKBUDDY_APP_EXECUTABLE 指向其 WorkBuddy.exe':
         'The client does not appear to be installed; if it lives in an unusual directory, point WORKBUDDY_APP_EXECUTABLE at its WorkBuddy.exe',
+      '把国内版与国际版分别重装到两个不同目录，并清掉共用的更新缓存（%TEMP%\\workbuddy-update-x64*、%LOCALAPPDATA%\\@genieworkbuddy-desktop-updater）—— 残留着对方的安装包时，客户端会把它当成自己的更新装进当前目录；卸载重装不会丢账号（登录态在共享数据目录）；详见 docs/TROUBLESHOOTING.md 的「两个客户端被装进同一目录」':
+        'Reinstall the domestic and international builds into two different directories and clear the shared update cache (%TEMP%\\workbuddy-update-x64*, %LOCALAPPDATA%\\@genieworkbuddy-desktop-updater) — a leftover package from the other product is treated as this product\'s update and installed into the current directory. Uninstalling does not lose your accounts (login state lives in the shared data directory); see "Two clients installed into the same directory" in docs/TROUBLESHOOTING.md',
       '未能取得 AtRest 密钥': 'could not obtain the AtRest key',
       '由另一个客户端 build 写入，本机密钥解不开': 'written by another client build; this machine\'s key cannot decrypt it',
       '未取得密钥，跳过': 'no key obtained, skipped',
@@ -894,6 +896,10 @@ body.dark .wb-root,
       [/^目录为空：(.+)$/, 'directory is empty: $1'],
       [/^keyId=(.+)（与信封一致）$/, 'keyId=$1 (matches the envelope)'],
       [/^keyId=(.+)（与信封不一致）$/, 'keyId=$1 (does NOT match the envelope)'],
+      /* 两个 WorkBuddy 产品被装进同一目录：detail 带安装路径（拼接串），整串查不到词条 */
+      [/^两个客户端被装进了同一个目录：(.+)（后装的会覆盖前一套的 resources，客户端会跑错版本）$/,
+        (m, dir) => 'Two clients are installed into the same directory: ' + dir
+          + ' (the later install overwrites the other\'s resources, so the client runs the wrong build)'],
       [/^账号 (.+) · 剩余 (.+)$/, (m, acct, d) => 'account ' + acct + ' · ' + translateText(d) + ' left'],
       [/^(.+) 已响应$/, '$1 responding'],
       [/^(.+) 未监听$/, '$1 not listening'],

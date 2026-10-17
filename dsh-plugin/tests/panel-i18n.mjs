@@ -114,6 +114,24 @@ function routesFor(variant) {
    * 「数据 / 文案」的分界要**按字段**判，不能按整个响应体判。
    */
   routes['/workbuddy/console-api/diagnose'] = FIXTURES.consoleDiagnose;
+  /*
+   * 客户端安装被合并（两个 WorkBuddy 产品装进同一目录）那条文案：真实机器上只有
+   * 撞到才会出现，不主动注入就永远扫不到它的翻译。**只给 i18n 用例注入** ——
+   * 截图用的 panel-render 仍用原桩，不把故障例子画进 README 截图。
+   */
+  routes['/workbuddy/console-api/diagnose'] = {
+    ...FIXTURES.consoleDiagnose,
+    items: [
+      ...FIXTURES.consoleDiagnose.items,
+      {
+        id: 'exe-merged',
+        label: 'WorkBuddy 客户端',
+        status: 'fail',
+        detail: '两个客户端被装进了同一个目录：E:\\App\\WB\\WorkBuddy（后装的会覆盖前一套的 resources，客户端会跑错版本）',
+        hint: '把国内版与国际版分别重装到两个不同目录，并清掉共用的更新缓存（%TEMP%\\workbuddy-update-x64*、%LOCALAPPDATA%\\@genieworkbuddy-desktop-updater）—— 残留着对方的安装包时，客户端会把它当成自己的更新装进当前目录；卸载重装不会丢账号（登录态在共享数据目录）；详见 docs/TROUBLESHOOTING.md 的「两个客户端被装进同一目录」',
+      },
+    ],
+  };
   return routes;
 }
 

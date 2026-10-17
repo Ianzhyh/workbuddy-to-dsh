@@ -17,6 +17,46 @@
 
 只支持最近 2 个 minor 版本。
 
+## [Unreleased]
+
+### Added（环境诊断新增「客户端安装布局体检」—— 两个 WorkBuddy 客户端被装进同一目录会被点名）
+
+**真实案例（2026-10-17，本机）**：WorkBuddy 国内版 5.8.3（`WorkBuddy.exe`）与国际版
+WorkBuddy AI 5.8.4（`WorkBuddyAI.exe`）被自动更新装进了同一个目录
+`E:\App\WB\WorkBuddy`。两个产品共用同一份 `resources/app.asar`，后装的国际版把前一套
+覆盖掉 → 国内版只剩一个"跑错版本"的壳，客户端行为诡异，而界面上完全看不出原因。
+
+**第二层根因（修好一次、下次启动又合并）**：两个产品还**共用更新缓存**
+（`%TEMP%\workbuddy-update-x64*`、`%LOCALAPPDATA%\@genieworkbuddy-desktop-updater`）。
+旧版更新器留下的安装包没有产品标识校验，客户端恢复缓存时只看版本号 —— 于是国内版会把
+缓存里国际版的 5.8.4 安装包当成自己的更新，启动时静默装进当前目录（日志里是
+`Restored downloaded update from cache: version=5.8.4.41366630` → `installerPath=…Setup-5.8.4…`）。
+症状就是"两个快捷方式打开都是 WorkBuddy AI"。**所以修复必须包含"清掉共用更新缓存"这一步**。
+
+- **环境诊断的「WorkBuddy 客户端」一项现在会检查安装布局**：同一目录里出现两个不同产品的
+  exe（国内版 / 国际版 / 旧版 CodeBuddy）→ 判 `fail`，detail 给出目录与后果，
+  hint 给出修法（分别重装到两个目录 + 清掉共用更新缓存；卸载重装不丢账号）+ 文档指路。
+  **不能靠目录名猜**（那次目录名完全正常），判据是「同目录多产品」；纯函数
+  `inspectClientInstalls()` 抽出来直接单测。
+- **`tools/doctor.mjs` 同享结论**（它调用的就是同一个 `diagnose()`），两处口径一致。
+- 控制台与 dsh 面板的 i18n 都补了这条文案（detail 是带路径的拼接串 → 走规则；hint 是整段
+  → 走词条表）；面板 i18n 验收**主动注入**这一条 —— 真实机器不撞到就永远扫不到它的翻译。
+- **文档**：`docs/TROUBLESHOOTING.md` 新增「两个客户端被装进同一目录（国内版 + 国际版"合并"了）」
+  —— 症状、两层根因（更新器跑完整安装包 + 目标目录记忆；共用更新缓存导致反复合并）、
+  六步修法（先清共用更新缓存，再分别静默装到两个目录；含 NSIS `/S /D=`、
+  `WORKBUDDY_APP_EXECUTABLE` 兜底、以及"启动后看更新日志域名对不对"的复验法）、
+  以及客户端自己的 `installer.log` 在哪看。
+  README / dashboard README / 插件 README 的「环境诊断」描述同步（去掉过时的"8 项"字样）。
+
+**验证**：`lib/diagnostics.install.test.mjs` 4 条（找不到 / 同目录两个产品 / 两个独立目录 /
+单套安装）+ `lib/find-workbuddy.test.mjs` 新增 5 条布局判据（大小写、去重、旧版 CodeBuddy、
+无关 exe）；`panel:check` 双语无残留；控制台与面板的"合并"文案在中文 + 英文下都实测渲染
+（detail 规则 / hint 词条都翻）。
+**真机复验（本机）**：清掉共用更新缓存 → 两个客户端分别重装到 `E:\App\WB\CN`（5.8.3）与
+`E:\App\WB\AI`（5.8.4）→ 各启动一次：国内版查 `www.workbuddy.cn`（version=5.8.3）、
+国际版查 `www.workbuddy.ai`（version=5.8.4），都回 `No update available`；
+目录里没再出现对方的 exe，诊断项回到 `ok`、账号/桥/AtRest 密钥全部正常。
+
 ## [1.6.0] - 2026-10-17
 
 ### Fixed（同一个账号只显示一行 —— 不会再看到"两个一样的账号"；顺手修掉拖拽抓不住 / 卡片布局乱）
