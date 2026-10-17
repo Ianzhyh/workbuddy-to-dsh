@@ -493,6 +493,44 @@ export class WorkBuddyAdapter {
     return { id: provider, name: this.displayName };
   }
 
+  /**
+   * 声明「本路由不做图片计价」——**必须存在，不能省略**。
+   *
+   * dsh 的 `llm.imageRequestPricing(provider, model)` 只对 *适配器本身* 做了可选链
+   * （`this.adapters.get(provider)?.adapter.imageRequestPricing(provider, model)`），
+   * 对**方法**没有：适配器注册上了但没这个方法，就是
+   * `TypeError: ...imageRequestPricing is not a function`。
+   *
+   * 触发点很具体：**压缩上下文（compact）**要重建历史并按图片计价，于是走这条路径；
+   * 平时的纯文本对话不碰它，所以只有 compact 才炸。0.2.1-rc.2 的三处调用点仍无判空。
+   *
+   * 契约文档（`docs/dsh-llm-adapter-contract.md:892-898`）说「纯文本端点**省略**它即可」，
+   * 与运行时的实际行为不一致 —— 按运行时的要求来：返回 `undefined` 表示不声明计价，
+   * 由 token meter 退回中性估算，正是我们想要的。
+   *
+   * 同步、无 I/O（契约要求）；桥这边的目录是异步的，这里也**不能**去查。
+   */
+  imageRequestPricing() {
+    return undefined;
+  }
+
+  /**
+   * 图片请求尺寸投影：**也不可省略**，原因同上（dsh 对方法不做判空）。
+   *
+   * 语义照抄 dsh 基础类 `LlmAdapter.imageRequestTarget` 的默认实现 —— **原样透传**：
+   * 宽高与字节上限都取图片自身的值，表示「不要为我预缩放，按原图发」。
+   * 桥把图片作为 image_url 原样转发给上游，正是这个语义。
+   *
+   * 返回 `{ width, height, maxBytes }`（`ImageRequestTarget`，三个字段都必填）。
+   */
+  imageRequestTarget(_provider, _model, image) {
+    return {
+      width: image?.width,
+      height: image?.height,
+      maxBytes: image?.bytes,
+    };
+  }
+
   providerRetryPolicy() {
     return {
       mode: 'normal',

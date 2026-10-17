@@ -894,8 +894,32 @@ There is **no dollar-cost surface and no billing record** in the harness. What e
   (`dsh-llm/lib/index.js:1688-1697`, `dsh-token-meter/README.md:43`, `:105`). "Implementations must answer
   synchronously without I/O; the token meter resolves this per measurement" (`:1690-1692`).
   `ctx.llm.imageRequestPricing(provider, model)` degrades to `undefined` for an unregistered route rather
-  than throwing (`:2050-2051`). For a text-only local endpoint, **omit it** — the default returning
-  `undefined` is correct.
+  than throwing (`:2050-2051`). For a text-only local endpoint, **return `undefined`**.
+
+  > ⚠️ **The method must EXIST; returning `undefined` is not the same as omitting it.**
+  > This paragraph used to say "omit it", and following that advice crashed `compact`.
+  >
+  > The registry does `this.adapters.get(provider)?.adapter.imageRequestPricing(provider, model)`
+  > — the optional chain stops at the **adapter**, never at the **method**
+  > (`dsh-llm/lib/index.js`, 0.2.1-rc.2: three call sites, none guarded). A plain-object adapter
+  > that inherits from nothing therefore has no fallback, and the call throws
+  > `TypeError: ...imageRequestPricing is not a function`.
+  >
+  > Trigger: **compacting context** reprices durable history, images included; ordinary text-only
+  > turns never touch this path, so the failure looks isolated to compact.
+  >
+  > The same applies to **`imageRequestTarget(provider, model, image)`** → `{ width, height, maxBytes }`.
+  > It is likewise declared without `?` and called unguarded; `LlmAdapter`'s base implementation is a
+  > pure pass-through (`{ width: image.width, height: image.height, maxBytes: image.bytes }`), so a
+  > plain-object adapter must re-declare that pass-through or image requests throw the same way.
+  >
+  > Fix shape (one line each, both synchronous):
+  > ```js
+  > imageRequestPricing() { return undefined }
+  > imageRequestTarget(_p, _m, image) { return { width: image.width, height: image.height, maxBytes: image.bytes } }
+  > ```
+  > Guarded by `dsh-plugin/tests/adapter.test.mjs` → "compact 回归".
+
 * `contextBreakdown` (`systemTokens`/`toolsTokens`/`messageTokens`) is the fixed 4-chars-per-token
   heuristic, explicitly "approximate composition, not billing or `projectedTokens`"
   (`dsh-token-meter/README.md:53`). Do not try to influence it from the adapter.
