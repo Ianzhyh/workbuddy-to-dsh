@@ -2391,6 +2391,8 @@ async function relayAnthropicStream(up, res, model, estInputTokens) {
   let finishReason = null;
   let usage = null;
   let streamError = null;
+  /** 是否见过 `[DONE]`：与 finish_reason 一起作为"这一轮真的跑完了"的信号。 */
+  let sawDone = false;
   const reader = up.body.getReader();
   const decoder = new TextDecoder();
   let buffer = '';
@@ -2407,7 +2409,8 @@ async function relayAnthropicStream(up, res, model, estInputTokens) {
       for (const line of lines) {
         if (!line.startsWith('data:')) continue;
         const raw = line.slice(5).trim();
-        if (!raw || raw === '[DONE]') continue;
+        if (!raw) continue;
+        if (raw === '[DONE]') { sawDone = true; continue; }
         let j; try { j = JSON.parse(raw); } catch { continue; }
         if (j.usage) usage = j.usage;
         const choice = (j.choices || [])[0];
@@ -2509,6 +2512,16 @@ async function relayAnthropicStream(up, res, model, estInputTokens) {
   }
 
   closeAll();
+
+  /*
+   * 干净半关（上游正常收尾、但既没有 finish_reason 也没有 [DONE]）与"连接被掐"
+   * 是同一个结果：回答截断在半句话上。之前只认 `catch` 里的异常，于是干净半关
+   * 会一路走到 `end_turn + message_stop` —— Claude Code 认为回合正常结束。
+   */
+  if (!streamError && !sawDone && !finishReason && !res.writableEnded) {
+    streamError = new Error('upstream stream ended before completion (no finish_reason / [DONE])');
+    log('anthropic stream ended without a completion signal, reporting as failure');
+  }
 
   /*
    * ⚠️ **上游在流中途断掉时，绝不能以「干净的 end_turn + message_stop」收尾。**
@@ -3826,6 +3839,8 @@ async function relayResponsesStream(up, res, model, routes = null) {
   let usage = null;
   let streamError = null;
   let sawReasoning = false;
+  /** 是否见过 `[DONE]`：与 finish_reason 一起作为"这一轮真的跑完了"的信号。 */
+  let sawDone = false;
   const reader = up.body.getReader();
   const decoder = new TextDecoder();
   let buffer = '';
@@ -3841,7 +3856,8 @@ async function relayResponsesStream(up, res, model, routes = null) {
       for (const line of lines) {
         if (!line.startsWith('data:')) continue;
         const raw = line.slice(5).trim();
-        if (!raw || raw === '[DONE]') continue;
+        if (!raw) continue;
+        if (raw === '[DONE]') { sawDone = true; continue; }
         let j; try { j = JSON.parse(raw); } catch { continue; }
         if (j.usage) usage = j.usage;
         const choice = (j.choices || [])[0];
@@ -3972,6 +3988,14 @@ async function relayResponsesStream(up, res, model, routes = null) {
 
   const finalOutput = output.filter(Boolean);
   const truncated = finishReason === 'length';
+  /*
+   * 干净半关同样要按失败处理：旧实现只在 `catch` 里设 `streamError`，
+   * 上游"正常收尾但没有 finish_reason / [DONE]"时会发 `response.completed`。
+   */
+  if (!streamError && !sawDone && !finishReason && !res.writableEnded) {
+    streamError = new Error('upstream stream ended before completion (no finish_reason / [DONE])');
+    log('responses stream ended without a completion signal, reporting as failure');
+  }
   /*
    * ⚠️ **上游在流中途断掉时，绝不能发 `response.completed`。**
    *
@@ -4581,10 +4605,28 @@ async function fetchCatalog() {
 
     for (const path of catalogPathsFor()) {
       try {
-        const res = await fetch(`${auth.endpoint}${path}`, {
-          headers: buildHeaders(auth, '', ''),
+        const doFetch = () => fetch(`${auth.endpoint}${path}`, {
+          // 每次都重新读令牌：刷新成功后 memoryAuth 已更新，用旧 auth 会继续 401
+          headers: buildHeaders(readStoredAuth(), '', ''),
           signal: AbortSignal.timeout(8000),
         });
+        let res = await doFetch();
+        /*
+         * 401/403 不是「这个区域没有这个端点」，而是**令牌过期**（或会话失效）。
+         *
+         * 目录这条路原先没有刷新重试：401 被当成"该路径没有 models 字段"跳过，
+         * 于是上游目录一条都取不到，FEATURED 补出 2-3 个精选模型后仍被写进 5
+         * 分钟缓存 —— 用户看到"模型只剩几个"，而且要等 5 分钟才可能恢复。
+         * 聊天路径（callUpstream）早就对 401/403 做过 `refreshAuth` 后重试，
+         * 目录这条路必须一致。
+         */
+        if (res.status === 401 || res.status === 403) {
+          const refreshed = await refreshAuth(auth).catch(() => null);
+          if (refreshed) {
+            log('catalog auth expired, retried after token refresh');
+            res = await doFetch();
+          }
+        }
         // 5xx 是上游临时故障 → 硬失败；4xx / 端点没有 models 字段只算「这个
         // 区域没有这个端点」，不能因此让目录永远不更新。
         if (res.status >= 500) {
@@ -4725,8 +4767,19 @@ async function fetchCatalog() {
       // 过滤后还剩几个是**真的来自上游**的（FEATURED 补全项带 _supplemented 标记，
       // 要排除掉——否则补全又会把计数顶上去，等于没修）。
       const upstreamKept = kept.filter((m) => !m._supplemented).length;
+      /*
+       * 这次**一条上游模型都没拿到**（401/403 刷新后仍失败、端点全无 models）：
+       * 绝不能拿 FEATURED 补出来的 2-3 条顶掉已有目录 —— 用户会看到"模型只剩
+       * 几个"，而且要等满 5 分钟 TTL 才可能恢复。保留旧目录，把缓存时间往前拨
+       * 30 秒（下次请求就会再试），并在日志里说清楚。
+       */
+      const nextAt = upstreamOk ? Date.now() : Date.now() - CATALOG_TTL_MS + 30_000;
+      if (!upstreamOk && catalogCache.models.length > 0) {
+        catalogCache = { ...catalogCache, at: nextAt };
+        log('catalog refresh got no upstream models; keeping previous catalog, retry in 30s');
+      } else {
       catalogCache = {
-        at: Date.now(),
+        at: nextAt,
         models: kept.map((m) => ({
           id: m.id,
           name: m.name || m.id,
@@ -4769,6 +4822,7 @@ async function fetchCatalog() {
         // 原始计数留在诊断口径里，/health 的 upstreamShape 能直接看到
         upstreamModelsSeen: upstreamModelCount,
       };
+      }
     } else if (hardError) {
       log('catalog refresh failed; keeping cached catalog');
     }
@@ -5746,6 +5800,23 @@ async function handleRequest(req, res) {
         upstream.max_tokens = upstream.max_completion_tokens;
       }
       delete upstream.max_completion_tokens;
+      /*
+       * 思考档位按**实测表**校验：目录里声明了 reasoning_efforts，请求侧却从不检查，
+       * 于是客户端发来目录外的值（老客户端写死三档、curl 直接写 off/none、
+       * 本地表比上游旧）必然吃 400 `invalid_reasoning_effort`。这类 400 被
+       * DETERMINISTIC_400_CODES 判成"确定性拒绝、不重试"，用户只能看到
+       * "不支持该思考强度"这类无从下手的错误。
+       *
+       * 只对**表里明确测过**的模型动手：不在表里的模型（新模型）保持原样 ——
+       * 没有实测数据时擅自删参数，等于把用户的选择静默吞掉。
+       */
+      if (upstream.reasoning_effort != null) {
+        const measured = REASONING_EFFORTS_BY_MODEL[model];
+        if (Array.isArray(measured) && !measured.includes(String(upstream.reasoning_effort))) {
+          log(`drop unsupported reasoning_effort=${upstream.reasoning_effort} model=${model} (measured: ${measured.join('/') || 'none'})`);
+          delete upstream.reasoning_effort;
+        }
+      }
       const conversationId = req.headers['x-conversation-id'] || trace();
 
       const ac = new AbortController();
@@ -5769,7 +5840,31 @@ async function handleRequest(req, res) {
             code: typeof parsed?.code === 'number' ? parsed.code : null,
             error: parsed?.msg || parsed?.message || parsed?.error?.message || text,
           });
-          return json(res, up.status === 200 ? 502 : up.status, parsed || { error: { message: text || `upstream HTTP ${up.status}` } });
+          /*
+           * 错误体必须包成 OpenAI 的 `{ error: { message, type, code } }`。
+           *
+           * 原先这条路径**原样透传**上游的 `{code, msg}`：按 OpenAI 规范读
+           * `error.message` 的客户端拿不到内容，只剩一个状态码或整段原始 JSON。
+           * 另两条路径（Anthropic / Responses）早就包好了正确形状。
+           *
+           * 上游 401/403 也不能原样回 401：调用方会以为**本地桥的令牌**错了，
+           * 实际是上游登录态失效。回 502 + 明确文案，修法只有一个 ——
+           * 在 WorkBuddy 桌面端重新登录。
+           */
+          const upstreamMessage = String(
+            parsed?.error?.message || parsed?.msg || parsed?.message || text || `upstream HTTP ${up.status}`,
+          ).slice(0, 400);
+          const extCode = parsed?.extError?.code || parsed?.ext_error?.code || null;
+          const authFailure = up.status === 401 || up.status === 403;
+          return json(res, up.status === 200 || authFailure ? 502 : up.status, {
+            error: {
+              message: authFailure
+                ? 'workbuddy-bridge: upstream login expired — re-login in the WorkBuddy desktop app, then retry'
+                : `workbuddy-bridge: upstream ${up.status}: ${upstreamMessage}`,
+              type: authFailure ? 'upstream_auth_error' : (up.status === 429 ? 'rate_limit_error' : 'upstream_error'),
+              ...(extCode ? { code: extCode } : (typeof parsed?.code === 'number' ? { code: parsed.code } : {})),
+            },
+          });
         }
 
         if (wantStream) {
@@ -5789,6 +5884,18 @@ async function handleRequest(req, res) {
           // 结果是流式请求的 token 与扣分全被记成 0。
           let tail = '';
           let streamError = null;
+          /*
+           * 「这一轮到底跑完了没有」—— 与非流式路径（`aggregateStream` 的
+           * `completed`）用同一套判据：`finish_reason` / `[DONE]` / 完整工具调用。
+           *
+           * 旧实现只跟踪 `usage`，于是**干净半关**被当成了成功：上游吐几段内容后
+           * 正常收尾（代理超时、chunked 结束、网关省略 `[DONE]`），客户端看到的是
+           * 一个干净的 EOF；dsh 适配器据此判 `stop` —— 用户看到半句话就停，
+           * 既不报错也不重试。非流式路径早就修过这个坑，流式才是真实流量。
+           */
+          let sawDone = false;
+          let sawFinish = false;
+          let sawToolCall = false;
           try {
             for (;;) {
               const { done, value } = await reader.read();
@@ -5801,18 +5908,44 @@ async function handleRequest(req, res) {
               for (const line of lines) {
                 if (!line.startsWith('data:')) continue;
                 const chunk = line.slice(5).trim();
-                if (!chunk || chunk === '[DONE]' || !chunk.includes('"usage"')) continue;
+                if (!chunk) continue;
+                if (chunk === '[DONE]') { sawDone = true; continue; }
+                /*
+                 * 只解析**可能带终止信号**的帧：内容帧占绝大多数，逐帧 JSON.parse
+                 * 只为看 finish_reason 不划算（大流里是纯粹的 CPU 开销）。
+                 */
+                if (!chunk.includes('"usage"') && !chunk.includes('"finish_reason"') && !chunk.includes('"tool_calls"')) continue;
                 try {
-                  const u = JSON.parse(chunk).usage;
-                  if (u) usageSeen = u; // 最后一帧的 usage 胜出
+                  const j = JSON.parse(chunk);
+                  if (j.usage) usageSeen = j.usage; // 最后一帧的 usage 胜出
+                  const choice = j.choices?.[0];
+                  if (choice?.finish_reason) sawFinish = true;
+                  if (Array.isArray(choice?.delta?.tool_calls) && choice.delta.tool_calls.length) sawToolCall = true;
                 } catch { /* 半个包，忽略 */ }
               }
               // 兜底：上游若不按行收尾，别让 tail 无限增长
               if (tail.length > 100000) tail = tail.slice(-4096);
             }
+            // 最后一行可能没有换行符结尾：`[DONE]` / finish_reason 可能在 tail 里
+            if (tail.trim()) {
+              const chunk = tail.trim().startsWith('data:') ? tail.trim().slice(5).trim() : '';
+              if (chunk === '[DONE]') sawDone = true;
+              else if (chunk && (chunk.includes('"finish_reason"') || chunk.includes('"usage"'))) {
+                try {
+                  const j = JSON.parse(chunk);
+                  if (j.usage) usageSeen = j.usage;
+                  if (j.choices?.[0]?.finish_reason) sawFinish = true;
+                } catch { /* 半截帧，忽略 */ }
+              }
+            }
           } catch (e) {
             streamError = e;
             log('stream interrupted', e.message);
+          }
+          const aborted = ac.signal.aborted;
+          if (!streamError && !aborted && !(sawDone || sawFinish || sawToolCall)) {
+            streamError = new Error('upstream stream ended before completion (no finish_reason / [DONE])');
+            log('stream ended without a completion signal, reporting as failure');
           }
           // 上游在流中途断了（连接被掐 / 网络故障）**不是成功**：客户端的回答
           // 已被截断，账本要如实记一笔失败，否则「回答为什么少了一半」在控制台上
@@ -5820,7 +5953,7 @@ async function handleRequest(req, res) {
           //
           // 客户端自己断开（用户点了停止 / 关了页面）不是失败的另一种：请求已经
           // 服务过了，照旧记成功。用 ac.signal.aborted 区分这两者。
-          if (streamError && !ac.signal.aborted) {
+          if (streamError && !aborted) {
             recordRequest({
               model,
               stream: true,
@@ -5851,7 +5984,11 @@ async function handleRequest(req, res) {
               try {
                 res.write(`data: ${JSON.stringify({
                   error: {
-                    message: `workbuddy-bridge: upstream stream interrupted before completion: ${streamError.message}`,
+                    // 已经自带 "upstream stream …" 前缀的消息（干净半关那条）原样用，
+                    // 免得写成 "interrupted …: upstream stream ended …" 这种叠词
+                    message: /^upstream stream/i.test(streamError.message)
+                      ? `workbuddy-bridge: ${streamError.message}`
+                      : `workbuddy-bridge: upstream stream interrupted before completion: ${streamError.message}`,
                     type: 'upstream_error',
                   },
                 })}\n\n`);

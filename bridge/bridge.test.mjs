@@ -621,6 +621,56 @@ test('/v1/models：每模型给出**实测过**的 reasoning_efforts 档位（�
   } finally { await bridge.stop(); upstream.close(); }
 });
 
+test('目录：上游 401 时必须刷新令牌后重试（不能把目录缩成 2-3 个精选模型）', { timeout: 90_000 }, async () => {
+  /*
+   * 凭据过期时目录端点回 401。旧实现把 401 当成「这个区域没有这个端点」跳过，
+   * 于是一条上游模型都拿不到，FEATURED 补出 2-3 个精选后照样写进 5 分钟缓存 ——
+   * 用户看到"模型只剩几个"，得等 TTL 过期才恢复。聊天路径早就会 refresh+retry，
+   * 目录这条路必须一致。
+   */
+  let refreshed = 0;
+  const upstream = createServer((req, res) => {
+    const path = new URL(req.url, 'http://127.0.0.1').pathname;
+    if (path === '/v2/plugin/auth/token/refresh') {
+      refreshed += 1;
+      res.writeHead(200, { 'content-type': 'application/json' });
+      return res.end(JSON.stringify({ code: 0, data: { accessToken: 'fresh-token', refreshToken: 'rotated', expiresIn: 3600, refreshExpiresIn: 86400 } }));
+    }
+    if (path === '/v2/enterprises/personal/models') {
+      const tokenOk = /fresh-token/.test(String(req.headers.authorization || ''));
+      if (!tokenOk) {
+        res.writeHead(401, { 'content-type': 'application/json' });
+        return res.end(JSON.stringify({ code: 401, msg: 'token expired' }));
+      }
+      res.writeHead(200, { 'content-type': 'application/json' });
+      return res.end(JSON.stringify({
+        code: 0,
+        data: { models: [{ id: 'fresh-model', maxInputTokens: 128000, maxOutputTokens: 4096 }] },
+      }));
+    }
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ code: 0, data: { models: [] } }));
+  });
+  await new Promise((r) => upstream.listen(0, '127.0.0.1', r));
+
+  const bridge = await startBridge({
+    CODEBUDDY_ENDPOINT: `http://127.0.0.1:${upstream.address().port}`,
+    WORKBUDDY_TRANSPORT_RETRY_MS: '0',
+  }, { auth: READABLE_FAKE_AUTH });
+  try {
+    const res = await fetch(`${bridge.baseUrl}/v1/models?all=1&refresh=1`, { headers: auth, signal: AbortSignal.timeout(20_000) });
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.ok(refreshed >= 1, '401 之后必须尝试刷新令牌');
+    assert.ok((body.data || []).some((m) => m.id === 'fresh-model'),
+      `刷新令牌后必须拿到上游目录，而不是只剩精选模型。实际：${JSON.stringify((body.data || []).map((m) => m.id))}`);
+  } finally {
+    await bridge.stop();
+    await new Promise((r) => upstream.close(r));
+    rmSync(bridge.dir, { recursive: true, force: true });
+  }
+});
+
 test('桥：目录非空时拒绝未知模型，且不打上游（D3）', { timeout: 90_000 }, async () => {
   // 起一个**打桩上游**：它按上游的目录形状回模型清单，并记录 chat 有没有被调过。
   // 为什么必须打桩、不能沿用 example.invalid：预校验只在「目录已知」时生效，
@@ -2642,6 +2692,58 @@ test('桥：流中途断掉时必须告诉客户端（不能只记一笔账就�
   }
 });
 
+test('桥：流式遇到「有内容但干净半关」也必须报错（不能只修非流式）', { timeout: 60_000 }, async () => {
+  /*
+   * 与上一条（res.destroy 硬断）不同的失败形态：上游**正常收尾**，但既没有
+   * finish_reason 也没有 [DONE]（代理超时后正常关闭、chunked 结束、网关漏发）。
+   *
+   * 旧实现只跟踪 `usage`，于是这条路径记 ok:true 且一个错误信号都不发；
+   * dsh 的适配器看到干净 EOF + 有内容，判成 `stop` —— 用户看到半句话就停。
+   * 非流式路径早就用 `completed === false` 修过，流式才是真实流量。
+   */
+  const srv = createServer((req, res) => {
+    const path = new URL(req.url, 'http://127.0.0.1').pathname;
+    if (path !== '/v2/chat/completions') {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      return res.end(JSON.stringify({ code: 0, data: { models: [] } }));
+    }
+    res.writeHead(200, { 'content-type': 'text/event-stream' });
+    res.write('data: {"id":"c1","model":"m","choices":[{"delta":{"content":"说到一半"}}]}\n\n');
+    res.end(); // 干净半关：没有 finish_reason / usage / [DONE]
+  });
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+
+  const bridge = await startBridge({
+    CODEBUDDY_ENDPOINT: `http://127.0.0.1:${srv.address().port}`,
+    WORKBUDDY_SKIP_MODEL_PREFLIGHT: '1',
+    WORKBUDDY_TRANSPORT_RETRY_MS: '0',
+  }, { auth: READABLE_FAKE_AUTH });
+  try {
+    const res = await fetch(`${bridge.baseUrl}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { ...auth, 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'stub-model', messages: [{ role: 'user', content: 'hi' }], stream: true }),
+      signal: AbortSignal.timeout(30_000),
+    });
+    assert.equal(res.status, 200, '已经答应过是事件流，只能 200 + SSE');
+    const text = await res.text();
+    assert.match(text, /说到一半/, '已经收到的内容不该被丢掉');
+    assert.match(text, /"error"/, '干净半关也必须补 error 帧，客户端才知道被截断');
+    assert.match(text, /before completion/i, '错误信息要指出"流没跑完"');
+    assert.match(text, /\[DONE\]/, 'error 之后要有 [DONE]，客户端才好干净地结束解析');
+
+    // 账本同样要记失败：否则"回答为什么少了一半"在控制台上不可见
+    const ledger = await (await fetch(`${bridge.baseUrl}/v1/requests?limit=5`, { headers: auth, signal: AbortSignal.timeout(8000) })).json();
+    const last = (ledger.requests || [])[0];
+    assert.equal(last?.ok, false, `流式截断必须记 ok:false。实际账本：${JSON.stringify(last)}`);
+    assert.match(String(last?.error), /before completion/i);
+  } finally {
+    await bridge.stop();
+    await new Promise((r) => srv.close(r));
+    rmSync(bridge.dir, { recursive: true, force: true });
+  }
+});
+
 test('桥：非流式聚合遇到「有内容但没跑完」必须回 502，不能报成完整回答', { timeout: 60_000 }, async () => {
   const srv = createServer((req, res) => {
     const path = new URL(req.url, 'http://127.0.0.1').pathname;
@@ -2730,5 +2832,97 @@ test('桥：max_completion_tokens 必须翻译成 max_tokens（不能静默丢�
     await bridge.stop();
     await new Promise((r) => srv.close(r));
     rmSync(bridge.dir, { recursive: true, force: true });
+  }
+});
+
+
+test('桥：思考档位按实测表校验 —— 表外值剥掉、表内值保留', { timeout: 60_000 }, async () => {
+  // deepseek-v4.1-flash 实测 6 档（不含 off，见 REASONING_EFFORTS_BY_MODEL）。
+  // 客户端（老面板写死三档 / curl）发 off 会被上游确定性 400，桥应在出站前剥掉。
+  const seen = [];
+  const srv = createServer((req, res) => {
+    const chunks = [];
+    req.on('data', (c) => chunks.push(c));
+    req.on('end', () => {
+      const path = new URL(req.url, 'http://127.0.0.1').pathname;
+      if (path !== '/v2/chat/completions') {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        return res.end(JSON.stringify({ code: 0, data: { models: [] } }));
+      }
+      try { seen.push(JSON.parse(Buffer.concat(chunks).toString('utf8'))); } catch { seen.push(null); }
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      res.end('data: {"id":"c1","model":"m","choices":[{"delta":{"content":"ok"}}]}\n\ndata: {"id":"c1","model":"m","choices":[{"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n');
+    });
+  });
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+  const bridge = await startBridge({
+    CODEBUDDY_ENDPOINT: `http://127.0.0.1:${srv.address().port}`,
+    WORKBUDDY_SKIP_MODEL_PREFLIGHT: '1',
+    WORKBUDDY_TRANSPORT_RETRY_MS: '0',
+  }, { auth: READABLE_FAKE_AUTH });
+  try {
+    const call = (effort) => fetch(`${bridge.baseUrl}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { ...auth, 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'deepseek-v4.1-flash', messages: [{ role: 'user', content: 'hi' }], reasoning_effort: effort }),
+      signal: AbortSignal.timeout(30_000),
+    }).then((r) => r.text());
+
+    await call('off');
+    assert.equal('reasoning_effort' in (seen.at(-1) || {}), false,
+      '表外档位（off）必须在出站前剥掉，否则必然吃确定性 400');
+
+    await call('high');
+    assert.equal(seen.at(-1)?.reasoning_effort, 'high', '表内档位必须原样保留');
+  } finally {
+    await bridge.stop();
+    await new Promise((r) => srv.close(r));
+    rmSync(bridge.dir, { recursive: true, force: true });
+  }
+});
+
+test('桥：chat 错误体必须是 OpenAI 形状，且上游 401 不能被误认成本地令牌错', { timeout: 90_000 }, async () => {
+  const stub = await startStubUpstream(['stub-model'], {
+    chatRaw: JSON.stringify({ code: 11133, msg: 'the request parameters were rejected by the model provider', extError: { code: 'model_param_invalid' } }),
+    chatStatus: 400,
+    chatType: 'application/json',
+  });
+  const bridge = await startBridge({ CODEBUDDY_ENDPOINT: stub.base, WORKBUDDY_SKIP_MODEL_PREFLIGHT: '1' }, { auth: READABLE_FAKE_AUTH });
+  try {
+    const res = await fetch(`${bridge.baseUrl}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { ...auth, 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'stub-model', messages: [{ role: 'user', content: 'hi' }] }),
+      signal: AbortSignal.timeout(30_000),
+    });
+    assert.equal(res.status, 400);
+    const body = await res.json();
+    assert.ok(body.error?.message, '必须是 {error:{message}} 形状（客户端按 OpenAI 规范读）');
+    assert.match(body.error.message, /rejected by the model provider/i);
+    assert.equal(body.error.code, 'model_param_invalid', 'extError.code 要透出来，便于给出"换参数"而不是"重试"');
+    assert.equal(body.error.type, 'upstream_error');
+  } finally {
+    await bridge.stop();
+    try { await stub.close(); } catch { /* 忽略 */ }
+    rmSync(bridge.dir, { recursive: true, force: true });
+  }
+
+  const stub401 = await startStubUpstream(['stub-model'], { chatRaw: '<html>401</html>', chatStatus: 401, chatType: 'text/html' });
+  const bridge2 = await startBridge({ CODEBUDDY_ENDPOINT: stub401.base, WORKBUDDY_SKIP_MODEL_PREFLIGHT: '1' }, { auth: READABLE_FAKE_AUTH });
+  try {
+    const res = await fetch(`${bridge2.baseUrl}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { ...auth, 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'stub-model', messages: [{ role: 'user', content: 'hi' }] }),
+      signal: AbortSignal.timeout(60_000),
+    });
+    assert.equal(res.status, 502, '上游 401 不能原样回 401（那会被当成本地令牌错误）');
+    const body = await res.json();
+    assert.equal(body.error?.type, 'upstream_auth_error');
+    assert.match(body.error?.message || '', /re-?login/i);
+  } finally {
+    await bridge2.stop();
+    try { await stub401.close(); } catch { /* 忽略 */ }
+    rmSync(bridge2.dir, { recursive: true, force: true });
   }
 });

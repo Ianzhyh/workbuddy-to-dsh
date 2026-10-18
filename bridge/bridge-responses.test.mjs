@@ -194,6 +194,11 @@ const upstream = createServer((req, res) => {
       res.write(sse({ id: 'c1', model: 'm', choices: [{ index: 0, delta: { content: '——这句话说到一半' } }] }));
       setTimeout(() => res.destroy(), 20);
       return;   // 不走下面的正常收尾
+    } else if (scenario.kind === 'halfClose') {
+      // **干净半关**：上游正常 end()，但没有 finish_reason / usage / [DONE]
+      res.write(sse({ id: 'c1', model: 'm', choices: [{ index: 0, delta: { content: '说到一半' } }] }));
+      res.end();
+      return;   // 不走下面的正常收尾
     } else if (scenario.kind === 'undeclaredToolSearch') {
       /*
        * 模型调了 `tool_search`，但**当前请求没有声明**该工具
@@ -1346,6 +1351,29 @@ test('流中途断开：必须发 response.failed，不能发 completed（否则
   // 已经收到的半截内容仍要带出去（便于排查，但不代表成功）
   assert.match(JSON.stringify(failed.data.response.output), /说到一半/,
     '已收到的半截内容应保留在 output 里');
+});
+
+test('干净半关：同样必须发 response.failed（不能只认"被掐断"）', async () => {
+  /*
+   * 与上一条的区别：上游是**正常 end()**，只是没给 finish_reason / [DONE]。
+   * 旧实现只在 catch 里设 streamError，这条会一路发 response.completed。
+   */
+  await waitReady();
+  scenario = { kind: 'halfClose' };
+  const { status, text } = await post({
+    model: 'gpt-5.1-codex',
+    stream: true,
+    input: [{ type: 'message', role: 'user', content: 'do the thing' }],
+  });
+  assert.equal(status, 200);
+  const events = parseSse(text);
+  const kinds = events.map((e) => e.event);
+  assert.ok(!kinds.includes('response.completed'),
+    `干净半关绝不能发 response.completed。实际事件：${kinds.join(', ')}`);
+  const failed = events.find((e) => e.event === 'response.failed');
+  assert.ok(failed, `缺 response.failed。实际事件：${kinds.join(', ')}`);
+  assert.match(String(failed.data?.response?.error?.message), /before completion|interrupted/i);
+  assert.match(JSON.stringify(failed.data.response.output), /说到一半/);
 });
 
 /*

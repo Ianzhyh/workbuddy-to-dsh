@@ -76,6 +76,14 @@ const upstream = createServer((req, res) => {
       return;
     }
 
+    if (scenario.kind === 'halfClose') {
+      // **干净半关**：上游正常 end()，但没有 finish_reason / usage / [DONE]
+      res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+      res.write(sse(dText('说到一半')));
+      res.end();
+      return;
+    }
+
     if (scenario.kind === 'interleavedTools') {
       /*
        * OpenAI **并行工具调用的常见形状**：先把所有调用的 name/id 发完，
@@ -343,6 +351,24 @@ test('流中途断开：必须发 event: error 且不发 message_stop（不能�
 
   // 半截内容仍要发出去（便于排查），但块必须已收尾
   assert.match(JSON.stringify(events.filter((e) => e.event === 'content_block_delta')), /说到一半/);
+  assertBlockProtocol(events);
+});
+
+test('干净半关：同样必须发 event: error 且不发 message_stop（不能只认"被掐断"）', async () => {
+  /*
+   * 与上一条不同：上游是**正常 end()**，只是没给 finish_reason / [DONE]。
+   * 旧实现只把 `catch` 里的异常当失败，这条会一路走到 end_turn + message_stop。
+   */
+  await waitReady();
+  scenario = { kind: 'halfClose' };
+  const res = await post({ model: 'm', max_tokens: 64, stream: true, messages: [{ role: 'user', content: 'do the thing' }] });
+  assert.equal(res.status, 200);
+  const events = parseSse(await res.text());
+  const kinds = events.map((e) => e.event);
+  assert.ok(!kinds.includes('message_stop'), `干净半关绝不能发 message_stop。实际：${kinds.join(', ')}`);
+  const err = events.find((e) => e.event === 'error');
+  assert.ok(err, `缺 event: error。实际：${kinds.join(', ')}`);
+  assert.match(String(err.data?.error?.message), /before completion|interrupted/i);
   assertBlockProtocol(events);
 });
 
