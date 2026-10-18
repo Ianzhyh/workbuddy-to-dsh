@@ -16,7 +16,7 @@ import { WorkBuddyAdapter, mapUsage } from '../lib/adapter.mjs';
 import { BridgeClient } from '../lib/bridge.mjs';
 
 /** 起一个假桥：/health、/v1/models、/v1/chat/completions（SSE 回放）。 */
-async function startStub({ sseFrames = [], status = 200, errorBody = null, capture = null, catalog = null } = {}) {
+async function startStub({ sseFrames = [], status = 200, errorBody = null, capture = null, catalog = null, hang = false } = {}) {
   const server = createServer(async (req, res) => {
     const url = new URL(req.url, 'http://127.0.0.1');
     if (url.pathname === '/health') {
@@ -55,6 +55,11 @@ async function startStub({ sseFrames = [], status = 200, errorBody = null, captu
         res.write(`data: ${typeof frame === 'string' ? frame : JSON.stringify(frame)}\n\n`);
         await new Promise((r) => setTimeout(r, 1));
       }
+      if (hang) {
+        // 「卡住」：连接不断、也不再有数据。1 秒后自己收掉，避免 stub.close 挂住。
+        setTimeout(() => { try { res.destroy(); } catch { /* 忽略 */ } }, 1000);
+        return;
+      }
       res.write('data: [DONE]\n\n');
       return res.end();
     }
@@ -88,9 +93,18 @@ test('listModels / resolveModel 使用桥目录的元数据', async () => {
     const adapter = makeAdapter(stub.baseUrl);
     const models = await adapter.listModels();
     assert.equal(models.length, 2);
-    assert.deepEqual(models[0], { provider: 'workbuddy', id: 'stub-model', name: 'Stub Model', inputModalities: ['text', 'image'] });
+    // description 是选择器里唯一能看出的容量/价格/能力信息（dsh 只展示 name 与 description）
+    assert.deepEqual(models[0], {
+      provider: 'workbuddy',
+      id: 'stub-model',
+      name: 'Stub Model',
+      description: '上下文 128k · 输出 8192 · 倍率 0.5 · 图片',
+      inputModalities: ['text', 'image'],
+    });
+    assert.equal(models[1].description, '上下文 32k · 输出 4096 · 免费');
     const resolved = await adapter.resolveModel('workbuddy', 'stub-model');
     assert.equal(resolved.context.contextWindow, 128000);
+    assert.equal(resolved.description, '上下文 128k · 输出 8192 · 倍率 0.5 · 图片');
     assert.equal(resolved.defaultMaxTokens, 8192);
     assert.equal(adapter.providerInfo('workbuddy').id, 'workbuddy');
     assert.equal(adapter.providerRetryPolicy().mode, 'normal');
@@ -465,6 +479,34 @@ test('上游错误：不抛异常，以 error finish 收尾并带上状态码', 
   } finally { await stub.close(); }
 });
 
+test('流内 error 帧：断流不能被伪装成正常结束（桥补发的 upstream_error）', async () => {
+  /*
+   * 桥在「上游流中途断了」时会补一帧 `data: {"error":{…}}` 再 `[DONE]`
+   * （bridge 的 chat 流式路径，注释里明确写着"客户端（含本项目自己的适配器）认它"）。
+   * 适配器原先只认 `choices`，这一帧被静默忽略：既然已经吐过内容，
+   * `mapFinishReason(undefined, …)` 就返回 `stop` ——
+   * 用户看到半截回答、dsh 认为这一轮成功、不会重试，账本也只有桥那边记了失败。
+   */
+  const stub = await startStub({
+    sseFrames: [
+      delta({ role: 'assistant', content: '' }),
+      delta({ content: '半截' }),
+      { error: { message: 'workbuddy-bridge: upstream stream interrupted before completion: boom', type: 'upstream_error' } },
+    ],
+  });
+  try {
+    const adapter = makeAdapter(stub.baseUrl);
+    const out = [];
+    for await (const chunk of adapter.stream({ provider: 'workbuddy', model: 'stub-model', messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }] })) out.push(chunk);
+    const finish = out.at(-1);
+    assert.equal(finish.type, 'finish');
+    assert.equal(finish.reason.kind, 'error');
+    assert.match(finish.reason.failure.message, /boom/);
+    // 已吐出的内容仍要收尾（block-end），不能因为报错把半截内容丢掉
+    assert.ok(out.some((c) => c.type === 'block-end' && c.block.text === '半截'));
+  } finally { await stub.close(); }
+});
+
 test('空回复：finish 变成 EMPTY_RESPONSE 错误而不是静默 stop', async () => {
   /**
    * 这段只回一帧就结束，在 `node --test` 并行跑多个测试文件、CPU 抢得厉害时，
@@ -669,6 +711,30 @@ test('消费方提前 break：上游连接必须被立刻收掉（不留幽灵�
   } finally {
     await new Promise((r) => server.close(r));
   }
+});
+
+test('空闲看门狗：上游卡住不吐字时按 TIMEOUT 收尾（默认关闭，显式开）', async () => {
+  /*
+   * 上游"连接还在、就是不吐字"时旧实现会永远等下去：dsh 一直转圈、
+   * 用户只能手动取消，桥那边的并发槽位也被占着。
+   * 看门狗只看「距上一块数据多久」，不看总时长 —— 长回答不会被误杀。
+   * 默认 0（关），与「不加默认上游超时」的红线一致。
+   */
+  const stub = await startStub({ sseFrames: [delta({ content: '半' })], hang: true });
+  try {
+    const adapter = makeAdapter(stub.baseUrl);
+    adapter.streamIdleTimeoutMs = 120;
+    const started = Date.now();
+    const out = [];
+    for await (const chunk of adapter.stream({ provider: 'workbuddy', model: 'stub-model', messages: [] })) out.push(chunk);
+    const finish = out.at(-1);
+    assert.equal(finish.type, 'finish');
+    assert.equal(finish.reason.kind, 'error');
+    assert.equal(finish.reason.failure.code, 'TIMEOUT', '卡住必须归为 TIMEOUT（可重试），不能挂死');
+    assert.ok(Date.now() - started < 2000, '配置 120ms 后应当立刻收尾');
+    // 不配置 = 关闭（默认行为不变）
+    assert.equal(makeAdapter(stub.baseUrl).streamIdleTimeoutMs, 0);
+  } finally { await stub.close(); }
 });
 
 test('模型不在白名单：直接以 INVALID_REQUEST 收尾，不打上游', async () => {

@@ -22,6 +22,36 @@ export function isChatModel(id) {
   return !NON_CHAT_PATTERNS.some((re) => re.test(String(id)));
 }
 
+/** 目录里的数字 → 短文本：1_000_000 → 1M，128_000 → 128k，8192 → 8192。 */
+function shortCount(n) {
+  const value = Number(n);
+  if (!Number.isFinite(value) || value <= 0) return '';
+  if (value >= 1_000_000) return `${Math.round(value / 100_000) / 10}M`;
+  if (value >= 10_000) return `${Math.round(value / 1000)}k`;
+  return String(value);
+}
+
+/**
+ * 模型的一句话简介，给 dsh 的模型选择器用。
+ *
+ * `LlmModelInfo.description` 是契约允许的字段，但 dsh 的**选择器不展示目录里的
+ * 其它元数据**（context / maxTokens / credits 只存在于 resolved 形态）。不填这段
+ * 文字，30 个模型在选择器里就只剩名字 —— 面板里能看到的上下文、倍率、多模态、
+ * 推理能力全都看不见。这里把目录已有的数字拼成一句，两处口径天然同源。
+ */
+export function describeModel(model) {
+  const bits = [];
+  const context = shortCount(model?.context_window || model?.contextWindow);
+  if (context) bits.push(`上下文 ${context}`);
+  const output = shortCount(model?.max_output_tokens || model?.maxTokens);
+  if (output) bits.push(`输出 ${output}`);
+  if (model?.free === true || model?.credits === 0) bits.push('免费');
+  else if (typeof model?.credits === 'number' && model.credits > 0) bits.push(`倍率 ${model.credits}`);
+  if (model?.supports_images === true || model?.images === true) bits.push('图片');
+  if (model?.supports_reasoning === true || model?.supportsReasoning === true || model?.reasoning === true) bits.push('推理');
+  return bits.join(' · ');
+}
+
 /**
  * 桥的一个模型对象翻译成 dsh 适配器的模型元数据。
  *
@@ -48,6 +78,7 @@ export function toAdapterModel(model) {
   return {
     id,
     name: String(model.name || id),
+    ...(describeModel(model) ? { description: describeModel(model) } : {}),
     ...(contextWindow ? { contextWindow } : {}),
     ...(maxTokens ? { maxTokens } : {}),
     inputModalities: images ? ['text', 'image'] : ['text'],
@@ -62,6 +93,14 @@ export function toAdapterModel(model) {
  * @param {{ allow?: string[], deny?: string[] }} [filter]
  */
 export function toAdapterModels(catalog, filter = {}) {
+  /*
+   * `hideAll` 与 `allow: []` 是**两种不同的意图**：
+   *   - `allow: []`（未设置）= 没有白名单 → 全显示（旧语义，保留）；
+   *   - `hideAll: true`   = 用户在面板点了"全不选" → 一个都不显示。
+   * 旧实现只有 allow，空数组被当成"不过滤"，于是面板上"全不选 → 保存"后
+   * dsh 里反而**全部还在**（提示语却写着"将不显示"）。
+   */
+  if (filter?.hideAll === true) return [];
   const allow = new Set((filter.allow || []).map(String));
   const deny = new Set((filter.deny || []).map(String));
   const seen = new Set();

@@ -60,15 +60,31 @@ test('setFilter：allow 清单决定 listModels 的可见模型（空 = 全显�
   assert.equal(models.length, 3, 'allow 为空应恢复"全部显示"');
 });
 
-test('setFilter：不覆盖调用方已设的 deny（与配置的 modelDeny 叠加）', async () => {
+test('setFilter：hideAll 表示"全不选"，与"未设置"（全显示）必须是两种状态', async () => {
+  const adapter = makeAdapter();
+  // "全不选"：一个都不显示 —— 旧实现把它和"没设置过"混为一谈，
+  // 于是面板提示"将不显示模型"，dsh 里反而全部还在。
+  adapter.setFilter({ allow: [], hideAll: true });
+  assert.equal((await adapter.listModels()).length, 0, 'hideAll 必须真的清空选择器');
+  // "恢复全部"：回到构造时的配置过滤器
+  adapter.resetFilter();
+  assert.equal((await adapter.listModels()).length, 3, 'resetFilter 必须恢复全显示');
+});
+
+test('setFilter：不覆盖配置里的 deny（面板只决定"显示哪些"）', async () => {
   const adapter = makeAdapter({ filter: { deny: ['model-c'] } });
   adapter.setFilter({ allow: ['model-a', 'model-c'] });
   const models = await adapter.listModels();
-  // setFilter 整体替换 filter 对象 —— 本实现里 deny 被 allow 覆盖场景：
-  // 用户面板勾选 model-c 说明他**要**它，deny 是更早的配置意图。此处行为是
-  // "面板勾选优先"。这里钉住的就是这个优先级，防止将来悄悄改成"叠加"。
-  assert.deepEqual(models.map((m) => m.id), ['model-a', 'model-c'],
-    '面板勾选（setFilter）应优先于配置文件里的 modelDeny');
+  /*
+   * 旧实现整体替换 filter：面板保存一次显示设置，配置里的 modelDeny 就被清空，
+   * 被排除的模型重新出现，而界面上没有任何提示。现在 deny 恒久生效 ——
+   * 面板勾了被排除的模型也不会出现（面板会把这类模型标成「配置排除」）。
+   */
+  assert.deepEqual(models.map((m) => m.id), ['model-a'],
+    '配置的 modelDeny 不能被一次面板保存悄悄清掉（model-c 仍应被排除）');
+  // 「恢复全部」= 回到配置意图（allow 清空、deny 保留）
+  adapter.resetFilter();
+  assert.deepEqual((await adapter.listModels()).map((m) => m.id), ['model-a', 'model-b']);
 });
 
 // ── 请求默认参数 ──────────────────────────────────────────────────────
@@ -117,6 +133,48 @@ test('defaults：调用方显式给的参数优先于默认值（temperature=0 �
   const payload = getPayload();
   assert.equal(payload.temperature, 0, '显式 temperature=0 是合法值，绝不能被默认 0.3 覆盖');
   assert.equal(payload.max_tokens, 64, '显式 maxTokens 应优先于默认值');
+});
+
+test('每模型默认参数：模型自己的默认 > 全局默认，显式调用仍最高', async () => {
+  /*
+   * 全局默认只能有一份，而用户对不同模型的期待不同（写代码要低温、聊天要高温）。
+   * 旧实现只有全局 defaults，模型之间无法区分；现在按 model id 记一份，
+   * 优先级：调用方显式 > 该模型默认 > 全局默认 > 不发。
+   */
+  const adapter = makeAdapter({
+    defaults: { maxTokens: 512, temperature: 0.9, reasoningEffort: 'high' },
+  });
+  adapter.setModelParams({
+    'model-a': { maxTokens: 256, temperature: 0, reasoningEffort: 'low' },
+  });
+  const getPayload = capturePayload(adapter);
+
+  // 1) 调用方什么都没给 → 模型自己的默认（temperature=0 必须保留，不能被 0.9 覆盖）
+  for await (const c of adapter.stream({ model: 'model-a', messages: [{ role: 'user', content: 'hi' }] })) { void c; break; }
+  let payload = getPayload();
+  assert.equal(payload.temperature, 0, '每模型的 temperature=0 是合法值，必须原样下发');
+  assert.equal(payload.max_tokens, 256);
+  assert.equal(payload.reasoning_effort, 'low');
+
+  // 2) 调用方显式给 → 显式最高
+  for await (const c of adapter.stream({
+    model: 'model-a',
+    messages: [{ role: 'user', content: 'hi' }],
+    temperature: 1.1,
+    maxTokens: 64,
+    reasoningEffort: 'max',
+  })) { void c; break; }
+  payload = getPayload();
+  assert.equal(payload.temperature, 1.1);
+  assert.equal(payload.max_tokens, 64);
+  assert.equal(payload.reasoning_effort, 'max');
+
+  // 3) 没有该模型默认 → 回落到全局
+  for await (const c of adapter.stream({ model: 'model-b', messages: [{ role: 'user', content: 'hi' }] })) { void c; break; }
+  payload = getPayload();
+  assert.equal(payload.temperature, 0.9);
+  assert.equal(payload.max_tokens, 512);
+  assert.equal(payload.reasoning_effort, 'high');
 });
 
 test('defaults：没配置默认值时，payload 不含这些字段（不猜参数）', async () => {

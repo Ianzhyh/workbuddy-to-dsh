@@ -120,6 +120,13 @@ export function createTools(deps) {
         if (m.max_output_tokens) bits.push(`输出上限 ${fmtTokens(m.max_output_tokens)}`);
         if (typeof m.credits === 'number') bits.push(m.credits === 0 ? '免费' : `倍率 ${m.credits}`);
         if (m.supports_images) bits.push('支持图片');
+        // 推理能力与实测档位：面板与 CSV 都有，工具原先没有 —— 同一份目录两处口径
+        if (m.supports_reasoning) {
+          const efforts = Array.isArray(m.reasoning_efforts) ? m.reasoning_efforts : null;
+          bits.push(efforts === null
+            ? '推理（档位未实测）'
+            : (efforts.length ? `推理（${efforts.length} 档：${efforts.join('/')}）` : '推理（网关暂未接）'));
+        }
         // 上游的 vendor 是单字母内部代号（f/e），对用户没有意义，不显示
         lines.push(`- ${m.id}（${m.name || m.id}）：${bits.join('，')}`);
       }

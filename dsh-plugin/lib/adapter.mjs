@@ -43,7 +43,6 @@ export const EFFORT_NAMES = {
  */
 export const FALLBACK_EFFORTS = ['low', 'medium', 'high'];
 
-/** dsh 侧的错误码取值（与内置适配器同一套词汇）。 */
 export const CODE = {
   AUTH: 'AUTH',
   RATE_LIMIT: 'RATE_LIMIT',
@@ -57,9 +56,22 @@ export const CODE = {
   CONTEXT: 'CONTEXT_WINDOW_EXCEEDED',
 };
 
+/** 失败时给用户一句"下一步做什么"（dsh 只展示 message，错误码本身不解释）。 */
+export const ERROR_HINTS = {
+  [CODE.AUTH]: '登录态可能已失效：在 WorkBuddy 桌面端重新登录后重试。',
+  [CODE.QUOTA]: '积分不足：签到可领取每日积分，或换一个免费模型。',
+  [CODE.RATE_LIMIT]: '触发上游频率限制：稍等再试，或换一个模型。',
+  [CODE.CONTEXT]: '上下文超出该模型上限：压缩对话，或换上下文更大的模型。',
+  [CODE.INVALID]: '上游拒绝了请求参数（常见：思考强度 / 输出上限不被该模型接受）——换个档位或恢复默认参数。',
+  [CODE.TRANSPORT]: '本地桥连接异常：运行 /workbuddy restart 或确认桥进程还活着。',
+};
+
 /** 把上游错误文本 / HTTP 状态分类成 dsh 错误码。 */
 export function classifyError(message, status) {
   const text = String(message || '');
+  // 桥把"上游登录态失效"包成 502（本地令牌没错，错的是上游会话）——
+  // 按 AUTH 归类，避免 dsh 把它当 5xx 重试两次再报同一个错。
+  if (/upstream login expired|re-?login in the workbuddy/i.test(text)) return CODE.AUTH;
   if (status === 401 || status === 403 || /\b(?:401|403)\b/.test(text)) return CODE.AUTH;
   if (/quota|insufficient|balance|积分|余额/i.test(text)) return CODE.QUOTA;
   if (status === 429 || /\b429\b|rate.?limit|too many requests/i.test(text)) return CODE.RATE_LIMIT;
@@ -67,6 +79,9 @@ export function classifyError(message, status) {
   if (status === 400 || status === 422 || /\b(?:400|422)\b|invalid.?request/i.test(text)) return CODE.INVALID;
   if (status >= 500 || /\b5\d\d\b/.test(text)) return CODE.SERVER;
   if (/timeout|timed?\s*out|ETIMEDOUT/i.test(text)) return CODE.TIMEOUT;
+  // 「流中途断了」是传输层故障（可重试），不能落到 PROVIDER_ERROR：
+  // 桥补发的错误帧消息形如 "upstream stream interrupted before completion: …"。
+  if (/stream (?:interrupted|ended before)|interrupted before completion/i.test(text)) return CODE.TRANSPORT;
   if (/fetch failed|ECONN|socket|network|terminated|prematurely/i.test(text)) return CODE.TRANSPORT;
   return 'PROVIDER_ERROR';
 }
@@ -359,6 +374,18 @@ class StreamTranslator {
     this.usage = null;
     this.finishReason = undefined;
     this.sawToolCall = false;
+    /**
+     * 流内错误帧（`data: {"error":{…}}`）。
+     *
+     * OpenAI 兼容网关表达「这一轮出错」的方式就是这样发一帧 `error` 再 `[DONE]`；
+     * 本项目自己的桥在「上游流中途断了」时也补发同一形状（见 bridge 的
+     * `upstream stream interrupted before completion`）。
+     *
+     * 这一帧**没有 `choices`**。原实现的 `pushLine` 只认 `choices`，于是它被
+     * 静默忽略；只要此前吐过内容，`finish()` 里的 `mapFinishReason(undefined, …)`
+     * 就返回 `stop` —— 用户看到半截回答、dsh 认为成功、不会重试。
+     */
+    this.error = null;
   }
 
   get sawContent() {
@@ -375,6 +402,26 @@ class StreamTranslator {
     let frame;
     try { frame = JSON.parse(body); } catch { return out; }
     if (frame.usage) this.usage = frame.usage;
+    /*
+     * 错误帧必须**先于 choices 判断**接住：OpenAI 兼容网关与本地桥都用
+     * `{"error":{…}}`（有的还带 `type:"error"`）表达流内失败，而这一帧没有
+     * `choices`。原先直接 `if (!choice) return out` 会把它吞掉，使断流变成
+     * 「正常 stop」（见构造函数里 `this.error` 的说明）。
+     */
+    if (frame.error && typeof frame.error === 'object') {
+      const err = frame.error;
+      const message = (typeof err.message === 'string' && err.message)
+        || (typeof frame.message === 'string' && frame.message)
+        || (typeof err.type === 'string' && err.type)
+        || '上游在流中途报错';
+      const upstreamCode = err.code ?? frame.code;
+      this.error = {
+        message: upstreamCode !== undefined && upstreamCode !== null && String(upstreamCode)
+          ? `${message}（code ${upstreamCode}）`
+          : message,
+      };
+      return out;
+    }
     const choice = frame.choices?.[0];
     if (!choice) return out;
     const delta = choice.delta || {};
@@ -448,6 +495,14 @@ class StreamTranslator {
     }
     const usage = mapUsage(this.usage);
     if (usage) out.push({ type: 'usage', usage });
+    if (this.error) {
+      // 流内错误：已吐出的块照常收尾（上面已补 block-end），但这一轮**不是成功**。
+      out.push({
+        type: 'finish',
+        reason: { kind: 'error', failure: { message: this.error.message, code: classifyError(this.error.message) } },
+      });
+      return out;
+    }
     out.push({ type: 'finish', reason: mapFinishReason(this.finishReason, this.sawToolCall, this.sawContent) });
     return out;
   }
@@ -479,11 +534,36 @@ export class WorkBuddyAdapter {
     this.log = options.log || (() => {});
     /** 对话 TRANSPORT 失败时回调（宿主端用来作废「桥活着」的短 TTL 缓存）。 */
     this.onTransportFailure = options.onTransportFailure || (() => {});
-    this.filter = options.filter || {};
+    this.filter = {
+      allow: Array.isArray(options.filter?.allow) ? options.filter.allow.map(String) : [],
+      deny: Array.isArray(options.filter?.deny) ? options.filter.deny.map(String) : [],
+      hideAll: options.filter?.hideAll === true,
+    };
+    /** 构造时的过滤器：面板点「恢复全部」时回到这份配置意图（含 deny）。 */
+    this.configFilter = {
+      allow: [...this.filter.allow],
+      deny: [...this.filter.deny],
+      hideAll: this.filter.hideAll,
+    };
     this.defaults = options.defaults || {};
+    /**
+     * 每个模型自己的默认参数（`{ [modelId]: { temperature, maxTokens, reasoningEffort } }`）。
+     * 优先级：调用方显式 > 该模型默认 > 全局配置默认 > 不发。
+     */
+    this.modelParams = {};
+    /**
+     * 空闲看门狗（毫秒，0 = 关）。**只看"多久没数据"，不看总时长** ——
+     * 长回答该等多久等多久，这里只抓"上游卡住不吐字"的场景。
+     * 默认关：与项目红线「不加默认上游超时」一致，需要的人显式打开。
+     */
+    this.streamIdleTimeoutMs = Number(options.streamIdleTimeoutMs) > 0
+      ? Number(options.streamIdleTimeoutMs)
+      : 0;
     this.catalogTtlMs = options.catalogTtlMs ?? 60_000;
     /** 目录缓存，避免每次模型选择都打一次桥。 */
     this.catalogCache = { at: 0, models: [] };
+    /** 最近一次目录请求的刷新结果（`staleMs>0` = 刷新失败、退回旧缓存）。 */
+    this.lastRefresh = { refresh: false, staleMs: 0, at: 0 };
     /** 最近一次目录错误的文本，给面板显示。 */
     this.catalogError = '';
   }
@@ -552,6 +632,16 @@ export class WorkBuddyAdapter {
     const payload = await client.models({ all: true, refresh });
     const data = Array.isArray(payload?.data) ? payload.data : [];
     this.catalogCache = { at: Date.now(), models: data };
+    /*
+     * 桥在"强制刷新失败、退回旧缓存"时会带 `staleMs`（缓存有多旧）。
+     * 面板必须能说出"这次刷新没成功、你看到的是 N 分钟前的目录" ——
+     * 旧实现把它丢掉，刷新失败看起来和成功一模一样。
+     */
+    this.lastRefresh = {
+      refresh: refresh === true,
+      staleMs: Number(payload?.staleMs) > 0 ? Number(payload.staleMs) : 0,
+      at: Date.now(),
+    };
     this.catalogError = '';
     return data;
   }
@@ -569,10 +659,37 @@ export class WorkBuddyAdapter {
    * allow 语义是"只显示勾选的"（空 = 全显示），与配置文件里的 modelAllow 一致。
    */
   setFilter(filter) {
+    /*
+     * `deny` **不随面板勾选消失**：它是配置文件（modelDeny）表达的排除意图，
+     * 面板只表达"显示哪些"。旧实现整体替换 filter，于是用户在面板保存一次
+     * 显示设置，配置里的 deny 就被清空 —— 被排除的模型重新出现在选择器里，
+     * 而界面上没有任何地方提示这件事。
+     */
     this.filter = {
-      allow: Array.isArray(filter?.allow) ? filter.allow.map(String) : [],
-      deny: Array.isArray(filter?.deny) ? filter.deny.map(String) : [],
+      allow: Array.isArray(filter?.allow) ? filter.allow.map(String) : this.filter.allow,
+      deny: Array.isArray(filter?.deny) ? filter.deny.map(String) : this.filter.deny,
+      hideAll: filter?.hideAll === true,
     };
+  }
+
+  /** 运行时更新「每模型默认参数」（面板保存后即时生效，无需重建适配器）。 */
+  setModelParams(map) {
+    this.modelParams = map && typeof map === 'object' && !Array.isArray(map) ? map : {};
+  }
+
+  /** 当前生效的每模型默认参数快照。 */
+  modelParamsSnapshot() {
+    return { ...(this.modelParams || {}) };
+  }
+
+  /** 回到构造时的配置过滤器（面板「恢复全部」/ 未设置偏好时使用）。 */
+  resetFilter() {
+    this.filter = { ...this.configFilter, allow: [...this.configFilter.allow], deny: [...this.configFilter.deny] };
+  }
+
+  /** 当前生效的过滤器快照（面板展示"哪些是配置排除的"用）。 */
+  filterSnapshot() {
+    return { ...this.filter, allow: [...this.filter.allow], deny: [...this.filter.deny] };
   }
 
   /** 模型选择器看到的目录。 */
@@ -588,6 +705,9 @@ export class WorkBuddyAdapter {
       provider,
       id: m.id,
       name: m.name,
+      // 选择器里唯一能看到"这个模型多大 / 多贵 / 吃不吃图"的地方：
+      // dsh 的 LlmModelInfo 只带 id/name/description/inputModalities。
+      ...(m.description ? { description: m.description } : {}),
       ...(m.inputModalities ? { inputModalities: m.inputModalities } : {}),
     }));
   }
@@ -622,6 +742,7 @@ export class WorkBuddyAdapter {
       provider,
       id: model,
       name: mapped?.name || model,
+      ...(mapped?.description ? { description: mapped.description } : {}),
       ...(mapped?.contextWindow ? { context: { contextWindow: mapped.contextWindow } } : {}),
       ...(mapped?.maxTokens ? { defaultMaxTokens: mapped.maxTokens } : {}),
       ...(mapped?.inputModalities ? { inputModalities: mapped.inputModalities } : {}),
@@ -654,7 +775,7 @@ export class WorkBuddyAdapter {
       client = await this.ensureReady();
     } catch (error) {
       this.onTransportFailure();
-      yield { type: 'finish', reason: { kind: 'error', failure: { message: `本地桥不可用：${error?.message || error}`, code: CODE.TRANSPORT } } };
+      yield { type: 'finish', reason: { kind: 'error', failure: { message: `本地桥不可用：${error?.message || error} —— ${ERROR_HINTS[CODE.TRANSPORT]}`, code: CODE.TRANSPORT } } };
       return;
     }
 
@@ -671,21 +792,30 @@ export class WorkBuddyAdapter {
       payload = { model, messages: sanitizeWire(messages), stream: true };
       const tools = toWireTools(options);
       if (tools.length) payload.tools = tools;
-      // 参数优先级：调用方显式给的 > 插件配置的默认值 > 不发（上游默认）。
+      // 参数优先级：调用方显式给的 > 该模型自己的默认 > 插件全局默认 > 不发。
       // 刻意不用 ?? 链合并成一层：显式 undefined 与"没配"是同一件事，
       // 但显式 0（temperature=0 是合法值）必须被保留。
+      const perModel = this.modelParams?.[model] && typeof this.modelParams[model] === 'object'
+        ? this.modelParams[model]
+        : {};
       const hasCallerTemp = typeof options.temperature === 'number';
-      const temperature = hasCallerTemp ? options.temperature : this.defaults.temperature;
+      const temperature = hasCallerTemp
+        ? options.temperature
+        : (typeof perModel.temperature === 'number' ? perModel.temperature : this.defaults.temperature);
       if (typeof temperature === 'number') payload.temperature = temperature;
       const callerMax = typeof options.maxTokens === 'number' && options.maxTokens > 0;
-      const maxTokens = callerMax ? options.maxTokens : this.defaults.maxTokens;
+      const maxTokens = callerMax
+        ? options.maxTokens
+        : (Number(perModel.maxTokens) > 0 ? Number(perModel.maxTokens) : this.defaults.maxTokens);
       if (typeof maxTokens === 'number' && maxTokens > 0) payload.max_tokens = maxTokens;
-      // 推理强度：选择器里用户选的（options.reasoningEffort）优先；没选时用
-      // 配置默认。两者都没有就完全不发 —— 上游对未知/无意义参数的容忍度不一，
-      // 不猜（与 max_tokens/temperature 同一原则）。
+      // 推理强度：选择器里用户选的（options.reasoningEffort）优先；其次该模型的
+      // 默认；最后全局默认。都没有就完全不发 —— 上游对未知/无意义参数的容忍度
+      // 不一，不猜（与 max_tokens/temperature 同一原则）。
       const reasoningEffort = typeof options.reasoningEffort === 'string' && options.reasoningEffort
         ? options.reasoningEffort
-        : this.defaults.reasoningEffort;
+        : (typeof perModel.reasoningEffort === 'string' && perModel.reasoningEffort
+          ? perModel.reasoningEffort
+          : this.defaults.reasoningEffort);
       if (reasoningEffort) payload.reasoning_effort = reasoningEffort;
       if (Array.isArray(options.stop) && options.stop.length) payload.stop = options.stop;
     } catch (error) {
@@ -703,7 +833,7 @@ export class WorkBuddyAdapter {
         type: 'finish',
         reason: aborted
           ? { kind: 'aborted', failure: { message: '已取消', code: CODE.ABORTED } }
-          : { kind: 'error', failure: { message: `本地桥连接失败：${error?.message || error}`, code: CODE.TRANSPORT } },
+          : { kind: 'error', failure: { message: `本地桥连接失败：${error?.message || error} —— ${ERROR_HINTS[CODE.TRANSPORT]}`, code: CODE.TRANSPORT } },
       };
       return;
     }
@@ -711,13 +841,25 @@ export class WorkBuddyAdapter {
     if (!res.ok) {
       const text = await res.text().catch(() => '');
       let detail = text;
-      let upstreamCode = null;
+      let codeLabel = null;
       try {
         const parsed = JSON.parse(text);
+        // 桥现在包成 { error: { message, type, code } }（上游原始字段名兜底兼容）
         detail = parsed?.error?.message || parsed?.msg || parsed?.message || text;
-        upstreamCode = typeof parsed?.code === 'number' ? parsed.code : null;
+        const rawCode = parsed?.error?.code ?? parsed?.code;
+        codeLabel = rawCode === undefined || rawCode === null ? null : String(rawCode);
       } catch { /* 非 JSON 错误体，保留原文 */ }
-      const message = `上游 ${res.status}：${String(detail || '').slice(0, 400)}${upstreamCode !== null ? `（code ${upstreamCode}）` : ''}`;
+      const failureCode = signal?.aborted
+        ? CODE.ABORTED
+        : classifyError(`${detail} ${codeLabel || ''}`, res.status);
+      /*
+       * 错误消息要给**下一步动作**，不能只有上游原文：dsh 的界面只展示 message，
+       * 用户看到 "upstream 400: the request parameters were rejected" 时无从下手。
+       */
+      const hint = ERROR_HINTS[failureCode];
+      const message = `上游 ${res.status}：${String(detail || '').slice(0, 400)}`
+        + `${codeLabel ? `（code ${codeLabel}）` : ''}`
+        + `${hint ? ` —— ${hint}` : ''}`;
       this.log(`chat failed model=${model} status=${res.status}`, String(detail || '').slice(0, 200));
       yield {
         type: 'finish',
@@ -725,7 +867,7 @@ export class WorkBuddyAdapter {
           kind: signal?.aborted ? 'aborted' : 'error',
           failure: {
             message,
-            code: signal?.aborted ? CODE.ABORTED : classifyError(detail, res.status),
+            code: failureCode,
             ...(res.status ? { status: res.status } : {}),
           },
         },
@@ -749,8 +891,29 @@ export class WorkBuddyAdapter {
     let reader = null;
     try {
       reader = res.body.getReader();
+      /*
+       * 空闲看门狗：只对"读到下一块"计时。上游卡住（不回也不断）时，
+       * 旧实现会永远等下去 —— dsh 一直转圈，用户只能手动取消。
+       * 默认 0（关），显式配置后才启用，符合「不加默认上游超时」的红线。
+       */
+      const readNext = async () => {
+        if (!this.streamIdleTimeoutMs) return reader.read();
+        let timer = null;
+        const idle = new Promise((_, reject) => {
+          timer = setTimeout(() => {
+            const error = new Error(`上游 ${Math.max(1, Math.round(this.streamIdleTimeoutMs / 1000))} 秒没有返回数据`);
+            error.code = 'IDLE_TIMEOUT';
+            reject(error);
+          }, this.streamIdleTimeoutMs);
+        });
+        try {
+          return await Promise.race([reader.read(), idle]);
+        } finally {
+          if (timer) clearTimeout(timer);
+        }
+      };
       for (;;) {
-        const { done, value } = await reader.read();
+        const { done, value } = await readNext();
         if (done) break;
         tail += decoder.decode(value, { stream: true });
         const lines = tail.split('\n');
@@ -778,12 +941,15 @@ export class WorkBuddyAdapter {
         }
       }
       const aborted = signal?.aborted === true;
+      const idleTimeout = error?.code === 'IDLE_TIMEOUT';
       this.log(`stream interrupted model=${model}`, error?.message || error);
       yield {
         type: 'finish',
         reason: aborted
           ? { kind: 'aborted', failure: { message: '已取消', code: CODE.ABORTED } }
-          : { kind: 'error', failure: { message: `流中断：${error?.message || error}`, code: CODE.TRANSPORT } },
+          : (idleTimeout
+            ? { kind: 'error', failure: { message: `${error.message} —— 已停止等待，可重试或换模型。`, code: CODE.TIMEOUT } }
+            : { kind: 'error', failure: { message: `流中断：${error?.message || error} —— 上游连接提前结束，可重试或换模型。`, code: CODE.TRANSPORT } }),
       };
     } finally {
       /*
