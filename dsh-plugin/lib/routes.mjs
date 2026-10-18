@@ -36,6 +36,17 @@ async function readJsonBody(req, limit = 64 * 1024) {
   try { return JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch { return {}; }
 }
 
+/** 校验"每模型默认参数"：只收认识且合法的字段，其余丢弃。 */
+function sanitizeModelParams(input) {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return null;
+  const out = {};
+  if (typeof input.temperature === 'number' && Number.isFinite(input.temperature)
+    && input.temperature >= 0 && input.temperature <= 2) out.temperature = input.temperature;
+  if (Number.isInteger(input.maxTokens) && input.maxTokens > 0) out.maxTokens = input.maxTokens;
+  if (typeof input.reasoningEffort === 'string' && input.reasoningEffort.trim()) out.reasoningEffort = input.reasoningEffort.trim();
+  return Object.keys(out).length ? out : null;
+}
+
 /**
  * @param {object} deps
  * @param {() => object} deps.snapshot 运行态快照
@@ -112,7 +123,15 @@ export function createRouteTable(deps) {
           // 返回**归一化后**的目录（contextWindow/maxTokens/images/free…），
           // 不退上游原始字段名（context_window/max_output_tokens）：
           // 面板与其它消费者只认一种形状，免得两处各说一套。
-          sendJson(res, 200, { ok: true, models: toDirectory(catalog), at: adapter.catalogCache.at, error: adapter.catalogError || '' });
+          sendJson(res, 200, {
+            ok: true,
+            models: toDirectory(catalog),
+            at: adapter.catalogCache.at,
+            error: adapter.catalogError || '',
+            // staleMs>0 = 这次强制刷新失败、退回旧缓存：面板要能如实说"你看到的是旧目录"
+            refreshed: adapter.lastRefresh?.refresh === true,
+            staleMs: Number(adapter.lastRefresh?.staleMs) || 0,
+          });
         } catch (error) {
           sendJson(res, 200, { ok: false, models: [], error: String(error?.message || error) });
         }
@@ -130,21 +149,75 @@ export function createRouteTable(deps) {
           if (req.method === 'POST') {
             if (!guard(req)) return sendJson(res, 403, { ok: false, error: 'missing x-workbuddy-panel header' });
             const body = await readJsonBody(req);
+            const current = (typeof deps.readPrefs === 'function' ? deps.readPrefs() : null)
+              || { visible: null, hideAll: false, paramsByModel: {} };
+            /*
+             * 每模型默认参数：与"显示哪些"分开保存（同一份 prefs 文件的不同字段）。
+             * `params: null` = 清除该模型的默认参数；其余字段做白名单校验。
+             */
+            if (typeof body?.model === 'string' && Object.prototype.hasOwnProperty.call(body, 'params')) {
+              const model = body.model;
+              const paramsByModel = { ...(current.paramsByModel || {}) };
+              const cleaned = body.params === null ? null : sanitizeModelParams(body.params);
+              if (cleaned) paramsByModel[model] = cleaned;
+              else delete paramsByModel[model];
+              if (typeof adapter.setModelParams === 'function') adapter.setModelParams(paramsByModel);
+              onWritePrefs({ visible: current.visible, hideAll: current.hideAll === true, paramsByModel });
+              return sendJson(res, 200, { ok: true, model, params: paramsByModel[model] || null, paramsByModel });
+            }
+            /*
+             * 三种显示意图，必须分开建模（旧实现只认 `visible` 数组）：
+             *   - unset（恢复全部）：回到配置的 allow/deny（每模型参数保留）；
+             *   - hideAll（全不选）：一个都不显示 —— `visible: []` 单独存在时
+             *     不能当成"没设置"，否则 dsh 里反而全部还在；
+             *   - 勾选清单：只显示这些。
+             */
+            const wantsUnset = body?.unset === true || body?.visible === null;
+            if (wantsUnset) {
+              adapter.resetFilter();
+              onWritePrefs({ visible: null, hideAll: false, paramsByModel: current.paramsByModel || {} });
+              const applied = notifyAdaptersUpdated();
+              return sendJson(res, 200, { ok: true, unset: true, visible: null, hideAll: false, count: 0, applied });
+            }
             const visible = Array.isArray(body?.visible) ? body.visible.map(String).filter(Boolean) : [];
+            const hideAll = body?.hideAll === true || visible.length === 0;
             // 目录里不存在的 id 也照存：上游目录可能暂时没抓到，用户勾选的意图优先，
             // 目录恢复后自然重新生效。
-            adapter.setFilter({ allow: visible });
-            onWritePrefs(visible);
+            adapter.setFilter({ allow: visible, hideAll });
+            onWritePrefs({ visible, hideAll, paramsByModel: current.paramsByModel || {} });
             // 广播 llm/adapters-updated：dsh 的模型选择器**不轮询**目录，只认这个
-            // 事件。不广播的话 filter 虽已生效，但 UI 会一直显示旧清单 —— 用户保存
-            // 完看模型数量没变，报的就是这个。返回 applied 让前端如实告知：
-            // 旧版 dsh 没有这个内部方法时 applied=false，前端提示"重启一次 dsh"。
+            // 事件。不广播的话 filter 虽已生效，但 UI 会一直显示旧清单。
             const applied = notifyAdaptersUpdated();
-            return sendJson(res, 200, { ok: true, visible, count: visible.length, applied });
+            return sendJson(res, 200, {
+              ok: true,
+              unset: false,
+              visible,
+              hideAll,
+              count: hideAll ? 0 : visible.length,
+              applied,
+            });
           }
           if (readOnly(req, res)) return;
-          const current = typeof deps.readPrefs === 'function' ? deps.readPrefs() : null;
-          sendJson(res, 200, { ok: true, visible: current, at: adapter.catalogCache.at });
+          const current2 = typeof deps.readPrefs === 'function' ? deps.readPrefs() : null;
+          const filter = typeof adapter.filterSnapshot === 'function'
+            ? adapter.filterSnapshot()
+            : { allow: [], deny: [], hideAll: false };
+          sendJson(res, 200, {
+            ok: true,
+            // `unset` 与 `visible: []` 是两种状态：前者=跟随配置（全显示），
+            // 后者=用户点过"全不选"（全隐藏）。只有每模型参数、没有显示偏好时
+            // visible 也是 null（显示跟随配置）。
+            unset: !current2 || current2.visible === null,
+            visible: current2 ? current2.visible : null,
+            hideAll: current2 ? current2.hideAll === true : false,
+            /** 每模型默认参数（面板详情里编辑） */
+            paramsByModel: typeof adapter.modelParamsSnapshot === 'function'
+              ? adapter.modelParamsSnapshot()
+              : (current2?.paramsByModel || {}),
+            /** 配置里 modelDeny 排除的模型：面板据此标出来，避免"勾了也不出现"的疑惑 */
+            deny: filter.deny || [],
+            at: adapter.catalogCache.at,
+          });
         } catch (error) {
           sendJson(res, 500, { ok: false, error: String(error?.message || error) });
         }

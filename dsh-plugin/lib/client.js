@@ -76,6 +76,8 @@ window.__ModuleLoader__.load({
 
     const PANEL_HEADERS = { 'x-workbuddy-panel': '1', 'content-type': 'application/json' };
     const CONSOLE_API = '/workbuddy/console-api';
+/** 思考档位的显示名（id → 文案；中文档位交给 i18n 表翻译）。 */
+const EFFORT_LABELS = { minimal: 'Minimal', low: '低', medium: '中', high: '高', xhigh: 'Extra High', max: 'Max' };
 
     // ─────────────────────────── 样式 ───────────────────────────
     const CSS = `
@@ -699,6 +701,42 @@ body.dark .wb-root,
       '已保存': 'Saved',
       '恢复为全部显示（与从未筛选一致）': 'Restore to showing everything (same as never filtering)',
       '恢复全部': 'Restore all',
+      // ── 模型显示状态（未设置 / 全隐藏 / 配置排除）──────────────────────
+      '当前：全部显示（跟随配置）': 'Currently: all shown (follows config)',
+      '当前：全部隐藏': 'Currently: all hidden',
+      '已保存：全部隐藏 —— dsh 选择器现在不显示 WorkBuddy 模型。':
+        'Saved: all hidden — the dsh picker no longer shows WorkBuddy models.',
+      '已保存：全部隐藏。此 dsh 版本不支持即时刷新 —— 重启一次 dsh 后生效。':
+        'Saved: all hidden. This dsh build cannot refresh live — restart dsh for it to take effect.',
+      '已恢复：dsh 选择器显示全部模型（跟随配置）。':
+        'Restored: the dsh picker shows all models (follows config).',
+      '恢复为全部显示（删除偏好，跟随配置的 allow/deny）':
+        'Restore showing everything (delete the preference; follow config allow/deny)',
+      '配置排除': 'Denied by config',
+      '配置的 modelDeny 排除了它': 'Excluded by modelDeny in config',
+      '配置里被 modelDeny 排除，勾选不会让它出现在 dsh 选择器里':
+        'Excluded by modelDeny in config; checking it will not show it in the dsh picker',
+      '配置里有模型被 modelDeny 排除，它们不会出现在 dsh 选择器里（面板里勾选也不生效）。':
+        'Some models are excluded by modelDeny: they do not appear in the dsh picker (checking them here has no effect).',
+      '该模型默认参数': 'Defaults for this model',
+      '保存为该模型默认': 'Save as model defaults',
+      '已保存该模型的默认参数。': 'Saved the default parameters for this model.',
+      // ── 目录刷新结果 ──────────────────────────────────────────────────
+      '目录已刷新。': 'Catalog refreshed.',
+      '上游目录刷新失败：正在显示旧缓存，模型列表可能不是最新。':
+        'Upstream catalog refresh failed; showing a cached list that may be out of date.',
+      '目录刷新失败，请稍后重试。': 'Catalog refresh failed; try again later.',
+      // ── 体检中断（不能把"没测通"写成"不可用"）───────────────────────
+      '体检请求失败 —— 已中止，结论未写入。': 'Probe request failed — aborted, no results were written.',
+      '体检需要控制台在跑（宿主端旧构建时则需重启一次 dsh）—— 已中止，结论未写入。':
+        'Probing needs the console running (or one dsh restart on an old host build) — aborted, no results were written.',
+      '体检请求失败 —— 未写入结论。': 'Probe request failed — no results were written.',
+      '体检没有拿到任何结果，结论未写入。': 'The probe returned no results; nothing was written.',
+      // ── 对话测试：档位 / 思考展示 ────────────────────────────────────
+      '该模型不支持思考强度': 'This model does not support reasoning effort',
+      '上游未给档位，按低/中/高三档兜底': 'Upstream reported no levels; falling back to low/medium/high',
+      '网关对该模型暂未提供可选档位': 'The gateway currently offers no selectable levels for this model',
+      '上游在流中途报错': 'The upstream reported an error mid-stream',
       '有未保存的勾选改动 —— 点「保存显示设置」后才会应用到 dsh 的模型选择器。':
         'You have unsaved checkbox changes — they apply to the dsh model picker only after you click Save display settings.',
       '勾选 = 出现在 dsh 的模型选择器里（保存后生效）': 'Checked = appears in the dsh model picker (takes effect after saving)',
@@ -852,6 +890,9 @@ body.dark .wb-root,
      * 结果是半英半中 —— 控制台那边踩过，这里照同样的纪律排。
      */
     const I18N_RULES_EN = [
+      // 动态前缀：思考内容 / 流内错误（整串规则，保留后半段）
+      [/^思考：([\s\S]+)$/, 'Thinking: $1'],
+      [/^上游报错：([\s\S]+)$/, 'Upstream error: $1'],
       // ── 时长 / 数量单位（fmtDuration / fmtRunSeconds / fmtMetricValue）──
       [/^(\d+) 秒$/, '$1s'],
       [/^(\d+) 分 (\d+) 秒$/, '$1m $2s'],
@@ -1206,6 +1247,21 @@ body.dark .wb-root,
       const [state, setState] = useState({ data: null, error: '', status: 0, loading: true });
       const alive = useRef(true);
       const retryTimer = useRef(null);
+      /**
+       * 失败后的自动重试次数（上限 3，指数退避 4s→8s→16s）。
+       *
+       * 旧实现失败即排一次 4 秒重试、没有上限：桥没起 / 宿主旧构建 / 控制台停掉时，
+       * 模型页与控制台域接口会**永久**每 4 秒打一轮，日志与 ensureReady 被反复触发，
+       * 用户以为自己只是"重试了一次"。
+       */
+      const retryCount = useRef(0);
+      const scheduleRetry = () => {
+        if (!alive.current || retryTimer.current) return;
+        if (retryCount.current >= 3) return;
+        const delay = 4000 * (2 ** retryCount.current);
+        retryCount.current += 1;
+        retryTimer.current = setTimeout(() => { retryTimer.current = null; reload(); }, delay);
+      };
       const reload = useCallback(async (overridePath) => {
         try {
           const { status, data } = await getJson(overridePath || path);
@@ -1215,14 +1271,11 @@ body.dark .wb-root,
             ? (status === 404 ? '插件还没就绪（HTTP 404），正在自动重试…' : String(data?.error || `HTTP ${status}`))
             : '';
           setState({ data: failed && status === 404 ? null : data, status, error: message, loading: false });
-          if (failed && alive.current && !retryTimer.current) {
-            retryTimer.current = setTimeout(() => { retryTimer.current = null; reload(); }, 4000);
-          }
+          if (!failed) { retryCount.current = 0; return; }
+          scheduleRetry();
         } catch (error) {
           if (alive.current) setState({ data: null, status: 0, error: String(error?.message || error), loading: false });
-          if (alive.current && !retryTimer.current) {
-            retryTimer.current = setTimeout(() => { retryTimer.current = null; reload(); }, 4000);
-          }
+          scheduleRetry();
         }
       }, [path]);
       useEffect(() => {
@@ -2811,8 +2864,8 @@ body.dark .wb-root,
 
     // ─────────────────────────── 可用模型 / 体检 ───────────────────────────
     function ModelsPanel({ onStartConsole, busy, sampleModel, onUseModel }) {
-      const [refreshTick, setRefreshTick] = useState(0);
-      const { data, error, reload, loading } = useJson(`/workbuddy/models${refreshTick ? '?refresh=1' : ''}`, { interval: 120000 });
+      const { data, error, reload, loading } = useJson('/workbuddy/models', { interval: 120000 });
+      const [refreshing, setRefreshing] = useState(false);
       const probesApi = useConsoleApi(CONSOLE_API + '/probe-results', { interval: 30000 });
       const { data: probes, status: pstatus, reload: reloadProbes } = probesApi;
       const [detail, setDetail] = useState('');
@@ -2825,52 +2878,117 @@ body.dark .wb-root,
       // 存偏好（.model-prefs.json）与读目录是两个接口：POST 后 adapter.setFilter
       // 立即生效（选择器下一次 listModels 就是新清单），无需重启 dsh。
       const prefsApi = useJson('/workbuddy/model-visibility', {});
-      const [visibility, setVisibility] = useState(null);   // null = 跟随目录（全部显示）
+      /*
+       * 三种显示状态必须分开：
+       *   - `visibility === null && !hideAll` → 未设置，跟随配置（全显示）；
+       *   - `hideAll === true`               → 用户点了「全不选」，一个都不显示；
+       *   - 数组                              → 只显示勾选的那些。
+       * 旧实现只有数组一种状态，空数组同时被当成"全显示"与"全隐藏"，
+       * 于是"全不选 → 保存"后 dsh 里反而全部还在。
+       */
+      const [visibility, setVisibility] = useState(null);   // null = 跟随配置（全部显示）
+      const [hideAll, setHideAll] = useState(false);
+      const [denied, setDenied] = useState([]);             // 配置 modelDeny 排除的模型
       const [prefsLoaded, setPrefsLoaded] = useState(false);
       const [prefsDirty, setPrefsDirty] = useState(false);
       const [prefsSaving, setPrefsSaving] = useState(false);
+      // 每模型默认参数：草稿按模型 id 存，未编辑时回落到已保存值
+      const [paramDrafts, setParamDrafts] = useState({});
+      const [savingParams, setSavingParams] = useState('');
       useEffect(() => {
         // 只在首次拿到响应时初始化勾选状态（后续 reload 不覆盖用户的未保存改动）
         if (!prefsLoaded && prefsApi.data && prefsApi.data.ok) {
-          setVisibility(Array.isArray(prefsApi.data.visible) ? prefsApi.data.visible : null);
+          setVisibility(prefsApi.data.unset ? null : (Array.isArray(prefsApi.data.visible) ? prefsApi.data.visible : null));
+          setHideAll(prefsApi.data.hideAll === true);
+          setDenied(Array.isArray(prefsApi.data.deny) ? prefsApi.data.deny.map(String) : []);
           setPrefsLoaded(true);
         }
       }, [prefsApi.data, prefsLoaded]);
       const isVisible = (id) => {
+        if (denied.includes(id)) return false;
+        if (hideAll) return false;
         if (!Array.isArray(visibility)) return true;   // 未设置 = 全显示（默认）
         return visibility.includes(id);
       };
       const toggleVisible = (id) => {
         setVisibility((prev) => {
-          const base = Array.isArray(prev) ? prev : models.map((m) => m.id);
+          const base = Array.isArray(prev) ? prev : (hideAll ? [] : models.map((m) => m.id));
           return base.includes(id) ? base.filter((x) => x !== id) : [...base, id];
         });
+        setHideAll(false);
         setPrefsDirty(true);
       };
-      const savePrefs = async (nextVisible) => {
+      const savePrefs = async () => {
         setPrefsSaving(true);
-        const list = Array.isArray(nextVisible) ? nextVisible : visibility;
-        const res = await postJson('/workbuddy/model-visibility', { visible: list });
+        // null + 非 hideAll = "恢复全部"：请求服务端删除偏好，回到配置的 allow/deny
+        const unset = visibility === null && !hideAll;
+        const res = await postJson('/workbuddy/model-visibility', unset
+          ? { unset: true }
+          : { visible: Array.isArray(visibility) ? visibility : [], hideAll });
         setPrefsSaving(false);
         if (res.data?.ok) {
-          setVisibility(res.data.visible);
+          setVisibility(res.data.unset ? null : (Array.isArray(res.data.visible) ? res.data.visible : []));
+          setHideAll(res.data.hideAll === true);
           setPrefsDirty(false);
           // applied = 宿主是否成功广播了 llm/adapters-updated（dsh 选择器重拉模型
           // 清单的信号）。广播失败（旧版 dsh 没有该内部方法）时偏好其实已保存，
           // 但选择器不会自动刷新 —— 必须如实区分，不能让人以为"保存了没生效"。
-          setMessage(res.data.count
-            ? (res.data.applied
+          if (res.data.unset) {
+            setMessage('已恢复：dsh 选择器显示全部模型（跟随配置）。');
+          } else if (res.data.hideAll) {
+            setMessage(res.data.applied
+              ? '已保存：全部隐藏 —— dsh 选择器现在不显示 WorkBuddy 模型。'
+              : '已保存：全部隐藏。此 dsh 版本不支持即时刷新 —— 重启一次 dsh 后生效。');
+          } else {
+            setMessage(res.data.applied
               ? `已保存并即时生效：dsh 选择器现在显示 ${res.data.count} 个模型。`
-              : `已保存（${res.data.count} 个模型）。此 dsh 版本不支持即时刷新 —— 重启一次 dsh 后生效。`)
-            : '已保存：未勾选任何模型 —— dsh 选择器将不显示 WorkBuddy 模型（重新勾选即可恢复）。');
+              : `已保存（${res.data.count} 个模型）。此 dsh 版本不支持即时刷新 —— 重启一次 dsh 后生效。`);
+          }
         } else {
           setMessage('保存失败：' + (res.data?.error || res.status));
         }
       };
-      const selectAllVisible = () => { setVisibility(models.map((m) => m.id)); setPrefsDirty(true); };
-      const selectNoneVisible = () => { setVisibility([]); setPrefsDirty(true); };
+      // ── 每模型默认参数（温度 / 输出上限 / 思考强度）────────────────────
+      // 全局只能配一份默认值，但用户对不同模型的期待不同（写代码要低温、
+      // 聊天要高温）。dsh 自身只记「模型 + 档位」，温度这类参数没有地方存。
+      const paramsFor = (id) => (paramDrafts[id] ?? prefsApi.data?.paramsByModel?.[id] ?? {});
+      const editParam = (id, key, value) => setParamDrafts((prev) => ({
+        ...prev,
+        [id]: { ...(prev[id] ?? prefsApi.data?.paramsByModel?.[id] ?? {}), [key]: value },
+      }));
+      const saveModelParams = async (id) => {
+        const draft = paramsFor(id);
+        const params = {};
+        if (String(draft.temperature ?? '').trim() !== '') {
+          const t = Number(draft.temperature);
+          if (Number.isFinite(t) && t >= 0 && t <= 2) params.temperature = t;
+        }
+        if (String(draft.maxTokens ?? '').trim() !== '') {
+          const n = Number(draft.maxTokens);
+          if (Number.isInteger(n) && n > 0) params.maxTokens = n;
+        }
+        if (draft.reasoningEffort) params.reasoningEffort = draft.reasoningEffort;
+        setSavingParams(id);
+        try {
+          const res = await postJson('/workbuddy/model-visibility', {
+            model: id,
+            params: Object.keys(params).length ? params : null,
+          });
+          if (res.data?.ok) {
+            setParamDrafts((prev) => { const next = { ...prev }; delete next[id]; return next; });
+            setMessage('已保存该模型的默认参数。');
+            prefsApi.reload();
+          } else {
+            setMessage('保存失败：' + (res.data?.error || res.status));
+          }
+        } finally {
+          setSavingParams('');
+        }
+      };
+      const selectAllVisible = () => { setVisibility(models.map((m) => m.id)); setHideAll(false); setPrefsDirty(true); };      const selectNoneVisible = () => { setVisibility([]); setHideAll(true); setPrefsDirty(true); };
       const onlyAvailableVisible = () => {
         setVisibility(models.filter((m) => { const r = resultOf(m.id); return !r || r.ok !== false; }).map((m) => m.id));
+        setHideAll(false);
         setPrefsDirty(true);
       };
       // 只有确认控制台可用（availability 判定为 ok）才允许体检/清除：
@@ -2892,34 +3010,59 @@ body.dark .wb-root,
         setProgress({ done: 0, total: targets.length });
         const batch = {};
         let okCount = 0;
+        let aborted = '';
         for (let i = 0; i < targets.length; i += 1) {
           const m = targets[i];
           const res = await postJson(CONSOLE_API + '/probe', { model: m.id });
-          const entry = res.data && res.data.model ? { ok: res.data.ok === true, ms: res.data.ms || 0, at: Date.now(), ...(typeof res.data.credit === 'number' ? { credit: res.data.credit } : {}), ...(res.data.error ? { error: String(res.data.error).slice(0, 200) } : {}) } : { ok: false, ms: 0, at: Date.now(), error: 'HTTP ' + res.status };
+          /*
+           * 只有"真的拿到这个模型的体检结果"才落库。控制台停掉（503）/断连（502）/
+           * 旧宿主（404）都不是"模型不可用"—— 旧实现把它们一律记成 ok:false，
+           * 再点「只留可用的」就把这些**从没测通**的模型从 dsh 选择器里删掉。
+           */
+          if (res.status >= 400 || !res.data || !res.data.model) {
+            aborted = res.status === 503 || res.status === 404
+              ? '体检需要控制台在跑（宿主端旧构建时则需重启一次 dsh）—— 已中止，结论未写入。'
+              : '体检请求失败 —— 已中止，结论未写入。';
+            break;
+          }
+          const entry = {
+            ok: res.data.ok === true,
+            ms: res.data.ms || 0,
+            at: Date.now(),
+            ...(typeof res.data.credit === 'number' ? { credit: res.data.credit } : {}),
+            ...(res.data.error ? { error: String(res.data.error).slice(0, 200) } : {}),
+          };
           batch[m.id] = entry;
           if (entry.ok) okCount += 1;
           setProgress({ done: i + 1, total: targets.length });
-          if (res.status === 503 || res.status === 404) {
-            setMessage('体检需要控制台在跑（宿主端旧构建时则需重启一次 dsh）—— 已中止，避免对不存在的接口逐个空跑。');
-            break;
-          }
         }
-        const saved = await postJson(CONSOLE_API + '/probe-results', { results: batch, lastRun: { scope: scope === 'all' ? 'all' : 'checked', count: Object.keys(batch).length } });
         setWorking('');
         setProgress(null);
-        setMessage(saved.data?.saved ? `体检完成：${okCount}/${Object.keys(batch).length} 可用（结论已存进 .state.json，控制器里看到的是同一份）` : '体检结果保存失败：' + (saved.data?.error || saved.status));
+        // 中断分支**在写库之前返回**：否则下面那句"体检完成：0/N"会把中止提示盖掉
+        if (aborted) { setMessage(aborted); return; }
+        if (!Object.keys(batch).length) { setMessage('体检没有拿到任何结果，结论未写入。'); return; }
+        const saved = await postJson(CONSOLE_API + '/probe-results', { results: batch, lastRun: { scope: scope === 'all' ? 'all' : 'checked', count: Object.keys(batch).length } });
+        setMessage(saved.data?.saved
+          ? `体检完成：${okCount}/${Object.keys(batch).length} 可用（结论已存进 .state.json，控制器里看到的是同一份）`
+          : '体检结果保存失败：' + (saved.data?.error || saved.status));
         reloadProbes();
       };
       const probeOne = async (id) => {
         setWorking(id);
-        const res = await postJson(CONSOLE_API + '/probe', { model: id });
-        if (res.data?.model) {
+        try {
+          const res = await postJson(CONSOLE_API + '/probe', { model: id });
+          if (res.status >= 400 || !res.data?.model) {
+            setMessage('体检请求失败 —— 未写入结论。');
+            return;
+          }
           await postJson(CONSOLE_API + '/probe-results', {
             results: { [id]: { ok: res.data.ok === true, ms: res.data.ms || 0, at: Date.now(), ...(typeof res.data.credit === 'number' ? { credit: res.data.credit } : {}), ...(res.data.error ? { error: String(res.data.error).slice(0, 200) } : {}) } },
           });
+          reloadProbes();
+        } finally {
+          // 旧实现没有 finally：fetch 抛错时 working 永远停在 "测…"，按钮全禁用
+          setWorking('');
         }
-        setWorking('');
-        reloadProbes();
       };
       const clearProbes = async () => {
         if (typeof window.confirm === 'function' && !window.confirm(t('确定清除全部体检结论？\n\n只删 .state.json 里的 probe 记录（下次要重新体检），不影响模型与路由。'))) return;
@@ -2972,7 +3115,30 @@ body.dark .wb-root,
           h('div', { className: 'wb-actions-group' },
             h(Btn, { primary: true, disabled: working === 'probe' || !consoleReady, onClick: () => runProbe('all') }, progress ? `体检中 ${progress.done}/${progress.total}` : '全部体检'),
             h(Btn, { disabled: working === 'probe' || !consoleReady || !unavailable.length, onClick: () => runProbe('checked') }, `重测不可用的（${unavailable.length}）`),
-            h(Btn, { disabled: !!working, onClick: () => { setRefreshTick(refreshTick + 1); reload(); } }, '刷新目录'),
+            h(Btn, {
+              disabled: !!working || refreshing,
+              onClick: async () => {
+                /*
+                 * 刷新是**一次性的**：旧实现把 `?refresh=1` 拼进轮询用的 path，
+                 * 点一次之后每 120 秒的轮询都绕过 TTL 真打上游；而且点击时
+                 * `setRefreshTick` + `reload()` 会同时发出两个请求（旧缓存可能
+                 * 盖掉新目录）。这里直接用 overridePath 打一次，轮询 path 不变。
+                 */
+                setRefreshing(true);
+                try {
+                  const res = await getJson('/workbuddy/models?refresh=1');
+                  if (res.status === 200 && res.data?.ok !== false) {
+                    // 文案保持**静态**（数量在表头已有）：动态拼接的中文会漏翻
+                    setMessage(Number(res.data?.staleMs) > 0
+                      ? '上游目录刷新失败：正在显示旧缓存，模型列表可能不是最新。'
+                      : '目录已刷新。');
+                  } else {
+                    setMessage('目录刷新失败，请稍后重试。');
+                  }
+                  reload();
+                } finally { setRefreshing(false); }
+              },
+            }, refreshing ? '刷新中…' : '刷新目录'),
             h(Btn, { disabled: !!working || !consoleReady, onClick: clearProbes }, '清除体检结论'),
             h(Btn, { onClick: () => downloadCsv('workbuddy-models.csv',
               // reasoning / effortCount / efforts 三列：推理能力与实测档位是这块的
@@ -2991,10 +3157,18 @@ body.dark .wb-root,
             h(Btn, { disabled: prefsSaving, onClick: selectAllVisible }, '全选'),
             h(Btn, { disabled: prefsSaving, onClick: selectNoneVisible }, '全不选'),
             h(Btn, { disabled: prefsSaving || !consoleReady, onClick: onlyAvailableVisible, title: '按体检结论隐藏"不可用"的模型' }, '只留可用的'),
-            !Array.isArray(visibility) ? h('span', { className: 'wb-note', style: { margin: 0 } }, '当前：全部显示（未做过筛选）') : h('span', { className: 'wb-note', style: { margin: 0 } }, `已勾选 ${visibility.length} / ${models.length}`)),
+            visibility === null && !hideAll
+              ? h('span', { className: 'wb-note', style: { margin: 0 } }, '当前：全部显示（跟随配置）')
+              : hideAll
+                ? h('span', { className: 'wb-note', style: { margin: 0 } }, '当前：全部隐藏')
+                : h('span', { className: 'wb-note', style: { margin: 0 } }, `已勾选 ${visibility.length} / ${models.length}`)),
           h('div', { className: 'wb-actions-group' },
             h(Btn, { primary: prefsDirty, disabled: prefsSaving || !prefsDirty, onClick: () => savePrefs() }, prefsSaving ? '保存中…' : prefsDirty ? '保存显示设置' : '已保存'),
-            Array.isArray(visibility) ? h(Btn, { disabled: prefsSaving, onClick: () => { setVisibility(null); setPrefsDirty(true); }, title: '恢复为全部显示（与从未筛选一致）' }, '恢复全部') : null)),
+            h(Btn, { disabled: prefsSaving, onClick: () => { setVisibility(null); setHideAll(false); setPrefsDirty(true); }, title: '恢复为全部显示（删除偏好，跟随配置的 allow/deny）' }, '恢复全部'))),
+        denied.length
+          ? h('p', { className: 'wb-note', style: { margin: '0 0 8px' } },
+            '配置里有模型被 modelDeny 排除，它们不会出现在 dsh 选择器里（面板里勾选也不生效）。')
+          : null,
         prefsDirty ? h('p', { className: 'wb-note', style: { margin: '0 0 8px' } }, '有未保存的勾选改动 —— 点「保存显示设置」后才会应用到 dsh 的模型选择器。') : null,
         h('div', { className: 'wb-scroll' },
           h('table', { className: 'wb-table' },
@@ -3011,11 +3185,15 @@ body.dark .wb-root,
                 h('td', null, h('input', {
                   type: 'checkbox',
                   checked: isVisible(m.id),
+                  disabled: denied.includes(m.id),
                   onChange: () => toggleVisible(m.id),
-                  title: isVisible(m.id) ? '已显示在 dsh 选择器' : '已隐藏（保存后 dsh 选择器不再出现）',
+                  title: denied.includes(m.id)
+                    ? '配置里被 modelDeny 排除，勾选不会让它出现在 dsh 选择器里'
+                    : (isVisible(m.id) ? '已显示在 dsh 选择器' : '已隐藏（保存后 dsh 选择器不再出现）'),
                 })),
                 h('td', null, m.id + (m.id === sampleModel ? ' ★' : '')),
                 h('td', null, (m.name || ''),
+                  denied.includes(m.id) ? h('span', { className: 'wb-badge', title: '配置的 modelDeny 排除了它' }, '配置排除') : null,
                   m.images ? h('span', { className: 'wb-badge', title: '支持图片输入（多模态）' }, '图片') : null,
                   // 「推理」徽章与「图片」并列：有推理能力就标（档位细节在详情里，
                   // 列表行只做"能不能"的一眼判断，避免把六个档位名塞进一行）。
@@ -3082,6 +3260,32 @@ body.dark .wb-root,
                         : null,
                       probe && probe.ok === false && probe.error ? h('p', { className: 'wb-note', style: { margin: '8px 0 0' } }, '体检错误：' + probe.error) : null,
                       m.description ? h('p', { className: 'wb-note', style: { margin: '8px 0 0' } }, m.description) : null,
+                      (() => {
+                        const p = paramsFor(m.id);
+                        const levels = Array.isArray(m.efforts)
+                          ? m.efforts.filter(Boolean)
+                          : (m.reasoning ? ['low', 'medium', 'high'] : []);
+                        return h('div', { style: { marginTop: '10px', display: 'flex', gap: '8px', flexWrap: 'wrap', alignItems: 'center' } },
+                          h('span', { className: 'wb-label' }, '该模型默认参数'),
+                          h('input', {
+                            className: 'wb-input', type: 'number', min: '0', max: '2', step: '0.1', placeholder: 'temperature',
+                            value: p.temperature ?? '', style: { width: '110px' },
+                            onChange: (e) => editParam(m.id, 'temperature', e.target.value),
+                          }),
+                          h('input', {
+                            className: 'wb-input', type: 'number', min: '1', step: '1', placeholder: 'max_tokens',
+                            value: p.maxTokens ?? '', style: { width: '120px' },
+                            onChange: (e) => editParam(m.id, 'maxTokens', e.target.value),
+                          }),
+                          levels.length
+                            ? h(DropdownSelect, {
+                              value: p.reasoningEffort || '',
+                              onChange: (e) => editParam(m.id, 'reasoningEffort', e.target.value),
+                              options: [{ value: '', label: '默认' }, ...levels.map((id) => ({ value: id, label: EFFORT_LABELS[id] || id }))],
+                            })
+                            : null,
+                          h(Btn, { disabled: savingParams === m.id, onClick: () => saveModelParams(m.id) }, savingParams === m.id ? '保存中…' : '保存为该模型默认'));
+                      })(),
                       h('div', { className: 'wb-actions', style: { marginTop: '10px' } },
                         h(Btn, { onClick: () => onUseModel(m.id) }, '用这个模型对话 →'),
                         h(Btn, { onClick: () => { copyText(m.id); setCopiedId(m.id); setTimeout(() => setCopiedId(''), 2000); } }, copiedId === m.id ? '已复制 ✓' : '复制 ID'),
@@ -3099,7 +3303,7 @@ body.dark .wb-root,
      * 模型选择由容器持有（`model` / `setModel`）—— 这样切标签页回来不会被重置，
      * 也就不会给人"模型是写死的"错觉。未选时回落到推荐模型（sampleModel）。
      */
-    function ChatPanel({ sampleModel, model, setModel, messages, setMessages, accountKey }) {
+    function ChatPanel({ sampleModel, model, setModel, messages, setMessages, params, setParams, accountKey }) {
       /**
        * 模型目录用 `refreshKey` 跟着**桥的登录账号**走。
        *
@@ -3133,9 +3337,37 @@ body.dark .wb-root,
       // 上游是 OpenAI 协议：max_tokens / temperature 直接透传；"思考强度"没有
       // 跨模型统一字段，这里提供 reasoning_effort（OpenAI o 系 / 新版 GPT 语义，
       // 部分上游模型会接受），选"默认"就不发该字段 —— 未知参数上游可能 400。
-      const [maxTokens, setMaxTokens] = useState('');
-      const [temperature, setTemperature] = useState('');
-      const [effort, setEffort] = useState('');
+      //
+      // 参数存在容器里（切标签页不丢）；档位则按**当前模型实测的 efforts** 派生：
+      // 旧实现写死低/中/高三档，6 档模型只能选 3 档，而详情页明说"暂无可选档位"
+      // 的模型在这里仍然能选三档并照发 reasoning_effort。
+      const maxTokens = params?.maxTokens ?? '';
+      const temperature = params?.temperature ?? '';
+      const effort = params?.effort ?? '';
+      const setParam = (key, value) => setParams((prev) => ({ ...(prev || {}), [key]: value }));
+      const setMaxTokens = (value) => setParam('maxTokens', value);
+      const setTemperature = (value) => setParam('temperature', value);
+      const setEffort = (value) => setParam('effort', value);
+      const activeInfo = models.find((m) => m.id === activeModel) || null;
+      const effortOptions = (() => {
+        if (!activeInfo || activeInfo.reasoning !== true) return { levels: [], hint: '该模型不支持思考强度' };
+        const levels = Array.isArray(activeInfo.efforts) ? activeInfo.efforts.filter(Boolean) : null;
+        if (levels === null) return { levels: ['low', 'medium', 'high'], hint: '上游未给档位，按低/中/高三档兜底' };
+        if (!levels.length) return { levels: [], hint: '网关对该模型暂未提供可选档位' };
+        return { levels, hint: '' };
+      })();
+      // 换模型后旧档位可能不在新模型的表里：清掉，别把 A 的档位发给 B
+      useEffect(() => {
+        if (!effort) return;
+        if (!effortOptions.levels.includes(effort)) setEffort('');
+      }, [activeModel]);
+      // 换到输出上限更小的模型时，把超限的 max_tokens 夹到该模型上限 ——
+      // 旧实现原样发送，上游直接 400（或按它的上限静默截断）。
+      useEffect(() => {
+        const cap = Number(activeInfo?.maxTokens);
+        const current = Number(maxTokens);
+        if (cap > 0 && Number.isFinite(current) && current > cap) setMaxTokens(String(cap));
+      }, [activeModel]);
 
       useEffect(() => { if (boxRef.current) boxRef.current.scrollTop = boxRef.current.scrollHeight; }, [messages, streaming]);
 
@@ -3158,6 +3390,7 @@ body.dark .wb-root,
         abortRef.current = ac;
         let usage = null;
         let finish = '';
+        let streamFailure = '';
         /** 把本轮的耗时/tokens/扣分贴到最后一条助手消息上（逐轮可查，不只看最后一轮）。 */
         const attachMeta = (extra) => {
           const turnMeta = {
@@ -3216,11 +3449,28 @@ body.dark .wb-root,
               let frame;
               try { frame = JSON.parse(body); } catch (e) { continue; }
               if (frame.usage) usage = frame.usage;
+              /*
+               * 流内错误帧：桥在"上游流中途断了"时会补 `{"error":{…}}` 再 [DONE]。
+               * 旧实现 `if (!choice) continue` 直接忽略，于是半截回答被显示成
+               * "正常结束"（与本项目适配器修过的那个坑同源）。
+               */
+              if (frame.error) {
+                streamFailure = String(frame.error.message || frame.error.type || '上游在流中途报错');
+                break;
+              }
               const choice = frame.choices && frame.choices[0];
               if (!choice) continue;
               if (choice.finish_reason) finish = choice.finish_reason;
               const delta = choice.delta || {};
-              const piece = typeof delta.content === 'string' ? delta.content : (typeof delta.reasoning_content === 'string' ? '' : '');
+              // 思考内容单独累积并展示：旧实现把它静默丢掉，面板里看不到 CoT
+              const reasoningPiece = typeof delta.reasoning_content === 'string' ? delta.reasoning_content : '';
+              if (reasoningPiece) setMessages((prev) => {
+                const next = prev.slice();
+                const last = next[next.length - 1];
+                next[next.length - 1] = { ...(last || { role: 'assistant' }), role: 'assistant', reasoning: (last?.reasoning || '') + reasoningPiece };
+                return next;
+              });
+              const piece = typeof delta.content === 'string' ? delta.content : '';
               if (piece) setMessages((prev) => {
                 const next = prev.slice();
                 const last = next[next.length - 1];
@@ -3228,6 +3478,11 @@ body.dark .wb-root,
                 return next;
               });
             }
+          }
+          if (streamFailure) {
+            setError(`上游报错：${streamFailure}`);
+            attachMeta('错误');
+            return;
           }
           attachMeta();
         } catch (e2) {
@@ -3273,14 +3528,14 @@ body.dark .wb-root,
             h('span', { className: 'wb-label' }, '思考强度'),
             h(DropdownSelect, {
               value: effort,
+              disabled: effortOptions.levels.length === 0,
               onChange: (e) => setEffort(e.target.value),
               options: [
                 { value: '', label: '默认' },
-                { value: 'low', label: '低' },
-                { value: 'medium', label: '中' },
-                { value: 'high', label: '高' },
+                ...effortOptions.levels.map((id) => ({ value: id, label: EFFORT_LABELS[id] || id })),
               ],
-            })),
+            }),
+            effortOptions.hint ? h('span', { className: 'wb-note', style: { margin: 0 } }, effortOptions.hint) : null),
           h('div', { className: 'wb-actions-group' },
             h(Btn, { disabled: streaming || !messages.length, onClick: () => { setMessages([]); setMeta(null); } }, '清空对话'),
             streaming ? h(Btn, { onClick: () => abortRef.current && abortRef.current.abort() }, '停止') : null)),
@@ -3290,6 +3545,7 @@ body.dark .wb-root,
         h('div', { className: 'wb-chat', ref: boxRef },
           messages.length
             ? messages.map((m, i) => h('div', { key: i, className: 'wb-msg ' + m.role },
+              m.reasoning ? h('div', { className: 'wb-note', style: { whiteSpace: 'pre-wrap', margin: '0 0 4px' } }, `思考：${m.reasoning}`) : null,
               m.content || (streaming && i === messages.length - 1 ? '…' : ''),
               m.meta ? h('span', { className: 'wb-msg-meta' },
                 `${m.meta.ms} ms · ${m.meta.finish || '?'}` +
@@ -3434,9 +3690,12 @@ body.dark .wb-root,
         };
       }, [tab, lang]);
 
-      // 对话测试的模型与消息由容器持有：切标签页回来不丢，也不会让人以为"模型写死了"
+      // 对话测试的模型、消息与请求参数由容器持有：切标签页回来不丢，
+      // 也不会让人以为"模型/参数写死了"（旧实现参数放在 ChatPanel 内，
+      // 只有 tab==='chat' 才挂载，去「模型」页看一眼回来就全重置）。
       const [chatModel, setChatModel] = useState('');
       const [chatMessages, setChatMessages] = useState([]);
+      const [chatParams, setChatParams] = useState({ maxTokens: '', temperature: '', effort: '' });
       const { data: status, reload: reloadStatus } = useJson('/workbuddy/status', { interval: 8000 });
       /**
        * 桥当前登录账号 —— 作为模型目录的 refreshKey（见 ChatPanel 内的说明）。
@@ -3564,6 +3823,8 @@ body.dark .wb-root,
             setModel: setChatModel,
             messages: chatMessages,
             setMessages: setChatMessages,
+            params: chatParams,
+            setParams: setChatParams,
             accountKey,
           }) : null,
           tab === 'log' ? h(LogPanel, { status }) : null) : null);

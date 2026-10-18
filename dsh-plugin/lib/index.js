@@ -25,7 +25,7 @@
  * （只调用 providerInfo / providerRetryPolicy，没有 instanceof 检查）。
  */
 
-import { existsSync, readFileSync, writeFileSync, chmodSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, chmodSync, unlinkSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { homedir } from 'node:os';
@@ -60,16 +60,51 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
  */
 const MODEL_PREFS_PATH = join(PLUGIN_DIR, '.model-prefs.json');
 
+/**
+ * 读取面板保存的模型显示偏好。
+ *
+ * 返回 `{ visible, hideAll }`，或 `null`（= 没有偏好，跟随配置的 allow/deny）。
+ * **`visible: []` 与"没有偏好"必须分开**：前者是用户点了"全不选"，意思是
+ * 一个都不显示；后者是"没设置过"，意思是全显示。旧实现把两者混为一谈，
+ * 于是"全不选 → 保存"后 dsh 里反而全部还在。
+ */
 function readModelPrefs() {
   try {
     const j = JSON.parse(readFileSync(MODEL_PREFS_PATH, 'utf8'));
-    return Array.isArray(j.visible) ? j.visible.map(String) : null;
+    if (!j || typeof j !== 'object') return null;
+    const paramsByModel = j.paramsByModel && typeof j.paramsByModel === 'object' && !Array.isArray(j.paramsByModel)
+      ? j.paramsByModel
+      : {};
+    const hasDisplay = Array.isArray(j.visible) || j.hideAll === true;
+    // 只有"每个模型的默认参数"、没有显示偏好时也要能读回来
+    if (!hasDisplay && !Object.keys(paramsByModel).length) return null;
+    const visible = Array.isArray(j.visible) ? j.visible.map(String).filter(Boolean) : null;
+    return {
+      // visible=null 且 hideAll=false = 显示跟随配置（"恢复全部"就是写这个状态）
+      visible,
+      // 兼容旧文件：老面板的"全不选"写的也是空数组，且当时提示语承诺"全隐藏"
+      hideAll: j.hideAll === true || (Array.isArray(j.visible) && visible.length === 0 && j.hideAll !== false),
+      paramsByModel,
+    };
   } catch { return null; }
 }
 
-function writeModelPrefs(visible) {
+/** 写偏好。`null` = 清除偏好（恢复到配置的 allow/deny）。 */
+function writeModelPrefs(prefs) {
   try {
-    writeFileSync(MODEL_PREFS_PATH, `${JSON.stringify({ visible, at: Date.now() }, null, 2)}\n`, 'utf8');
+    if (prefs === null) {
+      if (existsSync(MODEL_PREFS_PATH)) unlinkSync(MODEL_PREFS_PATH);
+      return;
+    }
+    const paramsByModel = prefs?.paramsByModel && typeof prefs.paramsByModel === 'object' ? prefs.paramsByModel : {};
+    const visible = Array.isArray(prefs?.visible) ? prefs.visible.map(String).filter(Boolean) : null;
+    const hideAll = prefs?.hideAll === true;
+    // 显示"未设置"且没有每模型参数 → 没有可存的东西，删文件更干净
+    if (visible === null && !hideAll && !Object.keys(paramsByModel).length) {
+      if (existsSync(MODEL_PREFS_PATH)) unlinkSync(MODEL_PREFS_PATH);
+      return;
+    }
+    writeFileSync(MODEL_PREFS_PATH, `${JSON.stringify({ visible, hideAll, paramsByModel, at: Date.now() }, null, 2)}\n`, 'utf8');
   } catch { /* 只读介质：本次运行生效，不持久化 */ }
 }
 
@@ -234,6 +269,11 @@ export const DEFAULTS = {
   defaultMaxTokens: undefined,
   defaultTemperature: undefined,
   defaultReasoningEffort: undefined,
+  /**
+   * 空闲看门狗（毫秒，0 = 关）：只抓"上游多久没吐数据"，不看总时长，
+   * 所以不会误杀长回答。默认关 —— 与「不加默认上游超时」的红线一致。
+   */
+  streamIdleTimeoutMs: 0,
   migrateLegacy: true,
   tools: true,
   commands: true,
@@ -295,9 +335,13 @@ export function resolveConfig(raw = {}) {
     defaultTemperature: cfg.defaultTemperature === undefined || cfg.defaultTemperature === null || cfg.defaultTemperature === ''
       ? undefined
       : (Number.isFinite(Number(cfg.defaultTemperature)) ? Number(cfg.defaultTemperature) : undefined),
-    defaultReasoningEffort: ['low', 'medium', 'high'].includes(String(cfg.defaultReasoningEffort))
+    // 六档都允许设默认：旧实现只认 low/medium/high，选 minimal/xhigh/max 的
+    // 用户配了也等于没配（dsh 选择器明明有这些档）。档位是否被具体模型接受，
+    // 交给桥的实测表与适配器的"不猜"原则，不在这里提前砍掉。
+    defaultReasoningEffort: ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'].includes(String(cfg.defaultReasoningEffort))
       ? String(cfg.defaultReasoningEffort)
       : undefined,
+    streamIdleTimeoutMs: Number(cfg.streamIdleTimeoutMs) > 0 ? Number(cfg.streamIdleTimeoutMs) : 0,
     migrateLegacy: asBool(cfg.migrateLegacy, DEFAULTS.migrateLegacy),
     tools: asBool(cfg.tools, DEFAULTS.tools),
     commands: asBool(cfg.commands, DEFAULTS.commands),
@@ -584,7 +628,8 @@ export function apply(ctx, rawConfig = {}) {
       temperature: config.defaultTemperature,
       reasoningEffort: config.defaultReasoningEffort,
     },
-    catalogTtlMs: config.catalogTtlMs,    ensureReady: async () => {
+    catalogTtlMs: config.catalogTtlMs,
+    streamIdleTimeoutMs: config.streamIdleTimeoutMs,    ensureReady: async () => {
       // 每次取用前保证桥在跑：桥挂了自动拉起来，用户不必管。
       // 桥刚被确认活着的一小段时间内直接复用结论 —— 省掉每次对话前那次
       // 串行的 /health 探测（本机回环也要 2-3ms，且在请求关键路径上）。
@@ -615,9 +660,23 @@ export function apply(ctx, rawConfig = {}) {
   // 它是用户在界面上表达的最新意图）。
   const savedPrefs = readModelPrefs();
   if (savedPrefs) {
-    adapter.setFilter({ allow: savedPrefs });
-    state.modelVisibility = { source: 'prefs', allow: savedPrefs };
-    log(`已应用模型显示偏好：${savedPrefs.length} 个模型`);
+    if (savedPrefs.visible !== null || savedPrefs.hideAll) {
+      adapter.setFilter({ allow: savedPrefs.visible || [], hideAll: savedPrefs.hideAll });
+    }
+    if (savedPrefs.paramsByModel && Object.keys(savedPrefs.paramsByModel).length) {
+      adapter.setModelParams(savedPrefs.paramsByModel);
+    }
+    state.modelVisibility = {
+      source: 'prefs',
+      allow: savedPrefs.visible,
+      hideAll: savedPrefs.hideAll,
+      paramsByModel: savedPrefs.paramsByModel || {},
+    };
+    log(savedPrefs.hideAll
+      ? '已应用模型显示偏好：全部隐藏（面板里点过「全不选」）'
+      : (savedPrefs.visible === null
+        ? '已应用模型偏好：显示跟随配置（只有每模型默认参数）'
+        : `已应用模型显示偏好：${savedPrefs.visible.length} 个模型`));
   }
 
   // ── 1. 旧路由清理（必须在注册自己的路由之前） ──────────────────────────
