@@ -168,10 +168,11 @@ FIXTURES.consoleDiagnose = {
     { id: 'atrest', label: 'AtRest 密钥', status: 'ok', detail: 'keyId=9127dea1b44020a7（与信封一致）' },
     { id: 'cred', label: '凭据解密', status: 'ok', detail: '账号 330000000000 · 剩余 44 天 9 小时' },
     { id: 'bridge', label: '桥服务', status: 'ok', detail: '127.0.0.1:8790 已响应' },
-    { id: 'ref', label: '凭据引用', status: 'ok', detail: '.credentials.yaml 已含 WORKBUDDY_BRIDGE_KEY' },
+    // 同一轮的真实误报：原生路由不走 llm-pi-ai，旧口径却要求占位凭据
+    { id: 'credref', label: '凭据引用', status: 'fail', detail: '缺少占位凭据', hint: 'pi-ai 的 OpenAI 实现要求必须提供 API key 引用' },
     { id: 'bundles', label: 'profile bundles', status: 'ok', detail: '4 个，缺失 0 个 · DSH 0.2.0-rc.2' },
   ],
-  summary: { fail: 1, warn: 1, ok: 6 },
+  summary: { fail: 2, warn: 1, ok: 5 },
 };
 FIXTURES.consoleProbe = {
   updatedAt: now - 60000,

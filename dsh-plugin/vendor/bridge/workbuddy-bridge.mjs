@@ -55,7 +55,7 @@ import { spawnSync } from 'node:child_process';
  *
  * @param {string} name
  * @param {number} fallback
- * @param {{ min?: number, max?: number }} [range] 越界同样回退（不截断到边界）
+ * @param {{ min?: number, max?: number, integer?: boolean }} [range] 越界同样回退（不截断到边界）
  */
 function numEnv(name, fallback, range = {}) {
   const raw = process.env[name];
@@ -63,10 +63,11 @@ function numEnv(name, fallback, range = {}) {
   const value = Number(raw);
   if (!Number.isFinite(value)) return fallback;
   if (value < (range.min ?? -Infinity) || value > (range.max ?? Infinity)) return fallback;
-  return value;
+  return range.integer ? Math.trunc(value) : value;
 }
 
-const APP_VERSION = process.env.WORKBUDDY_APP_VERSION || '4.9.29177644';const IDE_VERSION = process.env.WORKBUDDY_IDE_VERSION || '1.119.0';
+const APP_VERSION = process.env.WORKBUDDY_APP_VERSION || '4.9.29177644';
+const IDE_VERSION = process.env.WORKBUDDY_IDE_VERSION || '1.119.0';
 const IDE_NAME = process.env.WORKBUDDY_IDE_NAME || 'VSCode';
 const CHAT_PATH = '/v2/chat/completions';
 const REFRESH_SKEW_MS = 5 * 60 * 1000;
@@ -175,6 +176,29 @@ const TRANSIENT_400_RETRY_ENABLED = process.env.WORKBUDDY_TRANSIENT_400_RETRY !=
  * 可覆盖（0 = 立刻重试），验收用例靠它把等待压到 0 以免拖慢测试。
  */
 const TRANSPORT_RETRY_DELAY_MS = numEnv('WORKBUDDY_TRANSPORT_RETRY_MS', 250, { min: 0 });
+
+/**
+ * 上游 5xx 的桥侧重试（默认：500/502/503/504 各重试 1 次，间隔 500ms）。
+ *
+ * ## 为什么加（2026-10-15 真实故障）
+ *
+ * DeepSeek 官方 V4.1 Flash / V4 Pro 当天 08:11 起出现部分中断，上游回 5xx。
+ * 用户当天 23 次失败里，多数在 1 秒后**原样重发就成功**；而桥当时对 5xx
+ * 直接读体返回，客户端只看到失败 —— 明明一次重试就能救回整轮对话。
+ *
+ * ## 边界
+ *
+ *   · 只重试 `500 / 502 / 503 / 504`。501（未实现）、505 等重发也不会变，
+ *     不在表里 —— 不认识的状态码不做无根据的重试。
+ *   · 只在**响应体还没交给调用方**时重试：调用方拿到 `res` 后就不会再动它，
+ *     不存在“流已经发了一半再重发”的问题。
+ *   · `WORKBUDDY_5XX_RETRY=0` 关闭；退避时间用
+ *     `WORKBUDDY_5XX_RETRY_DELAY_MS` 覆盖（测试把它压到毫秒级）。
+ *   · 重试是**原样重发**（同一份 body / 同一组请求头），不会重新组装请求。
+ */
+const UPSTREAM_5XX_RETRIES = numEnv('WORKBUDDY_5XX_RETRY', 1, { min: 0, max: 5, integer: true });
+const UPSTREAM_5XX_RETRY_DELAY_MS = numEnv('WORKBUDDY_5XX_RETRY_DELAY_MS', 500, { min: 0 });
+const UPSTREAM_5XX_RETRY_STATUSES = new Set([500, 502, 503, 504]);
 
 /**
  * 上游 429（code 14003 "too many requests"）的**桥侧等待计划**（毫秒）。
@@ -1681,6 +1705,21 @@ async function callUpstream(bodyString, model, conversationId, clientSignal) {
       const t = await res.text().catch(() => '');
       return { res, bodyText: t, upstreamStartedAt: upEnter };
     }
+  }
+
+  /*
+   * 上游 5xx（网关/模型服务短时中断）：在桥这层等一小会儿原样重发。
+   * 实测（2026-10-15）这类失败里多数 1 秒后重发即成功；不重试等于让用户
+   * 白白丢掉一整轮已经发出去的上下文。响应体还没交给调用方，重发无歧义。
+   */
+  for (let i = 0; UPSTREAM_5XX_RETRY_STATUSES.has(res.status) && i < UPSTREAM_5XX_RETRIES; i += 1) {
+    const text = await res.text().catch(() => '');
+    if (clientSignal?.aborted) return { res, bodyText: text, upstreamStartedAt: upEnter };
+    const wait = UPSTREAM_5XX_RETRY_DELAY_MS * (i + 1);
+    log(`upstream ${res.status}, bridge retries in ${wait}ms (${i + 1}/${UPSTREAM_5XX_RETRIES})`);
+    if (wait > 0) await sleep(wait);
+    if (clientSignal?.aborted) return { res, bodyText: text, upstreamStartedAt: upEnter };
+    res = await attemptWithStaleRetry(auth);
   }
 
   // the gateway occasionally wraps a momentary upstream failure as 400 code 11133: retry idempotently
@@ -6496,13 +6535,21 @@ if (process.argv.includes('--check')) {
 }
 
 server.listen(PORT, HOST, () => {
+  /*
+   * 先打印监听地址与登录文件路径，**再**尝试读凭据。
+   *
+   * 读凭据要跑客户端进程取 AtRest 密钥，在慢盘 / 高负载 / 客户端刚升级时
+   * 可能卡住好几秒。原顺序把这行日志压在它后面，于是启动日志看起来像
+   * "桥没起来"，验收脚本也会误判成启动失败（实测：并行跑整套测试时
+   * 10 秒等不到这一行）。这两行是纯本地信息，先说出来不需要任何代价。
+   */
+  console.log(`workbuddy-bridge listening on http://${HOST}:${PORT}/v1`);
+  console.log(`auth file  : ${AUTH_PATH}`);
+  console.log(`client exe : ${atRestUsedExe || resolveWorkBuddyExe() || '未找到（设置 WORKBUDDY_APP_EXECUTABLE 指向 WorkBuddy.exe）'}`);
   let who = '(no desktop session read)';
   let region = '';
   try { const a = readStoredAuth(); region = upstreamRegion(a); who = `${a.userId} @ ${a.endpoint}`; } catch (e) { who = `ERROR: ${e.message}`; }
-  console.log(`workbuddy-bridge listening on http://${HOST}:${PORT}/v1`);
   console.log(`auth       : ${API_KEY ? 'API key (CODEBUDDY_API_KEY)' : `desktop session ${who}`}`);
-  console.log(`auth file  : ${AUTH_PATH}`);
-  console.log(`client exe : ${atRestUsedExe || resolveWorkBuddyExe() || '未找到（设置 WORKBUDDY_APP_EXECUTABLE 指向 WorkBuddy.exe）'}`);
   // 同上：精选列表按区域过滤（国际版别在日志里列 v4-pro —— 那个区域不提供它）
   console.log(`models     : ${FEATURED.filter((m) => featuredAllowedIn(m, region)).map((m) => m.id).join(', ')}  (all models: /v1/models?all=1)`);
   /*

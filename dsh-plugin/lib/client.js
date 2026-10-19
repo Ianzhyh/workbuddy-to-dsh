@@ -656,6 +656,8 @@ body.dark .wb-root,
       '由另一个客户端 build 写入，本机密钥解不开': 'written by another client build; this machine\'s key cannot decrypt it',
       '未取得密钥，跳过': 'no key obtained, skipped',
       '缺少占位凭据': 'placeholder credential missing',
+      '原生插件路由不需要 WORKBUDDY_BRIDGE_KEY（桥使用插件自己的本地令牌）':
+        'The native plugin route does not need WORKBUDDY_BRIDGE_KEY (the bridge uses the plugin\'s own local token)',
       'settings.yaml 存在，但缺少 workbuddy 路由': 'settings.yaml exists, but the workbuddy route is missing',
       '尚未配置 workbuddy 路由': 'the workbuddy route is not configured yet',
       '.credentials.yaml 已含 WORKBUDDY_BRIDGE_KEY': '.credentials.yaml already contains WORKBUDDY_BRIDGE_KEY',
@@ -665,6 +667,8 @@ body.dark .wb-root,
       '点「启动桥服务」': 'click Start bridge',
       '在「可用模型」里勾选后保存。DSH Desktop 0.2.0 会在下次启动时把 settings.yaml 导入 profile 的 patch 层':
         'Check models under Available models and save. DSH Desktop 0.2.0 imports settings.yaml into the profile patch layer on next launch.',
+      '在「可用模型」里勾选后保存。若使用 dsh 插件，请确认插件已启用 —— 原生路由在运行时注册，不需要 settings.yaml':
+        'Check models under Available models and save. If you use the dsh plugin, make sure it is enabled — the native route is registered at runtime and does not need settings.yaml.',
       '在「可用模型」里勾选后保存': 'check models under Available models and save',
       'pi-ai 的 OpenAI 实现要求必须提供 API key 引用': 'the pi-ai OpenAI implementation requires an API key reference',
       '注意版本必须对齐——装错代次会连 peer 依赖一起错':
@@ -1016,6 +1020,13 @@ body.dark .wb-root,
       [/^已注册 provider=(.+)$/, 'registered provider=$1'],
       [/^原生 provider=(.+)（插件运行时注册，无需 settings.yaml）$/,
         'native provider=$1 (registered at plugin runtime; no settings.yaml needed)'],
+      [/^插件原生路由已启用（provider=(.+)，运行时注册，无需 settings.yaml）· 模型跟随桥目录$/,
+        (m, p) => 'Native plugin route is active (provider=' + p
+          + ', registered at runtime; no settings.yaml needed) · models follow the bridge catalog'],
+      [/^可选实验 bundle 未安装：(.+)。它们各自对应一项实验功能，不装不影响基础模型路由。若要安装：先在 profile 目录备份 package.json 与 pnpm-lock.yaml，再执行 pnpm add <包名>@<与 DSH 一致的版本>。$/,
+        (m, names) => 'Optional experimental bundles are not installed: ' + names
+          + '. Each one backs an experimental feature; not installing them does not affect the base model route. '
+          + 'To install: back up package.json and pnpm-lock.yaml in the profile directory first, then run pnpm add <package>@<same version as DSH>.'],
       [/^登录目录：(.+)$/, 'Login directory: $1'],
       [/^改名失败：(.+)$/, 'Rename failed: $1'],
       [/^同账号 ×(\d+)$/, (m, n) => 'Same account ×' + n],
@@ -2822,11 +2833,12 @@ body.dark .wb-root,
       const items = data?.items || [];
 
       /**
-       * 诊断库的「dsh 模型路由」一项用的是**迁移前**的口径：检查 settings.yaml 里
-       * 有没有手写的 llm-pi-ai 路由。插件的原生路由（运行时注册）它不认识 ——
-       * 旧的那段恰恰是被插件清掉的，于是永远误报 fail。
-       * 这里按**运行时事实**改判：原生路由已注册 = 通过；并注明这是插件的判定。
-       * （桥 / 账号等其它项与插件无冲突，照单显示。）
+       * 这里保留一层**兼容旧控制台**的改判。
+       *
+       * 新版的 `lib/diagnostics.mjs` 已能按 profile 配置识别原生路由（issue #1）；
+       * 但控制台进程可能还是旧代码（它的 lib/ 要重启才进内存），旧口径仍会把
+       * 「dsh 模型路由」「凭据引用」报成 fail。插件面板拿得到运行时事实
+       * （`route.registered`），按它改判，用户不必先重启控制台才能看到真话。
        */
       const adjusted = [];
       for (const item of items) {
@@ -2836,6 +2848,17 @@ body.dark .wb-root,
             ...item,
             status: 'ok',
             detail: `原生 provider=${pluginStatus.route.provider}（插件运行时注册，无需 settings.yaml）`,
+            hint: null,
+          });
+          continue;
+        }
+        // 原生路由不经过 llm-pi-ai，不需要 WORKBUDDY_BRIDGE_KEY —— 旧控制台会在这里误报
+        const isCredItem = item.id === 'credref' || item.label === '凭据引用';
+        if (isCredItem && item.status === 'fail' && pluginStatus?.route?.registered) {
+          adjusted.push({
+            ...item,
+            status: 'ok',
+            detail: '原生插件路由不需要 WORKBUDDY_BRIDGE_KEY（桥使用插件自己的本地令牌）',
             hint: null,
           });
           continue;
@@ -2959,13 +2982,27 @@ body.dark .wb-root,
       const saveModelParams = async (id) => {
         const draft = paramsFor(id);
         const params = {};
+        /*
+         * 非法输入必须**说出来**，不能静默丢掉。
+         *
+         * 旧实现把超范围 / 非整数的值直接丢掉，然后照常保存 —— 如果这是
+         * 该模型唯一的一组参数，实际效果是「清空默认参数」，但界面显示
+         * 「已保存」。用户以为设置生效了，下一次调用却按全局默认跑。
+         */
+        const problems = [];
         if (String(draft.temperature ?? '').trim() !== '') {
           const t = Number(draft.temperature);
           if (Number.isFinite(t) && t >= 0 && t <= 2) params.temperature = t;
+          else problems.push('temperature 需要是 0–2 之间的数字');
         }
         if (String(draft.maxTokens ?? '').trim() !== '') {
           const n = Number(draft.maxTokens);
           if (Number.isInteger(n) && n > 0) params.maxTokens = n;
+          else problems.push('max_tokens 需要是正整数');
+        }
+        if (problems.length) {
+          setMessage('未保存：' + problems.join('；'));
+          return;
         }
         if (draft.reasoningEffort) params.reasoningEffort = draft.reasoningEffort;
         setSavingParams(id);

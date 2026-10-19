@@ -18,8 +18,11 @@ node tools\doctor.mjs
 三个必要条件，缺一不可 —— 逐项确认：
 
 1. **桥在跑** → 控制台徽章应为绿色；或 `curl -H "Authorization: Bearer $WB_TOKEN" http://127.0.0.1:8790/health`
-2. **`settings.yaml` 已写入** → 控制台「可用模型」里至少勾了一个模型并保存过
-3. **profile bundle 完整** → doctor 的 `profile bundles` 项为绿
+2. **路由已生效** → 控制台诊断「dsh 模型路由」为绿。**用 dsh 插件时不需要 `settings.yaml`**：
+   插件在运行时注册 provider，诊断会按 profile 里的插件 bundle 识别（不需要
+   `WORKBUDDY_BRIDGE_KEY`）；只有不用插件、走手写 `llm-pi-ai` 路由时才需要它
+3. **profile bundle 完整** → doctor 的 `profile bundles` 项为绿（实验性 `dsh-experimental-*`
+   bundle 缺失只会显示黄色警告，不影响基础路由）
 
 第 3 项最常见的失败长这样：
 

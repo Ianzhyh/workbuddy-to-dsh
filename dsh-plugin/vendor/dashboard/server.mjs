@@ -1011,6 +1011,10 @@ const server = createServer(async (req, res) => {
           patchHasRoute: dsh.patchHasRoute,
           routeLive: dsh.routeLive,
           routeSource: dsh.routeSource,
+          // native = 插件在 dsh 运行时注册的 provider；控制台拿不到运行时信号，
+          // 只能按 profile 配置判定（见 lib/dsh.mjs 的 detectNativeRoute）
+          routeMode: dsh.routeMode,
+          nativeRoute: dsh.nativeRoute,
           hasBridgeKey: dsh.hasBridgeKey,
           bundlesOk: dsh.bundlesOk,
           bundles: dsh.bundles,

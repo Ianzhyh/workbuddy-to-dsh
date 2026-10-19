@@ -1474,6 +1474,103 @@ test('桥：上游 429（14003）在桥这层等待重试，客户端无感', { 
   }
 });
 
+/**
+ * 上游 5xx 重试：2026-10-15 的真实故障里，多数 500/502 在 1 秒后原样重发即可成功。
+ * 桥不重试 = 用户丢掉一整轮已经发出去的上下文。
+ */
+test('桥：上游 502 在桥这层重试一次，客户端无感', { timeout: 90_000 }, async () => {
+  const okRaw = 'data: {"choices":[{"delta":{"content":"ok-after-502"}}]}\n\n'
+    + 'data: {"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":1,"total_tokens":4}}\n\n'
+    + 'data: [DONE]\n\n';
+  const stub = await startStubUpstream(['stub-model'], {
+    chatSequence: [
+      { status: 502, type: 'application/json', raw: JSON.stringify({ msg: 'upstream temporarily unavailable' }) },
+      { status: 200, type: 'text/event-stream', raw: okRaw },
+    ],
+  });
+  const bridge = await startBridge({
+    CODEBUDDY_ENDPOINT: stub.base,
+    WORKBUDDY_SKIP_MODEL_PREFLIGHT: '1',
+    WORKBUDDY_5XX_RETRY_DELAY_MS: '10',
+  }, { auth: READABLE_FAKE_AUTH });
+  try {
+    const res = await fetch(bridge.baseUrl + '/v1/chat/completions', {
+      method: 'POST',
+      headers: { ...auth, 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'stub-model', messages: [{ role: 'user', content: 'hi' }], max_tokens: 8 }),
+      signal: AbortSignal.timeout(20_000),
+    });
+    assert.equal(res.status, 200, '上游 502 必须在桥这层重试掉 —— 客户端拿到 200');
+    const j = await res.json();
+    assert.equal(j.choices?.[0]?.message?.content, 'ok-after-502');
+    const calls = stub.seen.filter((s) => JSON.parse(s.body || '{}').model).length;
+    assert.equal(calls, 2, '应恰好重试 1 次（共 2 次上游请求）');
+  } finally {
+    await bridge.stop();
+    stub.close();
+    rmSync(bridge.dir, { recursive: true, force: true });
+  }
+});
+
+test('桥：WORKBUDDY_5XX_RETRY=0 时 502 不重试（快速失败）', { timeout: 90_000 }, async () => {
+  const stub = await startStubUpstream(['stub-model'], {
+    chatStatus: 502,
+    chatType: 'application/json',
+    chatRaw: JSON.stringify({ msg: 'upstream temporarily unavailable' }),
+  });
+  const bridge = await startBridge({
+    CODEBUDDY_ENDPOINT: stub.base,
+    WORKBUDDY_SKIP_MODEL_PREFLIGHT: '1',
+    WORKBUDDY_5XX_RETRY: '0',
+  }, { auth: READABLE_FAKE_AUTH });
+  try {
+    const res = await fetch(bridge.baseUrl + '/v1/chat/completions', {
+      method: 'POST',
+      headers: { ...auth, 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'stub-model', messages: [{ role: 'user', content: 'hi' }], max_tokens: 8 }),
+      signal: AbortSignal.timeout(20_000),
+    });
+    assert.equal(res.status, 502, '关闭重试后 502 原样返回');
+    const calls = stub.seen.filter((s) => JSON.parse(s.body || '{}').model).length;
+    assert.equal(calls, 1, '开关关闭时只许打上游 1 次');
+  } finally {
+    await bridge.stop();
+    stub.close();
+    rmSync(bridge.dir, { recursive: true, force: true });
+  }
+});
+
+test('桥：501 不在 5xx 重试表内（重发也不会变）', { timeout: 90_000 }, async () => {
+  const okRaw = 'data: {"choices":[{"delta":{"content":"should-not-arrive"}}]}\n\n'
+    + 'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n';
+  const stub = await startStubUpstream(['stub-model'], {
+    chatSequence: [
+      { status: 501, type: 'application/json', raw: JSON.stringify({ msg: 'not implemented' }) },
+      { status: 200, type: 'text/event-stream', raw: okRaw },
+    ],
+  });
+  const bridge = await startBridge({
+    CODEBUDDY_ENDPOINT: stub.base,
+    WORKBUDDY_SKIP_MODEL_PREFLIGHT: '1',
+    WORKBUDDY_5XX_RETRY_DELAY_MS: '10',
+  }, { auth: READABLE_FAKE_AUTH });
+  try {
+    const res = await fetch(bridge.baseUrl + '/v1/chat/completions', {
+      method: 'POST',
+      headers: { ...auth, 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'stub-model', messages: [{ role: 'user', content: 'hi' }], max_tokens: 8 }),
+      signal: AbortSignal.timeout(20_000),
+    });
+    assert.equal(res.status, 501, '501 不该被重试，原样返回');
+    const calls = stub.seen.filter((s) => JSON.parse(s.body || '{}').model).length;
+    assert.equal(calls, 1, '501 只许打上游 1 次');
+  } finally {
+    await bridge.stop();
+    stub.close();
+    rmSync(bridge.dir, { recursive: true, force: true });
+  }
+});
+
 test('桥：本地限流 reject 模式 —— 上限 N 时上游恰好收到 N 条，第 N+1 条 429 + Retry-After', { timeout: 90_000 }, async () => {
   const stub = await startStubUpstream(['rl-model']);
   const bridge = await startBridge(

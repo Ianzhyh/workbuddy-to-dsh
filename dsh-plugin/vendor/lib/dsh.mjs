@@ -11,6 +11,71 @@ import { join } from 'node:path';
 import config from '../config.mjs';
 
 /**
+ * 本插件的两种安装包名 —— 根包（github 直装）与单文件夹分发。
+ *
+ * 它们出现在 profile 的 `dsh.profile.bundles` 里，就意味着 dsh 会加载插件；
+ * 插件加载时会用 `ctx.llm.registerAdapter()` 在**运行时**注册 provider ——
+ * 这条路由不存在于 settings.yaml / patch 的 `llm-pi-ai` 分节里。
+ */
+export const NATIVE_PLUGIN_BUNDLES = ['dsh-plugin-workbuddy', 'workbuddy-to-dsh'];
+
+/** 实验性 bundle：声明了但没装只影响对应实验功能，不该和核心 bundle 同色。 */
+export function isOptionalBundle(name) {
+  return /^@deepseek-ai\/dsh-experimental-/.test(String(name || ''));
+}
+
+/**
+ * patch 层里某个 Loader 条目是否被 `disabled: true` 关掉。
+ *
+ * 只认**顶层列表项**（行首 `- id:`）与它下面 2 空格缩进的 `disabled` ——
+ * `config:` 里恰好也叫 disabled 的字段不能误判。找不到条目 = 未关闭（bundle 默认加载）。
+ */
+export function patchEntryDisabled(text, id = 'workbuddy') {
+  const escaped = String(id).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const entryRe = new RegExp(`^-\\s*id:\\s*["']?${escaped}["']?\\s*(?:#.*)?$`);
+  const lines = String(text || '').split(/\r?\n/);
+  for (let i = 0; i < lines.length; i += 1) {
+    if (!entryRe.test(lines[i])) continue;
+    for (let j = i + 1; j < lines.length; j += 1) {
+      // 下一个**顶层**列表项（行首 `- `）表示本条目结束；config 里的缩进列表不算
+      if (/^-\s/.test(lines[j])) break;
+      if (/^ {2}disabled:\s*true\s*(?:#.*)?$/i.test(lines[j])) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * profile 是否以「插件原生路由」方式接入。
+ *
+ * 判据是**配置层的事实**，不需要 dsh 正在运行：
+ *   1. `dsh.profile.bundles` 里有本插件（且依赖确实装上了）；
+ *   2. patch 层没有把 `id: workbuddy` 这个 Loader 条目 `disabled: true`。
+ *
+ * 满足这两条，dsh 下次组合 profile 时就会加载插件、注册 provider。控制台与
+ * 插件面板因此不必再对「settings.yaml 里没有 llm-pi-ai」报红灯 —— 那是
+ * 迁移前的旧口径（见 issue #1）。
+ *
+ * @param {string} patchText profile 的 cordis.patch.yml 原文
+ * @param {{name: string, installed: boolean}[]} bundles readDshStatus 读到的 bundle 状态
+ */
+export function detectNativeRoute(patchText, bundles) {
+  const list = Array.isArray(bundles) ? bundles : [];
+  const hit = list.find((b) => NATIVE_PLUGIN_BUNDLES.includes(String(b?.name || '')));
+  if (!hit || hit.installed !== true) {
+    return { installed: false, enabled: false, disabledByPatch: false, provider: 'workbuddy', bundle: '' };
+  }
+  const disabledByPatch = patchEntryDisabled(patchText, 'workbuddy');
+  return {
+    installed: true,
+    enabled: !disabledByPatch,
+    disabledByPatch,
+    provider: 'workbuddy',
+    bundle: hit.name,
+  };
+}
+
+/**
  * 读取 dsh 侧全部相关状态。不返回任何凭据值。
  *
  * 路由可能出现在两个位置，二者都算生效：
@@ -38,6 +103,13 @@ export function readDshStatus() {
     refNames: [],
     bundles: [],
     bundlesOk: true,
+    /** 手写 llm-pi-ai 路由（迁移前形态）是否存在且生效。 */
+    manualRoute: false,
+    /** 插件原生路由（运行时注册）是否会被加载 —— 由 profile 配置判定。 */
+    nativeRoute: false,
+    /** nativePlugin = 原生插件的安装/启用状态；routeMode ∈ manual / native / none。 */
+    nativePlugin: { installed: false, enabled: false, disabledByPatch: false, provider: 'workbuddy', bundle: '' },
+    routeMode: 'none',
   };
 
   // settings.yaml 写作 `llm-pi-ai:`，patch 层写作 `- id: llm-pi-ai`，两者都要认
@@ -58,10 +130,11 @@ export function readDshStatus() {
     out.settingsModels = modelsUnder(text);
   }
 
+  let patchText = '';
   if (existsSync(out.patchPath)) {
-    const text = readFileSync(out.patchPath, 'utf8');
-    out.patchHasRoute = hasRoute(text);
-    if (out.patchHasRoute) out.patchModels = modelsUnder(text);
+    patchText = readFileSync(out.patchPath, 'utf8');
+    out.patchHasRoute = hasRoute(patchText);
+    if (out.patchHasRoute) out.patchModels = modelsUnder(patchText);
   }
 
   // settings.yaml 是**用户最新的意图**，patch 层是 DSH Desktop 导入过的历史快照。
@@ -70,11 +143,7 @@ export function readDshStatus() {
   out.registeredModels = out.settingsHasRoute
     ? [...new Set(out.settingsModels)]
     : [...new Set(out.patchModels)];
-
-  out.routeLive = out.settingsHasRoute || out.patchHasRoute;
-  out.routeSource = out.settingsHasRoute
-    ? 'settings.yaml'
-    : out.patchHasRoute ? 'cordis.patch.yml' : '';
+  out.manualRoute = out.settingsHasRoute || out.patchHasRoute;
 
   if (existsSync(config.dsh.credentialsPath)) {
     const text = readFileSync(config.dsh.credentialsPath, 'utf8');
@@ -98,7 +167,12 @@ export function readDshStatus() {
           join(config.dsh.home, 'profiles', 'node_modules', name),
           join(config.dsh.profileDir, 'node_modules', name),
         ];
-        out.bundles.push({ name, installed: candidates.some((c) => existsSync(c)) });
+        out.bundles.push({
+          name,
+          installed: candidates.some((c) => existsSync(c)),
+          // 实验 bundle 缺失只影响对应实验功能，不应把「dsh 就绪度」判成待修复
+          optional: isOptionalBundle(name),
+        });
       }
     } catch (err) {
       out.bundlesError = err.message;
@@ -106,22 +180,39 @@ export function readDshStatus() {
   }
   out.bundlesOk = bundlesAllInstalled(out.bundles);
 
+  // 原生路由：插件 bundle 已安装且没有被 patch 关掉，dsh 启动时就会注册 provider。
+  // 这是**控制台进程唯一能看到的运行时事实**（它不在 dsh 进程里，拿不到 route.registered）。
+  out.nativePlugin = detectNativeRoute(patchText, out.bundles);
+  out.nativeRoute = out.nativePlugin.enabled;
+  out.routeLive = out.manualRoute || out.nativeRoute;
+  out.routeMode = out.manualRoute ? 'manual' : (out.nativeRoute ? 'native' : 'none');
+  out.routeSource = out.settingsHasRoute
+    ? 'settings.yaml'
+    : out.patchHasRoute
+      ? 'cordis.patch.yml'
+      : out.nativeRoute ? '插件原生路由（运行时注册）' : '';
+
   return out;
 }
 
 /**
- * 「dsh 的插件都装好了吗」。
+ * 「dsh 必需的 bundle 都装好了吗」。
  *
  * **空列表不算健康。** `[].every(...)` 返回 `true`，所以当 profile 目录缺失、
  * 插件列表读不出来、或上面那段 catch 吞掉异常之后 `bundles` 为空时，
  * 这个函数原先会返回 `true` —— **读不到任何东西却被判成「健康」**，
  * 是最糟的一类失败（用户看到绿点，实际什么都没检查）。
  *
+ * 实验 bundle（`@deepseek-ai/dsh-experimental-*`）属于可选功能，声明了但没装
+ * 时不把整体判成不健康 —— 诊断侧会单独给 warn，而不是 fail。
+ *
  * 空 = 未知；未知不等于健康。抽成独立函数是为了能直接对它写用例
  * （`readDshStatus` 要读真实环境，不好单测）。
  */
 export function bundlesAllInstalled(bundles) {
-  return Array.isArray(bundles) && bundles.length > 0 && bundles.every((b) => b.installed);
+  return Array.isArray(bundles)
+    && bundles.length > 0
+    && bundles.filter((b) => b?.optional !== true).every((b) => b.installed);
 }
 
 /**

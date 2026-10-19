@@ -143,6 +143,8 @@ try {
     if (label === '诊断') {
       if (/尚未配置 workbuddy 路由/.test(text)) problems.push('诊断页仍显示迁移前口径的误报（fail）');
       if (/勾选后保存/.test(text)) problems.push('诊断页仍显示旧口径的过时建议');
+      if (/缺少占位凭据/.test(text)) problems.push('诊断页仍显示「原生路由缺占位凭据」的误报');
+      if (/pi-ai 的 OpenAI 实现要求必须提供 API key 引用/.test(text)) problems.push('诊断页仍显示旧口径的凭据建议');
     }
     // 日志页专断：必须渲染出**真实的日志正文**（而不是空壳）。
     // 不用具体字符串断言 —— 桥连续运行久了，启动横幅会滚出最后 N 行，

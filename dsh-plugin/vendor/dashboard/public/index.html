@@ -1120,6 +1120,7 @@ const I18N_EN = {
   '未就绪': 'Not ready',
   '路由 ✓': 'Routing ✓',
   '路由 ✗': 'Routing ✗',
+  '原生路由 ✓': 'Native routing ✓',
   '凭据 ✓': 'Credentials ✓',
   '凭据 ✗': 'Credentials ✗',
   'AtRest 信封': 'AtRest envelope',
@@ -1748,6 +1749,8 @@ const I18N_EN = {
     'Reinstall the domestic and international builds into two different directories and clear the shared update cache (%TEMP%\\workbuddy-update-x64*, %LOCALAPPDATA%\\@genieworkbuddy-desktop-updater) — a leftover package from the other product is treated as this product\'s update and installed into the current directory. Uninstalling does not lose your accounts (login state lives in the shared data directory); see "Two clients installed into the same directory" in docs/TROUBLESHOOTING.md',
   '未取得密钥，跳过': 'no key obtained, skipped',
   '缺少占位凭据': 'placeholder credential missing',
+  '原生插件路由不需要 WORKBUDDY_BRIDGE_KEY（桥使用插件自己的本地令牌）':
+    'The native plugin route does not need WORKBUDDY_BRIDGE_KEY (the bridge uses the plugin\'s own local token)',
   'settings.yaml 存在，但缺少 workbuddy 路由': 'settings.yaml exists, but the workbuddy route is missing',
   '尚未配置 workbuddy 路由': 'the workbuddy route is not configured yet',
   '.credentials.yaml 已含 WORKBUDDY_BRIDGE_KEY': '.credentials.yaml already contains WORKBUDDY_BRIDGE_KEY',
@@ -1757,6 +1760,8 @@ const I18N_EN = {
   '点「启动桥服务」': 'click Start bridge',
   '在「可用模型」里勾选后保存。DSH Desktop 0.2.0 会在下次启动时把 settings.yaml 导入 profile 的 patch 层':
     'Check models under Available models and save. DSH Desktop 0.2.0 imports settings.yaml into the profile patch layer on next launch.',
+  '在「可用模型」里勾选后保存。若使用 dsh 插件，请确认插件已启用 —— 原生路由在运行时注册，不需要 settings.yaml':
+    'Check models under Available models and save. If you use the dsh plugin, make sure it is enabled — the native route is registered at runtime and does not need settings.yaml.',
   '在「可用模型」里勾选后保存': 'check models under Available models and save',
   'pi-ai 的 OpenAI 实现要求必须提供 API key 引用': 'the pi-ai OpenAI implementation requires an API key reference',
   '存在多个账号快照，已固定使用': 'multiple account snapshots exist; pinned to ',
@@ -2184,12 +2189,21 @@ const I18N_RULES_EN = [
   [/^建议：(.+)$/, (m, h) => 'Suggestion: ' + translateText(h)],
   [/^workbuddy 路由已生效（(.+)）· 已注册 (\d+) 个模型$/,
     'workbuddy route is live ($1) · $2 models registered'],
+  [/^插件原生路由已启用（provider=(.+)，运行时注册，无需 settings.yaml）· 模型跟随桥目录$/,
+    (m, p) => 'Native plugin route is active (provider=' + p + ', registered at runtime; no settings.yaml needed) · models follow the bridge catalog'],
+  [/^(\d+) 个，缺失 (\d+) 个（其中 (\d+) 个是可选实验 bundle）( · DSH (.+))?$/,
+    (m, total, missing, optional, _d, version) => total + ' total, ' + missing + ' missing ('
+      + optional + ' optional experimental bundles)' + (version ? ' · DSH ' + version : '')],
   [/^(\d+) 个，缺失 (\d+) 个( · DSH (.+))?$/, 'bundles: $1, missing: $2$3'],
   [/^未找到 profile( · DSH (.+))?$/, 'no profile found$1'],
   [/^存在多个账号快照，已固定使用 (.+)，避免选错账号$/,
     'multiple account snapshots exist; pinned to $1 to avoid picking the wrong account'],
   [/^缺失：(.+)；在 profile 目录执行 pnpm add <包名>@<与 DSH 一致的版本>。注意版本必须对齐——装错代次会连 peer 依赖一起错$/,
     'Missing: $1; in the profile directory run pnpm add <package>@<same version as DSH>. Versions must line up — installing the wrong generation breaks peer dependencies too.'],
+  [/^可选实验 bundle 未安装：(.+)。它们各自对应一项实验功能，不装不影响基础模型路由。若要安装：先在 profile 目录备份 package.json 与 pnpm-lock.yaml，再执行 pnpm add <包名>@<与 DSH 一致的版本>。$/,
+    (m, names) => 'Optional experimental bundles are not installed: ' + names
+      + '. Each one backs an experimental feature; not installing them does not affect the base model route. '
+      + 'To install: back up package.json and pnpm-lock.yaml in the profile directory first, then run pnpm add <package>@<same version as DSH>.'],
   /*
    * 令牌文件权限项。detail 是「路径 + 结论」，路径是变量 ——
    * 整串查表查不到，只能按后缀分流（与上面「账号 … · 剩余 …」同一套做法）。
@@ -5186,11 +5200,17 @@ function renderCards() {
     cards.push(card('积分余额', '—', '桥未运行或查询失败', true, 'muted'));
   }
 
-  const cfgOk = d.dsh.routeLive && d.dsh.hasBridgeKey;
+  /*
+   * 原生插件路由不经过 llm-pi-ai，凭据走插件自己的本地令牌 ——
+   * 这时要求 WORKBUDDY_BRIDGE_KEY 会把正常状态误报成「未就绪」。
+   */
+  const nativeRoute = d.dsh.routeMode === 'native' || d.dsh.nativeRoute === true;
+  const credOk = d.dsh.hasBridgeKey || nativeRoute;
+  const cfgOk = d.dsh.routeLive && credOk;
   cards.push(card('DSH 配置',
     cfgOk ? (d.dsh.bundlesOk ? '已就绪' : '待修复') : '未就绪',
     (d.dsh.routeLive ? '路由 ✓' : '路由 ✗') + '　' +
-    (d.dsh.hasBridgeKey ? '凭据 ✓' : '凭据 ✗') + '　' +
+    (nativeRoute ? '原生路由 ✓' : (d.dsh.hasBridgeKey ? '凭据 ✓' : '凭据 ✗')) + '　' +
     (d.dsh.bundlesOk ? 'bundle ✓' : 'bundle ✗'),
     true,
     cfgOk ? 'ok' : 'muted'));

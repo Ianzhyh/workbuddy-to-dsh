@@ -629,7 +629,8 @@ export function apply(ctx, rawConfig = {}) {
       reasoningEffort: config.defaultReasoningEffort,
     },
     catalogTtlMs: config.catalogTtlMs,
-    streamIdleTimeoutMs: config.streamIdleTimeoutMs,    ensureReady: async () => {
+    streamIdleTimeoutMs: config.streamIdleTimeoutMs,
+    ensureReady: async () => {
       // 每次取用前保证桥在跑：桥挂了自动拉起来，用户不必管。
       // 桥刚被确认活着的一小段时间内直接复用结论 —— 省掉每次对话前那次
       // 串行的 /health 探测（本机回环也要 2-3ms，且在请求关键路径上）。
