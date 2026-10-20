@@ -129,6 +129,7 @@ body.dark .wb-root,
 @keyframes wb-panel-slide-left{from{opacity:0.35;transform:translate3d(-10px,0,0)}to{opacity:1;transform:none}}
 @media (prefers-reduced-motion: reduce){.wb-tab-indicator{transition:none}.wb-tab-panel{animation:none}}
 .wb-card{background:var(--dsw-alias-bg-module-platform,light-dark(#ffffff,#202226));border-radius:14px;box-shadow:inset 0 0 0 .5px var(--dsw-alias-border-l2,light-dark(#0000001a,#ffffff1f)),0 1px 3px light-dark(rgba(0,0,0,0.03),rgba(0,0,0,0.2));padding:14px 16px;min-width:0;position:relative;transition:border-color var(--wb-anim-normal),box-shadow var(--wb-anim-normal)}
+.wb-welcome-steps{display:flex;flex-wrap:wrap;gap:4px 14px;margin-top:8px;font-size:12px;line-height:20px;color:var(--dsw-alias-label-secondary,light-dark(#61666b,#cfd3d6))}
 .wb-card h3{margin:0 0 10px;font-size:14px;font-weight:600;letter-spacing:-0.01em}
 .wb-row{display:flex;align-items:center;justify-content:space-between;gap:12px;min-height:30px;min-width:0}
 .wb-row+.wb-row{border-top:.5px solid var(--dsw-alias-border-l1,light-dark(#0000000a,#ffffff0f))}
@@ -136,6 +137,18 @@ body.dark .wb-root,
 .wb-value{flex:1 1 auto;min-width:0;font-variant-numeric:tabular-nums;text-align:right;overflow-wrap:anywhere;word-break:break-word}
 /* 胶囊：**不换行**。table-layout:auto 下列宽不会小于 nowrap 内容的宽度 */
 .wb-pill{display:inline-flex;align-items:center;gap:6px;padding:2px 10px;border-radius:999px;font-size:12px;background:var(--dsw-alias-interactive-bg-hover,light-dark(#2631480f,#ffffff14));box-shadow:inset 0 0 0 .5px var(--dsw-alias-border-l1,light-dark(#0000000a,#ffffff0f));max-width:100%;white-space:nowrap;transition:background-color var(--wb-anim-fast)}
+.wb-chat-quota{appearance:none;display:inline-flex;align-items:center;gap:6px;border:.5px solid var(--dsw-alias-border-l2,light-dark(#0000001f,#ffffff2e));border-radius:999px;background:transparent;color:var(--dsw-alias-label-secondary,light-dark(#61666b,#cfd3d6));font:inherit;font-size:12px;line-height:20px;padding:1px 9px;cursor:pointer;white-space:nowrap;transition:background-color var(--wb-anim-fast),color var(--wb-anim-fast),border-color var(--wb-anim-fast)}
+.wb-chat-quota:hover{background:var(--dsw-alias-interactive-bg-hover,light-dark(#2631480f,#ffffff14));color:var(--dsw-alias-label-primary,light-dark(#0f1115,#f9fafb));border-color:var(--dsw-alias-border-l3,light-dark(#00000033,#ffffff42))}
+.wb-chat-quota:focus-visible{outline:2px solid var(--dsw-alias-brand-primary,#6366f1);outline-offset:1px}
+.wb-chat-quota:disabled{opacity:.6;cursor:default}
+.wb-chat-quota-dot{width:6px;height:6px;border-radius:50%;background:var(--dsw-alias-brand-primary,light-dark(#0f1115,#f9fafb));flex:none}
+.wb-chat-quota.warn .wb-chat-quota-dot{background:#d29922}
+.wb-chat-quota.bad .wb-chat-quota-dot{background:#e5534b}
+.wb-turn-cost{font-size:11px;line-height:18px;color:var(--dsw-alias-label-secondary,light-dark(#61666b,#cfd3d6));margin-right:8px;white-space:nowrap}
+.wb-chat-login-inline{display:inline-flex;align-items:center;gap:6px;flex-wrap:wrap;min-width:0}
+.wb-chat-login-link{font-size:11.5px;line-height:18px;color:var(--dsw-alias-brand-primary,#6366f1);text-decoration:none;white-space:nowrap;margin-left:0}
+.wb-chat-login-link:hover{text-decoration:underline}
+.wb-chat-login-error{font-size:11.5px;line-height:18px;color:#e5534b;white-space:nowrap;margin-left:6px}
 .wb-dot{width:7px;height:7px;border-radius:50%;background:var(--dsw-alias-label-tertiary,#adb2b8);flex:none;transition:transform var(--wb-anim-fast)}
 @keyframes wb-pulse{0%{box-shadow:0 0 0 0 rgba(46,160,67,0.45)}70%{box-shadow:0 0 0 5px rgba(46,160,67,0)}100%{box-shadow:0 0 0 0 rgba(46,160,67,0)}}
 .wb-dot.ok{background:#2ea043;animation:wb-pulse 2.2s infinite ease-out}
@@ -483,6 +496,12 @@ body.dark .wb-root,
       '运行中（未登录）': 'Running (not signed in)',
       '还没有登录 WorkBuddy': 'WorkBuddy is not signed in yet',
       '登录后显示积分余额': 'Credit balance will appear after sign-in',
+      '连接 WorkBuddy': 'Connect WorkBuddy',
+      '浏览器授权一次，WorkBuddy 的模型和积分就会自动出现。不需要安装 WorkBuddy 桌面端，也不用填 API Key。':
+        'Authorize once in your browser and WorkBuddy models and credits appear automatically. No desktop app and no API key required.',
+      '① 点「去登录」': '1. Click "Go to sign-in"',
+      '② 在浏览器里确认授权': '2. Approve in your browser',
+      '③ 回 dsh 选模型': '3. Return to dsh and pick a model',
       '登录后可用': 'Available after sign-in',
       '桥已经在运行，只是还没有登录：到「账号」页点「开始登录」即可。':
         'The bridge is already running; it just is not signed in. Click "Sign in" on the Account tab.',
@@ -1468,6 +1487,13 @@ body.dark .wb-root,
 
     // ─────────────────────────── 格式化 / 导出 ───────────────────────────
     const fmtInt = (n) => (typeof n === 'number' && isFinite(n) ? n.toLocaleString('zh-CN') : '—');
+    /** 积分：最多 3 位小数，去掉无意义的尾零；极小值不显示成 0。 */
+    const fmtCreditShort = (n) => {
+      const value = Number(n);
+      if (!Number.isFinite(value)) return '—';
+      if (value > 0 && value < 0.001) return '<0.001';
+      return String(Math.round(value * 1000) / 1000);
+    };
     const fmtTokens = (n) => {
       const v = Number(n) || 0;
       if (v >= 1_000_000) return (v / 1_000_000).toFixed(1) + 'M';
@@ -2173,10 +2199,7 @@ body.dark .wb-root,
       const desktopAvailable = credential.desktop?.available === true;
       const pluginCount = Number(credential.plugin?.count ?? credential.pluginCount ?? 0);
       const alerts = [];
-      if (state === 'unauthenticated') {
-        alerts.push({ tone: 'warn', text: '还没有登录 WorkBuddy', action: 'account' });
-        alerts.push({ tone: 'warn', text: '在「账号」页点「开始登录」，浏览器授权一次即可，不需要安装 WorkBuddy 桌面端' });
-      } else if (state === 'degraded') {
+      if (state === 'degraded') {
         if (credentialKnown && !desktopAvailable && pluginCount === 0) {
           alerts.push({ tone: 'bad', text: '还没有可用的登录凭据：没有检测到桌面端，也没有插件账号', action: 'account' });
           alerts.push({ tone: 'warn', text: '在「账号」页点「开始登录」，浏览器授权一次即可，不需要安装 WorkBuddy 桌面端' });
@@ -2193,7 +2216,9 @@ body.dark .wb-root,
         alerts.push({ tone: 'bad', text: bridge.error || '端口上的桥与本插件的本地令牌不一致', action: 'restart' });
       } else if (state === 'foreign') {
         alerts.push({ tone: 'bad', text: bridge.error || '端口被别的服务占用了', action: 'restart' });
-      } else if (state !== 'running') {
+      } else if (state !== 'running' && state !== 'unauthenticated') {
+        // unauthenticated = 桥活着但还没登录，欢迎卡已经接管引导；
+        // 这里不能再报「桥没有在运行」，那是假话。
         alerts.push({ tone: 'bad', text: '桥没有在运行 —— 模型调用会失败', action: 'start' });
       }
       const pluginMode = credential.effective?.source === 'plugin'
@@ -2247,9 +2272,28 @@ body.dark .wb-root,
         copyText(lines.join('\n'));
       };
 
+      const unauthenticated = state === 'unauthenticated';
+      /*
+       * 未登录时首屏只讲一件事：授权一次就能用。空积分卡、桥状态、待办列表
+       * 对第一次打开的人都是噪音，全部后置；欢迎卡承担唯一主操作。
+       */
+      const welcome = unauthenticated
+        ? h('div', { className: 'wb-card wb-welcome' },
+          h('h3', null, '连接 WorkBuddy'),
+          h('p', { className: 'wb-note', style: { margin: '4px 0 0' } },
+            '浏览器授权一次，WorkBuddy 的模型和积分就会自动出现。不需要安装 WorkBuddy 桌面端，也不用填 API Key。'),
+          h('div', { className: 'wb-welcome-steps' },
+            h('span', null, '① 点「去登录」'),
+            h('span', null, '② 在浏览器里确认授权'),
+            h('span', null, '③ 回 dsh 选模型')),
+          h('div', { className: 'wb-actions', style: { marginTop: '12px' } },
+            h(Btn, { primary: true, onClick: () => onOpenTab('accounts') }, '去登录')))
+        : null;
+
       return h('div', { style: { display: 'flex', flexDirection: 'column', gap: '12px' } },
+        welcome,
         // 积分卡放在最前：这是大家真正在意的东西，值得单独一张卡 + 大号数字
-        h(QuotaCard, { status, reload, busy, onOpenTab }),
+        unauthenticated ? null : h(QuotaCard, { status, reload, busy, onOpenTab }),
 
         alerts.length
           ? h('div', { className: 'wb-card' },
@@ -2261,10 +2305,12 @@ body.dark .wb-root,
                 disabled: busy,
                 onClick: () => alertAction(a.action),
               }, ACTION_LABEL[a.action] || '处理') : null)))
-          : h(Card, { title: '需要你动手' }, h('p', { className: 'wb-note', style: { margin: 0 } }, '没有待办事项。')),
+          : (unauthenticated
+            ? null
+            : h(Card, { title: '需要你动手' }, h('p', { className: 'wb-note', style: { margin: 0 } }, '没有待办事项。'))),
 
-        h(Card, { title: '状态' },
-          h(Row, { label: '本地桥' }, h(Pill, { tone, text: state === 'unauthenticated' ? '运行中（未登录）' : text })),
+        unauthenticated ? null : h(Card, { title: '状态' },
+          h(Row, { label: '本地桥' }, h(Pill, { tone, text })),
           health ? h(Row, { label: '进程 / 地址' },
             (health.pid ? 'pid ' + health.pid + ' · ' : '') + (status?.config?.bridgeUrl || '') + '/v1') : null,
           health?.uptimeMs ? h(Row, { label: '已运行' }, fmtDuration(health.uptimeMs)) : null,
@@ -2279,7 +2325,7 @@ body.dark .wb-root,
           h(Row, { label: '数据控制台' }, h(Pill, { tone: con.state === 'running' ? 'ok' : 'bad', text: con.state === 'running' ? '运行中' : (con.state || '未运行') })),
           status?.config?.projectRoot ? h(Row, { label: '检出目录' }, status.config.projectRoot) : null),
 
-        h(Card, { title: '操作' },
+        unauthenticated ? null : h(Card, { title: '操作' },
           h('div', { className: 'wb-actions' },
             h(Btn, { primary: state === 'stopped', disabled: busy, onClick: () => onAct('start') }, '启动桥'),
             h(Btn, { disabled: busy, onClick: () => onAct('restart') }, '重启桥'),
@@ -2525,6 +2571,12 @@ body.dark .wb-root,
           : []),
         { value: 'plugin', label: '仅插件登录' },
       ];
+      /*
+       * 还没有任何凭据时，来源/存储/实际使用对新手全是噪音：只留区域和
+       * 「开始登录」。登录成功后再出现这些高级项；被 env 锁定或来自旧配置时
+       * 仍显示，避免把真实约束藏起来。
+       */
+      const showAdvanced = creds.length > 0 || data?.envPinned === true || sourceValue !== 'auto';
       return h(Card, { title: '插件登录（不依赖桌面端）' },
         h('p', { className: 'wb-note wb-login-intro' },
           '在浏览器里完成 WorkBuddy / CodeBuddy 授权；不需要安装或切换到桌面端，密码不会经过本插件。'),
@@ -2540,20 +2592,22 @@ body.dark .wb-root,
           ? h(Alert, { bad: true }, '桌面端登录态当前不可用；请选择「自动」或改用插件登录。')
           : null,
         loading && !data ? h(Loading, { text: '正在读取凭据来源…' }) : null,
-        h('div', { className: 'wb-login-toolbar' },
-          h('span', { className: 'wb-note' }, '当前来源'),
-          data?.envPinned
-            ? h('code', null, sourceValue + '（由环境变量锁定）')
-            : h(Segmented, {
-              value: sourceValue,
-              options: sourceOptions,
-              ariaLabel: '凭据来源',
-              onChange: (e) => switchSource(e.target.value),
-            }),
-          h('span', { className: 'wb-note' },
-            data?.storeMode === 'dpapi' ? '凭据存储：DPAPI 加密' : '凭据存储：仅内存'),
-          h('span', { className: 'wb-note' }, '实际使用：'),
-          h('span', { className: 'wb-note' }, credentialSourceLabel(effectiveSource))),
+        showAdvanced
+          ? h('div', { className: 'wb-login-toolbar' },
+            h('span', { className: 'wb-note' }, '当前来源'),
+            data?.envPinned
+              ? h('code', null, sourceValue + '（由环境变量锁定）')
+              : h(Segmented, {
+                value: sourceValue,
+                options: sourceOptions,
+                ariaLabel: '凭据来源',
+                onChange: (e) => switchSource(e.target.value),
+              }),
+            h('span', { className: 'wb-note' },
+              data?.storeMode === 'dpapi' ? '凭据存储：DPAPI 加密' : '凭据存储：仅内存'),
+            h('span', { className: 'wb-note' }, '实际使用：'),
+            h('span', { className: 'wb-note' }, credentialSourceLabel(effectiveSource)))
+          : null,
         h('div', { className: 'wb-login-toolbar' },
           h('span', { className: 'wb-note' }, '登录区域'),
           h(Segmented, {
@@ -3370,11 +3424,16 @@ body.dark .wb-root,
         Object.keys(adjSummary).length
           ? h('p', { className: 'wb-note', style: { marginTop: 0 } }, `${adjSummary.ok || 0} 项通过 / ${adjSummary.warn || 0} 项警告 / ${adjSummary.fail || 0} 项失败 —— 红色项不解决，模型就不会出现。`)
           : null,
-        h('div', { style: { marginTop: '8px' } }, adjusted.map((item, i) => h('div', { key: i, className: 'wb-row' },
-          h('span', { style: { display: 'flex', alignItems: 'center', gap: '8px', minWidth: 0 } },
-            h('span', { className: 'wb-dot ' + tone(item.status) }),
-            h('span', null, h('b', null, item.label))),
-          h('span', { className: 'wb-value' }, item.detail || '')))),
+        h('div', { style: { marginTop: '8px' } }, adjusted.map((item, i) => h('div', {
+          key: i,
+          className: 'wb-row',
+          style: { alignItems: 'flex-start' },
+        },
+        // 标签不能被长路径挤成竖排：固定宽度 + 不换行，值另起一行自然折行
+        h('span', { className: 'wb-label', style: { display: 'flex', alignItems: 'center', gap: '8px', flex: '0 0 auto' } },
+          h('span', { className: 'wb-dot ' + tone(item.status) }),
+          h('span', null, h('b', null, item.label))),
+        h('span', { className: 'wb-value', style: { textAlign: 'left' } }, item.detail || '')))),
         h('div', { style: { marginTop: '8px' } }, adjusted.filter((i) => i.hint).map((i, k) => h('p', { key: k, className: 'wb-note' }, '建议（' + i.label + '）：' + i.hint))),
         h('div', { className: 'wb-actions', style: { marginTop: '10px' } }, h(Btn, { onClick: reload }, '重新诊断')));
     }
@@ -4162,6 +4221,173 @@ body.dark .wb-root,
       { id: 'log', label: '日志' },
     ];
 
+    /**
+     * 对话页顶部常驻的积分余额胶囊。
+     *
+     * 设置页里的积分卡要开面板才能看到；这个位置让用户聊天时一眼能看到余额，
+     * 点一下刷新（POST 会强制重读上游，GET 只读缓存）。数据来自插件自己的路由，
+     * 不经过控制台，也不额外要求登录。
+     */
+    function ChatQuotaPill() {
+      const { data, reload } = useJson('/workbuddy/quota', { interval: 60000 });
+      const { data: requestData, reload: reloadRequests } = useJson('/workbuddy/requests?limit=1', { interval: 15000 });
+      const { data: usageData, reload: reloadUsage } = useJson('/workbuddy/usage?days=1', { interval: 120000 });
+      const [busy, setBusy] = useState(false);
+      const total = typeof data?.quota?.total === 'number' ? data.quota.total : null;
+      if (total === null) return null;
+      const error = data?.quotaError || (data?.quota && data.quota.ok === false ? String(data.quota.error || '') : '');
+      const refresh = async () => {
+        if (busy) return;
+        setBusy(true);
+        await postJson('/workbuddy/quota', {});
+        setBusy(false);
+        reload(); reloadRequests(); reloadUsage();
+      };
+      const en = typeof document !== 'undefined'
+        && String(document.documentElement.lang || '').toLowerCase().startsWith('en');
+      // 套餐余量低时胶囊变色：<=10% 红，<=30% 黄；没有套餐数据就不猜。
+      const packages = data?.quota?.packages || [];
+      let remain = 0;
+      let size = 0;
+      for (const p of packages) {
+        remain += Number(p.remain) || 0;
+        size += Number(p.size) || 0;
+      }
+      const ratio = size > 0 ? remain / size : null;
+      const tone = ratio !== null && ratio <= 0.1 ? 'bad' : ratio !== null && ratio <= 0.3 ? 'warn' : '';
+      const last = requestData?.requests?.[0];
+      const lastCredit = last && last.ok !== false && typeof last.credit === 'number' ? last.credit : null;
+      const today = typeof usageData?.total?.credit === 'number' ? usageData.total.credit : null;
+      const titleLines = [
+        (en ? 'WorkBuddy credits: ' : 'WorkBuddy 积分余额：') + fmtInt(total),
+        ratio !== null ? (en ? 'Package remaining: ' : '套餐余量：') + Math.round(ratio * 100) + '%' : '',
+        today !== null ? (en ? 'Used today: ' : '今日已用：') + today.toFixed(2) + (en ? ' credits' : ' 积分') : '',
+        lastCredit !== null
+          ? (en ? 'Last call: ' : '最近一次：') + (last.model || '—') + ' · '
+            + (lastCredit === 0 ? (en ? 'free' : '免费') : fmtCreditShort(lastCredit) + (en ? ' credits' : ' 积分'))
+          : '',
+        error ? (en ? 'Last read failed: ' : '最近一次读取失败：') + error : '',
+        en ? 'Click to refresh' : '点击刷新',
+      ].filter(Boolean);
+      const title = titleLines.join('\n');
+      return h('button', {
+        type: 'button',
+        className: 'wb-chat-quota' + (tone ? ' ' + tone : ''),
+        title,
+        'aria-label': title,
+        'data-workbuddy-quota': String(total),
+        disabled: busy,
+        onClick: refresh,
+      },
+      h('span', { className: 'wb-chat-quota-dot', 'aria-hidden': 'true' }),
+      (en ? 'Credits ' : '积分 ') + fmtInt(total));
+    }
+
+    /**
+     * 每轮回复末尾的积分消耗。
+     *
+     * dsh 的 turnTail 槽位只给 turn/seq，不提供这一轮的 usage；这里按
+     * **最近一次已完成的模型请求**估算，并且只渲染在最后一个 turn tail 上 ——
+     * 并发多个会话时可能对到另一窗口，title 会明确标注"估算"。
+     */
+    function ChatTurnCost({ seq } = {}) {
+      const holder = useRef(null);
+      const [info, setInfo] = useState(null);
+      const en = typeof document !== 'undefined'
+        && String(document.documentElement.lang || '').toLowerCase().startsWith('en');
+      useEffect(() => {
+        setInfo(null);
+        const el = holder.current;
+        if (!el) return undefined;
+        const tail = el.closest('[data-turn-tail]');
+        if (!tail) return undefined;
+        const tails = document.querySelectorAll('[data-turn-tail]');
+        if (tails[tails.length - 1] !== tail) return undefined;
+        let alive = true;
+        const timer = setTimeout(async () => {
+          try {
+            const { data } = await getJson('/workbuddy/requests?limit=1');
+            const r = data?.requests?.[0];
+            if (!alive || !r || r.ok === false) return;
+            if (Date.now() - Number(r.t || 0) > 120000) return;
+            if (typeof r.credit !== 'number') return;
+            setInfo(r);
+          } catch { /* 账本读不到就不显示，不影响对话 */ }
+        }, 500);
+        return () => { alive = false; clearTimeout(timer); };
+      }, [seq, en]);
+      if (!info) return h('span', { ref: holder, className: 'wb-turn-cost', style: { display: 'none' } });
+      const text = info.credit === 0
+        ? (en ? 'Free this turn' : '本轮免费')
+        : (en ? 'This turn: ' : '本轮 ') + fmtCreditShort(info.credit) + (en ? ' credits' : ' 积分');
+      const title = (en ? 'Estimated from the latest model request: ' : '按最近一次模型请求估算：')
+        + (info.model || '—') + ' · '
+        + (info.credit === 0 ? (en ? 'free' : '免费') : fmtCreditShort(info.credit) + (en ? ' credits' : ' 积分'))
+        + (info.ms ? ' · ' + info.ms + ' ms' : '');
+      return h('span', { ref: holder, className: 'wb-turn-cost', title }, text);
+    }
+
+    /**
+     * 空会话 hero 里的登录入口：未登录时直接发起设备码，省得用户去设置页。
+     * 只在 unauthenticated 状态出现；登录成功后 status 轮询会把它隐藏。
+     */
+    function ChatLoginButton() {
+      const { data: status, reload } = useJson('/workbuddy/status', { interval: 10000 });
+      const [pending, setPending] = useState(null);
+      const [busy, setBusy] = useState(false);
+      const [error, setError] = useState('');
+      const alive = useRef(true);
+      useEffect(() => () => { alive.current = false; }, []);
+      useEffect(() => {
+        if (!pending) return undefined;
+        const timer = setInterval(async () => {
+          const res = await postJson('/workbuddy/login/poll', { state: pending.state });
+          if (!alive.current) return;
+          const d = res.data || {};
+          if (d.status === 'ready') {
+            setPending(null);
+            setBusy(false);
+            reload();
+          } else if (d.ok === false || res.status >= 400) {
+            setPending(null);
+            setBusy(false);
+            setError(String(d.error || '登录未完成'));
+          }
+        }, 3500);
+        return () => clearInterval(timer);
+      }, [pending, reload]);
+      if (status?.bridge?.state !== 'unauthenticated') return null;
+      const en = typeof document !== 'undefined'
+        && String(document.documentElement.lang || '').toLowerCase().startsWith('en');
+      const region = status?.bridge?.health?.credential?.loginRegion === 'global' ? 'global' : 'cn';
+      const start = async () => {
+        setBusy(true); setError('');
+        const res = await postJson('/workbuddy/login/start', { region, open: true });
+        if (!alive.current) return;
+        setBusy(false);
+        if (res.data?.ok && res.data?.state && res.data?.url) {
+          setPending({ state: res.data.state, url: res.data.url });
+        } else {
+          setError(String(res.data?.error || ('HTTP ' + res.status)));
+        }
+      };
+      return h('span', { className: 'wb-chat-login-inline' },
+        h(Btn, {
+          primary: true,
+          sm: true,
+          disabled: busy || !!pending,
+          onClick: pending ? undefined : start,
+          title: pending ? (en ? 'Waiting for browser approval' : '等待浏览器授权') : (en ? 'Sign in to WorkBuddy in your browser' : '在浏览器里登录 WorkBuddy'),
+        }, pending ? (en ? 'Waiting for approval…' : '等待授权…') : (error ? (en ? 'Retry sign-in' : '重试登录') : (en ? 'Connect WorkBuddy' : '连接 WorkBuddy'))),
+        pending ? h('a', {
+          className: 'wb-chat-login-link',
+          href: pending.url,
+          target: '_blank',
+          rel: 'noreferrer',
+        }, en ? 'Open page' : '打开授权页') : null,
+        error ? h('span', { className: 'wb-chat-login-error', title: error }, en ? 'Sign-in failed' : '登录失败') : null);
+    }
+
     function WorkBuddyPanel() {
       /*
        * 订阅语言：切换时这一个 setState 会让整棵面板重渲染，文案在 render 里现算。
@@ -4403,7 +4629,38 @@ body.dark .wb-root,
           order: 60,
           label: 'WorkBuddy',
         }, WorkBuddyPanel));
-        return () => { disposeSlot(); disposeStyles(); };
+        /*
+         * 对话页的三处增强。`inject` 会等槽位声明；旧版 dsh 没有某个槽时
+         * 不能影响设置页注册，所以逐个兜一层、互不牵连。
+         */
+        const conversationSlots = [
+          ['conversation.session.header.utilities', 'workbuddy-quota', 10, ChatQuotaPill],
+          ['conversation.hero.options', 'workbuddy-login', 20, ChatLoginButton],
+          ['conversation.chat.turnTail', 'workbuddy-turn-cost', 30, ChatTurnCost],
+        ];
+        const disposers = [];
+        for (const [name, id, order, component] of conversationSlots) {
+          try {
+            const dispose = slots.inject(name, () => {
+              try {
+                return slots.register({ name, id, order }, component);
+              } catch (error) {
+                try { console.warn('dsh-plugin-workbuddy: slot registration failed', name, error); } catch (e) { /* ignore */ }
+                return () => {};
+              }
+            });
+            if (typeof dispose === 'function') disposers.push(dispose);
+          } catch (error) {
+            try { console.warn('dsh-plugin-workbuddy: slot unavailable', name, error); } catch (e) { /* ignore */ }
+          }
+        }
+        return () => {
+          for (const dispose of disposers) {
+            try { dispose(); } catch (e) { /* ignore */ }
+          }
+          disposeSlot();
+          disposeStyles();
+        };
       }, 'workbuddy.panel');
     }
 
@@ -4411,6 +4668,9 @@ body.dark .wb-root,
     exports.apply = apply;
     exports.inject = ['slots'];
     exports.WorkBuddyPanel = WorkBuddyPanel;
+    exports.ChatQuotaPill = ChatQuotaPill;
+    exports.ChatLoginButton = ChatLoginButton;
+    exports.ChatTurnCost = ChatTurnCost;
     return module.exports;
   },
 });

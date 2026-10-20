@@ -36,7 +36,7 @@ async function startStub({ sseFrames = [], status = 200, errorBody = null, captu
       res.writeHead(200, { 'content-type': 'application/json' });
       // `catalog` 可覆盖（默认给两个固定桩）：用例要按形状区分"带推理标记"的模型
       return res.end(JSON.stringify({ object: 'list', data: catalog || [
-          { id: 'stub-model', name: 'Stub Model', context_window: 128000, max_output_tokens: 8192, credits: 0.5, supports_images: true },
+          { id: 'stub-model', name: 'Stub Model', context_window: 128000, max_output_tokens: 8192, credits: 0.11, supports_images: true },
           { id: 'stub-free', name: 'Stub Free', context_window: 32000, max_output_tokens: 4096, credits: 0, free: true },
         ],
       }));
@@ -97,14 +97,16 @@ test('listModels / resolveModel 使用桥目录的元数据', async () => {
     assert.deepEqual(models[0], {
       provider: 'workbuddy',
       id: 'stub-model',
-      name: 'Stub Model',
-      description: '上下文 128k · 输出 8192 · 倍率 0.5 · 图片',
+      name: 'Stub Model · ×0.11',
+      description: '上下文 128k · 输出 8192 · 图片',
       inputModalities: ['text', 'image'],
     });
-    assert.equal(models[1].description, '上下文 32k · 输出 4096 · 免费');
+    assert.equal(models[1].name, 'Stub Free · 免费');
+    assert.equal(models[1].description, '上下文 32k · 输出 4096');
     const resolved = await adapter.resolveModel('workbuddy', 'stub-model');
     assert.equal(resolved.context.contextWindow, 128000);
-    assert.equal(resolved.description, '上下文 128k · 输出 8192 · 倍率 0.5 · 图片');
+    assert.equal(resolved.name, 'Stub Model · ×0.11');
+    assert.equal(resolved.description, '上下文 128k · 输出 8192 · 图片');
     assert.equal(resolved.defaultMaxTokens, 8192);
     assert.equal(adapter.providerInfo('workbuddy').id, 'workbuddy');
     assert.equal(adapter.providerRetryPolicy().mode, 'normal');

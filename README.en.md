@@ -50,6 +50,21 @@ Base URL, token, port or environment variable is required. If the desktop app is
 signed in, its login is reused and step 2 is unnecessary. The China / Global region is
 pre-selected from the existing account or desktop domain, and the model picker refreshes
 after sign-in, account switches or bridge restarts — no extra dsh restart.
+Model names carry their credit multiplier (`DeepSeek-V4.1-Flash · ×0.11`; free models
+are marked too). The chat header keeps a click-to-refresh credit pill (hover for today's
+spend and the last call), an empty chat offers a one-click "Connect WorkBuddy" button,
+and the latest turn shows its estimated credit cost.
+
+#### In the chat view
+
+| Where | What you see | Notes |
+|---|---|---|
+| Model name | `DeepSeek-V4.1-Flash · ×0.11` / `· Free` | The multiplier comes from the model catalog; no need to open details |
+| Chat header | `Credits 715` | Hover for package remaining, today's spend and the last call; turns amber at ≤30%, red at ≤10%; click to refresh |
+| End of the latest turn | `This turn: 0.03 credits` | Estimated from the latest completed model request; concurrent windows may attribute it to another session (the tooltip says so) |
+| Empty chat | `Connect WorkBuddy` | Starts browser authorization without opening Settings; the model picker refreshes automatically |
+
+`×0.11` is a **credit multiplier**, not a CNY price; free models are labelled as such.
 
 ## ⚠️ Read this first (disclaimer & boundaries)
 

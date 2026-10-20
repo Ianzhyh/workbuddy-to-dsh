@@ -110,12 +110,81 @@ try {
   if (!Array.isArray(result.harness.moduleInject) || !result.harness.moduleInject.includes('slots')) {
     problems.push(`模块级 inject 导出必须包含 slots（现在是 ${JSON.stringify(result.harness.moduleInject)}）`);
   }
-  if (result.harness.injectSlot !== 'settings.section') problems.push(`没有先 slots.inject('settings.section')（实际 ${result.harness.injectSlot}）`);
-  const reg = (result.harness.registrations || [])[0] || {};
-  if (reg.name !== 'settings.section') problems.push(`注册项的槽位键必须是 name='settings.section'（实际 ${reg.name}）`);
+  const injected = result.harness.injectedSlots || [];
+  if (!injected.includes('settings.section')) problems.push(`没有 slots.inject('settings.section')（实际 ${JSON.stringify(injected)}）`);
+  for (const slot of ['conversation.session.header.utilities', 'conversation.hero.options', 'conversation.chat.turnTail']) {
+    if (!injected.includes(slot)) problems.push(`没有注册 ${slot}（实际 ${JSON.stringify(injected)}）`);
+  }
+  const reg = (result.harness.registrations || []).find((r) => r.name === 'settings.section') || {};
+  if (!reg.name) problems.push(`注册项里找不到 name='settings.section'`);
   if (reg.id !== 'workbuddy') problems.push(`注册的 id 不对：${reg.id}`);
   if (result.harness.applyError) problems.push(`apply 抛错：${result.harness.applyError}`);
   if (result.errors.length) problems.push(`页面有错误：${result.errors.join(' | ')}`);
+
+  // 对话页顶部的积分胶囊：能渲染、显示余额、点击会强制刷新
+  {
+    const quota = await page.cdp.evaluate(`(async () => {
+      const host = document.createElement('div');
+      host.id = 'quota-probe';
+      document.body.appendChild(host);
+      const root = ReactDOM.createRoot(host);
+      root.render(React.createElement(window.__module.ChatQuotaPill));
+      await new Promise((r) => setTimeout(r, 800));
+      const btn = host.querySelector('[data-workbuddy-quota]');
+      if (!btn) { host.remove(); return { found: false }; }
+      const text = btn.textContent;
+      btn.click();
+      await new Promise((r) => setTimeout(r, 400));
+      const posts = window.__calls.filter((c) => c[0] === '/workbuddy/quota' && c[1] === 'POST').length;
+      host.remove();
+      return { found: true, text, posts };
+    })()`);
+    if (!quota.found) problems.push('对话页积分胶囊没有渲染出来');
+    else {
+      if (!/积分/.test(quota.text)) problems.push(`积分胶囊文案不对：${quota.text}`);
+      if (quota.posts < 1) problems.push('点击积分胶囊没有强制刷新');
+    }
+  }
+
+  // 空会话登录入口 + 每轮积分：直接挂载两个聊天页组件验证（不依赖宿主 DOM）
+  {
+    const chatBits = await page.cdp.evaluate(`(async () => {
+      const origStatus = window.__routes['/workbuddy/status'];
+      const origRequests = window.__routes['/workbuddy/requests'];
+      window.__setRoute('/workbuddy/status', {
+        bridge: { state: 'unauthenticated', health: { credential: { loginRegion: 'global' } } },
+      });
+      const loginHost = document.createElement('div');
+      document.body.appendChild(loginHost);
+      const loginRoot = ReactDOM.createRoot(loginHost);
+      loginRoot.render(React.createElement(window.__module.ChatLoginButton));
+      await new Promise((r) => setTimeout(r, 500));
+      const loginBtn = [...loginHost.querySelectorAll('button')].find((b) => b.textContent === '连接 WorkBuddy');
+      if (!loginBtn) { loginRoot.unmount(); loginHost.remove(); return { login: 'missing' }; }
+      loginBtn.click();
+      await new Promise((r) => setTimeout(r, 500));
+      const waiting = !!loginHost.querySelector('.wb-chat-login-link');
+      loginRoot.unmount(); loginHost.remove();
+
+      window.__setRoute('/workbuddy/requests', {
+        ok: true,
+        requests: [{ t: Date.now() - 1000, model: 'stub-model', ok: true, credit: 0.03, ms: 1200 }],
+      });
+      const turnHost = document.createElement('div');
+      turnHost.setAttribute('data-turn-tail', '1');
+      document.body.appendChild(turnHost);
+      const turnRoot = ReactDOM.createRoot(turnHost);
+      turnRoot.render(React.createElement(window.__module.ChatTurnCost, { seq: 1 }));
+      await new Promise((r) => setTimeout(r, 900));
+      const cost = turnHost.textContent;
+      turnRoot.unmount(); turnHost.remove();
+      window.__setRoute('/workbuddy/status', origStatus);
+      window.__setRoute('/workbuddy/requests', origRequests);
+      return { login: waiting ? 'ok' : 'no-link', cost };
+    })()`);
+    if (chatBits.login !== 'ok') problems.push('空会话「连接 WorkBuddy」没有进入等待授权/没给授权链接');
+    if (!/0\.03/.test(chatBits.cost || '')) problems.push(`每轮积分没有显示：${chatBits.cost || '空'}`);
+  }
 
   // 逐个标签页走一遍：每个面板都要真的渲染出内容（不是只挂个空壳）
   const EXPECT = {
@@ -246,6 +315,20 @@ try {
   if (modelRows < 4) problems.push(`模型页表格行太少：${modelRows}`);
   await page.cdp.evaluate(`(() => { const b=[...document.querySelectorAll('.wb-tab')].find(x=>x.textContent==='诊断'); b && b.click(); })()`);
   await sleep(500);
+  // 回归：长路径不能把「登录文件」标签挤成竖排
+  const diagLayout = await page.cdp.evaluate(`(() => {
+    const card = [...document.querySelectorAll('.wb-card')].find((c) => c.querySelector('h3')?.textContent === '环境诊断');
+    const row = card && card.querySelector('.wb-row');
+    const label = row && row.querySelector('.wb-label');
+    const value = row && row.querySelector('.wb-value');
+    if (!label || !value) return null;
+    return { lw: label.offsetWidth, lh: label.offsetHeight, vw: value.offsetWidth, align: getComputedStyle(value).textAlign };
+  })()`);
+  if (!diagLayout) problems.push('诊断页找不到标签/值布局');
+  else {
+    if (diagLayout.lw < 40 || diagLayout.lh > 28) problems.push(`诊断标签被挤成竖排（${diagLayout.lw}×${diagLayout.lh}）`);
+    if (diagLayout.align !== 'left') problems.push(`诊断值没有左对齐（${diagLayout.align}）`);
+  }
   shot = await page.cdp.send('Page.captureScreenshot', { format: 'png', captureBeyondViewport: true });
   writeFileSync(join(OUT_DIR, 'plugin-panel-diagnose.png'), Buffer.from(shot.result.data, 'base64'));
   await page.cdp.evaluate(`(() => { const b=[...document.querySelectorAll('.wb-tab')].find(x=>x.textContent==='对话测试'); b && b.click(); })()`);
@@ -1029,12 +1112,12 @@ async function verifyFirstRun() {
     await waitFor(page.cdp, 'window.__harness && window.__harness.rendered === true', 15000, '面板挂载');
     await sleep(1000);
     const text = await page.cdp.evaluate("document.querySelector('.wb-root') ? document.querySelector('.wb-root').innerText : ''");
-    if (!/还没有登录 WorkBuddy/.test(text)) problems.push('没有说明当前还没有登录');
+    if (!/连接 WorkBuddy/.test(text)) problems.push('首次安装没有显示「连接 WorkBuddy」引导');
     if (/桥凭据异常/.test(text)) problems.push('首次安装（从来没登录）被说成了「桥凭据异常」');
     if (!/未登录/.test(text)) problems.push('首次安装没有明确显示「未登录」');
-    if (!/登录后显示积分余额/.test(text)) problems.push('积分卡没有说明登录后才显示余额');
+    if (!/模型和积分/.test(text)) problems.push('引导没有说明登录后模型/积分会出现');
     if (!/不需要安装 WorkBuddy 桌面端/.test(text)) problems.push('没有说明插件登录不依赖桌面端');
-    if (!/开始登录/.test(text)) problems.push('没有给出「开始登录」的修法');
+    if (!/去登录|开始登录/.test(text)) problems.push('没有给出登录入口');
     const shot = await page.cdp.send('Page.captureScreenshot', { format: 'png', captureBeyondViewport: true });
     writeFileSync(join(OUT_DIR, 'plugin-panel-first-run.png'), Buffer.from(shot.result.data, 'base64'));
     // 首次安装的引导文案也必须能翻成英文（这些分支平时渲染扫描扫不到）

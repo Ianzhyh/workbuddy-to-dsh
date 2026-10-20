@@ -52,10 +52,24 @@ dsh 的模型选择器里，日常需要的接入、管理、监控、运维能�
 - **不填任何东西**：不需要 API Key、Base URL、令牌、端口或环境变量；桥与控制台由插件自动拉起。
 - **国内 / 国际版自动预选**：登录区域跟随现有账号或桌面端域名，不用每次手动切。
 - **模型选择器即时刷新**：登录、切号、重启桥后自动广播目录更新，不需要重启 dsh。
+- **聊天页闭环**：未登录时空会话里直接「连接 WorkBuddy」；对话页顶部常驻「积分 N」（悬停看套餐余量 / 今日已用 / 最近一次，点一下刷新）；每轮回复末尾显示本轮积分。
+- **模型名自带倍率**：选择器/聊天顶部直接显示 `DeepSeek-V4.1-Flash · ×0.11`，免费模型标「免费」，不用再翻模型详情。
 - **凭据不裸奔**：DPAPI + AES-GCM 加密保存；同一账号的桌面/插件双凭据自动合并，401/403 自动接管。
 
 <img src="docs/plugin-panel-first-run-login.png" width="100%"
      alt="首次安装的 dsh「账号」页：插件登录卡直接排在账号列表前面，区域已自动预选，点「开始登录」即可在浏览器授权">
+
+#### 聊天页里，常用的都在手边
+
+| 位置 | 显示 | 说明 |
+|---|---|---|
+| **模型名** | `DeepSeek-V4.1-Flash · ×0.11` / `· 免费` | 倍率来自模型目录，选模型时就能看到；不用点进详情 |
+| **对话页顶部** | `积分 715` | 悬停看套餐余量 / 今日已用 / 最近一次调用；余量 ≤30% 变黄、≤10% 变红；点一下强制刷新 |
+| **每轮回复末尾** | `本轮 0.03 积分` | 对话结束就能看到成本；按最近一次已完成的模型请求估算，双窗口并发时可能对应到另一窗口（悬停有说明） |
+| **空会话欢迎区** | `连接 WorkBuddy` | 未登录时直接发起浏览器授权，不用先进设置页；成功后模型选择器自动刷新 |
+
+> `×0.11` 是**积分消耗倍率**，不是人民币单价；免费模型直接标「免费」。
+> 积分胶囊、登录入口、每轮成本都在 dsh 对话页；完整用量曲线、请求明细和 CSV 仍在设置页的「用量 / 请求」里。
 
 能力清单：
 
@@ -147,7 +161,7 @@ dsh plugin --profile desktop add github:Ianzhyh/workbuddy-to-dsh
 
 # 方式二：release 附件（tgz 安装包，无构建、无需 allowBuilds 授权）
 #   从 GitHub Releases 下载 dsh-plugin-workbuddy-<版本>.tgz 后：
-dsh plugin --profile desktop add ./dsh-plugin-workbuddy-1.8.1.tgz
+dsh plugin --profile desktop add ./dsh-plugin-workbuddy-1.8.2.tgz
 
 # 方式三：从源码（插件在 dsh-plugin/ 子目录，接第 1 步的 git clone）
 dsh plugin --profile desktop add workbuddy-to-dsh/dsh-plugin

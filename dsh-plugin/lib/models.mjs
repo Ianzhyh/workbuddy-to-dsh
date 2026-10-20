@@ -45,11 +45,21 @@ export function describeModel(model) {
   if (context) bits.push(`上下文 ${context}`);
   const output = shortCount(model?.max_output_tokens || model?.maxTokens);
   if (output) bits.push(`输出 ${output}`);
-  if (model?.free === true || model?.credits === 0) bits.push('免费');
-  else if (typeof model?.credits === 'number' && model.credits > 0) bits.push(`倍率 ${model.credits}`);
+  // 积分倍率放到模型名后面（见 modelCostLabel），描述里不再重复一遍
   if (model?.supports_images === true || model?.images === true) bits.push('图片');
   if (model?.supports_reasoning === true || model?.supportsReasoning === true || model?.reasoning === true) bits.push('推理');
   return bits.join(' · ');
+}
+
+/**
+ * 模型名后缀：让选择器/聊天顶部的模型名直接带上消耗倍率。
+ * `credits` 是桥目录里的积分倍率（0.11 = 每次扣 0.11 倍），免费模型给「免费」。
+ */
+export function modelCostLabel(model) {
+  const credits = Number(model?.credits);
+  if (model?.free === true || credits === 0) return '免费';
+  if (Number.isFinite(credits) && credits > 0) return '×' + String(credits);
+  return '';
 }
 
 /**
@@ -75,9 +85,11 @@ export function toAdapterModel(model) {
   const efforts = Array.isArray(model.reasoning_efforts)
     ? [...new Set(model.reasoning_efforts.map((e) => String(e || '').trim()).filter(Boolean))]
     : null;
+  const baseName = String(model.name || id);
+  const cost = modelCostLabel(model);
   return {
     id,
-    name: String(model.name || id),
+    name: cost ? baseName + ' · ' + cost : baseName,
     ...(describeModel(model) ? { description: describeModel(model) } : {}),
     ...(contextWindow ? { contextWindow } : {}),
     ...(maxTokens ? { maxTokens } : {}),

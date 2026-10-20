@@ -283,6 +283,8 @@ window.confirm = function (message) { window.__dialogs.push(String(message)); re
     const body = route && Object.prototype.hasOwnProperty.call(route, 'payload') ? route.payload : route;
     return Promise.resolve(new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } }));
   };
+  window.__routes = ROUTES;
+  window.__setRoute = (path, route) => { ROUTES[path] = route; };
 })();
 window.__ModuleLoader__ = {
   load(registration) {
@@ -302,10 +304,11 @@ window.__ModuleLoader__ = {
   const registration = window.__registration || {};
   const mod = window.__module || {};
   const slots = [];
+  const injectedSlots = [];
   /* 按核心插件的真实契约造桩：apply 直接从 ctx.slots 取服务，
      注册项用 name 指槽位，并包在 slots.inject(槽位, …) 里。 */
   const service = {
-    inject(key, callback) { window.__injectedSlot = key; return callback(); },
+    inject(key, callback) { window.__injectedSlot = key; injectedSlots.push(key); return callback(); },
     register(options, component) { slots.push({ options, component }); return () => {}; },
   };
   const ctx = {
@@ -323,6 +326,7 @@ window.__ModuleLoader__ = {
     /** 模块级 inject 导出 = cordis 服务依赖；核心插件都是这么写的 */
     moduleInject: mod.inject,
     injectSlot: window.__injectedSlot || '',
+    injectedSlots,
     registrations: slots.map((s) => s.options),
     applyError,
     rendered: false,
