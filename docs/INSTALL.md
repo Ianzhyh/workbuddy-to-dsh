@@ -12,12 +12,13 @@
 
 | 需要 | 说明 | 怎么确认 |
 |---|---|---|
-| **Windows** | 凭据解密的密钥**不在本包里**：每次由客户端自己的 Electron 原生绑定现取（以 `ELECTRON_RUN_AS_NODE=1` 跑客户端可执行文件）。目前只在 Windows 实测过 | — |
+| **Windows** | 复用桌面端登录态时，解密密钥**不在本包里**：每次由客户端自己的 Electron 原生绑定现取。插件登录的加密落盘用 DPAPI，同样仅 Windows（其他平台自动退回仅内存，未实测） | — |
 | **Node.js 18+** | 桥与控制台都是纯 Node 脚本；dsh 自带的 runtime 也行 | `node -v` |
-| **WorkBuddy 桌面端，且已登录** | 模型来自它的登录态；登录文件在 `%LOCALAPPDATA%\CodeBuddyExtension\Data\Public\auth\*.info` | 打开 WorkBuddy 能正常对话 |
+| **WorkBuddy 桌面端，且已登录**（或改用插件登录） | 二选一：① 复用桌面端登录态；② **不装桌面端**，在插件的「账号」页用「插件登录」完成浏览器授权（需要一个 WorkBuddy / CodeBuddy 账号） | ① 打开 WorkBuddy 能正常对话；② 账号列表里能看到标「插件」的账号 |
 | **DeepSeek Harness（dsh）桌面版** | 插件宿主 | 能打开 dsh 界面 |
 
-不需要：不需要 OpenAI key、不需要对方有本仓库、不需要管理员权限。
+不需要：不需要 OpenAI key、不需要对方有本仓库、不需要管理员权限；
+改用插件登录时**不需要安装 WorkBuddy 桌面端**（凭据由插件保管，DPAPI 加密落盘）。
 插件**只连本机回环地址**，不新增对外监听、不上传任何数据。
 
 ---

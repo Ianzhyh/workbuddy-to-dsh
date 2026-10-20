@@ -51,6 +51,23 @@ copy .env.example .env
 | `WORKBUDDY_AUTH_FILE` | 自动定位 | 登录文件绝对路径。**多账号时务必显式指定** |
 | `WORKBUDDY_AUTH_DIR` | 平台默认 | 登录文件所在目录，仅在目录被移动时需要 |
 
+### 插件登录（第二条凭据来源）
+
+| 变量 | 默认值 | 说明 |
+|---|---|---|
+| `WORKBUDDY_CREDENTIAL_SOURCE` | 不设置（桥按 `auto`） | `auto` / `desktop` / `plugin` / `api-key`。`auto` 是**软默认**：允许面板/控制台切换，登录成功后照常切到插件；只有显式写 `desktop` / `plugin` / `api-key` 才**锁定**来源（UI 切换会被拒绝）。`auto` 的顺序 = API key → 桌面端 → 插件（仅**本地**不可用时回退）；上游 401 不会中途换号 |
+| `WORKBUDDY_CREDENTIAL_STORE` | Windows `dpapi`，其他平台 `memory` | `dpapi` = DPAPI(CurrentUser) 保护 `store.key` + AES-256-GCM 凭据；`memory` = 不落盘。DPAPI 失败会自动退回 memory，**绝不写明文** |
+| `WORKBUDDY_CREDENTIAL_DIR` | `%USERPROFILE%\.workbuddy-bridge\credentials` | 凭据目录（`store.key` / `*.cred` / `active.json` / `source.json`） |
+| `WORKBUDDY_LOGIN_REGION` | `cn` | 设备码登录默认区域：`cn` / `global` |
+| `WORKBUDDY_LOGIN_UA` | `CLI/2.63.2 CodeBuddy/2.63.2` | 登录端点期望的 User-Agent；上游漂移时的逃生门 |
+| `WORKBUDDY_LOGIN_BASE` / `WORKBUDDY_LOGIN_ORIGIN` | 按区域 | 仅测试 / 应急覆盖登录端点 |
+| `WORKBUDDY_CREDENTIAL_FAILOVER` | `same-account` | 鉴权失败（401/403）时另一条凭据是否接管：`same-account` = 只在桌面端与插件端 **uid 相同**时接管（钱包不变）；`any` = 任意账号接管（会切换账号/钱包，显式 opt-in）；`off` = 不接管 |
+| `WORKBUDDY_PLUGIN_IDENTITY` | `workbuddy` | 插件来源的 chat 身份：`workbuddy`（WorkBuddy 形状 UA / `X-IDE-*` / Origin，参考实现实测）/ `vscode`（退回旧头）。桌面来源不受影响 |
+| `WORKBUDDY_PLUGIN_APP_VERSION_CN` / `_GLOBAL` | `5.5.6` / `5.5.2` | 插件身份声明的桌面版本（进 UA 与 `X-IDE-Version`）；非法值自动回退 |
+
+> 未用环境变量锁定来源时，面板/控制台里的选择会持久化到 `source.json`；登录成功后
+> 自动切到 `plugin` 并在界面明示，可随时切回 `desktop` / `auto`。
+
 ### 一键接入
 
 「客户端接入」面板的「一键接入」与 `npm run connect` 会**写**客户端的配置文件。

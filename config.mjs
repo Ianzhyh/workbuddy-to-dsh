@@ -434,6 +434,18 @@ export const config = {
   workbuddy: {
     exe: resolveWorkBuddyExe(),
     authFile: resolveAuthFile(),
+    /*
+     * 第二条凭据来源（插件登录）。凭据由桥自己保管：
+     *   - source：auto（桌面端优先，本地不可用时回退插件）/ desktop / plugin / api-key
+     *   - store ：dpapi（Windows 加密落盘）或 memory（不落盘，重启需重登）
+     *   - dir   ：凭据目录；默认在用户目录下，与仓库/插件目录无关
+     */
+    // 空串 = 不锁定；由桥按 auto + 运行时/持久化选择决定。只有显式设置才注入，
+    // 否则会把 UI 里的来源切换当成"被环境变量锁定"而拒绝。
+    credentialSource: env.WORKBUDDY_CREDENTIAL_SOURCE || '',
+    credentialStore: env.WORKBUDDY_CREDENTIAL_STORE || (process.platform === 'win32' ? 'dpapi' : 'memory'),
+    credentialDir: env.WORKBUDDY_CREDENTIAL_DIR || join(homedir(), '.workbuddy-bridge', 'credentials'),
+    loginRegion: env.WORKBUDDY_LOGIN_REGION || 'cn',
   },
   /**
    * dsh 的路径切面。
@@ -508,6 +520,10 @@ export function bridgeEnv(overrides = {}) {
     WORKBUDDY_ACTIVE_ALERT_MS: String(config.bridge.activeAlertMs),
     WORKBUDDY_CLIENT_KEYS: config.bridge.clientKeys,
     WORKBUDDY_AUTH_FILE: overrides.authFile || config.workbuddy.authFile,
+    ...(config.workbuddy.credentialSource ? { WORKBUDDY_CREDENTIAL_SOURCE: config.workbuddy.credentialSource } : {}),
+    WORKBUDDY_CREDENTIAL_STORE: config.workbuddy.credentialStore,
+    WORKBUDDY_CREDENTIAL_DIR: config.workbuddy.credentialDir,
+    WORKBUDDY_LOGIN_REGION: config.workbuddy.loginRegion,
     // 探测不到时不注入空值 —— 桥会用自己的同款探测重新定位，而不是把
     // 一个空串当成"显式指定的路径"。
     ...(config.workbuddy.exe ? { WORKBUDDY_APP_EXECUTABLE: config.workbuddy.exe } : {}),

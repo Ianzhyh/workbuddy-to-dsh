@@ -23,7 +23,18 @@ test('数据面的方法 / 权限矩阵：只读路由拒绝写方法，写路�
     snapshot: async () => ({ bridge: { state: 'running' } }),
     supervisor: { readLog: () => ({ lines: [] }), probe: async () => ({ state: 'running' }), ensure: async () => ({ ok: true }), stop: async () => ({ ok: true }) },
     consoleSupervisor: { probe: async () => ({ state: 'running' }), ensure: async () => ({ ok: true }), stop: async () => ({ ok: true }), url: 'http://127.0.0.1:8792', spawnedPid: null },
-    client: { checkin: async () => ({ status: {} }), clearUsage: async () => ({ ok: true }), usage: async () => ({}), requests: async () => ({}), quota: async () => ({}) },
+    client: {
+      checkin: async () => ({ status: {} }), clearUsage: async () => ({ ok: true }), usage: async () => ({}),
+      requests: async () => ({}), quota: async () => ({}),
+      authSource: async () => ({ ok: true, configured: 'auto', credentials: [] }),
+      authCredentials: async () => ({ ok: true, configuredSource: 'auto', credentials: [] }),
+      deviceLoginStart: async () => ({ ok: true, state: 's', url: 'https://example.invalid/login' }),
+      deviceLoginPoll: async () => ({ ok: true, status: 'pending' }),
+      deviceLoginCancel: async () => ({ ok: true }),
+      authSetActive: async () => ({ ok: true }),
+      authLogout: async () => ({ ok: true }),
+      setAuthSource: async () => ({ ok: true }),
+    },
     adapter: { catalogCache: { at: Date.now(), models: [] }, catalogError: '', catalog: async () => [], invalidate() {} },
     paths: { settingsPath: 'x', patchPath: 'y' },
     provider: 'workbuddy',
@@ -50,7 +61,7 @@ test('数据面的方法 / 权限矩阵：只读路由拒绝写方法，写路�
   };
 
   // 只读路由：GET 正常，PUT/PATCH/DELETE 一律 405
-  for (const path of ['/workbuddy/status', '/workbuddy/models', '/workbuddy/requests', '/workbuddy/migrate', '/workbuddy/console', '/workbuddy/quota']) {
+  for (const path of ['/workbuddy/status', '/workbuddy/models', '/workbuddy/requests', '/workbuddy/migrate', '/workbuddy/console', '/workbuddy/quota', '/workbuddy/login']) {
     const get = await run(path, 'GET');
     assert.equal(get.status, 200, `${path} GET 应当 200`);
     for (const method of ['PUT', 'PATCH', 'DELETE']) {
@@ -67,6 +78,12 @@ test('数据面的方法 / 权限矩阵：只读路由拒绝写方法，写路�
     ['/workbuddy/quota', 'POST'],
     ['/workbuddy/usage', 'DELETE'],
     ['/workbuddy/log', 'DELETE'],
+    ['/workbuddy/login/start', 'POST'],
+    ['/workbuddy/login/poll', 'POST'],
+    ['/workbuddy/login/cancel', 'POST'],
+    ['/workbuddy/login/active', 'POST'],
+    ['/workbuddy/login/logout', 'POST'],
+    ['/workbuddy/login/source', 'POST'],
   ];
   for (const [path, method] of writes) {
     const blocked = await run(path, method);
@@ -328,9 +345,11 @@ test('apply() 装配：注册 llm 路由、5 个工具、命令、HTTP 路由', 
     }
     assert.equal(calls.commands.length, 1);
     assert.equal(calls.commands[0].name, 'workbuddy');
-    assert.equal(calls.routes.length, 12, 'HTTP 数据面应有 12 条路由（11 条 exact + 1 条 console-api 前缀）');
+    assert.equal(calls.routes.length, 19, 'HTTP 数据面应有 19 条路由（18 条 exact + 1 条 console-api 前缀）');
     assert.deepEqual(calls.routes.map((r) => r.path).sort(), [
       '/workbuddy/bridge', '/workbuddy/checkin', '/workbuddy/console', '/workbuddy/console-api', '/workbuddy/log',
+      '/workbuddy/login', '/workbuddy/login/active', '/workbuddy/login/cancel', '/workbuddy/login/logout',
+      '/workbuddy/login/poll', '/workbuddy/login/source', '/workbuddy/login/start',
       '/workbuddy/migrate', '/workbuddy/model-visibility', '/workbuddy/models', '/workbuddy/quota', '/workbuddy/requests', '/workbuddy/status', '/workbuddy/usage',
     ]);
     const prefix = calls.routes.find((r) => r.path === '/workbuddy/console-api');

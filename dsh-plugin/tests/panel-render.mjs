@@ -669,6 +669,20 @@ async function verifyNarrow() {
   console.log('\n—— 场景 3：窄列 620px（表格挤压回归）——');
   const narrowRoutes = {
     ...routes,
+    // 窄列用例只验桌面登录文件去重：清掉插件凭据，免得插件独有账号也混进行数断言
+    '/workbuddy/login': {
+      ok: true,
+      configured: 'auto',
+      envPinned: false,
+      storeMode: 'dpapi',
+      failover: 'same-account',
+      fallbackReason: '',
+      desktop: { available: true, error: '', userId: '' },
+      plugin: { available: true, count: 0, activeUid: '', uids: [], error: '' },
+      sameAccount: false,
+      effective: { source: 'desktop' },
+      credentials: [],
+    },
     // 让账号表出现"长名字 + 长域名 + 长剩余时间"的最坏组合
     '/workbuddy/console-api/accounts': {
       dir: 'C:\\Users\\demo\\AppData\\Local\\CodeBuddyExtension\\Data\\Public\\auth',

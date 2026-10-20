@@ -30,6 +30,21 @@
 
 本项目没有内置任何密钥副本，每次运行都向写这个文件的客户端现取。
 
+## 插件登录（OAuth 设备码）
+
+**参考**：<https://github.com/molly-ovo/dsh-workbuddy-oauth>（MIT）
+
+设备码登录的**流程形状**（`state → authUrl → token → account`）、登录端点与请求头
+（`Origin` / `Referer` / `User-Agent`）、轮询节流，以及刷新时的来源头
+（`X-Refresh-Token` / `X-Auth-Refresh-Source`），参考了该公开实现（其自身亦以官方 CLI
+的登录流程为参照）。本项目独立实现，未复制其源代码；额外做了：
+
+- 凭据加密落盘（DPAPI 保护字段密钥 + AES-256-GCM 信封，DPAPI 不可用时仅内存）；
+- 凭据来源优先级（api-key / 桌面端 / 插件）与运行时切换；
+- 换号后的模型目录失效、诊断、面板/控制台双侧入口与测试。
+
+密码不经过本插件：授权在浏览器完成，插件只接收令牌。
+
 ## 相关上游事实
 
 - WorkBuddy 桌面端自 **5.6.0** 起强制开启 AtRest 加密，登录文件中的

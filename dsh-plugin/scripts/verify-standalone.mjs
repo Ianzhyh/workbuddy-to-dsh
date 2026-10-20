@@ -87,6 +87,8 @@ try {
       WORKBUDDY_LOCAL_TOKEN: 'drill-token',
       WORKBUDDY_LOG: '1',
       WORKBUDDY_AUTH_FILE: fakeAuth,
+      // 沙箱桥绝不能读到本机真实的插件登录凭据（否则 /health 不会是 503）
+      WORKBUDDY_CREDENTIAL_DIR: join(vendorDir, 'credentials-drill'),
     },
   });
   let bridgeOut = '';

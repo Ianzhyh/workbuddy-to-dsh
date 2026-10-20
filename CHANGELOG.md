@@ -19,6 +19,47 @@
 
 ## [Unreleased]
 
+（暂无）
+
+## [1.8.0] - 2026-10-20
+
+### Added（插件内登录：不装桌面端也能用）
+
+- **OAuth 设备码登录**：桥新增 `/v1/auth/device*`、`/v1/auth/credentials`、`/v1/auth/source`；
+  插件面板的「账号」页与控制台的「账号」块提供同一套入口 —— 浏览器完成授权，密码不经过插件。
+- **凭据来源**：`auto`（API key → 桌面端 → 插件；桌面端**本地**不可用时才回退）、
+  `desktop`、`plugin`、`api-key`。`auto` 是软默认（不锁定，登录成功照常切到插件）；
+  `desktop`/`plugin`/`api-key` 才锁定来源。上游 401 不会在请求中途偷偷换号。
+  账号页只把**实际生效**的那一行标为「使用中」，另一侧标「已选（未生效）」，不再出现两个"使用中"。
+- **加密落盘**：`~/.workbuddy-bridge/credentials` 下 `store.key`（DPAPI 保护）
+  + `<hash>.cred`（AES-256-GCM，AAD 绑定 uid）。换机器 / 换 Windows 用户解不开；
+  DPAPI 不可用时**自动退回仅内存**，绝不静默写明文。刷新轮换后的 refresh token
+  会原子回写（跨进程锁 + 单飞）。
+- **插件命令**：`/workbuddy login`（发起 / 再次运行检查）、`/workbuddy logout [uid前缀]`；
+  `/workbuddy status` 增加「凭据来源」。
+- **同账号识别与互通**：桌面 JWT `sub` 与插件 `uid` 匹配即判定同一账号；同账号在
+  账号页**合并成一行**（桌面账号 + 「双凭据」+「用插件凭据」），401/403 时自动接管
+  （`WORKBUDDY_CREDENTIAL_FAILOVER=same-account`，默认，钱包不变）；不同账号默认
+  不自动切换。`any` 模式可让不同账号也接管（显式 opt-in，会切换账号/钱包）。
+- **测试**：设备码端到端（pending → ready、刷新轮换持久化、auto 桌面优先、重启后
+  继续使用新令牌、密文不含明文令牌、同账号桌面→插件自动接管）；**把
+  `WORKBUDDY_APP_EXECUTABLE` 指向不存在的路径（模拟没装桌面端）也能完成登录并对话**；
+  面板/控制台 i18n 与 UI 全绿。
+- **配置**：`WORKBUDDY_CREDENTIAL_SOURCE` / `_STORE` / `_DIR`、`WORKBUDDY_LOGIN_REGION`
+  （见 `.env.example` 与 `docs/CONFIGURATION.md`）。
+- **插件来源身份**：chat/目录请求使用 WorkBuddy 形状的 UA / `X-IDE-*` / Origin
+  （参考实现实测），桌面来源保持 CodeBuddy 扩展头；`WORKBUDDY_PLUGIN_IDENTITY=vscode`
+  可退回旧头，版本可用 `WORKBUDDY_PLUGIN_APP_VERSION_*` 覆盖。
+
+### Changed
+
+- 桥的凭据读取从“只读桌面端登录文件”扩展为统一来源解析；**桌面端路径行为不变**。
+- **账号列表统一**：桌面账号与插件凭据并进同一个列表 —— 同账号合并成一行
+  （「双凭据」+「用插件凭据」），桌面端没有的插件账号标「插件」追加在列表末尾；
+  插件登录卡片只保留登录/来源控制，不再单独列一份账号。控制台与插件面板一致。
+- `/health` 增加 `credential` 段（来源 / 存储模式 / 插件账号数），不含任何令牌。
+- 换号或换来源后模型目录自动失效并在后台重取（避免用上一个账号的目录做预校验）。
+
 ## [1.7.0] - 2026-10-19
 
 ### Fixed（诊断口径：原生插件路由不再误报 —— issue #1）

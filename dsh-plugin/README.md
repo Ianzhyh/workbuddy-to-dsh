@@ -1,6 +1,7 @@
 # dsh-plugin-workbuddy
 
-把本机 **WorkBuddy 桌面端**已登录的模型，做成 **DeepSeek Harness 的一等公民**。
+把本机 **WorkBuddy** 的模型（桌面端已登录，或在插件里完成一次浏览器授权），
+做成 **DeepSeek Harness 的一等公民**。
 
 **分工是「插件当引擎，控制台当界面 —— 且界面就长在 dsh 里」**：
 
@@ -25,7 +26,9 @@ dsh 设置 → WorkBuddy（9 个标签页）═══ 同一份状态 ═══ 
 
 装进 dsh 后，这些能力都在同一个插件里（明细见下方「它做了什么」）：
 
-- **零配置接入** —— 不需要 API Key，复用桌面端已登录态
+- **零配置接入** —— 不需要 API Key：有桌面端就复用登录态；没有桌面端就点「插件登录」
+- **插件内登录** —— 设置页点「开始登录」→ 浏览器授权；**不安装、不切换桌面端**也能用；
+  凭据 DPAPI 加密落盘（可关），不读桌面端登录文件
 - **模型直接进选择器** —— 原生 `provider: workbuddy` 路由，不写任何配置文件
 - **模型管理** —— 启用 / 禁用、体检（可用性 · 消耗倍率 · 实测成本）、详情、CSV 导出
 - **账号切换**、**积分与用量**（趋势图 + 排行 + CSV）、**请求明细**（失败标红 + 错误码一键复制）
@@ -91,8 +94,11 @@ dsh plugin --profile desktop add <本仓库路径>/dsh-plugin
 `dsh-plugin/vendor/`（16 个文件、约 366 KB），于是对方**不需要仓库**，只要有：
 
 - Windows + Node 18+
-- WorkBuddy 桌面端**已登录**
 - dsh 桌面版
+- **二选一**：
+  - WorkBuddy 桌面端**已登录**（复用它的登录态，凭据不落盘）；或
+  - **不装桌面端**：在插件里用「插件登录（不依赖桌面端）」完成一次浏览器授权
+    （需要一个 WorkBuddy / CodeBuddy 账号；凭据由插件保管，DPAPI 加密落盘）
 
 拷 `dsh-plugin/` 文件夹（或 `npm run pack:plugin` 出的 tgz）过去 → 对方跑一次
 `node <插件>/scripts/preflight.mjs` 自检 → 用 dsh 的插件安装指向它 → 重启 dsh。
@@ -119,9 +125,54 @@ npm run release:check      # = vendor:check + 单测 + 独立分发演练（发�
 - Node.js 18+
 - 桥与控制台脚本：仓库里的 `bridge/workbuddy-bridge.mjs`、`dashboard/server.mjs`，
   或插件自带的 `vendor/` 副本（插件通过 `projectRoot` 找它们）
-- WorkBuddy 桌面端已安装并登录
+- WorkBuddy 桌面端已安装并登录，**或者**使用插件内登录（见下）
 
 插件**只连本机回环地址**，不新增任何对外监听、不上报任何数据。
+
+---
+
+## 插件登录（不依赖桌面端）
+
+「设置 → WorkBuddy → 账号」里有一张**插件登录**卡片（控制台的「账号」区块也有同一张）。
+流程：点「开始登录」→ 在浏览器里完成 WorkBuddy / CodeBuddy 授权 → 回到面板等待自动完成
+（也可用 `/workbuddy login` 两步式命令）。密码不经过插件，插件只接收令牌。
+
+**凭据来源优先级**（`auto`，默认）：
+
+1. `CODEBUDDY_API_KEY`（显式环境变量覆盖，与旧行为一致）
+2. **桌面端登录文件**（能读、能解密、有 token）
+3. **插件登录凭据**（桌面端本地不可用时的回退；access 过期会自动刷新）
+4. 都没有 → 明确报错并给出两种登录入口
+
+> 上游 401 **不会**触发中途换号：账户可预测性优先。登录成功后，UI 会明确把来源切到
+> 插件并提示（可一键切回）。**不设置** `WORKBUDDY_CREDENTIAL_SOURCE` 时 UI 可自由切换；
+> `auto` 是软默认（不锁定）；只有显式写 `desktop|plugin|api-key` 才会把来源锁定
+> （面板里的切换会被拒绝）。
+
+**存储**：默认 `%USERPROFILE%\.workbuddy-bridge\credentials\`：
+
+| 文件 | 说明 |
+|---|---|
+| `store.key` | 32 字节随机密钥，由 **Windows DPAPI（当前用户）** 保护 |
+| `<hash>.cred` | AES-256-GCM 信封（AAD 绑定 uid），刷新轮换后原子回写 |
+| `active.json` / `source.json` | 当前账号 / 来源选择，非机密 |
+
+- 换机器 / 换 Windows 用户 → 解不开；复制目录到别处不可用。
+- DPAPI 不可用（组策略禁用 PowerShell 等）→ **自动退回仅内存**，绝不静默写明文；
+  面板/诊断会明确显示「凭据存储：仅内存」。
+- 同用户的恶意进程仍能调用 DPAPI / 读进程内存 —— 这是无 TPM/Hello 方案的共同上限。
+- `WORKBUDDY_CREDENTIAL_STORE=memory` 可主动选择不落盘（桥重启后需要重新登录）。
+- 「退出登录」只删除插件自己保存的那份凭据，**不会注销上游账号**。
+- **同账号识别与互通**：桌面端 JWT 的 `sub` 与插件凭据的 `uid` 是同一套账号标识。
+  两边是同一账号时，账号页**合并成一行**：桌面账号 + 「双凭据」+「用插件凭据」，
+  两条凭据可互换；某一条鉴权失败（401/403）会自动用另一条重试，钱包不变。两边是
+  不同账号时，一次请求只能用一个账号；桌面端没有的插件账号会标「插件」并进同一个
+  账号列表，插件登录卡片只负责登录与来源选择。`WORKBUDDY_CREDENTIAL_FAILOVER=any`
+  可让**不同账号**也自动接管（会切换账号/钱包，默认关闭）。
+- 插件来源的模型请求使用 **WorkBuddy 身份头**（UA / `X-IDE-*` / Origin），与桌面来源的
+  CodeBuddy 扩展头分开；上游若收紧，可设 `WORKBUDDY_PLUGIN_IDENTITY=vscode` 退回旧头。
+
+插件目录里**不包含任何凭据**；分发插件不会把账号带给别人。
 
 ---
 
@@ -139,6 +190,7 @@ npm run release:check      # = vendor:check + 单测 + 独立分发演练（发�
     consoleAutoStart: true             # 控制台（数据界面）也由插件复用/拉起
     consolePort: 8792                  # 默认跟 .env 的 DASHBOARD_PORT 对齐
     displayName: WorkBuddy
+    loginRegion: cn                    # 插件登录默认区域：cn / global
     modelAllow: []                     # 只放行这些模型 id（空 = 全部）
     modelDeny: []
     migrateLegacy: true                # 首次加载清理 llm-pi-ai 里的旧 workbuddy 路由

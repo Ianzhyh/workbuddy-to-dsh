@@ -257,6 +257,19 @@ export const DEFAULTS = {
   fallbackProvider: 'workbuddy-native',
   displayName: 'WorkBuddy',
   catalogTtlMs: 60_000,
+  /** 设备码登录默认区域（cn / global）；桥侧也可用 WORKBUDDY_LOGIN_REGION 覆盖。 */
+  loginRegion: 'cn',
+  /**
+   * 凭据来源：'' = 不锁定（桥默认 auto，UI 可切换）/ auto（软默认）/
+   * desktop / plugin / api-key（后三者锁定）。
+   * 只有显式配置时才注入 WORKBUDDY_CREDENTIAL_SOURCE —— 把默认 auto 注入过去
+   * 没有意义，还会让"登录成功后切到插件"看起来像被环境变量挡住。
+   */
+  credentialSource: '',
+  /** 凭据存储：'' = 平台默认（Windows dpapi，其余 memory）；可显式写 dpapi / memory。 */
+  credentialStore: '',
+  /** 凭据目录：'' = 桥按用户目录推导；显式写则必须可写。 */
+  credentialDir: '',
   /** 桥「已确认活着」结论的缓存时长（ensureReady 短路用）。对话失败会立即作废。 */
   bridgeAliveTtlMs: 5_000,
   modelAllow: [],
@@ -326,6 +339,11 @@ export function resolveConfig(raw = {}) {
     fallbackProvider: String(cfg.fallbackProvider || DEFAULTS.fallbackProvider),
     displayName: String(cfg.displayName || DEFAULTS.displayName),
     catalogTtlMs: Number(cfg.catalogTtlMs) || DEFAULTS.catalogTtlMs,
+    loginRegion: ['cn', 'global'].includes(String(cfg.loginRegion)) ? String(cfg.loginRegion) : DEFAULTS.loginRegion,
+    credentialSource: ['auto', 'desktop', 'plugin', 'api-key'].includes(String(cfg.credentialSource))
+      ? String(cfg.credentialSource) : DEFAULTS.credentialSource, // '' = 不锁定
+    credentialStore: ['dpapi', 'memory'].includes(String(cfg.credentialStore)) ? String(cfg.credentialStore) : '',
+    credentialDir: String(cfg.credentialDir || ''),
     bridgeAliveTtlMs: Number(cfg.bridgeAliveTtlMs) || DEFAULTS.bridgeAliveTtlMs,
     modelAllow: asStringArray(cfg.modelAllow),
     modelDeny: asStringArray(cfg.modelDeny),
@@ -484,10 +502,29 @@ export function apply(ctx, rawConfig = {}) {
   reconcile('bridgePort', 'WORKBUDDY_PORT', (raw, fallback) => Number(raw) || fallback);
   reconcile('localToken', 'WORKBUDDY_LOCAL_TOKEN');
   reconcile('authFile', 'WORKBUDDY_AUTH_FILE');
+  reconcile('credentialSource', 'WORKBUDDY_CREDENTIAL_SOURCE');
+  reconcile('credentialStore', 'WORKBUDDY_CREDENTIAL_STORE');
+  reconcile('credentialDir', 'WORKBUDDY_CREDENTIAL_DIR');
+  reconcile('loginRegion', 'WORKBUDDY_LOGIN_REGION');
   // 控制台端口跟项目自己的 config.mjs 同源（读同一个 DASHBOARD_PORT）
   reconcile('consolePort', 'DASHBOARD_PORT', (raw, fallback) => Number(raw) || fallback);
   if (!explicit.has('autoCheckin') && (projectEnv.WORKBUDDY_AUTO_CHECKIN ?? process.env.WORKBUDDY_AUTO_CHECKIN) !== undefined) {
     config.autoCheckin = asBool(projectEnv.WORKBUDDY_AUTO_CHECKIN ?? process.env.WORKBUDDY_AUTO_CHECKIN, true);
+  }
+
+  // 桥的上游身份/登录端点逃生门：插件没有独立配置字段，但 .env 里写了要生效。
+  const bridgeExtraEnv = {};
+  for (const key of [
+    'WORKBUDDY_PLUGIN_IDENTITY',
+    'WORKBUDDY_PLUGIN_APP_VERSION_CN',
+    'WORKBUDDY_PLUGIN_APP_VERSION_GLOBAL',
+    'WORKBUDDY_CREDENTIAL_FAILOVER',
+    'WORKBUDDY_LOGIN_UA',
+    'WORKBUDDY_LOGIN_BASE',
+    'WORKBUDDY_LOGIN_ORIGIN',
+  ]) {
+    const value = projectEnv[key] ?? process.env[key];
+    if (value !== undefined && value !== '') bridgeExtraEnv[key] = value;
   }
 
   const supervisor = new BridgeSupervisor({
@@ -500,6 +537,14 @@ export function apply(ctx, rawConfig = {}) {
     autoStart: config.autoStart,
     nodePath: config.nodePath || undefined,
     timeoutMs: 8000,
+    // 插件 config / .env / 进程环境三处的凭据来源设置都注入桥，启动方之间不漂移。
+    env: {
+      ...bridgeExtraEnv,
+      ...(config.credentialSource ? { WORKBUDDY_CREDENTIAL_SOURCE: config.credentialSource } : {}),
+      ...(config.credentialStore ? { WORKBUDDY_CREDENTIAL_STORE: config.credentialStore } : {}),
+      ...(config.credentialDir ? { WORKBUDDY_CREDENTIAL_DIR: config.credentialDir } : {}),
+      ...(config.loginRegion ? { WORKBUDDY_LOGIN_REGION: config.loginRegion } : {}),
+    },
     onLog: (line) => log(line),
   });
   const client = new BridgeClient({
@@ -524,6 +569,8 @@ export function apply(ctx, rawConfig = {}) {
     dshPaths,
     route: { registered: false, provider: config.provider, error: '', fallback: false },
     legacy: { found: false, files: [], detail: [], cleaned: null },
+    /** 斜杠命令发起、尚未完成的设备码登录（面板有自己的轮询，不共用）。 */
+    pendingLogin: null,
     readyPromise: null,
     lastEnsure: null,
     lastConsoleEnsure: null,
@@ -975,10 +1022,12 @@ export function apply(ctx, rawConfig = {}) {
       try {
         commands.register({
           name: 'workbuddy',
-          description: 'WorkBuddy 中转：状态 / 模型 / 用量 / 签到 / 启停桥 / 打开控制台 / 清理旧路由',
-          input: { hint: 'status | models | usage | checkin | console | start | stop | restart | cleanup' },
+          description: 'WorkBuddy 中转：状态 / 登录 / 模型 / 用量 / 签到 / 启停桥 / 打开控制台 / 清理旧路由',
+          input: { hint: 'status | login | logout [uid前缀] | models | usage | checkin | console | start | stop | restart | cleanup' },
           async handler({ rawInput, signal }) {
-            const arg = String(rawInput || '').trim().split(/\s+/)[0] || 'status';
+            const parts = String(rawInput || '').trim().split(/\s+/).filter(Boolean);
+            const arg = parts[0] || 'status';
+            const sub = parts[1] || '';
             try {
               if (arg === 'console' || arg === 'ui') {
                 const result = await consoleSupervisor.ensure({ signal });
@@ -989,6 +1038,7 @@ export function apply(ctx, rawConfig = {}) {
               if (arg === 'start' || arg === 'restart') {
                 const result = await supervisor.ensure({ restart: arg === 'restart', signal });
                 adapter.invalidate();
+                if (result.ok) adapter.warmup().catch(() => {});
                 return result.ok
                   ? { kind: 'success', text: `桥已就绪：${supervisor.baseUrl}/v1（pid ${result.health?.pid}${result.reused ? '，复用已有实例' : ''}）` }
                   : { kind: 'error', text: `桥启动失败：${result.error}` };
@@ -1006,6 +1056,64 @@ export function apply(ctx, rawConfig = {}) {
                 const result = cleanLegacyRoutes({ settingsPath: dshPaths.settingsPath, patchPath: dshPaths.patchPath, provider: config.provider });
                 const lines = result.files.map((f) => `${f.path}：${f.changed ? `已清理（备份 ${f.backup}）` : f.reason}`);
                 return { kind: 'success', text: `旧路由清理完成：\n${lines.join('\n')}` };
+              }
+              if (arg === 'login') {
+                /*
+                 * 两步式：第一次发起并给出 URL，第二次（浏览器授权后再跑）检查结果。
+                 * 面板里有自动轮询；斜杠命令不长期占用会话，所以做成幂等的"再跑一次"。
+                 */
+                const pending = state.pendingLogin;
+                if (pending && Date.now() - pending.at < 10 * 60 * 1000) {
+                  let result;
+                  try { result = await client.deviceLoginPoll(pending.state, signal); }
+                  catch (error) { return { kind: 'error', text: `检查登录状态失败：${error?.message || error}` }; }
+                  if (result?.status === 'ready') {
+                    state.pendingLogin = null;
+                    adapter.invalidate();
+                    adapter.warmup().catch(() => {});
+                    invalidateUpstreamCaches();
+                    return { kind: 'success', text: `登录成功：${result.account?.uid || ''}。已切换为插件账号。` };
+                  }
+                  return {
+                    kind: 'success',
+                    text: `尚未完成授权。请在浏览器打开：\n${pending.url}\n完成后再次运行 /workbuddy login 检查结果。`,
+                  };
+                }
+                try {
+                  const started = await client.deviceLoginStart({ region: config.loginRegion || 'cn' }, signal);
+                  state.pendingLogin = { state: started.state, url: started.url, at: Date.now() };
+                  return {
+                    kind: 'success',
+                    text: `请在浏览器打开并完成授权（10 分钟内有效）：\n${started.url}\n完成后再次运行 /workbuddy login 检查结果。`,
+                  };
+                } catch (error) {
+                  return { kind: 'error', text: `发起登录失败：${error?.message || error}` };
+                }
+              }
+              if (arg === 'logout') {
+                try {
+                  const list = await client.authCredentials(signal);
+                  const creds = Array.isArray(list?.credentials) ? list.credentials : [];
+                  if (!creds.length) return { kind: 'success', text: '没有插件账号可退出。' };
+                  const target = sub
+                    ? creds.find((c) => String(c.uid).startsWith(sub))
+                    : (creds.length === 1 ? creds[0] : null);
+                  if (!target) {
+                    const lines = creds.map((c) => `- ${String(c.uid).slice(0, 8)}…`
+                      + `${c.nickname ? `（${c.nickname}）` : ''}${c.active ? ' [使用中]' : ''}`);
+                    return {
+                      kind: 'success',
+                      text: `有 ${creds.length} 个插件账号，请指定 uid 前缀：\n${lines.join('\n')}`,
+                    };
+                  }
+                  await client.authLogout(target.uid, signal);
+                  adapter.invalidate();
+                  adapter.warmup().catch(() => {});
+                  invalidateUpstreamCaches();
+                  return { kind: 'success', text: '已清除该插件账号的凭据（不影响上游账号）。' };
+                } catch (error) {
+                  return { kind: 'error', text: `退出失败：${error?.message || error}` };
+                }
               }
               if (arg === 'models') {
                 const catalog = await adapter.catalog({ signal });
@@ -1025,6 +1133,7 @@ export function apply(ctx, rawConfig = {}) {
               const snap = await snapshot({ signal, quota: true });
               const lines = [
                 `桥：${snap.bridge.state}${snap.bridge.health ? `（pid ${snap.bridge.health.pid}，已运行 ${Math.round((snap.bridge.health.uptimeMs || 0) / 60000)} 分钟）` : ''}`,
+                `凭据：${snap.bridge.health?.credential?.source || '—'}${snap.bridge.health?.credential?.storeMode === 'memory' ? '（仅内存）' : ''}`,
                 `地址：${snap.config.bridgeUrl}/v1`,
                 `路由：${snap.route.registered ? `已注册 provider=${snap.route.provider}` : `未注册（${snap.route.error}）`}`,
                 `模型：桥目录 ${snap.directory.length} 个`,
@@ -1085,6 +1194,12 @@ export function apply(ctx, rawConfig = {}) {
         state.lastEnsure = { at: Date.now(), ...result };
         if (result.ok) {
           adapter.invalidate();
+          /*
+           * 预热目录：首次模型调用/打开模型选择器时不必再等一次桥往返。
+           * 冷启动时桥可能要去上游抓目录（最多十几秒），把它放在后台，
+           * 用户发第一条消息时目录通常已经就位。
+           */
+          adapter.warmup().catch(() => {});
           log(`桥已就绪：${supervisor.baseUrl}/v1（pid ${result.health?.pid}${result.reused ? '，复用已有实例' : '，本次新拉起'}）`);
         } else {
           log(`桥未能就绪：${result.error}`);

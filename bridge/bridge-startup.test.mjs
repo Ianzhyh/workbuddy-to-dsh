@@ -113,6 +113,7 @@ test('桥 smoke：端口写成非数值时不再抛 ERR_SOCKET_BAD_PORT', { time
       WORKBUDDY_PORT: '879O', // ← 字母 O：旧写法得到 NaN
       WORKBUDDY_LOCAL_TOKEN: TOKEN,
       WORKBUDDY_AUTH_FILE: authFile,
+      WORKBUDDY_CREDENTIAL_DIR: join(dir, 'credentials'),
       WORKBUDDY_USAGE_FILE: join(dir, 'usage.jsonl'),
       WORKBUDDY_AUTO_CHECKIN: '0',
       WORKBUDDY_LOG: '0',

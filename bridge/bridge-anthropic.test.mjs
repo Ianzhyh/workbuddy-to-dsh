@@ -186,6 +186,7 @@ const child = spawn(process.execPath, [BRIDGE], {
     WORKBUDDY_PORT: String(bridgePort),
     WORKBUDDY_LOCAL_TOKEN: TOKEN,
     WORKBUDDY_AUTH_FILE: authFile,
+    WORKBUDDY_CREDENTIAL_DIR: join(dir, 'credentials'),
     CODEBUDDY_ENDPOINT: `http://127.0.0.1:${UPSTREAM_PORT}`,
     WORKBUDDY_USAGE_FILE: usageFile,
     WORKBUDDY_AUTO_CHECKIN: '0',

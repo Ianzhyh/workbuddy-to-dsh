@@ -112,6 +112,128 @@ export function createRouteTable(deps) {
       },
     },
     {
+      // 插件登录状态：来源 + 凭据清单。桥是唯一事实来源；这里只做展示。
+      // 响应里**永远不含** access / refresh token（桥侧已经保证，这里也不二次加工）。
+      kind: 'exact',
+      path: '/workbuddy/login',
+      async handler(req, res) {
+        if (readOnly(req, res)) return;
+        try {
+          const [source, creds] = await Promise.all([client.authSource(), client.authCredentials()]);
+          sendJson(res, 200, {
+            ok: true,
+            ...source,
+            configuredSource: creds.configuredSource,
+            credentials: Array.isArray(creds.credentials) ? creds.credentials : [],
+          });
+        } catch (error) {
+          sendJson(res, 200, { ok: false, error: String(error?.message || error), credentials: [] });
+        }
+      },
+    },
+    {
+      kind: 'exact',
+      path: '/workbuddy/login/start',
+      async handler(req, res) {
+        if (!guard(req)) return sendJson(res, 403, { ok: false, error: 'missing x-workbuddy-panel header' });
+        try {
+          const body = await readJsonBody(req);
+          const started = await client.deviceLoginStart({ region: body?.region === 'global' ? 'global' : 'cn' });
+          sendJson(res, 200, { ok: true, ...started });
+        } catch (error) {
+          sendJson(res, 200, { ok: false, error: String(error?.message || error) });
+        }
+      },
+    },
+    {
+      kind: 'exact',
+      path: '/workbuddy/login/poll',
+      async handler(req, res) {
+        if (!guard(req)) return sendJson(res, 403, { ok: false, error: 'missing x-workbuddy-panel header' });
+        try {
+          const body = await readJsonBody(req);
+          if (!body?.state) return sendJson(res, 400, { ok: false, error: 'state is required' });
+          const result = await client.deviceLoginPoll(String(body.state));
+          if (result?.status === 'ready') {
+            // 账号换了：模型目录与余额/签到缓存都属于上一个账号
+            adapter.invalidate();
+            adapter.warmup().catch(() => {});
+            onUpstreamMutation();
+          }
+          sendJson(res, 200, result);
+        } catch (error) {
+          sendJson(res, 200, { ok: false, error: String(error?.message || error) });
+        }
+      },
+    },
+    {
+      kind: 'exact',
+      path: '/workbuddy/login/cancel',
+      async handler(req, res) {
+        if (!guard(req)) return sendJson(res, 403, { ok: false, error: 'missing x-workbuddy-panel header' });
+        try {
+          const body = await readJsonBody(req);
+          const result = await client.deviceLoginCancel(String(body?.state || ''));
+          sendJson(res, 200, { ok: true, ...result });
+        } catch (error) {
+          sendJson(res, 200, { ok: false, error: String(error?.message || error) });
+        }
+      },
+    },
+    {
+      kind: 'exact',
+      path: '/workbuddy/login/active',
+      async handler(req, res) {
+        if (!guard(req)) return sendJson(res, 403, { ok: false, error: 'missing x-workbuddy-panel header' });
+        try {
+          const body = await readJsonBody(req);
+          if (!body?.uid) return sendJson(res, 400, { ok: false, error: 'uid is required' });
+          const result = await client.authSetActive(String(body.uid));
+          adapter.invalidate();
+          adapter.warmup().catch(() => {});
+          onUpstreamMutation();
+          sendJson(res, 200, { ok: true, ...result });
+        } catch (error) {
+          sendJson(res, 200, { ok: false, error: String(error?.message || error) });
+        }
+      },
+    },
+    {
+      kind: 'exact',
+      path: '/workbuddy/login/logout',
+      async handler(req, res) {
+        if (!guard(req)) return sendJson(res, 403, { ok: false, error: 'missing x-workbuddy-panel header' });
+        try {
+          const body = await readJsonBody(req);
+          if (!body?.uid) return sendJson(res, 400, { ok: false, error: 'uid is required' });
+          const result = await client.authLogout(String(body.uid));
+          adapter.invalidate();
+          adapter.warmup().catch(() => {});
+          onUpstreamMutation();
+          sendJson(res, 200, { ok: true, ...result });
+        } catch (error) {
+          sendJson(res, 200, { ok: false, error: String(error?.message || error) });
+        }
+      },
+    },
+    {
+      kind: 'exact',
+      path: '/workbuddy/login/source',
+      async handler(req, res) {
+        if (!guard(req)) return sendJson(res, 403, { ok: false, error: 'missing x-workbuddy-panel header' });
+        try {
+          const body = await readJsonBody(req);
+          const result = await client.setAuthSource(String(body?.source || 'auto'));
+          adapter.invalidate();
+          adapter.warmup().catch(() => {});
+          onUpstreamMutation();
+          sendJson(res, 200, { ok: true, ...result });
+        } catch (error) {
+          sendJson(res, 200, { ok: false, error: String(error?.message || error) });
+        }
+      },
+    },
+    {
       kind: 'exact',
       path: '/workbuddy/models',
       async handler(req, res) {

@@ -559,6 +559,20 @@ export function baseRoutes({ catalog = CATALOG, usage, probeResults, ...rest } =
     '/api/usage': { body: usageFixture(usage || {}) },
     '/api/requests': { body: requestsFixture(rest) },
     '/api/accounts': { body: accountsFixture(rest) },
+    // 插件登录（第二条凭据来源）：默认没有插件账号；来源与存储模式正常。
+    '/api/login': {
+      body: {
+        ok: true,
+        configured: 'auto',
+        envPinned: false,
+        storeMode: 'dpapi',
+        fallbackReason: '',
+        desktop: { available: true, error: '' },
+        plugin: { available: false, count: 0, activeUid: '', error: '' },
+        effective: { source: 'desktop', uid: '', region: '', endpoint: '', expiresAt: '' },
+        credentials: [],
+      },
+    },
     '/api/checkin': { body: checkinFixture(rest) },
     '/api/probe-results': { body: probeResultsFixture({ catalog, ...(probeResults || {}) }) },
     '/api/bridge/log': { body: { lines: [] } },

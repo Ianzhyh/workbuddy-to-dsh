@@ -20,7 +20,7 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { createServer, request as httpRequest } from 'node:http';
-import { mkdtempSync, rmSync, writeFileSync, existsSync, readFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync, existsSync, readFileSync, readdirSync, utimesSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -88,6 +88,8 @@ async function startBridge(env = {}, opts = {}) {
       WORKBUDDY_PORT: String(port),
       WORKBUDDY_LOCAL_TOKEN: TOKEN,
       WORKBUDDY_AUTH_FILE: authFile,
+      // 凭据库必须隔离：否则测试会读到本机真实的插件登录凭据（/health 不再是 503）。
+      WORKBUDDY_CREDENTIAL_DIR: join(dir, 'credentials'),
       WORKBUDDY_USAGE_FILE: join(dir, 'usage.jsonl'),
       WORKBUDDY_AUTO_CHECKIN: '0', // 别在测试里触发签到
       WORKBUDDY_LOG: '0',
@@ -3021,5 +3023,341 @@ test('桥：chat 错误体必须是 OpenAI 形状，且上游 401 不能被误�
     await bridge2.stop();
     try { await stub401.close(); } catch { /* 忽略 */ }
     rmSync(bridge2.dir, { recursive: true, force: true });
+  }
+});
+test('凭据缓存：登录文件改写后立即生效；上游请求带 Content-Length，账本记首字耗时', { timeout: 90_000 }, async () => {
+  /*
+   * readStoredAuth() 原先每个请求都读盘 + AES 解密 + JWT 解码。现在按
+   * stat 指纹（mtime + size）缓存 —— 本用例钉住"缓存不能把换号/换令牌挡住"：
+   * 用**同长度**的不同令牌改写文件，只靠 mtime 也必须立刻失效。
+   */
+  const stub = await startStubUpstream(['stub-model']);
+  const authFileA = {
+    auth: {
+      accessToken: 'token-aaaaaaaa',
+      refreshToken: 'refresh-token',
+      domain: 'example.invalid',
+      expiresAt: Date.now() + 30 * 86_400_000,
+    },
+  };
+  const bridge = await startBridge(
+    { CODEBUDDY_ENDPOINT: stub.base, WORKBUDDY_SKIP_MODEL_PREFLIGHT: '1' },
+    { auth: authFileA },
+  );
+  const chat = () => fetch(`${bridge.baseUrl}/v1/chat/completions`, {
+    method: 'POST',
+    headers: { ...auth, 'content-type': 'application/json' },
+    body: JSON.stringify({ model: 'stub-model', stream: true, messages: [{ role: 'user', content: 'hi' }] }),
+    signal: AbortSignal.timeout(30_000),
+  });
+  try {
+    assert.equal((await chat()).status, 200);
+    assert.equal(stub.seen.at(-1).headers.authorization, 'Bearer token-aaaaaaaa');
+    // 未改写时连续请求：缓存命中也必须仍然是同一个令牌
+    assert.equal((await chat()).status, 200);
+    assert.equal(stub.seen.at(-1).headers.authorization, 'Bearer token-aaaaaaaa');
+
+    const authFile = join(bridge.dir, 'fake-auth.info');
+    writeFileSync(authFile, JSON.stringify({
+      auth: {
+        accessToken: 'token-bbbbbbbb',
+        refreshToken: 'refresh-token',
+        domain: 'example.invalid',
+        expiresAt: Date.now() + 30 * 86_400_000,
+      },
+    }));
+    // 强制把 mtime 推到未来：不依赖文件系统的毫秒精度，也避免同毫秒写入
+    const future = new Date(Date.now() + 2000);
+    utimesSync(authFile, future, future);
+
+    assert.equal((await chat()).status, 200);
+    assert.equal(stub.seen.at(-1).headers.authorization, 'Bearer token-bbbbbbbb',
+      '登录文件改写后必须立刻重读 —— 缓存不能把换号/换令牌挡住');
+
+    const { headers, body } = stub.seen.at(-1);
+    assert.equal(Number(headers['content-length']), Buffer.byteLength(body),
+      '发给上游的请求必须带 Content-Length（不再退回 chunked）');
+
+    const requests = await (await fetch(bridge.baseUrl + '/v1/requests', { headers: auth })).json();
+    const rec = (requests.requests || []).find((r) => r.model === 'stub-model' && r.ok);
+    assert.ok(rec, '成功请求必须落账');
+    assert.equal(typeof rec.overheadMs, 'number', '账本要能回答"桥自身花了多久"');
+    assert.equal(typeof rec.ttfbMs, 'number', '账本要能回答"多久开始出字"');
+  } finally {
+    await bridge.stop();
+    await stub.close();
+    rmSync(bridge.dir, { recursive: true, force: true });
+  }
+});
+
+test('插件登录：设备码 → 加密落盘 → auto 回退 → 刷新轮换持久化', { timeout: 180_000 }, async () => {
+  /*
+   * 端到端验证第二条凭据来源：
+   *   ① 没有桌面端登录文件时，设备码登录能把凭据写进插件自己的库；
+   *   ② 密文里不出现令牌；
+   *   ③ 令牌快过期时自动刷新，并把轮换后的 refresh token 持久化；
+   *   ④ 桥重启后继续用刷新后的令牌（证明持久化有效）；
+   *   ⑤ auto 在"桌面端可用"时仍然优先桌面端（老行为不变）。
+   */
+  const credRoot = mkdtempSync(join(tmpdir(), 'wb-cred-'));
+  const credDir = join(credRoot, 'credentials');
+  const missingAuth = join(credRoot, 'missing-auth.info');
+  let tokenPolls = 0;
+  let refreshes = 0;
+  const chatAuths = [];
+  const chatHeaders = [];
+  const catalogAuths = [];
+  const refreshHeaders = [];
+  // 与插件 uid-1 同一账号的桌面 JWT（readStoredAuth 只解码 payload，不验签）
+  const desktopJwtForSameAccount = `e30.${Buffer.from(JSON.stringify({
+    sub: 'uid-1',
+    exp: Math.floor((Date.now() + 30 * 86_400_000) / 1000),
+  })).toString('base64url')}.sig`;
+  const desktopJwtOtherAccount = `e30.${Buffer.from(JSON.stringify({
+    sub: 'uid-other',
+    exp: Math.floor((Date.now() + 30 * 86_400_000) / 1000),
+  })).toString('base64url')}.sig`;
+
+  const stub = createServer((req, res) => {
+    const u = new URL(req.url, 'http://127.0.0.1');
+    const send = (status, obj) => {
+      res.writeHead(status, { 'content-type': 'application/json' });
+      res.end(JSON.stringify(obj));
+    };
+    if (u.pathname === '/v2/plugin/auth/state') {
+      return send(200, { code: 0, data: { state: 'state-1', authUrl: 'https://example.invalid/login?state=state-1' } });
+    }
+    if (u.pathname === '/v2/plugin/auth/token' && req.method === 'GET') {
+      tokenPolls += 1;
+      if (tokenPolls === 1) return send(200, { code: 11217, msg: '11217:login ing' });
+      return send(200, {
+        code: 0,
+        data: { accessToken: 'plugin-access-1', refreshToken: 'plugin-refresh-1', expiresIn: 60, domain: 'www.codebuddy.cn' },
+      });
+    }
+    if (u.pathname === '/v2/plugin/login/account') {
+      return send(200, { code: 0, data: { uid: 'uid-1', nickname: 'Tester' } });
+    }
+    if (u.pathname === '/v2/plugin/auth/token/refresh') {
+      refreshes += 1;
+      refreshHeaders.push(req.headers);
+      return send(200, {
+        code: 0,
+        data: {
+          accessToken: `plugin-access-${refreshes + 1}`,
+          refreshToken: `plugin-refresh-${refreshes + 1}`,
+          expiresIn: 3600,
+        },
+      });
+    }
+    if (u.pathname === '/v2/chat/completions') {
+      chatAuths.push(req.headers.authorization);
+      chatHeaders.push(req.headers);
+      if (req.headers.authorization === `Bearer ${desktopJwtForSameAccount}`
+        || req.headers.authorization === `Bearer ${desktopJwtOtherAccount}`) {
+        res.writeHead(401, { 'content-type': 'application/json' });
+        return res.end(JSON.stringify({ error: { message: 'desktop session expired' } }));
+      }
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      res.write('data: {"choices":[{"delta":{"content":"ok"}}]}\n\n');
+      res.end('data: [DONE]\n\n');
+      return;
+    }
+    if (u.pathname === '/v2/enterprises/personal/models') {
+      catalogAuths.push(req.headers.authorization);
+      return send(200, { code: 0, data: { models: [] } });
+    }
+    if (u.pathname === '/v3/config') return send(200, { code: 0, data: { models: [] } });
+    res.writeHead(404, { 'content-type': 'application/json' });
+    res.end('{}');
+  });
+  await new Promise((r) => stub.listen(0, '127.0.0.1', r));
+  const stubBase = `http://127.0.0.1:${stub.address().port}`;
+
+  const storeMode = process.platform === 'win32' ? 'dpapi' : 'memory';
+  const sharedEnv = {
+    CODEBUDDY_ENDPOINT: stubBase,
+    WORKBUDDY_LOGIN_BASE: stubBase,
+    WORKBUDDY_LOGIN_ORIGIN: 'http://127.0.0.1',
+    WORKBUDDY_LOGIN_POLL_MIN_MS: '0',
+    WORKBUDDY_CREDENTIAL_DIR: credDir,
+    WORKBUDDY_CREDENTIAL_STORE: storeMode,
+    // 用户的真实场景：.env 里留着 auto。auto 是软默认，不应阻止登录后切到插件。
+    WORKBUDDY_CREDENTIAL_SOURCE: 'auto',
+    WORKBUDDY_SKIP_MODEL_PREFLIGHT: '1',
+    WORKBUDDY_5XX_RETRY: '0',
+  };
+  const chat = async (base) => {
+    const r = await fetch(`${base}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { ...auth, 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'stub-model', messages: [{ role: 'user', content: 'hi' }] }),
+      signal: AbortSignal.timeout(30_000),
+    });
+    await r.text();
+    return r;
+  };
+
+  const bridge1 = await startBridge({ ...sharedEnv, WORKBUDDY_AUTH_FILE: missingAuth }, { auth: READABLE_FAKE_AUTH });
+  let bridge2 = null;
+  let bridge3 = null;
+  let bridge4 = null;
+  let bridge5 = null;
+  let bridge6 = null;
+  try {
+    // ① 设备码开始 → 第一次 poll 返回 pending → 第二次拿到令牌
+    const device = await (await fetch(`${bridge1.baseUrl}/v1/auth/device`, {
+      method: 'POST',
+      headers: { ...auth, 'content-type': 'application/json' },
+      body: JSON.stringify({ region: 'cn' }),
+    })).json();
+    assert.equal(device.ok, true);
+    assert.ok(device.state);
+    assert.match(device.url, /loginSessionId=/);
+
+    const poll1 = await (await fetch(`${bridge1.baseUrl}/v1/auth/device?state=${encodeURIComponent(device.state)}`, { headers: auth })).json();
+    assert.equal(poll1.status, 'pending', '上游 code 11217 必须映射成 pending，而不是失败');
+    const poll2 = await (await fetch(`${bridge1.baseUrl}/v1/auth/device?state=${encodeURIComponent(device.state)}`, { headers: auth })).json();
+    assert.equal(poll2.status, 'ready');
+    assert.equal(poll2.account.uid, 'uid-1');
+    assert.equal(poll2.sourceSwitched, true, '登录是显式动作：成功后应把来源切到插件');
+    assert.equal(poll2.effectiveSource, 'plugin', 'env=auto 是软默认，不能把插件登录锁成不生效');
+
+    // ② 对外清单不能出现任何令牌
+    const credRes = await fetch(`${bridge1.baseUrl}/v1/auth/credentials`, { headers: auth });
+    const credText = await credRes.text();
+    assert.ok(!credText.includes('plugin-access'), '凭据清单绝对不能回显 access token');
+    assert.ok(!credText.includes('plugin-refresh'), '凭据清单绝对不能回显 refresh token');
+    const creds = JSON.parse(credText);
+    assert.equal(creds.credentials.length, 1);
+    assert.equal(creds.credentials[0].uid, 'uid-1');
+
+    // ③ 桌面端缺失 → auto 回退到插件凭据
+    const source = await (await fetch(`${bridge1.baseUrl}/v1/auth/source`, { headers: auth })).json();
+    assert.equal(source.configured, 'plugin', '登录成功后来源应切到插件');
+    assert.equal(source.envPinned, false);
+    assert.equal(source.effective.source, 'plugin');
+    assert.equal(source.desktop.available, false);
+    assert.equal(source.plugin.count, 1);
+
+    // ④ 第一次 chat：令牌 60s 过期 < 5min 刷新余量 → 先刷新再请求
+    assert.equal((await chat(bridge1.baseUrl)).status, 200);
+    assert.deepEqual(chatAuths, ['Bearer plugin-access-2'], '刷新后的 access token 必须用于本次请求');
+    const pluginHeaders = chatHeaders.at(-1);
+    assert.equal(pluginHeaders['x-ide-type'], 'WorkBuddy', '插件来源必须用 WorkBuddy 身份，而不是 VSCode');
+    assert.equal(pluginHeaders['x-ide-name'], 'WorkBuddy');
+    assert.equal(pluginHeaders['x-user-id'], 'uid-1');
+    assert.match(pluginHeaders['user-agent'], /^WorkBuddy\/5\.5\.6 WorkBuddy\/5\.5\.6/);
+    assert.equal(pluginHeaders['x-product'], 'SaaS');
+    // 目录请求必须带插件凭据的 Authorization（否则模型列表永远 401）
+    const deadline = Date.now() + 2000;
+    while (!catalogAuths.length && Date.now() < deadline) await new Promise((r) => setTimeout(r, 50));
+    assert.ok(catalogAuths.some((a) => /^Bearer plugin-access-/.test(String(a || ''))),
+      `插件来源的目录请求必须带 Authorization，实际：${catalogAuths.join(' / ') || '(无请求)'}`);
+    assert.equal(refreshes, 1);
+    assert.equal(refreshHeaders[0]['x-refresh-token'], 'plugin-refresh-1');
+    assert.equal(refreshHeaders[0]['x-auth-refresh-source'], 'workbuddy', '国内版刷新来源头必须是 workbuddy');
+    assert.equal(refreshHeaders[0]['x-user-id'], 'uid-1');
+
+    // ⑤ 落盘形态：只有密文，令牌不出现在文件里
+    if (storeMode === 'dpapi') {
+      const files = readdirSync(credDir);
+      assert.ok(files.includes('store.key'), 'DPAPI 密钥必须独立落在 store.key');
+      const credFile = files.find((f) => f.endsWith('.cred'));
+      assert.ok(credFile, '凭据必须写进 .cred 文件');
+      const credCipher = readFileSync(join(credDir, credFile), 'utf8');
+      assert.ok(!credCipher.includes('plugin-access-2'), '凭据文件里不能出现明文 access token');
+      assert.ok(!credCipher.includes('plugin-refresh-2'), '凭据文件里不能出现明文 refresh token');
+      const keyCipher = readFileSync(join(credDir, 'store.key'), 'utf8');
+      assert.ok(!keyCipher.includes('plugin-'), 'store.key 里不能出现任何令牌');
+    } else {
+      assert.ok(!existsSync(credDir) || readdirSync(credDir).filter((f) => f.endsWith('.cred')).length === 0,
+        'memory 模式不得把凭据写到磁盘');
+    }
+
+    // ⑥ 重启桥：必须用持久化后的 access token（证明轮换后的 refresh 也落盘了）
+    if (storeMode === 'dpapi') {
+      await bridge1.stop();
+      bridge2 = await startBridge({ ...sharedEnv, WORKBUDDY_AUTH_FILE: missingAuth }, { auth: READABLE_FAKE_AUTH });
+      assert.equal((await chat(bridge2.baseUrl)).status, 200);
+      assert.equal(chatAuths.at(-1), 'Bearer plugin-access-2', '重启后应继续使用刷新后的令牌');
+      assert.equal(refreshes, 1, '1 小时有效期内不应再次刷新');
+    }
+
+    // ⑦ auto：桌面端可用时仍然优先桌面端（老行为不变）
+    // 先把来源偏好写回 auto —— 否则上一段的登录会把偏好留在 plugin。
+    if (storeMode === 'dpapi') {
+      writeFileSync(join(credDir, 'source.json'), JSON.stringify({ source: 'auto' }));
+    }
+    bridge3 = await startBridge({ ...sharedEnv }, { auth: READABLE_FAKE_AUTH });
+    const sourceBoth = await (await fetch(`${bridge3.baseUrl}/v1/auth/source`, { headers: auth })).json();
+    assert.equal(sourceBoth.desktop.available, true);
+    assert.equal(sourceBoth.plugin.count, storeMode === 'dpapi' ? 1 : 0);
+    assert.equal(sourceBoth.effective.source, 'desktop', 'auto 必须桌面端优先');
+    assert.equal((await chat(bridge3.baseUrl)).status, 200);
+    assert.equal(chatAuths.at(-1), 'Bearer fake-access-token', 'auto 下请求应使用桌面端令牌');
+    assert.equal(chatHeaders.at(-1)['x-ide-type'], 'VSCode', '桌面来源的身份头必须保持原样');
+
+    // ⑧ 显式 desktop 是硬锁：envPinned 必须为 true，且桌面优先
+    bridge4 = await startBridge({ ...sharedEnv, WORKBUDDY_CREDENTIAL_SOURCE: 'desktop' }, { auth: READABLE_FAKE_AUTH });
+    const sourcePin = await (await fetch(`${bridge4.baseUrl}/v1/auth/source`, { headers: auth })).json();
+    assert.equal(sourcePin.envPinned, true, '显式 desktop 必须锁定来源');
+    assert.equal(sourcePin.effective.source, 'desktop');
+
+    /*
+     * ⑨ 同账号双凭据互通：桌面 JWT 的 sub = 插件 uid，桌面端 401 后必须自动
+     * 接管到插件凭据，且请求身份切到 WorkBuddy。memory 模式下另一个进程没有
+     * 插件凭据（设计如此），这条只在能落盘的 Windows 跑。
+     */
+    if (storeMode === 'dpapi') {
+      const sameAuth = {
+        auth: {
+          accessToken: desktopJwtForSameAccount,
+          refreshToken: '',
+          domain: 'example.invalid',
+          expiresAt: Date.now() + 30 * 86_400_000,
+        },
+      };
+      bridge5 = await startBridge({ ...sharedEnv }, { auth: sameAuth });
+      const sourceSame = await (await fetch(`${bridge5.baseUrl}/v1/auth/source`, { headers: auth })).json();
+      assert.equal(sourceSame.desktop.available, true);
+      assert.equal(sourceSame.sameAccount, true, '桌面 JWT sub 与插件 uid 相同时必须识别为同一账号');
+      assert.equal(sourceSame.effective.source, 'desktop', 'auto 仍先走桌面端');
+      assert.equal((await chat(bridge5.baseUrl)).status, 200);
+      assert.ok(chatAuths.some((a) => a === `Bearer ${desktopJwtForSameAccount}`), '必须先尝试桌面凭据');
+      assert.match(String(chatAuths.at(-1) || ''), /^Bearer plugin-access-/, '桌面端 401 后必须自动接管到同账号插件凭据');
+      assert.equal(chatHeaders.at(-1)['x-ide-type'], 'WorkBuddy', '接管后身份头要切到插件来源');
+    }
+
+    // ⑩ 不同账号：默认不接管（上一步已证）；显式 any 才允许跨账号接管
+    if (storeMode === 'dpapi') {
+      const otherAuth = {
+        auth: {
+          accessToken: desktopJwtOtherAccount,
+          refreshToken: '',
+          domain: 'example.invalid',
+          expiresAt: Date.now() + 30 * 86_400_000,
+        },
+      };
+      bridge6 = await startBridge(
+        { ...sharedEnv, WORKBUDDY_CREDENTIAL_FAILOVER: 'any' },
+        { auth: otherAuth },
+      );
+      const sourceOther = await (await fetch(`${bridge6.baseUrl}/v1/auth/source`, { headers: auth })).json();
+      assert.equal(sourceOther.sameAccount, false, '不同 uid 不能被识别成同一账号');
+      assert.equal(sourceOther.failover, 'any');
+      assert.equal((await chat(bridge6.baseUrl)).status, 200);
+      assert.match(String(chatAuths.at(-1) || ''), /^Bearer plugin-access-/, 'any 模式下跨账号接管应成功');
+      assert.equal(chatHeaders.at(-1)['x-ide-type'], 'WorkBuddy');
+    }
+  } finally {
+    for (const b of [bridge1, bridge2, bridge3, bridge4, bridge5, bridge6]) {
+      if (b) { try { await b.stop(); } catch { /* 忽略 */ } }
+    }
+    try { await stub.close(); } catch { /* 忽略 */ }
+    for (const b of [bridge1, bridge2, bridge3, bridge4, bridge5, bridge6]) {
+      if (b) { try { rmSync(b.dir, { recursive: true, force: true }); } catch { /* 忽略 */ } }
+    }
+    rmSync(credRoot, { recursive: true, force: true });
   }
 });

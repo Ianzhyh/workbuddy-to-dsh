@@ -33,7 +33,10 @@ export const FIXTURES = {
         // endpoint 只到源站，**不带**接口路径 —— 桥的 /health 就是这么上报的
         // （曾经误写成 `.../v2/chat/completions`，于是 README 截图里显示的"上游端点"
         //  是个接口路径，与真实面板对不上）
-        auth: { userId: 'wb-8f2c1a4e', endpoint: 'https://copilot.tencent.com', expiresAt: new Date(now + 44 * 86_400_000).toISOString(), expired: false },
+        auth: { userId: 'uid-fixture-0001', source: 'plugin', endpoint: 'https://copilot.tencent.com', expiresAt: new Date(now + 44 * 86_400_000).toISOString(), expired: false },
+        // 与 /workbuddy/login 的插件账号保持一致：实际生效来源是插件，
+        // 桌面账号那一行只能显示「已选（未生效）」。
+        credential: { source: 'plugin', storeMode: 'dpapi', pluginCount: 1 },
         catalogSize: 30, catalogAt: new Date(now - 300_000).toISOString(),
       },
       error: '',
@@ -154,9 +157,9 @@ FIXTURES.consoleAccounts = {
      * 服务端会合并成一行；夹具**故意保留两行**，钉住面板自己的兜底
      * （控制台进程可能还是旧代码）—— 截图里不许出现两个一样的账号。
      */
-    { name: 'workbuddy-desktop.info', path: 'C:\\Users\\demo\\AppData\\Local\\CodeBuddyExtension\\Data\\Public\\auth\\workbuddy-desktop.info', active: true, usable: true, account: '330000000000', domain: 'copilot.tencent.com', encrypted: true, expiresAt: now + 44 * 86400000, remainingMs: 44 * 86400000, aliasKey: '330000000000', alias: '', hidden: false, sameAccount: 2 },
-    { name: 'workbuddy-desktop.2026-10-12.info', path: 'C:\\Users\\demo\\AppData\\Local\\CodeBuddyExtension\\Data\\Public\\auth\\workbuddy-desktop.2026-10-12.info', active: false, usable: true, account: '330000000000', domain: 'copilot.tencent.com', encrypted: true, expiresAt: now + 44 * 86400000, remainingMs: 44 * 86400000, aliasKey: '330000000000', alias: '', hidden: false, sameAccount: 2 },
-    { name: 'workbuddy-desktop-ai.info', path: 'C:\\Users\\demo\\AppData\\Local\\CodeBuddyExtension\\Data\\Public\\auth\\workbuddy-desktop-ai.info', active: false, usable: true, account: '450000000000', domain: 'www.workbuddy.ai', encrypted: true, expiresAt: now + 342 * 86400000, remainingMs: 342 * 86400000, aliasKey: '450000000000', alias: '', hidden: false, sameAccount: 1 },
+    { name: 'workbuddy-desktop.info', path: 'C:\\Users\\demo\\AppData\\Local\\CodeBuddyExtension\\Data\\Public\\auth\\workbuddy-desktop.info', active: true, usable: true, account: '330000000000', userId: 'uid-fixture-0001', domain: 'copilot.tencent.com', encrypted: true, expiresAt: now + 44 * 86400000, remainingMs: 44 * 86400000, aliasKey: '330000000000', alias: '', hidden: false, sameAccount: 2 },
+    { name: 'workbuddy-desktop.2026-10-12.info', path: 'C:\\Users\\demo\\AppData\\Local\\CodeBuddyExtension\\Data\\Public\\auth\\workbuddy-desktop.2026-10-12.info', active: false, usable: true, account: '330000000000', userId: 'uid-fixture-0001', domain: 'copilot.tencent.com', encrypted: true, expiresAt: now + 44 * 86400000, remainingMs: 44 * 86400000, aliasKey: '330000000000', alias: '', hidden: false, sameAccount: 2 },
+    { name: 'workbuddy-desktop-ai.info', path: 'C:\\Users\\demo\\AppData\\Local\\CodeBuddyExtension\\Data\\Public\\auth\\workbuddy-desktop-ai.info', active: false, usable: true, account: '450000000000', userId: 'uid-fixture-0002', domain: 'www.workbuddy.ai', encrypted: true, expiresAt: now + 342 * 86400000, remainingMs: 342 * 86400000, aliasKey: '450000000000', alias: '', hidden: false, sameAccount: 1 },
   ],
 };
 FIXTURES.consoleDiagnose = {
@@ -353,6 +356,39 @@ export function buildRoutes(data) {
     // checkin 固定成"今日未签到"，好让概览页的待办提醒可断言（真实数据取决于今天签没签）
     '/workbuddy/status': { ...data.status, checkin: { status: { todayCheckedIn: false, streakDays: 3, todayCredit: 0 }, auto: { auto: true } } },
     '/workbuddy/models': data.models,
+    // 插件登录（第二条凭据来源）：给一条已登录的插件账号，让账号页的
+    // 来源选择 / 账号行 / 按钮文案都进入 i18n 验收（空态由别的用例覆盖）。
+    '/workbuddy/login': {
+      ok: true,
+      configured: 'plugin',
+      envPinned: false,
+      storeMode: 'dpapi',
+      failover: 'same-account',
+      fallbackReason: '',
+      desktop: { available: true, error: '', userId: 'uid-fixture-0001' },
+      plugin: { available: true, count: 2, activeUid: 'uid-fixture-0001', uids: ['uid-fixture-0001', 'uid-fixture-0002'], error: '' },
+      sameAccount: true,
+      effective: { source: 'plugin', uid: 'uid-fixture-0001', region: 'cn', endpoint: 'https://example.invalid', expiresAt: new Date(now + 86_400_000).toISOString() },
+      credentials: [{
+        uid: 'uid-fixture-0001',
+        region: 'cn',
+        nickname: 'Fixture',
+        enterpriseId: '',
+        domain: 'example.invalid',
+        expiresAt: new Date(now + 86_400_000).toISOString(),
+        updatedAt: new Date(now).toISOString(),
+        active: true,
+      }, {
+        uid: 'uid-fixture-0002',
+        region: 'global',
+        nickname: 'Fixture Other',
+        enterpriseId: '',
+        domain: 'example.invalid',
+        expiresAt: new Date(now + 86_400_000).toISOString(),
+        updatedAt: new Date(now - 60_000).toISOString(),
+        active: false,
+      }],
+    },
     // 运行中的宿主可能还是旧构建（宿主改动要重启 dsh 才生效）：早期 /workbuddy/usage
     // 套了一层 {usage:{…}}，这里按**当前契约**摊平，保证面板拿到的形状与新代码一致。
     '/workbuddy/usage': (data.usage && data.usage.usage) ? { ok: true, ...data.usage.usage } : data.usage,
@@ -378,6 +414,18 @@ export function buildRoutes(data) {
         activeAlertMs: 300_000,
       },
     },
+    // 登录卡片的动作桩：面板的 i18n/渲染用例会点来源分段按钮
+    '/workbuddy/login/source': {
+      ok: true, configured: 'plugin', envPinned: false, storeMode: 'dpapi',
+      credentials: [{
+        uid: 'uid-fixture-0001', region: 'cn', nickname: 'Fixture', enterpriseId: '',
+        expiresAt: new Date(now + 86_400_000).toISOString(), updatedAt: new Date(now).toISOString(), active: true,
+      }],
+    },
+    '/workbuddy/login/start': { ok: true, state: 'state-fixture', url: 'https://example.invalid/login?state=state-fixture', region: 'cn' },
+    '/workbuddy/login/poll': { ok: true, status: 'pending' },
+    '/workbuddy/login/active': { ok: true },
+    '/workbuddy/login/logout': { ok: true },
     '/workbuddy/bridge': { ok: true, action: 'restart', result: { ok: true, health: { pid: 4242 } } },
     '/workbuddy/console': { ok: true, action: 'start', url: 'http://127.0.0.1:8792', result: { ok: true, reused: true } },
     '/workbuddy/migrate': { ok: true, found: false, files: [], changed: false },

@@ -368,6 +368,22 @@ spawnSync(systemExe('netstat'), ['-ano'], {
 面板为空说明桥没在跑，或还没有任何请求经过桥。原始日志（含更完整的堆栈）在
 `bridge/bridge.log`。
 
+### 插件登录失败 / 登录后仍用桌面端账号
+
+- **登录后仍扣桌面端账号**：`auto` 的策略是**桌面端优先**。插件登录成功后 UI 会自动切到
+  `plugin`；如果你手动切回 `auto` / `desktop`，下一次请求就会回桌面端。看「账号 → 当前来源」。
+- **登录端点 400 / 403**：上游可能改了登录页的 UA / Origin / Referer。先看 `bridge.log`
+  的状态码，再用 `WORKBUDDY_LOGIN_UA` / `WORKBUDDY_LOGIN_BASE` / `WORKBUDDY_LOGIN_ORIGIN`
+  覆盖（后两个仅应急/测试用）。
+- **刷新失败 / 令牌失效**：在面板里「退出登录」后重新走一次授权；不要手工编辑
+  `credentials/` 下的文件（信封是加密的，改坏只能重登）。
+- **「凭据存储：仅内存」**：DPAPI（PowerShell）不可用时会自动退回内存，桥重启后需要重新登录。
+  这是有意的安全降级，不会静默写明文。想主动不落盘可设 `WORKBUDDY_CREDENTIAL_STORE=memory`。
+- **换机器 / 换 Windows 用户后凭据不可用**：`store.key` 由 DPAPI 绑定当前用户，复制
+  `credentials/` 到别处解不开；重新登录即可。
+- **账号列表里没有标「插件」的账号，但凭据目录里确有 `.cred` 文件**：通常是密钥不匹配（换了用户/机器/build）。
+  面板会显示「插件凭据读取失败」；退出后重新登录。
+
 ### 选错账号
 
 登录目录里有多个 `.info` 时，**自动探测按固定优先级取**：

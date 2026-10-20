@@ -7,7 +7,7 @@
  * 它只读不写（除了可选地探测端口），逐项告诉你「行不行 / 为什么 / 怎么修」：
  *   1. Node 版本
  *   2. 插件要用的脚本在哪（仓库检出 / 自带 vendor）
- *   3. WorkBuddy 桌面端与登录文件（没有登录文件的话桥起不来）
+ *   3. WorkBuddy 桌面端与登录文件（或插件登录凭据 —— 二选一）
  *   4. 端口 8790 / 8792 是否可用（占用者是自己的进程还是别的软件）
  *   5. 桥是否在跑、能列出多少模型、积分多少
  *   6. 插件装进了哪些 dsh profile
@@ -76,19 +76,38 @@ const authDirs = [
       ? join(homeDir, 'Library', 'Application Support', 'CodeBuddyExtension', 'Data', 'Public', 'auth')
       : join(homeDir, '.local', 'share', 'CodeBuddyExtension', 'Data', 'Public', 'auth'),
 ].filter(Boolean);
+/*
+ * 第二条凭据来源：插件登录。自检要在"没装桌面端"的机器上也能给出正确结论，
+ * 不能把缺失的 .info 一律判红 —— 那正是插件登录要消除的前置条件。
+ */
+const credentialDir = process.env.WORKBUDDY_CREDENTIAL_DIR || env.WORKBUDDY_CREDENTIAL_DIR
+  || join(homeDir, '.workbuddy-bridge', 'credentials');
+let pluginCredentialCount = 0;
+try { pluginCredentialCount = readdirSync(credentialDir).filter((f) => f.endsWith('.cred')).length; } catch { /* 目录不存在 */ }
+let pluginSource = '';
+try { pluginSource = JSON.parse(readFileSync(join(credentialDir, 'source.json'), 'utf8')).source || ''; } catch { /* 没有 source.json */ }
+const pluginLoginDetected = pluginCredentialCount > 0 || pluginSource === 'plugin';
+record(pluginLoginDetected ? 'ok' : 'warn', '插件登录凭据',
+  pluginLoginDetected
+    ? `${credentialDir}（${pluginCredentialCount} 个账号${pluginSource ? `，source=${pluginSource}` : ''}）`
+    : '未检测到（可选：不装桌面端时用插件里的「插件登录」）',
+  pluginLoginDetected ? null : '如果不想安装 WorkBuddy 桌面端：在 dsh 插件的「账号」页点「开始登录」完成一次浏览器授权');
+
 const authDir = authDirs.find((d) => existsSync(d));
 if (!authDir) {
-  record('bad', 'WorkBuddy 登录文件', `找不到登录目录（找过：${authDirs.join(' / ')}）`,
-    '先安装并登录 WorkBuddy 桌面端；绿色版/自定义安装位置的话，在 .env 里设 WORKBUDDY_AUTH_DIR');
+  record(pluginLoginDetected ? 'ok' : 'bad', 'WorkBuddy 登录文件',
+    pluginLoginDetected ? '未安装桌面端；当前使用插件登录凭据' : `找不到登录目录（找过：${authDirs.join(' / ')}）`,
+    pluginLoginDetected ? null : '安装并登录 WorkBuddy 桌面端；或改用上面的「插件登录」，不需要桌面端');
 } else {
   const infos = readdirSync(authDir).filter((f) => f.endsWith('.info'));
-  record(infos.length ? 'ok' : 'bad', 'WorkBuddy 登录文件',
-    `${authDir}（${infos.length} 个：${infos.join('、') || '空'}）`,
-    infos.length ? null : '在 WorkBuddy 桌面端登录一次账号');
+  record(infos.length || pluginLoginDetected ? 'ok' : 'bad', 'WorkBuddy 登录文件',
+    `${authDir}（${infos.length} 个：${infos.join('、') || '空'}）${pluginLoginDetected ? ' · 当前使用插件登录' : ''}`,
+    infos.length || pluginLoginDetected ? null : '在 WorkBuddy 桌面端登录一次账号；或改用「插件登录」');
   const active = process.env.WORKBUDDY_AUTH_FILE || (existsSync(join(authDir, 'workbuddy-desktop.info')) ? join(authDir, 'workbuddy-desktop.info') : '');
   if (!active) {
-    record('warn', '当前使用的登录文件', '没找到默认的 workbuddy-desktop.info',
-      '在 .env 里用 WORKBUDDY_AUTH_FILE 指定具体文件（多账号时用得上）');
+    record(pluginLoginDetected ? 'ok' : 'warn', '当前使用的登录文件',
+      pluginLoginDetected ? '使用插件登录，不需要桌面端登录文件' : '没找到默认的 workbuddy-desktop.info',
+      pluginLoginDetected ? null : '在 .env 里用 WORKBUDDY_AUTH_FILE 指定具体文件（多账号时用得上）');
   } else if (!existsSync(active)) {
     // 用户显式指定的路径可能写错、文件可能被删 —— 这时**不能**直接 readFileSync：
     // 自检脚本的最大价值就是"装上还没跑通时告诉你为什么"，在这里抛 Node 堆栈

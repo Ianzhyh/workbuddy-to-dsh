@@ -1,10 +1,14 @@
 # WorkBuddy Local API Bridge
 
-Expose the model capabilities of your locally-logged-in **WorkBuddy desktop app**
-(DeepSeek / GLM / Kimi / MiniMax …) through a local bridge as **OpenAI-compatible**,
-**Anthropic-compatible** and **OpenAI Responses** APIs — so **Claude Code**, **Codex**,
-**opencode**, **Cursor**, **Trae**, **Cherry Studio**, **NextChat**, **LobeChat**,
-**Open WebUI** or any client with a custom Base URL can use them directly.
+Expose WorkBuddy's model capabilities (DeepSeek / GLM / Kimi / MiniMax …) through a
+local bridge as **OpenAI-compatible**, **Anthropic-compatible** and **OpenAI Responses**
+APIs — so **Claude Code**, **Codex**, **opencode**, **Cursor**, **Trae**,
+**Cherry Studio**, **NextChat**, **LobeChat**, **Open WebUI** or any client with a
+custom Base URL can use them directly.
+
+Two credential sources: the **WorkBuddy desktop app** you are already logged in to, or
+**"Plugin sign-in" inside the dsh plugin** — **the desktop app is optional**; a one-time
+browser authorization is enough (credentials are kept encrypted by the plugin).
 
 Also included: a web console (status / start-stop / diagnostics / model registration /
 usage / health check / chat test) — **bilingual (Chinese / English, switchable in the
@@ -42,12 +46,14 @@ dsh plugin --profile desktop add github:Ianzhyh/workbuddy-to-dsh
 
 ## ⚠️ Read this first (disclaimer & boundaries)
 
-- **Unofficial path.** This relies on the undocumented credential storage of the
-  WorkBuddy desktop app. The upstream may change protocols or tighten risk control
-  at any time (it already happened) — **no availability or compatibility guarantee**.
-- **Only drives YOUR account.** It reads the credentials of the account logged in on
-  **your own machine** and consumes its quota. **Do not** use it for multi-account
-  pooling, proxying for others, or any resale/hosting service.
+- **Unofficial path.** This relies on WorkBuddy's undocumented upstream protocol and
+  credential formats (plugin sign-in does **not** need the desktop app, but still uses
+  an unofficial device-code flow). The upstream may change protocols or tighten risk
+  control at any time (it already happened) — **no availability or compatibility guarantee**.
+- **Only drives YOUR account.** It uses the desktop account logged in on **your own
+  machine**, or the plugin account you explicitly authorized, and consumes that
+  account's quota. **Do not** use it for multi-account pooling, proxying for others,
+  or any resale/hosting service.
 - **Check WorkBuddy's Terms of Service** before use; if they disallow this, don't use it.
 - **No warranty.** Provided "as is" under MIT. Use a real API contract for anything
   long-term or commercial.
@@ -61,8 +67,10 @@ dsh plugin --profile desktop add github:Ianzhyh/workbuddy-to-dsh
   APIs *into* Claude Code; this project exports *from* WorkBuddy to standard APIs.
   Complementary, not competing.
 - **vs the WorkBuddy2API cluster (20+ projects)**: this one deliberately stays
-  **single-account · credentials never hit disk · zero runtime dependencies ·
-  single-file bridge**; no multi-account pooling, no task automation.
+  **single-account · no plaintext credentials · zero runtime dependencies ·
+  single-file bridge** (desktop credentials are read on demand; plugin-sign-in
+  credentials are stored with DPAPI + AES-GCM); no multi-account pooling, no task
+  automation.
 
 ## Quick start (Windows)
 
@@ -73,6 +81,9 @@ dsh plugin --profile desktop add github:Ianzhyh/workbuddy-to-dsh
    - OpenAI-compatible: `http://127.0.0.1:8790/v1`
    - Anthropic: `http://127.0.0.1:8790` (no `/v1`)
    - API key: `wb-local-bridge` (or your `WORKBUDDY_LOCAL_TOKEN`)
+
+No WorkBuddy desktop app? Install the dsh plugin, open its **Account** tab and use
+**Plugin sign-in** — no desktop download is required.
 
 DeepSeek Harness users: `dsh plugin add github:Ianzhyh/workbuddy-to-dsh`, then
 register models in the plugin's settings page. That page is **bilingual** —
@@ -86,8 +97,9 @@ the `EN` / `中` toggle in its top-right corner switches all nine tabs
 
 - **Zero runtime dependencies** — the bridge is a single self-contained file
   (`bridge/workbuddy-bridge.mjs`).
-- **Credentials never hit disk** — AtRest keys are fetched from the desktop app via
-  `ELECTRON_RUN_AS_NODE` on demand; plaintext tokens stay in memory only.
+- **No plaintext credentials on disk** — desktop AtRest keys are fetched via
+  `ELECTRON_RUN_AS_NODE` on demand; plugin-sign-in credentials are stored as
+  DPAPI-protected AES-GCM envelopes. Plaintext tokens stay in memory only.
 - **Three protocols**, streaming, tool calls, multi-turn tool results.
   Codex speaks the OpenAI **Responses** protocol, which is *not* chat/completions —
   the bridge contains a real conversion layer (`/v1/responses`), so there is no

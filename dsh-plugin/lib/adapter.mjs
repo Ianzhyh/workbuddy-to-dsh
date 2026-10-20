@@ -208,6 +208,21 @@ function textOf(blocks) {
 }
 
 /**
+ * 图片缓存键。
+ *
+ * 长会话里**同一张图会在每一轮被重新带上**：dsh 的历史包含图片块，适配器每次
+ * 组包都会拿到同一个 `ImageAttachmentRef`。不缓存的话，每一轮都要重新读盘 +
+ * base64 编码（截图动辄几 MB），既费 CPU 又产生大量临时字符串。
+ *
+ * 键里带上体积与尺寸：附件 id 理论上一一对应内容，但元数据能让"同 id 不同图"
+ * 这种异常情形直接判为未命中，不会把旧图发给模型。
+ */
+function imageCacheKey(ref) {
+  return `${ref?.attachmentId || ''}\u0000${ref?.mediaType || ''}\u0000${ref?.bytes ?? ''}`
+    + `\u0000${ref?.width ?? ''}\u0000${ref?.height ?? ''}`;
+}
+
+/**
  * 一条 dsh 消息 → 一条 OpenAI wire 消息。
  *
  * @param {object} message dsh Message（system/developer/user/assistant/tool）
@@ -290,7 +305,7 @@ async function toWireMessage(message, resolveImage) {
      * 注意 assistant 的 content 允许为 `null`（只有 tool_calls 时），
      * 所以"有图"时必须换成数组形态，不能仍走 `content: null`。
      */
-    const imageParts = [];
+    const imageRefs = [];
     for (const block of blocks) {
       if (block?.type === 'text') textParts.push(block.text || '');
       else if (block?.type === 'tool-call') {
@@ -300,11 +315,15 @@ async function toWireMessage(message, resolveImage) {
           function: { name: String(block.name || ''), arguments: String(block.arguments ?? '{}') },
         });
       } else if (block?.type === 'image' && block.offloaded !== true) {
-        const url = await resolveImage(block.attachment).catch(() => null);
-        if (url) imageParts.push({ type: 'image_url', image_url: { url } });
+        imageRefs.push(resolveImage(block.attachment).catch(() => null));
       }
       // reasoning 块不回灌：兼容端点对 reasoning 字段的接受度不一致，上游也不需要。
     }
+    // 多图并行解析（顺序由 Promise.all 保证与块顺序一致）：串行读盘时每张图
+    // 的 I/O 会叠加进"开始回答前"的等待里。
+    const imageParts = (await Promise.all(imageRefs))
+      .filter(Boolean)
+      .map((url) => ({ type: 'image_url', image_url: { url } }));
     const text = textParts.join('');
     if (imageParts.length) {
       // 多段内容：文字在前、图在后（与 user 侧同序，读起来自然）
@@ -322,15 +341,17 @@ async function toWireMessage(message, resolveImage) {
   const hasImage = blocks.some((b) => b?.type === 'image' && b.offloaded !== true);
   if (!hasImage) return { role, content: textOf(blocks) };
 
-  const parts = [];
-  for (const block of blocks) {
-    if (block?.type === 'text' && block.text) parts.push({ type: 'text', text: block.text });
-    else if (block?.type === 'image') {
+  // 并行解析，输出顺序仍与块顺序一致（文字/图片交错时不会乱序）。
+  const parts = (await Promise.all(blocks.map(async (block) => {
+    if (block?.type === 'text' && block.text) return { type: 'text', text: block.text };
+    if (block?.type === 'image') {
       const url = await resolveImage(block.attachment).catch(() => null);
-      if (url) parts.push({ type: 'image_url', image_url: { url } });
-      else parts.push({ type: 'text', text: '[图片：无法读取该附件]' });
+      return url
+        ? { type: 'image_url', image_url: { url } }
+        : { type: 'text', text: '[图片：无法读取该附件]' };
     }
-  }
+    return null;
+  }))).filter(Boolean);
   if (!parts.length) parts.push({ type: 'text', text: '' });
   return { role, content: parts };
 }
@@ -562,10 +583,27 @@ export class WorkBuddyAdapter {
     this.catalogTtlMs = options.catalogTtlMs ?? 60_000;
     /** 目录缓存，避免每次模型选择都打一次桥。 */
     this.catalogCache = { at: 0, models: [] };
+    /** 在飞的目录请求：并发调用共用同一次桥往返。 */
+    this.catalogInflight = null;
+    /** 单调序号：invalidate() 之后，旧请求的结果不许覆盖新缓存。 */
+    this.catalogSeq = 0;
+    this.catalogAppliedSeq = 0;
     /** 最近一次目录请求的刷新结果（`staleMs>0` = 刷新失败、退回旧缓存）。 */
     this.lastRefresh = { refresh: false, staleMs: 0, at: 0 };
     /** 最近一次目录错误的文本，给面板显示。 */
     this.catalogError = '';
+
+    /**
+     * 图片 data URL 缓存（同一附件跨轮次复用）。
+     *
+     * 双上限：条数防止小图无限堆积，字符数防止几张超大截图吃光内存。
+     * `imageInflight` 让"同一张图在一条消息里出现两次"也只读一次盘。
+     */
+    this.imageCache = new Map();
+    this.imageCacheChars = 0;
+    this.imageCacheMaxEntries = Math.max(1, Number(options.imageCacheMaxEntries) || 64);
+    this.imageCacheMaxChars = Math.max(0, Number(options.imageCacheMaxChars) || 48 * 1024 * 1024);
+    this.imageInflight = new Map();
   }
 
   /** 注册时**同步**调用：不能有 I/O。 */
@@ -622,33 +660,159 @@ export class WorkBuddyAdapter {
     };
   }
 
-  /** 拉取桥的目录（带 TTL 缓存）。 */
-  async catalog({ refresh = false } = {}) {
-    const now = Date.now();
-    if (!refresh && this.catalogCache.models.length && now - this.catalogCache.at < this.catalogTtlMs) {
-      return this.catalogCache.models;
+  /** 真正打一次桥的目录请求；`seq` 保证乱序返回时旧结果不会覆盖新结果。 */
+  #fetchCatalog({ refresh = false, signal } = {}) {
+    const seq = ++this.catalogSeq;
+    const promise = (async () => {
+      const client = await this.ensureReady();
+      const payload = await client.models({ all: true, refresh, signal });
+      const data = Array.isArray(payload?.data) ? payload.data : [];
+      if (seq > this.catalogAppliedSeq) {
+        this.catalogAppliedSeq = seq;
+        this.catalogCache = { at: Date.now(), models: data };
+        /*
+         * 桥在"强制刷新失败、退回旧缓存"时会带 `staleMs`（缓存有多旧）。
+         * 面板必须能说出"这次刷新没成功、你看到的是 N 分钟前的目录" ——
+         * 旧实现把它丢掉，刷新失败看起来和成功一模一样。
+         */
+        this.lastRefresh = {
+          refresh: refresh === true,
+          staleMs: Number(payload?.staleMs) > 0 ? Number(payload.staleMs) : 0,
+          at: Date.now(),
+        };
+        this.catalogError = '';
+      }
+      return data;
+    })();
+    // 失败只记录，不制造未处理的 rejection（后台刷新没人 await）。
+    promise.catch((error) => {
+      if (seq > this.catalogAppliedSeq) this.catalogError = String(error?.message || error);
+    });
+    return promise;
+  }
+
+  /**
+   * 发起/复用在飞目录请求。
+   *
+   * 显式 `refresh` 必须真的强制刷新：若此刻在飞的是后台刷新，等它结束后
+   * 再发一次 `refresh=1`，不能把"用户点了刷新"悄悄降级成普通读取。
+   */
+  #startCatalogFetch({ refresh = false, signal } = {}) {
+    const inflight = this.catalogInflight;
+    if (inflight) {
+      if (!refresh || inflight.refresh) return inflight.promise;
+      return inflight.promise.catch(() => {}).then(() => this.#startCatalogFetch({ refresh: true, signal }));
     }
-    const client = await this.ensureReady();
-    const payload = await client.models({ all: true, refresh });
-    const data = Array.isArray(payload?.data) ? payload.data : [];
-    this.catalogCache = { at: Date.now(), models: data };
-    /*
-     * 桥在"强制刷新失败、退回旧缓存"时会带 `staleMs`（缓存有多旧）。
-     * 面板必须能说出"这次刷新没成功、你看到的是 N 分钟前的目录" ——
-     * 旧实现把它丢掉，刷新失败看起来和成功一模一样。
-     */
-    this.lastRefresh = {
-      refresh: refresh === true,
-      staleMs: Number(payload?.staleMs) > 0 ? Number(payload.staleMs) : 0,
-      at: Date.now(),
-    };
-    this.catalogError = '';
-    return data;
+    const entry = { refresh, promise: null };
+    entry.promise = this.#fetchCatalog({ refresh, signal }).finally(() => {
+      if (this.catalogInflight === entry) this.catalogInflight = null;
+    });
+    this.catalogInflight = entry;
+    return entry.promise;
+  }
+
+  /**
+   * 后台刷新目录：失败只记在 `catalogError`，不打断调用方。
+   *
+   * 为什么需要：目录过期（默认 60s）时旧实现会让**下一次模型调用**在组包前
+   * 串行等一次桥往返。桥本机虽快，但桥可能刚重启、或正被面板刷新占着 ——
+   * 这段等待直接变成用户感知的"模型卡住不开始回答"。旧目录本来就能用，
+   * 先返回、后台换新即可。
+   */
+  #backgroundRefresh() {
+    this.#startCatalogFetch({ refresh: false }).catch((error) => {
+      this.log('model catalog background refresh failed', String(error?.message || error));
+    });
+  }
+
+  /**
+   * 拉取桥的目录。
+   *
+   * - 缓存新鲜 → 直接返回；
+   * - 缓存过期 → **立刻返回旧目录**，后台刷新（stale-while-revalidate）；
+   * - 没有缓存（冷启动）→ 阻塞一次（模型选择器不能空着）。
+   *
+   * `refresh: true` 是显式刷新（面板「刷新目录」），始终阻塞并强制重取。
+   */
+  async catalog({ refresh = false, signal } = {}) {
+    if (refresh) return this.#startCatalogFetch({ refresh: true, signal });
+    const cached = this.catalogCache.models;
+    if (cached.length) {
+      if (Date.now() - this.catalogCache.at < this.catalogTtlMs) return cached;
+      this.#backgroundRefresh();
+      return cached;
+    }
+    return this.#startCatalogFetch({ refresh: false, signal });
+  }
+
+  /**
+   * 启动预热：把首次模型调用/选择器要等的目录请求挪到后台。
+   * 返回 promise 方便测试与需要等待的调用方，失败不会抛给调用方。
+   */
+  warmup() {
+    if (this.catalogCache.models.length
+      && Date.now() - this.catalogCache.at < this.catalogTtlMs) {
+      return Promise.resolve(this.catalogCache.models);
+    }
+    const task = this.#startCatalogFetch({ refresh: false });
+    task.catch(() => {});
+    return task;
   }
 
   /** 失效缓存（面板里「刷新目录」/ 启停桥之后调用）。 */
   invalidate() {
+    // 冻结在飞请求的写入权：桥重启后，重启前发出的目录请求即使晚到也不能
+    // 把旧进程的目录重新灌回来。
+    this.catalogAppliedSeq = this.catalogSeq;
+    this.catalogInflight = null;
     this.catalogCache = { at: 0, models: [] };
+  }
+
+  #storeImage(key, dataUrl) {
+    if (!dataUrl || dataUrl.length > this.imageCacheMaxChars) return;
+    const previous = this.imageCache.get(key);
+    if (previous !== undefined) this.imageCacheChars -= previous.length;
+    else if (this.imageCache.size >= this.imageCacheMaxEntries) {
+      const [oldestKey, oldestUrl] = this.imageCache.entries().next().value;
+      this.imageCache.delete(oldestKey);
+      this.imageCacheChars -= oldestUrl.length;
+    }
+    this.imageCache.set(key, dataUrl);
+    this.imageCacheChars += dataUrl.length;
+    while (this.imageCacheChars > this.imageCacheMaxChars && this.imageCache.size > 1) {
+      const [oldestKey, oldestUrl] = this.imageCache.entries().next().value;
+      this.imageCache.delete(oldestKey);
+      this.imageCacheChars -= oldestUrl.length;
+    }
+  }
+
+  /**
+   * 带缓存的图片解析：同一附件只读盘 + 编码一次，并发请求共用同一个在飞 promise。
+   * 返回 null 的解析结果不缓存（附件可能下一轮才写入完成）。
+   */
+  async resolveImageCached(ref) {
+    if (!ref?.attachmentId) return null;
+    const key = imageCacheKey(ref);
+    const cached = this.imageCache.get(key);
+    if (cached !== undefined) {
+      // 命中即刷新 LRU 次序
+      this.imageCache.delete(key);
+      this.imageCache.set(key, cached);
+      return cached;
+    }
+    const inflight = this.imageInflight.get(key);
+    if (inflight) return inflight;
+    const task = (async () => {
+      const dataUrl = await this.resolveImage(ref).catch(() => null);
+      if (dataUrl) this.#storeImage(key, dataUrl);
+      return dataUrl;
+    })();
+    this.imageInflight.set(key, task);
+    try {
+      return await task;
+    } finally {
+      this.imageInflight.delete(key);
+    }
   }
 
   /**
@@ -728,8 +892,9 @@ export class WorkBuddyAdapter {
    *   3. 目录没说支持推理 → 不给 reasoning 字段（发了上游可能 400，
    *      与"不猜参数"同一原则）。
    */
-  async resolveModel(provider, model) {
-    const catalog = await this.catalog();
+  async resolveModel(provider, model, signal) {
+    // 传 signal：取消一次生成时，冷启动的目录请求也能一起停下（不再空等桥）。
+    const catalog = await this.catalog({ signal });
     const hit = catalog.find((m) => m && m.id === model);
     if (!hit) return { provider, id: model, name: model };
     const [mapped] = toAdapterModels([hit]);
@@ -786,9 +951,12 @@ export class WorkBuddyAdapter {
       if (typeof options.system === 'string' && options.system.length) {
         messages.push({ role: 'system', content: options.system });
       }
-      for (const message of options.messages || []) {
-        messages.push(await toWireMessage(message, this.resolveImage));
-      }
+      const resolveImage = (ref) => this.resolveImageCached(ref);
+      // 历史消息之间没有依赖，一起组包：多图会话不必串行等每一张图读完。
+      const converted = await Promise.all(
+        (options.messages || []).map((message) => toWireMessage(message, resolveImage)),
+      );
+      messages.push(...converted);
       payload = { model, messages: sanitizeWire(messages), stream: true };
       const tools = toWireTools(options);
       if (tools.length) payload.tools = tools;

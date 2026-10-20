@@ -208,6 +208,41 @@ export class BridgeClient {
     return this.#json('/v1/checkin', { method: claim ? 'POST' : 'GET', signal, timeoutMs: 20000 });
   }
 
+  // ── 插件登录（第二条凭据来源）─────────────────────────────────────────
+  /** 凭据来源状态（桌面端/插件、存储模式、生效来源）—— 不含任何令牌。 */
+  authSource(signal) {
+    return this.#json('/v1/auth/source', { signal, timeoutMs: 8000 });
+  }
+
+  /** 插件凭据清单 —— 不含任何令牌。 */
+  authCredentials(signal) {
+    return this.#json('/v1/auth/credentials', { signal, timeoutMs: 8000 });
+  }
+
+  deviceLoginStart({ region = 'cn' } = {}, signal) {
+    return this.#json('/v1/auth/device', { method: 'POST', body: { region }, signal, timeoutMs: 30000 });
+  }
+
+  deviceLoginPoll(state, signal) {
+    return this.#json(`/v1/auth/device?state=${encodeURIComponent(state)}`, { signal, timeoutMs: 30000 });
+  }
+
+  deviceLoginCancel(state, signal) {
+    return this.#json(`/v1/auth/device?state=${encodeURIComponent(state)}`, { method: 'DELETE', signal, timeoutMs: 8000 });
+  }
+
+  authSetActive(uid, signal) {
+    return this.#json('/v1/auth/active', { method: 'POST', body: { uid }, signal, timeoutMs: 8000 });
+  }
+
+  authLogout(uid, signal) {
+    return this.#json(`/v1/auth/credentials?uid=${encodeURIComponent(uid)}`, { method: 'DELETE', signal, timeoutMs: 15000 });
+  }
+
+  setAuthSource(source, signal) {
+    return this.#json('/v1/auth/source', { method: 'POST', body: { source }, signal, timeoutMs: 8000 });
+  }
+
   /** `POST /v1/chat/completions`，返回原始 Response（SSE 或 JSON）。 */
   chat(payload, { signal } = {}) {
     return this.#fetch('/v1/chat/completions', { method: 'POST', body: payload, signal, timeoutMs: 0 });

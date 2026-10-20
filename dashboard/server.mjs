@@ -16,6 +16,14 @@ import {
   bridgeQuota,
   bridgeRequests,
   bridgeUsage,
+  bridgeAuthSource,
+  bridgeAuthCredentials,
+  bridgeDeviceStart,
+  bridgeDevicePoll,
+  bridgeDeviceCancel,
+  bridgeAuthActive,
+  bridgeAuthLogout,
+  bridgeSetAuthSource,
   credentialStatus,
   diagnose,
   invalidateQuotaCache,
@@ -1447,6 +1455,95 @@ const server = createServer(async (req, res) => {
 
     if (route === '/api/accounts') {
       sendJson(res, 200, await listAccounts());
+      return;
+    }
+
+    // ── 插件登录（第二条凭据来源）─────────────────────────────────────
+    // 与插件面板走同一套桥端点；响应里不含任何令牌。
+    if (route === '/api/login' && req.method === 'GET') {
+      try {
+        const [source, creds] = await Promise.all([bridgeAuthSource(), bridgeAuthCredentials()]);
+        sendJson(res, 200, {
+          ok: true,
+          ...source,
+          configuredSource: creds.configuredSource,
+          credentials: Array.isArray(creds.credentials) ? creds.credentials : [],
+        });
+      } catch (err) {
+        sendJson(res, 200, { ok: false, error: String(err?.message || err), credentials: [] });
+      }
+      return;
+    }
+
+    if (route === '/api/login/start' && req.method === 'POST') {
+      try {
+        const body = JSON.parse(await readBody(req));
+        const started = await bridgeDeviceStart(body?.region === 'global' ? 'global' : 'cn');
+        sendJson(res, 200, { ok: true, ...started });
+      } catch (err) {
+        sendJson(res, 200, { ok: false, error: String(err?.message || err) });
+      }
+      return;
+    }
+
+    if (route === '/api/login/poll' && req.method === 'POST') {
+      try {
+        const body = JSON.parse(await readBody(req));
+        if (!body?.state) return sendJson(res, 400, { ok: false, error: 'state is required' });
+        const result = await bridgeDevicePoll(String(body.state));
+        if (result?.status === 'ready') invalidateQuotaCache();
+        sendJson(res, 200, result);
+      } catch (err) {
+        sendJson(res, 200, { ok: false, error: String(err?.message || err) });
+      }
+      return;
+    }
+
+    if (route === '/api/login/cancel' && req.method === 'POST') {
+      try {
+        const body = JSON.parse(await readBody(req));
+        sendJson(res, 200, { ok: true, ...(await bridgeDeviceCancel(String(body?.state || ''))) });
+      } catch (err) {
+        sendJson(res, 200, { ok: false, error: String(err?.message || err) });
+      }
+      return;
+    }
+
+    if (route === '/api/login/active' && req.method === 'POST') {
+      try {
+        const body = JSON.parse(await readBody(req));
+        if (!body?.uid) return sendJson(res, 400, { ok: false, error: 'uid is required' });
+        const result = await bridgeAuthActive(String(body.uid));
+        invalidateQuotaCache();
+        sendJson(res, 200, { ok: true, ...result });
+      } catch (err) {
+        sendJson(res, 200, { ok: false, error: String(err?.message || err) });
+      }
+      return;
+    }
+
+    if (route === '/api/login/logout' && req.method === 'POST') {
+      try {
+        const body = JSON.parse(await readBody(req));
+        if (!body?.uid) return sendJson(res, 400, { ok: false, error: 'uid is required' });
+        const result = await bridgeAuthLogout(String(body.uid));
+        invalidateQuotaCache();
+        sendJson(res, 200, { ok: true, ...result });
+      } catch (err) {
+        sendJson(res, 200, { ok: false, error: String(err?.message || err) });
+      }
+      return;
+    }
+
+    if (route === '/api/login/source' && req.method === 'POST') {
+      try {
+        const body = JSON.parse(await readBody(req));
+        const result = await bridgeSetAuthSource(String(body?.source || 'auto'));
+        invalidateQuotaCache();
+        sendJson(res, 200, { ok: true, ...result });
+      } catch (err) {
+        sendJson(res, 200, { ok: false, error: String(err?.message || err) });
+      }
       return;
     }
 

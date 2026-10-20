@@ -21,7 +21,10 @@
  * Security boundary: binds 127.0.0.1 only; never logs or persists a token or
  * any conversation content.
  */
-import { readFileSync, writeFileSync, appendFileSync, existsSync, readdirSync, statSync, renameSync } from 'node:fs';
+import {
+  readFileSync, writeFileSync, appendFileSync, existsSync, readdirSync, statSync, renameSync,
+  mkdirSync, chmodSync, unlinkSync, openSync, closeSync,
+} from 'node:fs';
 import { createServer, request as httpRequest } from 'node:http';
 import { request as httpsRequest } from 'node:https';
 import { Agent as HttpAgent } from 'node:http';
@@ -29,7 +32,7 @@ import { Agent as HttpsAgent } from 'node:https';
 import { join, dirname, isAbsolute } from 'node:path';
 import { homedir, userInfo } from 'node:os';
 import { fileURLToPath } from 'node:url';
-import { createDecipheriv, createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
+import { createCipheriv, createDecipheriv, createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { spawnSync } from 'node:child_process';
 
@@ -1079,9 +1082,25 @@ function pickUpstream(domain) {
 }
 
 // ── Auth: read the local desktop session ─────────────────────────────────
+/**
+ * 登录文件解析缓存：`{ mtimeMs, size, auth }`。
+ *
+ * 每个模型请求（以及控制台每 8 秒一次的 /health）都要读一次登录文件，再做
+ * AES-256-GCM 解密与 JWT 解码 —— 单次只有几毫秒，但它在**请求关键路径**上，
+ * 而且内容几乎从不变。用 stat 指纹判新旧：桌面端刷新令牌 / 换账号会原子替换
+ * 文件，mtime 与（通常）size 都会变，下次调用自然重读。
+ *
+ * 读失败（文件被换走、权限问题）不缓存，保持原先"每次都能自愈"的行为。
+ */
+let authFileCache = null;
+
 function readStoredAuth() {
   // A token this process refreshed outlives the file until the desktop app catches up.
   if (memoryAuth && Date.now() < memoryAuth.expiresAt - REFRESH_SKEW_MS) return memoryAuth;
+  const stat = statSync(AUTH_PATH);
+  if (authFileCache && authFileCache.mtimeMs === stat.mtimeMs && authFileCache.size === stat.size) {
+    return authFileCache.auth;
+  }
   const raw = JSON.parse(readFileSync(AUTH_PATH, 'utf8'));
   const auth = raw.auth || {};
   if (!auth.accessToken) throw new Error('login file has no accessToken; sign in to the WorkBuddy desktop app first');
@@ -1096,7 +1115,8 @@ function readStoredAuth() {
   const claims = decodeJwt(access);
   const domain = auth.domain || claims.iss || '';
   const endpoint = EXPLICIT_ENDPOINT || pickUpstream(domain);
-  return {
+  const result = {
+    source: 'desktop',
     access,
     refresh,
     expiresAt: Number(auth.expiresAt || claims.exp * 1000 || 0),
@@ -1107,6 +1127,8 @@ function readStoredAuth() {
     endpoint,
     domain,
   };
+  authFileCache = { mtimeMs: stat.mtimeMs, size: stat.size, auth: result };
+  return result;
 }
 
 function decodeJwt(token) {
@@ -1114,36 +1136,780 @@ function decodeJwt(token) {
   catch { return {}; }
 }
 
-// ── Auth: refresh and write back the login file (cross-process lock + atomic write) ──
-let lastRefreshFailedAt = 0;
-/**
- * 在途的那一次刷新。**过期瞬间的并发请求共用它**，而不是各刷一次。
+// ── Plugin-owned credentials: DPAPI + AES-256-GCM store ──────────────────
+/*
+ * 第二条凭据来源：不读桌面端登录文件，由本桥自己走 OAuth 设备码登录。
+ * 令牌是**我们自己的**，所以必须落盘（否则桥一重启就要重登），也就必须加密：
  *
- * 为什么必须单飞：响应里可能带**轮换后的 refreshToken**（下面
- * `refresh: body.data.refreshToken || auth.refresh` 说明轮换是预期行为）。
- * 若 N 个并发请求各刷一次，后到的那些拿的是**已经作废**的旧 refreshToken ——
- * 必然失败，于是写 `lastRefreshFailedAt`，把接下来 `REFRESH_COOLDOWN_MS` 内的
- * **所有**刷新都挡住（包括本该成功的）。
+ *   store.key   32 字节随机密钥，由 Windows DPAPI（CurrentUser）保护
+ *   <sha256(uid)>.cred  AES-256-GCM 信封（AAD 绑定 uid）
+ *   active.json 当前 active 的账号（非机密）
  *
- * 确定的代价：每次过期多打 N-1 次上游刷新、日志里多几条 `refresh failed`。
- * 更坏的推测：上游若对 refreshToken 做「重复使用即吊销」检测，并发复用同一个
- * 旧令牌可能让整个会话被吊销、用户被迫重新登录。
- *
- * 注意限流**不**会替这里串行化 —— `rateWaitMs()` 在两个阈值都为 0 时直接返回
- * （默认就是关的），所以并发请求是真的并行。
+ * 换机器 / 换 Windows 用户 → DPAPI 解不开 store.key → 凭据不可用。
+ * DPAPI 不可用时**绝不静默写明文**：退回进程内内存，诊断里如实说明。
+ * 注意：这防的是"文件被拷走"，不防同用户的恶意进程（它也能调 DPAPI / 读内存）。
  */
-let refreshInFlight = null;
+const CREDENTIAL_SOURCE_ENV = (() => {
+  const raw = String(process.env.WORKBUDDY_CREDENTIAL_SOURCE || '').trim().toLowerCase();
+  return ['auto', 'desktop', 'plugin', 'api-key'].includes(raw) ? raw : '';
+})();
+/**
+ * `auto` 是**软默认**，不是锁：它表示"按运行时/持久化选择，默认桌面优先"。
+ * 只有显式写 desktop / plugin / api-key 才锁定（UI 的切换会被拒绝）。
+ * 这样 `.env` 里留着 `WORKBUDDY_CREDENTIAL_SOURCE=auto` 不会让"插件登录成功"
+ * 变成"登录了但永远不生效"。
+ */
+const CREDENTIAL_SOURCE_PINNED = CREDENTIAL_SOURCE_ENV !== '' && CREDENTIAL_SOURCE_ENV !== 'auto';
+/**
+ * 鉴权失败时的另一条凭据接管策略：
+ *   same-account（默认）—— 只有两边是**同一账号**才自动接管（钱包不变，安全）；
+ *   any                  —— 任意账号都接管（会切换账号/钱包，显式 opt-in）；
+ *   off                  —— 不接管，按原样报错。
+ */
+const CREDENTIAL_FAILOVER = (() => {
+  const raw = String(process.env.WORKBUDDY_CREDENTIAL_FAILOVER || '').trim().toLowerCase();
+  return ['off', 'same-account', 'any'].includes(raw) ? raw : 'same-account';
+})();
+/** 未用 env 锁定时的运行时选择（登录成功后切到 plugin，面板可切回）。 */
+let credentialSourcePreference = null;
+const CREDENTIAL_STORE_MODE = (() => {
+  const raw = String(process.env.WORKBUDDY_CREDENTIAL_STORE || '').trim().toLowerCase();
+  if (raw === 'memory' || raw === 'dpapi') return raw;
+  return process.platform === 'win32' ? 'dpapi' : 'memory';
+})();
+const CREDENTIAL_DIR = (() => {
+  const raw = String(process.env.WORKBUDDY_CREDENTIAL_DIR || '').trim();
+  if (raw) return isAbsolute(raw) ? raw : join(process.cwd(), raw);
+  return join(HOME_FOR_AUTH || homedir(), '.workbuddy-bridge', 'credentials');
+})();
 
-/** 单飞入口：同飞的调用方拿到**同一个** promise。 */
+/** DPAPI 失败后的进程内回退原因（空串 = 未回退）。 */
+let credentialStoreFallback = '';
+/** 进程内凭据（memory 模式 / DPAPI 回退时使用）。 */
+const memoryCredentials = new Map();
+let memoryActiveUid = '';
+/** store.key 与 active 凭据的进程内缓存。 */
+let credentialKey = null;
+let credentialKeyPrint = '';
+let pluginAuthCache = { file: '', uid: '', mtimeMs: -1, size: -1, auth: null };
+function invalidatePluginAuthCache() {
+  pluginAuthCache = { file: '', uid: '', mtimeMs: -1, size: -1, auth: null };
+}
+let credentialLockTail = Promise.resolve();
+
+const credentialStoreMode = () => (credentialStoreFallback ? 'memory' : CREDENTIAL_STORE_MODE);
+const credentialFileFor = (uid) => join(CREDENTIAL_DIR, `${createHash('sha256').update(String(uid), 'utf8').digest('hex').slice(0, 24)}.cred`);
+const credentialActiveFile = () => join(CREDENTIAL_DIR, 'active.json');
+const credentialSourceFile = () => join(CREDENTIAL_DIR, 'source.json');
+const VALID_SOURCES = new Set(['auto', 'desktop', 'plugin', 'api-key']);
+
+/** env 优先；否则用运行时/持久化的选择；都没有 = auto。 */
+function effectiveSource() {
+  if (CREDENTIAL_SOURCE_PINNED) return CREDENTIAL_SOURCE_ENV;
+  if (credentialSourcePreference !== null) return credentialSourcePreference || 'auto';
+  let stored = '';
+  try {
+    const parsed = JSON.parse(readFileSync(credentialSourceFile(), 'utf8'));
+    if (VALID_SOURCES.has(parsed?.source)) stored = parsed.source;
+  } catch { /* 没有就是 auto */ }
+  /*
+   * 上次选了 plugin，但凭据已经不存在（memory 模式重启 / 被手动删掉）：
+   * 继续按 plugin 只会让每个请求都报"没有插件凭据"。回到 auto，桌面端可用时照常服务；
+   * 诊断里仍能看到 source.json 的内容，不会假装没发生过。
+   */
+  if (stored === 'plugin' && readAllPluginCredentials().length === 0) {
+    log('stored source=plugin but no readable plugin credential; falling back to auto');
+    stored = '';
+  }
+  credentialSourcePreference = stored;
+  return stored || 'auto';
+}
+
+async function setSourcePreference(source) {
+  const value = String(source || '').trim().toLowerCase();
+  if (!VALID_SOURCES.has(value)) throw new Error(`source must be one of ${[...VALID_SOURCES].join(', ')}`);
+  if (CREDENTIAL_SOURCE_PINNED) throw new Error(`credential source is pinned by WORKBUDDY_CREDENTIAL_SOURCE=${CREDENTIAL_SOURCE_ENV}`);
+  if (value === 'plugin' && readAllPluginCredentials().length === 0) {
+    throw new Error(pluginCredentialError
+      ? `plugin credentials are unreadable: ${pluginCredentialError}`
+      : 'no plugin credential yet; sign in first');
+  }
+  credentialSourcePreference = value;
+  // 来源变了 → 账号/区域可能也变了，模型目录必须重取（后台，不阻塞本请求）。
+  invalidateCatalogCache();
+  if (credentialStoreMode() === 'memory') return;
+  try {
+    await withCredentialLock(async () => {
+      ensureCredentialDir();
+      writeFileAtomic(credentialSourceFile(), JSON.stringify({ source: value, updatedAt: new Date().toISOString() }, null, 2), 0o600);
+    });
+  } catch (e) {
+    // 持久化失败不影响本次进程内的选择（下次启动回到 auto）
+    log('credential source preference not persisted', shortError(e?.message || e, 160));
+  }
+}
+const credentialKeyFile = () => join(CREDENTIAL_DIR, 'store.key');
+const credentialLockFile = () => join(CREDENTIAL_DIR, '.lock');
+const credentialAad = (uid) => Buffer.from(`workbuddy-credential\0${uid}\0v1`, 'utf8');
+
+function ensureCredentialDir() {
+  mkdirSync(CREDENTIAL_DIR, { recursive: true, mode: 0o700 });
+  try { chmodSync(CREDENTIAL_DIR, 0o700); } catch { /* Windows 上大多无效，尽力而为 */ }
+}
+
+function writeFileAtomic(file, text, mode = 0o600) {
+  const tmp = `${file}.tmp-${process.pid}-${Date.now()}`;
+  writeFileSync(tmp, text, { mode });
+  try { chmodSync(tmp, mode); } catch { /* 同上 */ }
+  renameSync(tmp, file);
+}
+
+/** DPAPI 调用的 PowerShell 脚本：密钥走 stdin，绝不进命令行（进程列表可见）。 */
+function dpapiCall(verb, inputBase64) {
+  if (process.platform !== 'win32') throw new Error('DPAPI is only available on Windows');
+  const script = 'Add-Type -AssemblyName System.Security; '
+    + '$in=[Console]::In.ReadToEnd().Trim(); $b=[Convert]::FromBase64String($in); '
+    + `$p=[Security.Cryptography.ProtectedData]::${verb}($b,$null,[Security.Cryptography.DataProtectionScope]::CurrentUser); `
+    + '[Console]::Out.Write([Convert]::ToBase64String($p))';
+  const res = spawnSync(wbPowershellPath(), ['-NoProfile', '-NonInteractive', '-Command', script], {
+    input: inputBase64,
+    encoding: 'utf8',
+    timeout: 20000,
+    windowsHide: true,
+    maxBuffer: 1024 * 1024,
+  });
+  if (res.error) throw new Error(`DPAPI ${verb} failed: ${res.error.message}`);
+  if (res.status !== 0) {
+    throw new Error(`DPAPI ${verb} failed: exit ${res.status} ${String(res.stderr || '').trim().slice(0, 200)}`);
+  }
+  const out = String(res.stdout || '').trim();
+  if (!out) throw new Error(`DPAPI ${verb} returned empty output`);
+  return out;
+}
+
+const dpapiProtect = (buffer) => dpapiCall('Protect', buffer.toString('base64'));
+const dpapiUnprotect = (base64) => Buffer.from(dpapiCall('Unprotect', base64), 'base64');
+
+/** 取/建字段密钥；失败**不静默明文**，由调用方回退到 memory。 */
+function loadOrCreateCredentialKey() {
+  if (credentialKey) return credentialKey;
+  ensureCredentialDir();
+  const file = credentialKeyFile();
+  if (existsSync(file)) {
+    const st = statSync(file);
+    const print = `${st.mtimeMs}:${st.size}`;
+    if (credentialKey && credentialKeyPrint === print) return credentialKey;
+    let blob;
+    try { blob = readFileSync(file, 'utf8').trim(); }
+    catch (e) { throw new Error(`cannot read credential key: ${e.message}`, { cause: e }); }
+    try { credentialKey = dpapiUnprotect(blob); }
+    catch (e) { throw new Error(`credential key cannot be opened on this machine/user: ${e.message}`, { cause: e }); }
+    credentialKeyPrint = print;
+    return credentialKey;
+  }
+  const key = randomBytes(32);
+  const blob = dpapiProtect(key);
+  writeFileAtomic(file, blob, 0o600);
+  credentialKey = key;
+  const st = statSync(file);
+  credentialKeyPrint = `${st.mtimeMs}:${st.size}`;
+  return key;
+}
+
+function sealCredential(cred) {
+  const key = loadOrCreateCredentialKey();
+  const iv = randomBytes(12);
+  const cipher = createCipheriv('aes-256-gcm', key, iv);
+  cipher.setAAD(credentialAad(cred.uid));
+  const data = Buffer.concat([cipher.update(JSON.stringify(cred), 'utf8'), cipher.final()]);
+  return JSON.stringify({
+    v: 1,
+    alg: 'aes-256-gcm',
+    uid: cred.uid,
+    iv: iv.toString('base64'),
+    tag: cipher.getAuthTag().toString('base64'),
+    data: data.toString('base64'),
+  });
+}
+
+function openCredential(text) {
+  const env = JSON.parse(text);
+  if (!env || env.v !== 1 || env.alg !== 'aes-256-gcm' || typeof env.uid !== 'string' || !env.uid) {
+    throw new Error('unsupported credential envelope');
+  }
+  const key = loadOrCreateCredentialKey();
+  const decipher = createDecipheriv('aes-256-gcm', key, Buffer.from(env.iv, 'base64'), { authTagLength: 16 });
+  decipher.setAAD(credentialAad(env.uid));
+  decipher.setAuthTag(Buffer.from(env.tag, 'base64'));
+  const plain = Buffer.concat([
+    decipher.update(Buffer.from(env.data, 'base64')),
+    decipher.final(),
+  ]).toString('utf8');
+  const cred = JSON.parse(plain);
+  if (String(cred.uid) !== env.uid) throw new Error('credential envelope uid mismatch');
+  return cred;
+}
+
+/** 跨进程刷新锁：同一凭据目录只允许一个刷新/写入者。 */
+async function acquireCredentialLock() {
+  ensureCredentialDir();
+  const file = credentialLockFile();
+  const deadline = Date.now() + 8000;
+  for (;;) {
+    try {
+      const fd = openSync(file, 'wx');
+      try { writeFileSync(fd, String(process.pid)); } finally { closeSync(fd); }
+      return () => { try { unlinkSync(file); } catch { /* 已被清理 */ } };
+    } catch (e) {
+      const code = /** @type {{ code?: string, mtimeMs?: number }} */ (e).code;
+      if (code !== 'EEXIST') throw e;
+      try {
+        const st = statSync(file);
+        if (Date.now() - st.mtimeMs > 15000) { unlinkSync(file); continue; } // 崩溃遗留
+      } catch { /* 锁刚被释放 */ }
+      if (Date.now() > deadline) throw new Error('credential store is locked by another process', { cause: e });
+      await sleep(60);
+    }
+  }
+}
+
+async function withCredentialLock(fn) {
+  const run = credentialLockTail.then(async () => {
+    const release = await acquireCredentialLock();
+    try { return await fn(); } finally { release(); }
+  });
+  credentialLockTail = run.catch(() => {});
+  return run;
+}
+
+function writeActiveUid(uid) {
+  if (credentialStoreMode() === 'memory') { memoryActiveUid = uid; return; }
+  ensureCredentialDir();
+  writeFileAtomic(credentialActiveFile(), JSON.stringify({ uid, updatedAt: new Date().toISOString() }, null, 2), 0o600);
+}
+
+function readActiveUid() {
+  if (credentialStoreMode() === 'memory') return memoryActiveUid;
+  try {
+    const parsed = JSON.parse(readFileSync(credentialActiveFile(), 'utf8'));
+    return typeof parsed.uid === 'string' ? parsed.uid : '';
+  } catch { return ''; }
+}
+
+/** 写入一条插件凭据；返回 `{stored:'dpapi'|'memory', degraded?:true, reason?}`。 */
+async function savePluginCredential(cred) {
+  const uid = String(cred.uid || '').trim();
+  if (!uid) throw new Error('credential has no uid');
+  const record = { ...cred, uid, updatedAt: new Date().toISOString() };
+  if (credentialStoreMode() === 'memory') {
+    memoryCredentials.set(uid, record);
+    memoryActiveUid = uid;
+    invalidatePluginAuthCache();
+    return { stored: 'memory' };
+  }
+  try {
+    return await withCredentialLock(async () => {
+      ensureCredentialDir();
+      writeFileAtomic(credentialFileFor(uid), sealCredential(record), 0o600);
+      writeActiveUid(uid);
+      invalidatePluginAuthCache();
+      return { stored: 'dpapi' };
+    });
+  } catch (e) {
+    credentialStoreFallback = String(e?.message || e);
+    memoryCredentials.set(uid, record);
+    memoryActiveUid = uid;
+    invalidatePluginAuthCache();
+    log('credential store unavailable; keeping this login in memory only', credentialStoreFallback);
+    return { stored: 'memory', degraded: true, reason: credentialStoreFallback };
+  }
+}
+
+/** 最近一次读取插件凭据时的错误（诊断/UI 用；不含令牌）。 */
+let pluginCredentialError = '';
+
+/** 全部插件凭据（含令牌，**仅供内部使用**）。 */
+function readAllPluginCredentials() {
+  const out = [];
+  pluginCredentialError = '';
+  if (credentialStoreMode() === 'memory') {
+    for (const cred of memoryCredentials.values()) out.push(cred);
+    return out;
+  }
+  let files;
+  try { files = readdirSync(CREDENTIAL_DIR).filter((f) => f.endsWith('.cred')); }
+  catch { return out; }
+  for (const file of files) {
+    const full = join(CREDENTIAL_DIR, file);
+    try { out.push(openCredential(readFileSync(full, 'utf8'))); }
+    catch (e) {
+      pluginCredentialError = `${file}: ${e.message}`;
+      log('credential file unreadable', shortError(pluginCredentialError, 160));
+    }
+  }
+  return out;
+}
+
+/** 对外清单：永不含 access / refresh。 */
+function publicCredential(cred) {
+  return {
+    uid: cred.uid,
+    region: cred.region || '',
+    nickname: cred.nickname || '',
+    enterpriseId: cred.enterpriseId || '',
+    domain: cred.domain || '',
+    expiresAt: cred.expiresAtMs ? new Date(cred.expiresAtMs).toISOString() : '',
+    updatedAt: cred.updatedAt || '',
+  };
+}
+
+function listPluginCredentials() {
+  const active = readActiveUid();
+  return readAllPluginCredentials()
+    .map((c) => ({ ...publicCredential(c), active: c.uid === active }))
+    .sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)));
+}
+
+function pluginAuthFromCredential(cred) {
+  return {
+    source: 'plugin',
+    uid: cred.uid,
+    access: cred.accessToken,
+    refresh: cred.refreshToken || '',
+    expiresAt: Number(cred.expiresAtMs) || 0,
+    refreshExpiresAt: Number(cred.refreshExpiresAtMs) || 0,
+    userId: cred.uid,
+    enterpriseId: cred.enterpriseId || '',
+    tenantId: '',
+    endpoint: cred.endpoint || (cred.region === 'global' ? 'https://www.workbuddy.ai' : (EXPLICIT_ENDPOINT || 'https://copilot.tencent.com')),
+    domain: cred.domain || (cred.region === 'global' ? 'www.workbuddy.ai' : 'www.codebuddy.cn'),
+    region: cred.region || 'cn',
+  };
+}
+
+/** 取 active 插件凭据（热路径，按文件 mtime 缓存解密结果）。 */
+function readPluginAuth() {
+  if (credentialStoreMode() === 'memory') {
+    const uid = memoryActiveUid;
+    const cred = (uid && memoryCredentials.get(uid)) || [...memoryCredentials.values()].sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)))[0];
+    if (!cred) throw new Error('no plugin credential; sign in first (POST /v1/auth/device)');
+    return pluginAuthFromCredential(cred);
+  }
+  let uid = readActiveUid();
+  let file = uid ? credentialFileFor(uid) : '';
+  if (!file || !existsSync(file)) {
+    // active 指针丢失：挑最近写入的那个，并修好指针
+    let files;
+    try { files = readdirSync(CREDENTIAL_DIR).filter((f) => f.endsWith('.cred')); }
+    catch { files = []; }
+    if (!files.length) throw new Error('no plugin credential; sign in first (POST /v1/auth/device)');
+    const newest = files.map((f) => ({ f, mtimeMs: statSync(join(CREDENTIAL_DIR, f)).mtimeMs }))
+      .sort((a, b) => b.mtimeMs - a.mtimeMs)[0].f;
+    file = join(CREDENTIAL_DIR, newest);
+    uid = '';
+  }
+  const st = statSync(file);
+  if (pluginAuthCache.auth && pluginAuthCache.file === file
+    && pluginAuthCache.mtimeMs === st.mtimeMs && pluginAuthCache.size === st.size) {
+    return pluginAuthCache.auth;
+  }
+  const cred = openCredential(readFileSync(file, 'utf8'));
+  const auth = pluginAuthFromCredential(cred);
+  pluginAuthCache = { file, uid: cred.uid, mtimeMs: st.mtimeMs, size: st.size, auth };
+  if (!uid) { try { writeActiveUid(cred.uid); } catch { /* 只影响下次选择 */ } }
+  return auth;
+}
+
+async function deletePluginCredential(uid) {
+  if (!uid) throw new Error('uid is required');
+  if (credentialStoreMode() === 'memory') {
+    memoryCredentials.delete(uid);
+    if (memoryActiveUid === uid) memoryActiveUid = [...memoryCredentials.keys()][0] || '';
+    invalidatePluginAuthCache();
+  } else {
+    await withCredentialLock(async () => {
+      const file = credentialFileFor(uid);
+      try { unlinkSync(file); } catch (e) { if (e.code !== 'ENOENT') throw e; }
+      if (readActiveUid() === uid) {
+        const rest = readAllPluginCredentials().filter((c) => c.uid !== uid);
+        writeActiveUid(rest[0]?.uid || '');
+      }
+      invalidatePluginAuthCache();
+    });
+  }
+  // 最后一条插件凭据被删掉时，来源回到 auto（否则下次请求会报"没有插件凭据"）。
+  if (!CREDENTIAL_SOURCE_PINNED && effectiveSource() === 'plugin' && readAllPluginCredentials().length === 0) {
+    try { await setSourcePreference('auto'); } catch { /* 下次启动回到 auto */ }
+  }
+}
+
+async function setActivePluginCredential(uid) {
+  const exists = readAllPluginCredentials().some((c) => c.uid === uid);
+  if (!exists) throw new Error(`unknown credential: ${uid}`);
+  if (credentialStoreMode() === 'memory') {
+    writeActiveUid(uid);
+  } else {
+    await withCredentialLock(async () => { writeActiveUid(uid); });
+  }
+  invalidatePluginAuthCache();
+  invalidateCatalogCache();
+}
+
+/** auto / desktop / plugin / api-key 的来源解析。 */
+function apiKeyAuth() {
+  return {
+    source: 'api-key',
+    endpoint: EXPLICIT_ENDPOINT || 'https://copilot.tencent.com',
+    domain: (EXPLICIT_ENDPOINT || '').includes('codebuddy.ai') ? 'www.codebuddy.ai' : 'www.codebuddy.cn',
+    access: '',
+    refresh: '',
+    expiresAt: 0,
+  };
+}
+
+function resolveAuth() {
+  if (API_KEY) return apiKeyAuth();
+  const configured = effectiveSource();
+  if (configured === 'api-key') {
+    throw new Error('credential source is api-key but CODEBUDDY_API_KEY is not set');
+  }
+  if (configured === 'desktop') return readStoredAuth();
+  if (configured === 'plugin') return readPluginAuth();
+  // auto：桌面端优先（老行为不变），仅在**本地不可用**时回退到插件登录。
+  // 上游 401 不会触发中途换号 —— 账户可预测性优先（见 SECURITY 文档）。
+  let desktopError;
+  try { return readStoredAuth(); }
+  catch (e) { desktopError = e; }
+  try { return readPluginAuth(); }
+  catch (e) {
+    /** @type {Error & { code?: string }} */
+    const err = new Error(`no usable credential (auto): desktop: ${desktopError.message}; plugin: ${e.message}`);
+    err.code = 'NO_CREDENTIAL';
+    throw err;
+  }
+}
+
+/**
+ * 另一条可接管的凭据（鉴权失败时用）。
+ *
+ * same-account 只认 uid 相等：桌面 JWT 的 `sub` 与插件凭据的 `uid` 是同一套
+ * 账号标识（实测对得上）。any 模式才允许跨账号接管 —— 那会换钱包，必须显式开。
+ */
+async function resolveCredentialAlternative(auth) {
+  if (!auth || auth.source === 'api-key' || CREDENTIAL_FAILOVER === 'off') return null;
+  if (auth.source === 'desktop') {
+    const creds = readAllPluginCredentials();
+    if (!creds.length) return null;
+    const match = CREDENTIAL_FAILOVER === 'any'
+      ? (creds.find((c) => c.uid === auth.userId) || creds.find((c) => c.active) || creds[0])
+      : creds.find((c) => c.uid === auth.userId);
+    return match ? pluginAuthFromCredential(match) : null;
+  }
+  if (auth.source === 'plugin') {
+    try {
+      const desktop = readStoredAuth();
+      if (CREDENTIAL_FAILOVER === 'any' || (auth.uid && desktop.userId === auth.uid)) return desktop;
+    } catch { /* 桌面端不可用：没有可接管项 */ }
+  }
+  return null;
+}
+
+/** 诊断/健康用的来源状态：不含任何令牌。 */
+function credentialStatus() {
+  const status = {
+    configured: effectiveSource(),
+    envPinned: CREDENTIAL_SOURCE_PINNED,
+    storeMode: credentialStoreMode(),
+    storeDir: credentialStoreMode() === 'memory' ? '' : CREDENTIAL_DIR,
+    fallbackReason: credentialStoreFallback,
+    failover: CREDENTIAL_FAILOVER,
+    desktop: { available: false, error: '', userId: '' },
+    plugin: { available: false, count: 0, activeUid: '', uids: [], error: '' },
+    /** 当前选中的桌面账号与插件 active 账号是否为同一账号（用 JWT sub ↔ plugin uid 匹配）。 */
+    sameAccount: false,
+    effective: null,
+    error: '',
+  };
+  try {
+    const d = readStoredAuth();
+    status.desktop.available = true;
+    status.desktop.userId = d.userId || '';
+  } catch (e) { status.desktop.error = String(e?.message || e).slice(0, 300); }
+  try {
+    const list = listPluginCredentials();
+    status.plugin.available = list.length > 0;
+    status.plugin.count = list.length;
+    status.plugin.activeUid = list.find((c) => c.active)?.uid || '';
+    status.plugin.uids = list.map((c) => c.uid);
+    if (pluginCredentialError) status.plugin.error = pluginCredentialError.slice(0, 300);
+    status.sameAccount = !!(status.desktop.userId && status.plugin.activeUid
+      && String(status.desktop.userId) === String(status.plugin.activeUid));
+  } catch (e) { status.plugin.error = String(e?.message || e).slice(0, 300); }
+  try {
+    const auth = resolveAuth();
+    status.effective = {
+      source: auth.source,
+      uid: auth.uid || auth.userId || '',
+      region: auth.region || '',
+      endpoint: auth.endpoint || '',
+      expiresAt: auth.expiresAt ? new Date(auth.expiresAt).toISOString() : '',
+    };
+  } catch (e) { status.error = String(e?.message || e).slice(0, 400); }
+  return status;
+}
+
+// ── OAuth device-code sign-in (second credential source) ─────────────────
+const LOGIN_UA = process.env.WORKBUDDY_LOGIN_UA || 'CLI/2.63.2 CodeBuddy/2.63.2';
+const LOGIN_BASE_OVERRIDE = process.env.WORKBUDDY_LOGIN_BASE || '';
+const LOGIN_ORIGIN_OVERRIDE = process.env.WORKBUDDY_LOGIN_ORIGIN || '';
+// 可调是为了让用例不必真等 10 分钟 / 3 秒；生产没有理由改它们。
+const LOGIN_STATE_TTL_MS = numEnv('WORKBUDDY_LOGIN_STATE_TTL_MS', 10 * 60 * 1000, { min: 1000 });
+const LOGIN_POLL_MIN_MS = numEnv('WORKBUDDY_LOGIN_POLL_MIN_MS', 3000, { min: 0 });
+
+/**
+ * 插件登录来源的"上游身份"。
+ *
+ * 桌面端令牌配桌面仿真头（现行默认）已经实测可用；设备码令牌是另一条授权
+ * 来源，参考实现（molly-ovo/dsh-workbuddy-oauth）实测下来用的是 **WorkBuddy
+ * 桌面 App 形状**的 UA/身份头，而不是 CodeBuddy 扩展的 VSCode 形状：
+ *
+ *   User-Agent: WorkBuddy/<ver> WorkBuddy/<ver>（国际版第二段是 WorkBuddy AI）
+ *   X-IDE-Type / X-IDE-Name: WorkBuddy, X-IDE-Version: <ver>
+ *   Origin / Referer: 区域站点（国内 codebuddy.cn / 国际 workbuddy.ai）
+ *
+ * 因此插件来源单独走这套；桌面来源一个字不动。上游若收紧，可用
+ * `WORKBUDDY_PLUGIN_IDENTITY=vscode` 退回旧头，或用版本变量覆盖声明值。
+ */
+const PLUGIN_IDENTITY = process.env.WORKBUDDY_PLUGIN_IDENTITY === 'vscode' ? 'vscode' : 'workbuddy';
+const PLUGIN_APP_VERSION_CN = safeVersion(
+  process.env.WORKBUDDY_PLUGIN_APP_VERSION_CN || process.env.WORKBUDDY_PLUGIN_APP_VERSION,
+  '5.5.6',
+);
+const PLUGIN_APP_VERSION_GLOBAL = safeVersion(
+  process.env.WORKBUDDY_PLUGIN_APP_VERSION_GLOBAL || process.env.WORKBUDDY_PLUGIN_APP_VERSION,
+  '5.5.2',
+);
+
+/** 版本会进 HTTP 头：只接受形如 5.5.6 的安全值，非法值回退（绝不注入换行）。 */
+function safeVersion(raw, fallback) {
+  const value = String(raw || '').trim();
+  return /^\d{1,6}(?:\.\d{1,6}){1,3}(?:-[0-9A-Za-z.]+)?$/.test(value) ? value : fallback;
+}
+
+function pluginClientVersion(region) {
+  return region === 'global' ? PLUGIN_APP_VERSION_GLOBAL : PLUGIN_APP_VERSION_CN;
+}
+
+function pluginUserAgent(region) {
+  const v = pluginClientVersion(region);
+  return region === 'global'
+    ? `WorkBuddy/${v} WorkBuddy AI/${v}`
+    : `WorkBuddy/${v} WorkBuddy/${v}`;
+}
+
+function pluginCatalogUserAgent(region) {
+  // 参考实现实测：国际版目录要 `WorkBuddyAI/<ver>`（无空格），国内版用 CLI UA。
+  return region === 'global' ? `WorkBuddyAI/${pluginClientVersion(region)}` : LOGIN_UA;
+}
+/** 在飞的登录尝试（state → 元数据）。令牌**不**放在这里。 */
+const pendingLogins = new Map();
+
+function loginRegionConfig(region) {
+  const r = String(region || 'cn').toLowerCase();
+  if (r !== 'cn' && r !== 'global') throw new Error('region must be "cn" or "global"');
+  const global = r === 'global';
+  return {
+    region: r,
+    loginBase: LOGIN_BASE_OVERRIDE || (global ? 'https://www.workbuddy.ai' : 'https://www.workbuddy.cn'),
+    origin: LOGIN_ORIGIN_OVERRIDE || (global ? 'https://www.workbuddy.ai' : 'https://www.codebuddy.cn'),
+    endpoint: EXPLICIT_ENDPOINT || (global ? 'https://www.workbuddy.ai' : 'https://copilot.tencent.com'),
+    domain: global ? 'www.workbuddy.ai' : 'www.codebuddy.cn',
+  };
+}
+
+function loginHeaders(origin, token) {
+  return {
+    'Content-Type': 'application/json',
+    Accept: 'application/json, text/plain, */*',
+    'X-Requested-With': 'XMLHttpRequest',
+    Origin: origin,
+    Referer: `${origin}/`,
+    'User-Agent': LOGIN_UA,
+    ...(token ? { Authorization: `Bearer ${token}` } : {}),
+  };
+}
+
+/**
+ * @param {string} url
+ * @param {{ method?: string, headers?: Record<string, string>, body?: string, timeoutMs?: number }} init
+ */
+async function loginJson(url, { method = 'GET', headers = {}, body, timeoutMs = 30000 }) {
+  const res = await fetch(url, {
+    method,
+    headers,
+    ...(body === undefined ? {} : { body }),
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+  const text = await res.text().catch(() => '');
+  let parsed = null;
+  try { parsed = JSON.parse(text); } catch { /* 非 JSON：下面按原文报错 */ }
+  return { res, text, parsed };
+}
+
+function prunePendingLogins() {
+  const now = Date.now();
+  for (const [state, entry] of pendingLogins) {
+    if (now - entry.createdAt > LOGIN_STATE_TTL_MS) pendingLogins.delete(state);
+  }
+}
+
+/** 开始一次设备码登录：返回用户需要在浏览器打开的 URL。 */
+async function startDeviceLogin(region) {
+  const cfg = loginRegionConfig(region);
+  const url = `${cfg.loginBase}/v2/plugin/auth/state?platform=workbuddy`;
+  const { res, text, parsed } = await loginJson(url, {
+    method: 'POST', headers: loginHeaders(cfg.origin), body: '{}',
+  });
+  if (!res.ok || !parsed || parsed.code !== 0 || !parsed.data?.state || !parsed.data?.authUrl) {
+    throw new Error(`login state rejected: HTTP ${res.status} ${shortError(parsed?.msg || text, 200)}`);
+  }
+  const state = String(parsed.data.state);
+  let authUrl = String(parsed.data.authUrl);
+  try {
+    const u = new URL(authUrl);
+    if (!u.searchParams.has('loginSessionId')) u.searchParams.set('loginSessionId', randomUUID());
+    authUrl = u.href;
+  } catch { /* 上游给的 URL 解析不了就原样返回 */ }
+  prunePendingLogins();
+  pendingLogins.set(state, { region: cfg.region, createdAt: Date.now(), lastPolledAt: 0 });
+  return {
+    region: cfg.region,
+    state,
+    url: authUrl,
+    expiresAt: new Date(Date.now() + LOGIN_STATE_TTL_MS).toISOString(),
+  };
+}
+
+/**
+ * 轮询一次。返回 `{status:'pending'|'ready', ...}`；上游业务失败抛错。
+ * 节流是**先于请求**执行的：连点/重试不会打到上游。
+ */
+async function pollDeviceLogin(state) {
+  prunePendingLogins();
+  const entry = pendingLogins.get(state);
+  if (!entry) throw new Error('unknown or expired login state; start a new login');
+  const now = Date.now();
+  if (now - entry.lastPolledAt < LOGIN_POLL_MIN_MS) {
+    return { status: 'pending', retryAfterMs: LOGIN_POLL_MIN_MS - (now - entry.lastPolledAt) };
+  }
+  entry.lastPolledAt = now;
+  const cfg = loginRegionConfig(entry.region);
+  const { res, text, parsed } = await loginJson(
+    `${cfg.loginBase}/v2/plugin/auth/token?state=${encodeURIComponent(state)}`,
+    { method: 'GET', headers: loginHeaders(cfg.origin) },
+  );
+  const code = parsed?.code;
+  const msg = String(parsed?.msg || '');
+  if (code === 11217 || /login ing/i.test(msg)) return { status: 'pending' };
+  if (!res.ok || code !== 0 || !parsed?.data?.accessToken) {
+    throw new Error(`login token rejected: HTTP ${res.status} ${shortError(msg || text, 200)}`);
+  }
+  const d = parsed.data;
+  const accessToken = String(d.accessToken);
+  const refreshToken = typeof d.refreshToken === 'string' ? d.refreshToken : '';
+  const expiresIn = Number(d.expiresIn) || 0;
+  const domain = typeof d.domain === 'string' && d.domain ? d.domain : cfg.domain;
+
+  // 账号身份：上游每次调用都要 uid；拿不到就当作失败，避免写一条不可用的凭据
+  const acct = await loginJson(
+    `${cfg.loginBase}/v2/plugin/login/account?state=${encodeURIComponent(state)}`,
+    { method: 'GET', headers: loginHeaders(cfg.origin, accessToken) },
+  );
+  const account = acct.parsed?.code === 0 ? (acct.parsed.data || {}) : {};
+  const uid = typeof account.uid === 'string' ? account.uid : '';
+  if (!uid) throw new Error('login completed but the upstream returned no uid');
+
+  // expiresIn 偶发缺失 → 用 JWT exp 兜底（否则会立刻触发一次刷新）
+  const expiresAtMs = expiryFromToken(accessToken, expiresIn);
+  const stored = await savePluginCredential({
+    uid,
+    region: cfg.region,
+    nickname: typeof account.nickname === 'string' ? account.nickname : '',
+    enterpriseId: typeof account.enterpriseId === 'string' ? account.enterpriseId : '',
+    accessToken,
+    refreshToken,
+    expiresAtMs,
+    refreshExpiresAtMs: 0,
+    domain,
+    endpoint: cfg.endpoint,
+  });
+  pendingLogins.delete(state);
+  // 登录是用户的显式动作：没被 env 锁定时，立即让新账号生效（面板会明示）。
+  let sourceSwitched = false;
+  if (!CREDENTIAL_SOURCE_PINNED) {
+    try { await setSourcePreference('plugin'); sourceSwitched = true; }
+    catch (e) { log('switch to plugin source failed', shortError(e?.message || e, 160)); }
+  }
+  log(`device login complete region=${cfg.region} store=${stored.stored}${stored.degraded ? ' (degraded)' : ''}`);
+  return {
+    status: 'ready',
+    account: {
+      uid,
+      nickname: typeof account.nickname === 'string' ? account.nickname : '',
+      region: cfg.region,
+      expiresAt: new Date(expiresAtMs).toISOString(),
+    },
+    stored,
+    sourceSwitched,
+    effectiveSource: effectiveSource(),
+  };
+}
+
+// ── Auth: refresh and write back the login file (cross-process lock + atomic write) ──
+/**
+ * 每个来源/账号自己的冷却与在飞表。
+ *
+ * 为什么按 key 分开：桌面端刷新失败不应挡住插件凭据的刷新（反之亦然）。
+ * 同一个 key 内仍然单飞 —— 上游会轮换 refresh token，并发刷新会让后到的
+ * 请求拿着已作废的令牌。
+ */
+const refreshFailedAt = new Map();
+const refreshInFlight = new Map();
+const refreshKeyOf = (auth) => `${auth.source || 'desktop'}:${auth.uid || auth.userId || ''}`;
+
+/** 单飞入口：同飞（同来源同账号）的调用方拿到**同一个** promise。 */
 function refreshAuth(auth) {
   if (!auth.refresh) return Promise.resolve(null);
-  if (Date.now() - lastRefreshFailedAt < REFRESH_COOLDOWN_MS) return Promise.resolve(null);
-  if (refreshInFlight) return refreshInFlight;
-  refreshInFlight = doRefreshAuth(auth).finally(() => { refreshInFlight = null; });
-  return refreshInFlight;
+  const key = refreshKeyOf(auth);
+  if (Date.now() - (refreshFailedAt.get(key) || 0) < REFRESH_COOLDOWN_MS) return Promise.resolve(null);
+  const inflight = refreshInFlight.get(key);
+  if (inflight) return inflight;
+  const run = doRefreshAuth(auth)
+    .then((next) => {
+      if (next) refreshFailedAt.delete(key);
+      else refreshFailedAt.set(key, Date.now());
+      return next;
+    })
+    .catch((e) => {
+      refreshFailedAt.set(key, Date.now());
+      log('refresh error', e.message);
+      return null;
+    })
+    .finally(() => { refreshInFlight.delete(key); });
+  refreshInFlight.set(key, run);
+  return run;
+}
+
+/** 用 JWT exp 兜底过期时间：上游偶尔不回 expiresIn。 */
+function expiryFromToken(access, expiresIn, fallbackMs = 3600_000) {
+  const sec = Number(expiresIn) || 0;
+  if (sec > 0) return Date.now() + sec * 1000;
+  const exp = Number(decodeJwt(access).exp) || 0;
+  return exp > 0 ? exp * 1000 : Date.now() + fallbackMs;
 }
 
 async function doRefreshAuth(auth) {
+  if (auth.source === 'plugin') return doRefreshPluginAuth(auth);
   try {
     const res = await fetch(`${auth.endpoint}/v2/plugin/auth/token/refresh`, {
       method: 'POST',
@@ -1152,7 +1918,6 @@ async function doRefreshAuth(auth) {
     });
     const body = await res.json().catch(() => null);
     if (!res.ok || !body || body.code !== 0 || !body.data?.accessToken) {
-      lastRefreshFailedAt = Date.now();
       // **绝不打印响应体全文**：失败条件里含 `!res.ok`，也就是说非 2xx 的响应体
       // 仍可能带着 `data.accessToken` —— 而这一行会落进 bridge.log（控制台的日志
       // 面板还会把它显示出来），那就直接违反了「不落盘令牌 / 凭据不落盘」的承诺。
@@ -1165,6 +1930,7 @@ async function doRefreshAuth(auth) {
     }
     const now = Date.now();
     memoryAuth = {
+      source: 'desktop',
       access: body.data.accessToken,
       refresh: body.data.refreshToken || auth.refresh,
       expiresAt: now + Number(body.data.expiresIn || 0) * 1000,
@@ -1183,10 +1949,69 @@ async function doRefreshAuth(auth) {
     log('refreshed access token (in memory; file untouched)');
     return memoryAuth;
   } catch (e) {
-    lastRefreshFailedAt = Date.now();
     log('refresh error', e.message);
     return null;
   }
+}
+
+/**
+ * 插件凭据的刷新：头与桌面路径**不同**（上游按来源区分），成功后必须把
+ * 轮换后的 refresh token 写回加密存储 —— 否则下一次桥重启就失效了。
+ */
+async function doRefreshPluginAuth(auth) {
+  const region = auth.region === 'global' ? 'global' : 'cn';
+  const cfg = loginRegionConfig(region);
+  const headers = {
+    'Content-Type': 'application/json',
+    Accept: 'application/json, text/plain, */*',
+    'X-Requested-With': 'XMLHttpRequest',
+    'User-Agent': LOGIN_UA,
+    Origin: cfg.origin,
+    Referer: `${cfg.origin}/`,
+    'X-Refresh-Token': auth.refresh,
+    // 上游按这个头区分刷新来源：国内版 App 是 workbuddy，其余是 plugin。
+    'X-Auth-Refresh-Source': region === 'cn' ? 'workbuddy' : 'plugin',
+    'X-CodeBuddy-Request': '1',
+    'Accept-Language': region === 'global' ? 'en-US' : 'zh-CN',
+    ...(auth.uid ? { 'X-User-Id': auth.uid } : {}),
+    ...(auth.domain ? { 'X-Domain': auth.domain } : {}),
+    ...(auth.enterpriseId ? { 'X-Enterprise-Id': auth.enterpriseId } : {}),
+  };
+  const { res, text, parsed } = await loginJson(`${auth.endpoint}/v2/plugin/auth/token/refresh`, {
+    method: 'POST', headers, body: '{}', timeoutMs: 15000,
+  });
+  const inner = parsed?.data?.data ?? parsed?.data;
+  if (!res.ok || !inner?.accessToken) {
+    log('plugin refresh failed', res.status, shortError(parsed?.msg || text, 200));
+    return null;
+  }
+  const access = String(inner.accessToken);
+  const refresh = typeof inner.refreshToken === 'string' && inner.refreshToken ? inner.refreshToken : auth.refresh;
+  const next = {
+    ...auth,
+    access,
+    refresh,
+    expiresAt: expiryFromToken(access, inner.expiresIn),
+  };
+  try {
+    await savePluginCredential({
+      uid: auth.uid,
+      region,
+      nickname: auth.nickname || '',
+      enterpriseId: auth.enterpriseId || '',
+      accessToken: next.access,
+      refreshToken: next.refresh,
+      expiresAtMs: next.expiresAt,
+      refreshExpiresAtMs: 0,
+      domain: auth.domain || cfg.domain,
+      endpoint: auth.endpoint,
+    });
+    log('refreshed plugin credential (persisted)');
+  } catch (e) {
+    // 持久化失败不影响本次调用（内存里已有新令牌）；下次重启会退回旧令牌并再试刷新。
+    log('plugin credential persist failed', shortError(e?.message || e, 200));
+  }
+  return next;
 }
 
 /** 说明性日志：刷新出的令牌只留内存，登录文件归桌面端所有。 */
@@ -1373,6 +2198,58 @@ function buildHeaders(auth, model, conversationId) {
   return h;
 }
 
+/**
+ * Chat 请求头：插件来源用 WorkBuddy 身份（见 PLUGIN_IDENTITY 的说明），
+ * 桌面来源保持原样。所有 chat 协议路径最终都走 callUpstream → 这里。
+ */
+function buildChatHeaders(auth, model, conversationId) {
+  const base = buildHeaders(auth, model, conversationId);
+  if (auth.source !== 'plugin' || PLUGIN_IDENTITY === 'vscode') return base;
+  const region = auth.region === 'global' ? 'global' : 'cn';
+  const origin = loginRegionConfig(region).origin;
+  const version = pluginClientVersion(region);
+  const h = {
+    ...base,
+    'User-Agent': pluginUserAgent(region),
+    Origin: origin,
+    Referer: `${origin}/`,
+    'X-IDE-Type': 'WorkBuddy',
+    'X-IDE-Name': 'WorkBuddy',
+    'X-IDE-Version': version,
+    'X-Product-Version': version,
+    'X-Product': 'SaaS',
+  };
+  if (auth.uid || auth.userId) h['X-User-Id'] = auth.uid || auth.userId;
+  else { delete h['X-User-Id']; h['X-No-User-Id'] = '1'; }
+  if (auth.enterpriseId) h['X-Enterprise-Id'] = auth.enterpriseId;
+  else { delete h['X-Enterprise-Id']; h['X-No-Enterprise-Id'] = '1'; }
+  if (auth.domain) h['X-Domain'] = auth.domain;
+  else { delete h['X-Domain']; h['X-No-Department-Info'] = '1'; }
+  delete h['X-Tenant-Id']; // 插件凭据没有 tenant；不猜
+  return h;
+}
+
+/** 模型目录头：插件来源按参考实现实测的 UA 形状（国际版 WorkBuddyAI，国内版 CLI）。 */
+function buildCatalogHeaders(auth) {
+  if (auth.source !== 'plugin' || PLUGIN_IDENTITY === 'vscode') return buildHeaders(auth, '', '');
+  const region = auth.region === 'global' ? 'global' : 'cn';
+  const origin = loginRegionConfig(region).origin;
+  const h = {
+    Accept: 'application/json, text/plain, */*',
+    'X-Requested-With': 'XMLHttpRequest',
+    Origin: origin,
+    Referer: `${origin}/`,
+    'User-Agent': pluginCatalogUserAgent(region),
+    // 目录同样是鉴权请求：漏了它会让插件来源永远拿不到模型列表（401）。
+    ...(auth.access ? { Authorization: `Bearer ${auth.access}` } : {}),
+  };
+  if (auth.uid) h['X-User-Id'] = auth.uid; else h['X-No-User-Id'] = '1';
+  if (auth.enterpriseId) h['X-Enterprise-Id'] = auth.enterpriseId; else h['X-No-Enterprise-Id'] = '1';
+  if (auth.domain) h['X-Domain'] = auth.domain; else h['X-No-Department-Info'] = '1';
+  if (region === 'global') h['X-Product'] = 'SaaS';
+  return h;
+}
+
 // ── Upstream call (with refresh retry and transient-400 retry) ───────────
 /**
  * 用 node:http/https + keep-alive Agent 发一次上游请求，返回 IncomingMessage。
@@ -1385,6 +2262,12 @@ function buildHeaders(auth, model, conversationId) {
 function upstreamRequest(endpointUrl, { headers, body, signal }) {
   const url = new URL(endpointUrl);
   const doRequest = url.protocol === 'https:' ? httpsRequest : httpRequest;
+  /*
+   * 显式给 Content-Length：不设时 Node 会退回 `Transfer-Encoding: chunked`，
+   * 上游要按块重组 1MB+ 的请求体；给长度后网关可以直接按总量读取与分配。
+   * 大上下文（实测单次 40 万 token）下这是每个请求都要付一次的固定成本。
+   */
+  const payloadLength = body === undefined ? 0 : Buffer.byteLength(body);
   return new Promise((resolve, reject) => {
     const req = doRequest(
       {
@@ -1393,7 +2276,7 @@ function upstreamRequest(endpointUrl, { headers, body, signal }) {
         port: url.port || (url.protocol === 'https:' ? 443 : 80),
         path: `${url.pathname}${url.search}`,
         method: 'POST',
-        headers,
+        headers: { ...headers, 'Content-Length': String(payloadLength) },
         agent: agentFor(url.protocol),
       },
       (res) => resolve(res),
@@ -1453,7 +2336,9 @@ function shimResponse(res) {
         // 数据可能已经在 `text()` 之外的时机攒好了：先补发缓冲区，再接力实时事件。
         let sent = 0;
         const flush = () => {
-          while (sent < chunks.length) controller.enqueue(new Uint8Array(chunks[sent++]));
+          // 直接入队 Buffer：它本身就是 Uint8Array，`new Uint8Array(buf)` 会整块拷贝。
+          // 流式大响应下这段拷贝是纯开销（适配器只读内容，不改底层字节）。
+          while (sent < chunks.length) controller.enqueue(chunks[sent++]);
         };
         for (;;) {
           flush();
@@ -1615,11 +2500,9 @@ async function callUpstream(bodyString, model, conversationId, clientSignal) {
   // 让请求等的）也**不含上游等待**（那是上游的耗时）—— 口径精确、可复现。
   const upEnter = Date.now();
 
-  // API-key mode needs no login file; supply a minimal endpoint/domain instead
-  let auth = API_KEY
-    ? { endpoint: EXPLICIT_ENDPOINT || 'https://copilot.tencent.com', domain: (EXPLICIT_ENDPOINT || '').includes('codebuddy.ai') ? 'www.codebuddy.ai' : 'www.codebuddy.cn', access: '', refresh: '', expiresAt: 0 }
-    : readStoredAuth();
-  if (!API_KEY && auth.refresh && auth.expiresAt - REFRESH_SKEW_MS < Date.now()) {
+  // 凭据来源：api-key（显式覆盖）→ 桌面端 → 插件登录（auto，见 resolveAuth）。
+  let auth = resolveAuth();
+  if (auth.source !== 'api-key' && auth.refresh && auth.expiresAt - REFRESH_SKEW_MS < Date.now()) {
     const next = await refreshAuth(auth);
     if (next) auth = next;
   }
@@ -1631,7 +2514,7 @@ async function callUpstream(bodyString, model, conversationId, clientSignal) {
     const signal = clientSignal && timeoutSignal ? AbortSignal.any([clientSignal, timeoutSignal])
       : (clientSignal || timeoutSignal || undefined);
     return upstreamRequest(`${a.endpoint}${CHAT_PATH}`, {
-      headers: buildHeaders(a, model, conversationId),
+      headers: buildChatHeaders(a, model, conversationId),
       body: bodyString,
       signal,
     }).then(shimResponse);
@@ -1682,9 +2565,29 @@ async function callUpstream(bodyString, model, conversationId, clientSignal) {
   };
 
   let res = await attemptWithStaleRetry(auth);
-  if (!API_KEY && (res.status === 401 || res.status === 403) && auth.refresh) {
+  if (auth.source !== 'api-key' && (res.status === 401 || res.status === 403) && auth.refresh) {
     const next = await refreshAuth(auth);
     if (next) { auth = next; res = await attemptWithStaleRetry(auth); }
+  }
+  /*
+   * 另一条凭据接管（默认只接同一账号）。
+   * 桌面端与插件端如果是同一个账号，两把钥匙本来就是互通的；一把鉴权失败时
+   * 自动换另一把，不改变钱包。不同账号默认不接管（那会静默换钱包），
+   * 需要 WORKBUDDY_CREDENTIAL_FAILOVER=any 显式开启。
+   */
+  if (auth.source !== 'api-key' && (res.status === 401 || res.status === 403)) {
+    const alt = await resolveCredentialAlternative(auth).catch(() => null);
+    if (alt) {
+      let fresh = alt;
+      if (fresh.refresh && fresh.expiresAt - REFRESH_SKEW_MS < Date.now()) {
+        const next = await refreshAuth(fresh).catch(() => null);
+        if (next) fresh = next;
+      }
+      log(`credential failover: ${auth.source} -> ${fresh.source}`
+        + `${CREDENTIAL_FAILOVER === 'any' ? ' (any account)' : ' (same account)'}`);
+      auth = fresh;
+      res = await attemptWithStaleRetry(auth);
+    }
   }
 
   /*
@@ -4303,6 +5206,10 @@ function recentRequests(limit = 50) {
     ...(typeof r.promptTokens === 'number' ? { promptTokens: r.promptTokens } : {}),
     ...(typeof r.completionTokens === 'number' ? { completionTokens: r.completionTokens } : {}),
     ...(typeof r.credit === 'number' ? { credit: r.credit } : {}),
+    // 诊断用的两个时延拆分：桥前置处理 vs 上游首个字节（不含内容解析耗时）。
+    // 面板/控制台用它回答"慢在桥还是慢在上游"，账本里可能没有（旧记录 / 非流式）。
+    ...(typeof r.overheadMs === 'number' ? { overheadMs: r.overheadMs } : {}),
+    ...(typeof r.ttfbMs === 'number' ? { ttfbMs: r.ttfbMs } : {}),
   }));
 }
 
@@ -4504,6 +5411,15 @@ let catalogCache = { at: 0, models: [], shape: null, upstreamModelCount: 0 };
 let catalogRefreshing = null;
 
 /**
+ * 换号 / 换凭据来源后，模型目录可能属于另一个账号或另一个区域：清空并后台重取。
+ * 不能在旧目录上继续做预校验，否则会把新账号可用的模型误杀。
+ */
+function invalidateCatalogCache() {
+  catalogCache = { at: 0, models: [], shape: null, upstreamModelCount: 0 };
+  refreshCatalog().catch(() => {});
+}
+
+/**
  * 触发一次目录刷新；同一时刻只允许一个在飞（并发调用复用同一个 Promise）。
  *
  * 返回 `{ ok, at }`：`ok` 表示这次确实把缓存更新了（失败或空目录都算 false）。
@@ -4637,7 +5553,7 @@ async function fetchCatalog() {
   // 目录顶掉完整缓存——否则用户的模型列表会凭空少几个，还看不出原因。
   let hardError = false;
   try {
-    const auth = readStoredAuth();
+    let auth = resolveAuth();
     const shape = { paths: catalogPathsFor(), sources: {}, model: [] };
     const merged = new Map();
     const promotions = new Map(); // modelId → 徽章文案（如「Free now」）
@@ -4645,8 +5561,8 @@ async function fetchCatalog() {
     for (const path of catalogPathsFor()) {
       try {
         const doFetch = () => fetch(`${auth.endpoint}${path}`, {
-          // 每次都重新读令牌：刷新成功后 memoryAuth 已更新，用旧 auth 会继续 401
-          headers: buildHeaders(readStoredAuth(), '', ''),
+          // 用外层 auth：刷新/同账号接管后会更新它；旧 auth 会继续 401。
+          headers: buildCatalogHeaders(auth),
           signal: AbortSignal.timeout(8000),
         });
         let res = await doFetch();
@@ -4662,8 +5578,23 @@ async function fetchCatalog() {
         if (res.status === 401 || res.status === 403) {
           const refreshed = await refreshAuth(auth).catch(() => null);
           if (refreshed) {
+            auth = refreshed;
             log('catalog auth expired, retried after token refresh');
             res = await doFetch();
+          }
+          // 同账号的另一条凭据可以接管；不同账号默认不接管（见 resolveCredentialAlternative）。
+          if (res.status === 401 || res.status === 403) {
+            const alt = await resolveCredentialAlternative(auth).catch(() => null);
+            if (alt) {
+              let fresh = alt;
+              if (fresh.refresh && fresh.expiresAt - REFRESH_SKEW_MS < Date.now()) {
+                const next = await refreshAuth(fresh).catch(() => null);
+                if (next) fresh = next;
+              }
+              auth = fresh;
+              log(`catalog credential failover: -> ${auth.source}`);
+              res = await doFetch();
+            }
           }
         }
         // 5xx 是上游临时故障 → 硬失败；4xx / 端点没有 models 字段只算「这个
@@ -5030,7 +5961,7 @@ function maybeAutoCheckin() {
   autoCheckinTries += 1;
   autoCheckinInflight = (async () => {
     try {
-      const claim = await claimDailyCheckin(readStoredAuth());
+      const claim = await claimDailyCheckin(resolveAuth());
       autoCheckinState = {
         at: new Date().toISOString(),
         // 上游「已签到」是成功，不是失败（复用 claimDailyCheckin 的幂等语义）
@@ -5536,11 +6467,35 @@ async function handleRequest(req, res) {
     if (url.pathname === '/health') {
       let auth = null;
       let region = '';
+      const credential = {
+        configured: effectiveSource(),
+        storeMode: credentialStoreMode(),
+        storeDir: credentialStoreMode() === 'memory' ? '' : CREDENTIAL_DIR,
+        fallbackReason: credentialStoreFallback,
+        source: '',
+        pluginCount: 0,
+      };
       try {
-        const a = readStoredAuth();
+        const a = resolveAuth();
         region = upstreamRegion(a);
-        auth = { userId: a.userId, endpoint: a.endpoint, expiresAt: new Date(a.expiresAt).toISOString(), expired: a.expiresAt < Date.now() };
-      } catch (e) { return json(res, 503, { ok: false, error: e.message, authFile: AUTH_PATH }); }
+        credential.source = a.source;
+        try {
+          credential.pluginCount = credentialStoreMode() === 'memory'
+            ? memoryCredentials.size
+            : readdirSync(CREDENTIAL_DIR).filter((f) => f.endsWith('.cred')).length;
+        } catch { credential.pluginCount = 0; }
+        auth = {
+          source: a.source,
+          userId: a.userId || a.uid || '',
+          endpoint: a.endpoint,
+          expiresAt: a.expiresAt ? new Date(a.expiresAt).toISOString() : '',
+          expired: a.expiresAt ? a.expiresAt < Date.now() : false,
+        };
+      } catch (e) {
+        return json(res, 503, {
+          ok: false, error: e.message, authFile: AUTH_PATH, credential: credentialStatus(),
+        });
+      }
       // 这里**绝不能等上游**：控制台的探测超时是 4 秒，冷缓存时抓目录要好几秒，
       // 一旦超时就会被误判成「桥未运行」。有缓存立刻答，没有或过期都只触发后台刷新。
       if (!catalogCache.models.length || Date.now() - catalogCache.at > CATALOG_TTL_MS) refreshCatalog();
@@ -5552,6 +6507,7 @@ async function handleRequest(req, res) {
         uptimeMs: Date.now() - STARTED_AT,
         auth,
         authFile: AUTH_PATH,
+        credential,
         // 客户端定位结果（**只读内存缓存、绝不触发探测** —— /health 有 4 秒超时
         // 约束，慢探测会让控制台把桥误判成"未运行"；没定位过就显示空）
         clientExe: atRestUsedExe || wbExeCache || '',
@@ -5573,6 +6529,89 @@ async function handleRequest(req, res) {
         autoCheckinEnabled: AUTO_CHECKIN_ENABLED,
         autoCheckin: autoCheckinState,
       });
+    }
+
+    // ── OAuth device-code sign-in（第二条凭据来源）─────────────────────
+    // 全部走同一道本地令牌闸门；响应里**永远不含** access / refresh token。
+    if (url.pathname === '/v1/auth/source' && req.method === 'GET') {
+      return json(res, 200, { ok: true, ...credentialStatus() });
+    }
+
+    if (url.pathname === '/v1/auth/source' && req.method === 'POST') {
+      let body;
+      try { body = JSON.parse(await readBody(req)); } catch { body = null; }
+      try {
+        await setSourcePreference(body?.source);
+        return json(res, 200, { ok: true, ...credentialStatus() });
+      } catch (e) {
+        return json(res, 400, { ok: false, error: e.message });
+      }
+    }
+
+    if (url.pathname === '/v1/auth/credentials' && req.method === 'GET') {
+      return json(res, 200, {
+        ok: true,
+        configuredSource: effectiveSource(),
+        storeMode: credentialStoreMode(),
+        fallbackReason: credentialStoreFallback,
+        activeUid: readActiveUid(),
+        credentials: listPluginCredentials(),
+        ...(pluginCredentialError ? { error: pluginCredentialError } : {}),
+      });
+    }
+
+    if (url.pathname === '/v1/auth/credentials' && req.method === 'DELETE') {
+      const uid = url.searchParams.get('uid') || '';
+      if (!uid) return json(res, 400, { ok: false, error: 'uid is required' });
+      try {
+        await deletePluginCredential(uid);
+        return json(res, 200, { ok: true, credentials: listPluginCredentials() });
+      } catch (e) {
+        return json(res, 500, { ok: false, error: e.message });
+      }
+    }
+
+    if (url.pathname === '/v1/auth/active' && req.method === 'POST') {
+      let body;
+      try { body = JSON.parse(await readBody(req)); } catch { body = null; }
+      if (!body || typeof body.uid !== 'string' || !body.uid) {
+        return json(res, 400, { ok: false, error: 'uid is required' });
+      }
+      try {
+        await setActivePluginCredential(body.uid);
+        return json(res, 200, { ok: true, activeUid: body.uid });
+      } catch (e) {
+        return json(res, 400, { ok: false, error: e.message });
+      }
+    }
+
+    if (url.pathname === '/v1/auth/device' && req.method === 'POST') {
+      let body;
+      try { body = JSON.parse(await readBody(req)); } catch { body = null; }
+      const region = body?.region || process.env.WORKBUDDY_LOGIN_REGION || 'cn';
+      try {
+        const started = await startDeviceLogin(region);
+        return json(res, 200, { ok: true, ...started });
+      } catch (e) {
+        return json(res, 502, { ok: false, error: e.message });
+      }
+    }
+
+    if (url.pathname === '/v1/auth/device' && req.method === 'GET') {
+      const state = url.searchParams.get('state') || '';
+      if (!state) return json(res, 400, { ok: false, error: 'state is required' });
+      try {
+        const result = await pollDeviceLogin(state);
+        return json(res, 200, { ok: true, ...result });
+      } catch (e) {
+        return json(res, 502, { ok: false, error: e.message });
+      }
+    }
+
+    if (url.pathname === '/v1/auth/device' && req.method === 'DELETE') {
+      const state = url.searchParams.get('state') || '';
+      pendingLogins.delete(state);
+      return json(res, 200, { ok: true });
     }
 
     if (url.pathname === '/v1/models') {
@@ -5600,7 +6639,7 @@ async function handleRequest(req, res) {
        * 凭据读不出来时给空串 —— 那时只列**全区域**条目：region-restricted 的
        * 条目在没有区域信息时不敢声称可用（多报一个一调就 400 的模型比少报更糟）。
        */
-      const region = (() => { try { return upstreamRegion(readStoredAuth()); } catch { return ''; } })();
+      const region = (() => { try { return upstreamRegion(resolveAuth()); } catch { return ''; } })();
 
       let models;
       if (!catalog.length) {
@@ -5664,7 +6703,7 @@ async function handleRequest(req, res) {
 
     if (url.pathname === '/v1/quota') {
       try {
-        const quota = await fetchQuota(readStoredAuth());
+        const quota = await fetchQuota(resolveAuth());
         return json(res, 200, { ok: true, ...quota });
       } catch (e) {
         return json(res, 502, { ok: false, error: e.message });
@@ -5694,7 +6733,7 @@ async function handleRequest(req, res) {
 
     if (url.pathname === '/v1/checkin') {
       try {
-        const auth = readStoredAuth();
+        const auth = resolveAuth();
         if (req.method === 'POST') {
           const claim = await claimDailyCheckin(auth);
           const status = await fetchCheckinStatus(auth).catch(() => null);
@@ -5878,6 +6917,7 @@ async function handleRequest(req, res) {
             status: up.status,
             code: typeof parsed?.code === 'number' ? parsed.code : null,
             error: parsed?.msg || parsed?.message || parsed?.error?.message || text,
+            overheadMs: Math.max(0, upstreamStartedAt - startedAt),
           });
           /*
            * 错误体必须包成 OpenAI 的 `{ error: { message, type, code } }`。
@@ -5918,6 +6958,12 @@ async function handleRequest(req, res) {
           const reader = up.body.getReader();
           const decoder = new TextDecoder();
           let usageSeen = null;
+          /*
+           * 首字节时刻：用户感知的"多久开始出字"。
+           * 与 `X-WorkBuddy-Overhead-Ms`（桥前置处理）和总耗时一起落账后，
+           * 才能区分"上游排队/预填充慢"与"桥自己慢"。
+           */
+          let firstChunkAt = 0;
           // 逐行解析，不用正则：上游的 usage 里含 completion_tokens_details /
           // prompt_tokens_details 这类**嵌套对象**，`\{[^{}]*\}` 根本匹配不上，
           // 结果是流式请求的 token 与扣分全被记成 0。
@@ -5939,8 +6985,10 @@ async function handleRequest(req, res) {
             for (;;) {
               const { done, value } = await reader.read();
               if (done) break;
-              // 背压：写不动就等排空，别把上游的数据堆进内存（见 waitDrain）
-              if (!res.write(Buffer.from(value))) await waitDrain(res);
+              if (!firstChunkAt) firstChunkAt = Date.now();
+              // 背压：写不动就等排空，别把上游的数据堆进内存（见 waitDrain）。
+              // 直接写 Uint8Array：再包一次 Buffer.from 会把每个流块整块拷贝一遍。
+              if (!res.write(value)) await waitDrain(res);
               tail += decoder.decode(value, { stream: true });
               const lines = tail.split('\n');
               tail = lines.pop() ?? '';
@@ -6001,6 +7049,8 @@ async function handleRequest(req, res) {
               status: 0,
               code: null,
               error: streamError.message,
+              overheadMs: Math.max(0, upstreamStartedAt - startedAt),
+              ...(firstChunkAt ? { ttfbMs: firstChunkAt - startedAt } : {}),
             });
             /*
              * ⚠️ **截断必须让客户端知道**，不能只记一笔账就 `res.end()`。
@@ -6035,7 +7085,15 @@ async function handleRequest(req, res) {
               } catch { /* 客户端已经走了：写不进去也没关系 */ }
             }
           } else {
-            recordRequest({ model, stream: true, ok: true, ms: Date.now() - startedAt, ...usageOf(usageSeen) });
+            recordRequest({
+              model,
+              stream: true,
+              ok: true,
+              ms: Date.now() - startedAt,
+              overheadMs: Math.max(0, upstreamStartedAt - startedAt),
+              ...(firstChunkAt ? { ttfbMs: firstChunkAt - startedAt } : {}),
+              ...usageOf(usageSeen),
+            });
           }
           return res.end();
         }
@@ -6068,6 +7126,7 @@ async function handleRequest(req, res) {
             status: up.status,
             code: null,
             error: reason,
+            overheadMs: Math.max(0, upstreamStartedAt - startedAt),
           });
           return json(res, 502, {
             error: {
@@ -6076,7 +7135,14 @@ async function handleRequest(req, res) {
             },
           });
         }
-        recordRequest({ model, stream: false, ok: true, ms: Date.now() - startedAt, ...usageOf(aggregated.usage) });
+        recordRequest({
+          model,
+          stream: false,
+          ok: true,
+          ms: Date.now() - startedAt,
+          overheadMs: Math.max(0, upstreamStartedAt - startedAt),
+          ...usageOf(aggregated.usage),
+        });
         return json(res, 200, aggregated);
       } catch (e) {
         if (e?.code === 'RATE_LIMITED') {
@@ -6228,7 +7294,14 @@ async function handleRequest(req, res) {
             error: { type: 'api_error', message: `workbuddy-bridge: ${reason}` },
           });
         }
-        recordRequest({ model, stream: false, ok: true, ms: Date.now() - startedAt, ...usageOf(aggregated.usage) });
+        recordRequest({
+          model,
+          stream: false,
+          ok: true,
+          ms: Date.now() - startedAt,
+          overheadMs: Math.max(0, upstreamStartedAt - startedAt),
+          ...usageOf(aggregated.usage),
+        });
         return json(res, 200, openAIToAnthropicMessage(aggregated, model));
       } catch (e) {
         if (e?.code === 'RATE_LIMITED') {
@@ -6428,7 +7501,14 @@ async function handleRequest(req, res) {
             error: { type: 'upstream_error', message: `workbuddy-bridge: ${reason}` },
           });
         }
-        recordRequest({ model, stream: false, ok: true, ms: Date.now() - startedAt, ...usageOf(aggregated.usage) });
+        recordRequest({
+          model,
+          stream: false,
+          ok: true,
+          ms: Date.now() - startedAt,
+          overheadMs: Math.max(0, upstreamStartedAt - startedAt),
+          ...usageOf(aggregated.usage),
+        });
         return json(res, 200, openAIToResponsesResponse(aggregated, model, routes));
       } catch (e) {
         if (e?.code === 'RATE_LIMITED') {
@@ -6496,7 +7576,7 @@ async function handleRequest(req, res) {
     if (url.pathname === '/' ) {
       return json(res, 200, {
         service: 'workbuddy-bridge',
-        usage: 'POST /v1/chat/completions · POST /v1/messages (Anthropic) · POST /v1/responses (Codex) · GET /v1/models · GET /v1/usage · GET /v1/requests · GET /v1/quota · GET /v1/checkin · GET /health',
+        usage: 'POST /v1/chat/completions · POST /v1/messages (Anthropic) · POST /v1/responses (Codex) · GET /v1/models · GET /v1/usage · GET /v1/requests · GET /v1/quota · GET /v1/checkin · POST /v1/auth/device (device-code login) · GET /v1/auth/credentials · GET /v1/auth/source · GET /health',
         featured: FEATURED.map((m) => m.id),
       });
     }
@@ -6516,17 +7596,21 @@ if (process.argv.includes('--check')) {
   lines.push(`auth file       ${AUTH_PATH}`);
   let authOk = false;
   let checkRegion = '';
+  lines.push(`credential store ${credentialStoreMode()}`
+    + `${credentialStoreMode() === 'memory' ? ' (not persisted)' : ` @ ${CREDENTIAL_DIR}`}`
+    + `${credentialStoreFallback ? `  [degraded: ${credentialStoreFallback}]` : ''}`);
   try {
-    const a = readStoredAuth();
+    const a = resolveAuth();
     authOk = true;
-    lines.push(`account         ${a.userId || '(no sub claim)'}`);
+    lines.push(`credential      ${a.source}${a.uid ? ` (${a.uid})` : ''}${a.region ? ` · ${a.region}` : ''}`);
+    lines.push(`account         ${a.userId || a.uid || '(no sub claim)'}`);
     lines.push(`endpoint        ${a.endpoint}`);
     lines.push(`token expires   ${new Date(a.expiresAt).toISOString()}${a.expiresAt < Date.now() ? '  (expired: the bridge refreshes on first request)' : ''}`);
     checkRegion = upstreamRegion(a);
   } catch (e) {
     lines.push(`auth            [FAIL] ${e.message}`);
   }
-  lines.push(`client exe      ${atRestUsedExe || resolveWorkBuddyExe() || '未找到（设置 WORKBUDDY_APP_EXECUTABLE 指向 WorkBuddy.exe）'}`);
+  lines.push(`client exe      ${atRestUsedExe || resolveWorkBuddyExe() || '未找到（若只用插件登录，此行可忽略）'}`);
   // 精选列表按区域过滤 —— 日志里列一个当前区域**不提供**的模型，会让人以为
   // "桥明明认识它、为什么 /v1/models 里没有"（诊断日志的可信度就靠这点）
   lines.push(`models          ${FEATURED.filter((m) => featuredAllowedIn(m, checkRegion)).map((m) => m.id).join(', ')}`);
@@ -6548,7 +7632,7 @@ server.listen(PORT, HOST, () => {
   console.log(`client exe : ${atRestUsedExe || resolveWorkBuddyExe() || '未找到（设置 WORKBUDDY_APP_EXECUTABLE 指向 WorkBuddy.exe）'}`);
   let who = '(no desktop session read)';
   let region = '';
-  try { const a = readStoredAuth(); region = upstreamRegion(a); who = `${a.userId} @ ${a.endpoint}`; } catch (e) { who = `ERROR: ${e.message}`; }
+  try { const a = resolveAuth(); region = upstreamRegion(a); who = `${a.userId || a.uid} @ ${a.endpoint} (${a.source})`; } catch (e) { who = `ERROR: ${e.message}`; }
   console.log(`auth       : ${API_KEY ? 'API key (CODEBUDDY_API_KEY)' : `desktop session ${who}`}`);
   // 同上：精选列表按区域过滤（国际版别在日志里列 v4-pro —— 那个区域不提供它）
   console.log(`models     : ${FEATURED.filter((m) => featuredAllowedIn(m, region)).map((m) => m.id).join(', ')}  (all models: /v1/models?all=1)`);

@@ -845,3 +845,131 @@ test('compact 回归：imageRequestPricing / imageRequestTarget 必须存在且�
   assert.ok(!(adapter.imageRequestTarget('workbuddy', 'x', {}) instanceof Promise), 'imageRequestTarget 必须同步');
 });
 
+
+/* ───────────────────────── 目录缓存与图片热路径 ───────────────────────── */
+
+function makeClientAdapter(models) {
+  const client = { models };
+  return new WorkBuddyAdapter({
+    provider: 'workbuddy',
+    displayName: 'WorkBuddy',
+    client,
+    ensureReady: async () => client,
+    resolveImage: async () => null,
+    log: () => {},
+    filter: { allow: [], deny: [] },
+    catalogTtlMs: 60_000,
+  });
+}
+
+test('目录过期：先返回旧目录，后台刷新，不让模型调用等目录', async () => {
+  let calls = 0;
+  let releaseRefresh;
+  const refreshHeld = new Promise((resolve) => { releaseRefresh = resolve; });
+  const adapter = makeClientAdapter(async () => {
+    calls += 1;
+    if (calls === 1) return { data: [{ id: 'old', name: 'Old' }] };
+    await refreshHeld;
+    return { data: [{ id: 'new', name: 'New' }] };
+  });
+
+  const first = await adapter.listModels();
+  assert.deepEqual(first.map((m) => m.id), ['old']);
+
+  // 模拟 TTL 过期（比 sleep 更稳定）
+  adapter.catalogCache.at = Date.now() - adapter.catalogTtlMs - 1;
+  const startedAt = Date.now();
+  const second = await adapter.listModels();
+  assert.deepEqual(second.map((m) => m.id), ['old'], '过期时必须先给旧目录');
+  assert.ok(Date.now() - startedAt < 100, `旧目录必须立即返回（实际 ${Date.now() - startedAt}ms）`);
+  assert.equal(calls, 2, '后台刷新应当已经发起');
+
+  const inflight = adapter.catalogInflight?.promise;
+  releaseRefresh();
+  if (inflight) await inflight;
+  assert.deepEqual(adapter.catalogCache.models.map((m) => m.id), ['new'], '后台刷新完成后缓存换新');
+});
+
+test('warmup：启动预热在后台拉目录，不阻塞', async () => {
+  let release;
+  const held = new Promise((resolve) => { release = resolve; });
+  const adapter = makeClientAdapter(async () => {
+    await held;
+    return { data: [{ id: 'warm', name: 'Warm' }] };
+  });
+
+  const task = adapter.warmup();
+  assert.equal(adapter.catalogCache.models.length, 0, 'warmup 不能同步阻塞');
+  release();
+  await task;
+  assert.equal(adapter.catalogCache.models[0].id, 'warm');
+});
+
+test('图片：同一附件跨轮次只读一次、并发只读一次，多图并行且顺序不变', async () => {
+  const capture = {};
+  const stub = await startStub({
+    sseFrames: [delta({ content: 'ok' }), { choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] }],
+    capture,
+  });
+  try {
+    const client = new BridgeClient({ baseUrl: stub.baseUrl, token: 't', timeoutMs: 5000 });
+    const reads = new Map();
+    let active = 0;
+    let maxActive = 0;
+    const adapter = new WorkBuddyAdapter({
+      provider: 'workbuddy',
+      displayName: 'WorkBuddy',
+      client,
+      ensureReady: async () => client,
+      resolveImage: async (ref) => {
+        reads.set(ref.attachmentId, (reads.get(ref.attachmentId) || 0) + 1);
+        active += 1;
+        maxActive = Math.max(maxActive, active);
+        await new Promise((r) => setTimeout(r, 20));
+        active -= 1;
+        return `data:image/png;base64,${ref.attachmentId}`;
+      },
+      log: () => {},
+      catalogTtlMs: 0,
+    });
+    const messages = [
+      {
+        role: 'user',
+        content: [
+          { type: 'text', text: 'first' },
+          { type: 'image', attachment: { attachmentId: 'a1', mediaType: 'image/png', bytes: 10, width: 1, height: 1 } },
+          { type: 'image', attachment: { attachmentId: 'a2', mediaType: 'image/png', bytes: 10, width: 1, height: 1 } },
+        ],
+      },
+      {
+        role: 'user',
+        content: [
+          { type: 'image', attachment: { attachmentId: 'a3', mediaType: 'image/png', bytes: 10, width: 1, height: 1 } },
+          { type: 'image', attachment: { attachmentId: 'a1', mediaType: 'image/png', bytes: 10, width: 1, height: 1 } },
+        ],
+      },
+    ];
+    const drain = async () => {
+      for await (const _ of adapter.stream({ provider: 'workbuddy', model: 'stub-model', messages })) { /* drain */ }
+    };
+
+    await drain();
+    assert.deepEqual([...reads.keys()].sort(), ['a1', 'a2', 'a3']);
+    assert.deepEqual([...reads.values()], [1, 1, 1], '同一附件（含同一请求内重复）只允许读一次');
+    assert.equal(maxActive, 3, '不同图片必须并行解析（串行实现这里会是 1）');
+
+    const urls = capture.body.messages.flatMap((m) => (Array.isArray(m.content) ? m.content : []))
+      .filter((p) => p.type === 'image_url')
+      .map((p) => p.image_url.url);
+    assert.deepEqual(urls, [
+      'data:image/png;base64,a1',
+      'data:image/png;base64,a2',
+      'data:image/png;base64,a3',
+      'data:image/png;base64,a1',
+    ], '图片顺序必须与内容块顺序一致');
+
+    // 第二轮重发同一份历史：全部命中缓存，不再读盘
+    await drain();
+    assert.deepEqual([...reads.values()], [1, 1, 1], '跨轮次必须命中缓存');
+  } finally { await stub.close(); }
+});

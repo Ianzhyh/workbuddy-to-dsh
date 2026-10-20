@@ -120,7 +120,7 @@ body.dark .wb-root,
 .wb-tab:active{transform:scale(0.96)}
 .wb-tab.on{background:var(--dsw-alias-brand-primary,light-dark(#0f1115,#f9fafb));color:var(--dsw-alias-label-primary-foreground,light-dark(#ffffff,#0f1115));font-weight:600;box-shadow:0 1px 2px light-dark(rgba(0,0,0,0.1),rgba(0,0,0,0.3))}
 .wb-tabs.has-indicator .wb-tab.on{background:transparent;box-shadow:none}
-.wb-tab-panel{min-width:0;animation:wb-panel-slide-right .24s var(--wb-ease) both}
+.wb-tab-panel{min-width:0;display:flex;flex-direction:column;gap:12px;animation:wb-panel-slide-right .24s var(--wb-ease) both}
 .wb-tab-panel.wb-slide-left{animation-name:wb-panel-slide-left}
 @keyframes wb-panel-slide-right{from{opacity:0.35;transform:translate3d(10px,0,0)}to{opacity:1;transform:none}}
 @keyframes wb-panel-slide-left{from{opacity:0.35;transform:translate3d(-10px,0,0)}to{opacity:1;transform:none}}
@@ -222,6 +222,17 @@ body.dark .wb-root,
 .wb-account-drop-bottom{box-shadow:inset 0 -2px 0 0 var(--dsw-alias-brand-primary,light-dark(#0f1115,#f9fafb))}
 /* 已隐藏的账号：压暗 + 虚线边，一眼看出它不在默认列表里 */
 .wb-account-hidden{opacity:.62;border-style:dashed}
+/* 插件登录：卡片内部的节距与分组，避免每个元素自己写内联 margin */
+.wb-login-intro{margin:0 0 12px}
+.wb-login-toolbar{display:flex;align-items:center;flex-wrap:wrap;gap:8px 12px;min-height:32px}
+.wb-login-toolbar>.wb-note{margin:0}
+.wb-login-toolbar+.wb-login-toolbar{margin-top:10px}
+.wb-login-toolbar .wb-segmented-wrap{flex:0 1 auto;min-width:0}
+.wb-login-pending{margin-top:12px;padding:12px;border-radius:10px;border:.5px solid var(--dsw-alias-border-l2,light-dark(#0000001a,#ffffff1f));background:var(--dsw-alias-interactive-bg-hover,light-dark(#2631480f,#ffffff14))}
+.wb-login-pending .wb-note{margin:0 0 8px}
+.wb-login-pending a{word-break:break-all;color:var(--dsw-alias-brand-primary,light-dark(#0f1115,#f9fafb))}
+.wb-login-actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}
+.wb-login-warning{margin-top:10px}
 .wb-select{background:var(--dsw-alias-bg-module-platform,light-dark(#ffffff,#202226));color:var(--dsw-alias-label-primary,light-dark(#0f1115,#f9fafb));border:.5px solid var(--dsw-alias-border-l2,light-dark(#0000001f,#ffffff2e));border-radius:8px;padding:4px 8px;cursor:pointer;transition:all var(--wb-anim-fast)}
 .wb-select:hover{background:var(--dsw-alias-interactive-bg-hover,light-dark(#2631480f,#ffffff14))}
 .wb-select:focus{outline:none;border-color:var(--dsw-alias-brand-primary,light-dark(#0f1115,#f9fafb))}
@@ -534,8 +545,8 @@ body.dark .wb-root,
         'All accounts are hidden — tick "Show hidden" below to restore them.',
       'AtRest 密钥获取失败：': 'Failed to get the AtRest key: ',
       '（无法逐个验证账号可用性）': ' (cannot verify each account\'s availability)',
-      '登录目录下存在多个账号快照时可在此切换。切换会自动重启桥、清空上一个账号的体检结论与余额缓存 —— 与控制器里点「切换」完全等价。可以改名、上移/下移排序，也可以直接拖动；不想看到的可以隐藏（只记在 .state.json 里，不动登录目录的文件）；同一账号的多份登录快照只显示一行（自动合并，不影响切换）。':
-        'When the login directory holds several account snapshots you can switch here. Switching restarts the bridge and clears the previous account\'s probe results and credit cache — exactly equivalent to clicking Switch in the controller. You can rename accounts, reorder them with Move up / Move down or by dragging, and hide the ones you do not care about (recorded only in .state.json — no file in the login directory is touched). Multiple login snapshots of the same account are shown as a single row (merged automatically; switching is unaffected).',
+      '登录目录下存在多个账号快照时可在此切换。切换会自动重启桥、清空上一个账号的体检结论与余额缓存 —— 与控制器里点「切换」完全等价。可以改名、上移/下移排序，也可以直接拖动；不想看到的可以隐藏（只记在 .state.json 里，不动登录目录的文件）；同一账号的多份登录快照只显示一行（自动合并，不影响切换）；插件登录得到的账号也在同一列表里（标「插件」），与桌面端同账号时合并为一行「双凭据」。':
+        'When the login directory holds several account snapshots you can switch here. Switching restarts the bridge and clears the previous account\'s probe results and credit cache — exactly equivalent to clicking Switch in the controller. You can rename accounts, reorder them with Move up / Move down or by dragging, and hide the ones you do not care about (recorded only in .state.json — no file in the login directory is touched). Multiple login snapshots of the same account are shown as a single row (merged automatically; switching is unaffected). Plugin sign-in accounts appear in the same list (tagged "Plugin"); when one matches a desktop account, the two are merged into a single "Dual credentials" row.',
       '登录目录：': 'Login directory: ',
       '使用中': 'In use',
       '可用': 'Available',
@@ -550,6 +561,94 @@ body.dark .wb-root,
       '不可用的账号及原因：': 'Unavailable accounts and why: ',
       '未能解开凭据（可能是另一个 build 写入的）': 'Could not decrypt the credential (possibly written by another build)',
       '账号': 'Account',
+
+      // ── 插件登录 ──
+      '插件登录（不依赖桌面端）': 'Plugin sign-in (no desktop app)',
+      '在浏览器里完成 WorkBuddy / CodeBuddy 授权；不需要安装或切换到桌面端，密码不会经过本插件。':
+        'Authorize WorkBuddy / CodeBuddy in your browser. No desktop app is needed and your password never passes through this plugin.',
+      '凭据加密存储不可用，本次登录只保存在内存：':
+        'Encrypted credential storage is unavailable; this login is kept in memory only: ',
+      '正在读取凭据来源…': 'Reading credential sources…',
+      '当前来源': 'Current source',
+      '凭据来源': 'Credential source',
+      '（由环境变量锁定）': ' (pinned by an environment variable)',
+      '凭据存储：DPAPI 加密': 'Credential store: DPAPI encrypted',
+      '凭据存储：仅内存': 'Credential store: memory only',
+      '插件凭据读取失败：': 'Could not read plugin credential: ',
+      '桌面端登录态当前不可用；请选择「自动」或改用插件登录。':
+        'The desktop login is unavailable right now. Choose "Auto" or use plugin sign-in.',
+      '修法：到「账号」页重新走一次插件登录；或切回桌面端（若已安装）':
+        'Fix: sign in again from the Account tab, or switch back to the desktop source if installed.',
+      '插件登录令牌已过期（桥会在下次请求时尝试续期）':
+        'The plugin sign-in token has expired (the bridge will try to refresh it on the next request).',
+      '插件登录令牌不到 7 天到期，建议在「账号」页重新登录':
+        'The plugin sign-in token expires in under 7 days; sign in again from the Account tab.',
+      '登录区域': 'Sign-in region',
+      '国内版': 'China',
+      '国际版': 'Global',
+      '开始登录': 'Sign in',
+      '正在创建…': 'Creating…',
+      '已生成授权链接：请在浏览器打开并完成登录，本页会自动检查结果。':
+        'Authorization link created. Open it in your browser; this page will check automatically.',
+      '发起登录失败：': 'Could not start sign-in: ',
+      '请在浏览器打开下面的链接并完成授权（链接约 10 分钟内有效）。本页每 3.5 秒自动检查一次结果。':
+        'Open the link below to authorize (valid for about 10 minutes). This page checks every 3.5 seconds.',
+      '等待授权…': 'Waiting for authorization…',
+      '复制链接': 'Copy link',
+      '已复制': 'Copied',
+      '检查中…': 'Checking…',
+      '我已完成授权': 'I have authorized',
+      '插件账号': 'Plugin accounts',
+      '还没有插件账号。点「开始登录」在浏览器里添加一个。':
+        'No plugin account yet. Click "Sign in" to add one in the browser.',
+      '使用这个账号': 'Use this account',
+      '退出登录': 'Sign out',
+      '有效期至 ': 'Expires ',
+      '登录成功，已切换为插件账号。': 'Signed in and switched to the plugin account.',
+      '登录成功，当前使用插件账号。': 'Signed in; the plugin account is in use.',
+      '登录成功；当前凭据来源未切换（被环境变量锁定），插件账号尚未生效。':
+        'Signed in, but the credential source is pinned by an environment variable; the plugin account is not in use yet.',
+      '已选（未生效）': 'Selected (not in use)',
+      '同一账号': 'Same account',
+      '双凭据': 'Dual credentials',
+      '插件': 'Plugin',
+      '使用': 'Use',
+      '退出': 'Sign out',
+      '用插件凭据': 'Use plugin credential',
+      '插件凭据 · ': 'Plugin credential · ',
+      '已合并到桌面账号': 'Merged into desktop accounts',
+      '插件凭据已合并到桌面账号列表。': 'The plugin credential is shown in the desktop account row.',
+      '已切换到这个账号的插件凭据。': 'Switched to this account\'s plugin credential.',
+      '把请求切到这个账号的插件凭据（同一账号，钱包不变）':
+        'Switch requests to this account\'s plugin credential (same account, same wallet).',
+      '当前实际使用插件账号；桌面端账号若与插件端同账号，会在该行显示「双凭据」和「用插件凭据」。':
+        'Currently using the plugin account. A desktop account on the same account shows "Dual credentials" and "Use plugin credential".',
+      '插件端同账号': 'Same account in plugin',
+      '桌面端同账号': 'Same account on desktop',
+      '当前实际使用插件账号；下面的桌面账号仅作为桌面来源的候选。':
+        'Currently using the plugin account; the desktop accounts below are only candidates for the desktop source.',
+      '当前实际使用插件账号，且与桌面端选中的是同一账号；两条凭据互通。':
+        'Currently using the plugin account, which is the same account as the selected desktop one; either credential can serve requests.',
+      '桌面端与插件端当前是同一账号；两条凭据互通，一条鉴权失败会自动用另一条。':
+        'The desktop and plugin credentials belong to the same account; either can serve requests, and an auth failure on one automatically falls back to the other.',
+      '桌面端与插件端当前是不同账号；一次请求只能使用一个账号。插件端有同一账号的凭据时可切换过去。':
+        'The desktop and plugin credentials belong to different accounts; one request can only use one account. Switch to the matching plugin credential when one exists.',
+      '桌面端与插件端当前是不同账号；已开启任意账号接管（鉴权失败会切换账号/钱包）。':
+        'The desktop and plugin credentials belong to different accounts; cross-account failover is enabled (an auth failure will switch accounts/wallets).',
+      '实际使用：': 'Effective: ',
+      '登录成功。': 'Signed in.',
+      '登录未完成：': 'Sign-in not completed: ',
+      '已切换到这个插件账号。': 'Switched to this plugin account.',
+      '确定清除这个插件账号的凭据？不会注销上游账号。':
+        'Remove this plugin account credential? This does not sign out the upstream account.',
+      '已清除插件凭据。': 'Plugin credential removed.',
+      '退出失败：': 'Sign-out failed: ',
+      '凭据来源已切换。': 'Credential source switched.',
+      '自动（桌面端优先）': 'Auto (desktop first)',
+      '仅桌面端': 'Desktop only',
+      '仅插件登录': 'Plugin sign-in only',
+      '企业版': 'Enterprise',
+      '检查状态': 'Check status',
 
       // ── 用量 ──
       '用量统计': 'Usage',
@@ -2043,12 +2142,30 @@ body.dark .wb-root,
       } else if (state !== 'running') {
         alerts.push({ tone: 'bad', text: '桥没有在运行 —— 模型调用会失败', action: 'start' });
       }
+      const pluginMode = health?.credential?.source === 'plugin';
       if (state === 'degraded') {
-        alerts.push({ tone: 'warn', text: '修法：打开 WorkBuddy 桌面端重新登录一次；不行再看 诊断 页的「登录文件 / 凭据解密」两项' });
+        alerts.push({
+          tone: 'warn',
+          text: pluginMode
+            ? '修法：到「账号」页重新走一次插件登录；或切回桌面端（若已安装）'
+            : '修法：打开 WorkBuddy 桌面端重新登录一次；不行再看 诊断 页的「登录文件 / 凭据解密」两项',
+        });
       }
-      if (health?.auth?.expired) alerts.push({ tone: 'bad', text: '登录令牌已过期（桥会在下次请求时尝试续期）', action: 'restart' });
-      else if (health?.auth?.expiresAt && new Date(health.auth.expiresAt).getTime() - Date.now() < 7 * 86400000) {
-        alerts.push({ tone: 'warn', text: '令牌不到 7 天到期，建议重新登录 WorkBuddy 桌面端' });
+      if (health?.auth?.expired) {
+        alerts.push({
+          tone: 'bad',
+          text: pluginMode
+            ? '插件登录令牌已过期（桥会在下次请求时尝试续期）'
+            : '登录令牌已过期（桥会在下次请求时尝试续期）',
+          action: 'restart',
+        });
+      } else if (health?.auth?.expiresAt && new Date(health.auth.expiresAt).getTime() - Date.now() < 7 * 86400000) {
+        alerts.push({
+          tone: 'warn',
+          text: pluginMode
+            ? '插件登录令牌不到 7 天到期，建议在「账号」页重新登录'
+            : '令牌不到 7 天到期，建议重新登录 WorkBuddy 桌面端',
+        });
       }
       if (!status?.route?.registered) alerts.push({ tone: 'bad', text: '原生模型路由未注册：' + (status?.route?.error || '未知原因') });
       if (failedRecent.length) alerts.push({ tone: 'warn', text: `最近请求里有 ${failedRecent.length} 条失败`, action: 'requests' });
@@ -2097,6 +2214,7 @@ body.dark .wb-root,
           h(Row, { label: '本地桥' }, h(Pill, { tone, text })),
           health ? h(Row, { label: '进程 / 地址' }, 'pid ' + health.pid + ' · ' + (status?.config?.bridgeUrl || '') + '/v1') : null,
           health ? h(Row, { label: '已运行' }, fmtDuration(health.uptimeMs)) : null,
+          health?.auth ? h(Row, { label: '凭据来源' }, health.auth.source || 'desktop') : null,
           health?.auth ? h(Row, { label: '登录账号' }, health.auth.userId || '(未识别)') : null,
           health?.auth ? h(Row, { label: '令牌剩余' }, fmtRemaining(health.auth.expiresAt)) : null,
           h(Row, { label: '上游端点' }, health?.auth?.endpoint || '—'),
@@ -2247,8 +2365,155 @@ body.dark .wb-root,
           : null);
     }
 
+    // ─────────────────────── 插件登录（不依赖桌面端） ───────────────────────
+    /*
+     * 第二条凭据来源：桥自己走 OAuth 设备码，不读桌面端登录文件。
+     * 面板只负责展示/触发；令牌永远不经过浏览器（桥的 /v1/auth/* 响应里没有 token）。
+     */
+    function PluginLoginCard({ onChanged, onData, refreshKey }) {
+      const { data, error, reload, loading } = useJson('/workbuddy/login', { interval: 15000, refreshKey });
+      const [region, setRegion] = useState('cn');
+      const [pending, setPending] = useState(null);
+      const [busy, setBusy] = useState('');
+      const [message, setMessage] = useState('');
+      const [copied, setCopied] = useState(false);
+      const alive = useRef(true);
+      useEffect(() => () => { alive.current = false; }, []);
+      // 把完整数据上报父级：桌面账号行要据此加“插件端同账号”标记。
+      useEffect(() => {
+        if (data && typeof onData === 'function') onData(data);
+      }, [data, onData]);
+
+      const refreshAll = () => { reload(); if (onChanged) onChanged(); };
+
+      const startLogin = async () => {
+        setBusy('start'); setMessage(''); setCopied(false);
+        const res = await postJson('/workbuddy/login/start', { region });
+        if (!alive.current) return;
+        setBusy('');
+        if (res.data?.ok && res.data?.state && res.data?.url) {
+          setPending({ state: res.data.state, url: res.data.url });
+        } else {
+          setMessage('发起登录失败：' + (res.data?.error || res.status));
+        }
+      };
+
+      const pollOnce = async () => {
+        if (!pending) return;
+        setBusy('poll');
+        const res = await postJson('/workbuddy/login/poll', { state: pending.state });
+        if (!alive.current) return;
+        setBusy('');
+        const d = res.data || {};
+        if (d.status === 'ready') {
+          setPending(null);
+          const eff = d.effectiveSource || (d.sourceSwitched === true ? 'plugin' : '');
+          setMessage(eff === 'plugin'
+            ? '登录成功，当前使用插件账号。'
+            : '登录成功；当前凭据来源未切换（被环境变量锁定），插件账号尚未生效。');
+          refreshAll();
+          return;
+        }
+        if (d.status === 'pending') return;
+        if (d.ok === false || res.status >= 400) {
+          setMessage('登录未完成：' + (d.error || ('HTTP ' + res.status)));
+        }
+      };
+
+      useEffect(() => {
+        if (!pending) return undefined;
+        // 3.5s > 桥侧 3s 的最小轮询间隔；一次只发一个请求。
+        const timer = setInterval(() => { pollOnce(); }, 3500);
+        return () => clearInterval(timer);
+      }, [pending && pending.state]);
+
+      const cancelLogin = async () => {
+        const state = pending && pending.state;
+        setPending(null);
+        setMessage('');
+        if (state) await postJson('/workbuddy/login/cancel', { state });
+      };
+
+      const switchSource = async (source) => {
+        setBusy('source'); setMessage('');
+        const res = await postJson('/workbuddy/login/source', { source });
+        setBusy('');
+        setMessage(res.data?.ok ? '凭据来源已切换。' : '切换失败：' + (res.data?.error || res.status));
+        if (res.data?.ok) refreshAll();
+      };
+
+      const creds = data?.credentials || [];
+      const sourceValue = data?.configured || 'auto';
+      const effective = data?.effective || {};
+      const effectiveSource = effective.source || '';
+      const sameAccount = data?.sameAccount === true;
+      const sourceOptions = [
+        { value: 'auto', label: '自动（桌面端优先）' },
+        { value: 'desktop', label: '仅桌面端' },
+        { value: 'plugin', label: '仅插件登录' },
+      ];
+      return h(Card, { title: '插件登录（不依赖桌面端）' },
+        h('p', { className: 'wb-note wb-login-intro' },
+          '在浏览器里完成 WorkBuddy / CodeBuddy 授权；不需要安装或切换到桌面端，密码不会经过本插件。'),
+        error ? h(Alert, { bad: true }, error) : null,
+        message ? h(Alert, null, message) : null,
+        data?.fallbackReason
+          ? h(Alert, { bad: true }, '凭据加密存储不可用，本次登录只保存在内存：' + data.fallbackReason)
+          : null,
+        data?.plugin?.error
+          ? h(Alert, { bad: true }, '插件凭据读取失败：' + data.plugin.error)
+          : null,
+        (sourceValue === 'desktop' && data?.desktop?.available === false)
+          ? h(Alert, { bad: true }, '桌面端登录态当前不可用；请选择「自动」或改用插件登录。')
+          : null,
+        loading && !data ? h(Loading, { text: '正在读取凭据来源…' }) : null,
+        h('div', { className: 'wb-login-toolbar' },
+          h('span', { className: 'wb-note' }, '当前来源'),
+          data?.envPinned
+            ? h('code', null, sourceValue + '（由环境变量锁定）')
+            : h(Segmented, {
+              value: sourceValue,
+              options: sourceOptions,
+              ariaLabel: '凭据来源',
+              onChange: (e) => switchSource(e.target.value),
+            }),
+          h('span', { className: 'wb-note' },
+            data?.storeMode === 'dpapi' ? '凭据存储：DPAPI 加密' : '凭据存储：仅内存'),
+          h('span', { className: 'wb-note' }, '实际使用：'),
+          h('span', { className: 'wb-note' }, effectiveSource || '—')),
+        h('div', { className: 'wb-login-toolbar' },
+          h('span', { className: 'wb-note' }, '登录区域'),
+          h(Segmented, {
+            value: region,
+            options: [{ value: 'cn', label: '国内版' }, { value: 'global', label: '国际版' }],
+            ariaLabel: '登录区域',
+            onChange: (e) => setRegion(e.target.value === 'global' ? 'global' : 'cn'),
+          }),
+          h(Btn, { primary: true, disabled: !!pending || busy === 'start', onClick: startLogin },
+            busy === 'start' ? '正在创建…' : (pending ? '等待授权…' : '开始登录'))),
+        data?.desktop?.available && creds.length
+          ? h('p', { className: 'wb-note' },
+            sameAccount
+              ? '桌面端与插件端当前是同一账号；两条凭据互通，一条鉴权失败会自动用另一条。'
+              : (data?.failover === 'any'
+                ? '桌面端与插件端当前是不同账号；已开启任意账号接管（鉴权失败会切换账号/钱包）。'
+                : '桌面端与插件端当前是不同账号；一次请求只能使用一个账号。插件端有同一账号的凭据时可切换过去。'))
+          : null,
+        pending
+          ? h('div', { className: 'wb-login-pending' },
+            h('p', { className: 'wb-note' },
+              '请在浏览器打开下面的链接并完成授权（链接约 10 分钟内有效）。本页每 3.5 秒自动检查一次结果。'),
+            h('a', { href: pending.url, target: '_blank', rel: 'noreferrer' }, pending.url),
+            h('div', { className: 'wb-login-actions' },
+              h(Btn, { sm: true, onClick: () => { setCopied(copyText(pending.url)); } }, copied ? '已复制' : '复制链接'),
+              h(Btn, { sm: true, disabled: busy === 'poll', onClick: pollOnce }, busy === 'poll' ? '检查中…' : '我已完成授权'),
+              h(Btn, { sm: true, onClick: cancelLogin }, '取消')))
+          : null,
+        );
+    }
+
     // ─────────────────────────── 账号 ───────────────────────────
-    function AccountsPanel({ onStartConsole, busy, reloadStatus }) {
+    function AccountsPanel({ onStartConsole, busy, reloadStatus, pageStatus }) {
       const api = useConsoleApi(CONSOLE_API + '/accounts', { interval: 30000 });
       const { data, error, status, reload } = api;
       const [working, setWorking] = useState('');
@@ -2259,6 +2524,10 @@ body.dark .wb-root,
       const [saving, setSaving] = useState(false);
       // 是否连"已隐藏"的账号一起显示（只影响显示，不改任何文件）
       const [showHidden, setShowHidden] = useState(false);
+      /** 插件登录的完整数据（账号清单/同账号标记），由卡片上报；桌面账号行据此加“同账号”标记。 */
+      const [pluginLoginData, setPluginLoginData] = useState(null);
+      /** 递增后让插件卡片立即重拉（切换插件凭据后不必等 15 秒轮询）。 */
+      const [pluginRefreshKey, setPluginRefreshKey] = useState(0);
       /*
        * 拖拽排序用 **ref** 而不是 state —— 这是个"能跑起来但实际抓不住"的坑：
        * React 18 的 state 更新是批处理的，onDragStart 里 setDragFile 之后，React 不会
@@ -2270,8 +2539,18 @@ body.dark .wb-root,
       const dragFileRef = useRef('');
       const dropTargetRef = useRef(null);
       const [, force] = useState(0);
+      /*
+       * 实际生效的凭据来源（来自桥的 /health.credential.source）。
+       * 「使用中」只能有一个：插件来源生效时，桌面端那一行只是在桌面来源下
+       * 会选中的账号 —— 标成「使用中」会和下面的插件账号同时出现两个"使用中"。
+       */
+      const effectiveSource = pageStatus?.bridge?.health?.credential?.source || '';
       if (api.availability.state !== 'ok' && (status === 503 || status === 404)) {
-        return h(ConsoleGate, { availability: api.availability, onStartConsole, onProbe: api.probeConsole, busy, feature: '账号' });
+        // 控制台没跑也不影响插件登录（它直接走桥），所以卡片放在 Gate 之后照常显示。
+        // 用 Fragment 而不是 div：两张卡都是 `.wb-tab-panel` 的直接子元素，才能吃到统一间距。
+        return h(Fragment, null,
+          h(ConsoleGate, { availability: api.availability, onStartConsole, onProbe: api.probeConsole, busy, feature: '账号' }),
+          h(PluginLoginCard, { onChanged: reloadStatus, desktopAccounts: [], onData: setPluginLoginData }));
       }
       const accounts = data?.accounts || [];
       /*
@@ -2298,14 +2577,44 @@ body.dark .wb-root,
       })();
       const visible = showHidden ? distinct : distinct.filter((a) => !a.hidden);
       const hiddenCount = distinct.filter((a) => a.hidden).length;
+      // 插件 uid → 凭据：桌面账号行据此合并「双凭据」并显示「用插件凭据」。
+      const pluginCredentials = pluginLoginData?.credentials || [];
+      const pluginByUid = new Map(pluginCredentials.map((c) => [String(c.uid), c]));
+      const sameAccount = pluginLoginData?.sameAccount === true;
+      const effectiveUid = pluginLoginData?.effective?.uid || '';
+      const desktopUids = new Set(distinct.map((a) => a.userId).filter(Boolean).map(String));
+      // 桌面端没有对应账号的插件凭据：也放进同一个账号列表，不再单独列一张卡。
+      const pluginOnly = pluginCredentials.filter((c) => !desktopUids.has(String(c.uid)));
+      /*
+       * 插件登录卡片只负责登录与来源控制；它把完整数据上报给父级，
+       * 账号列表据此合并同账号凭据、并把桌面端没有的插件账号追加进来。
+       */
+      const loginCard = h(PluginLoginCard, {
+        onChanged: reloadStatus,
+        onData: setPluginLoginData,
+        refreshKey: pluginRefreshKey,
+      });
       // 账号页的 loading 来自 api（useConsoleApi 透传了底层 useJson 的 loading）
-      if (api.loading && data === null) return h(Card, { title: '账号' }, h(Loading, { text: '正在读取登录账号…' }));
-      const switchTo = async (name) => {
+      if (api.loading && data === null) {
+        return h(Fragment, null,
+          h(Card, { title: '账号' }, h(Loading, { text: '正在读取登录账号…' })),
+          loginCard);
+      }
+      const switchTo = async (name, { forceDesktop = false } = {}) => {
         setWorking(name);
         setMessage('');
         const res = await postJson(CONSOLE_API + '/account/switch', { file: name });
         setWorking('');
         if (res.data?.switched) {
+          /*
+           * 切桌面账号会重启桥；如果来源还停在 plugin，这个桌面账号依旧不会生效
+           * （插件 active 可能是另一个账号）。用户点的是"用这个桌面账号"，
+           * 所以把来源一起切到 desktop，避免"切了但没生效"。
+           */
+          if (forceDesktop) {
+            await postJson('/workbuddy/login/source', { source: 'desktop' });
+            setPluginRefreshKey((k) => k + 1);
+          }
           // 切换成功：立刻刷本面板 + 强制重读状态（status?quota=1 会带着新账号的
           // 积分回来；宿主端 reconciliation 也会因账号变化作废旧缓存）—— 不等 8 秒轮询。
           // 诚实性：只有**新构建**的宿主才认识 quota=1（旧构建会静默忽略），
@@ -2321,6 +2630,46 @@ body.dark .wb-root,
         }
         reload();
         reloadStatus();
+      };
+      /**
+       * 把某个账号切到它的插件凭据：先设插件 active，再把来源切到 plugin。
+       * 这是"同一账号合并成一行"后的主操作 —— 用户不必去插件卡片里再找一遍。
+       */
+      const activatePluginCredential = async (uid, message) => {
+        setWorking('plugin:' + uid);
+        setMessage('');
+        try {
+          const active = await postJson('/workbuddy/login/active', { uid });
+          const source = active.data?.ok
+            ? await postJson('/workbuddy/login/source', { source: 'plugin' })
+            : null;
+          if (active.data?.ok && source?.data?.ok) {
+            setMessage(message);
+            setPluginRefreshKey((k) => k + 1);
+            if (reloadStatus) reloadStatus();
+            reload();
+          } else {
+            setMessage('切换失败：' + (active.data?.error || source?.data?.error || '未知错误'));
+          }
+        } finally {
+          setWorking('');
+        }
+      };
+      const usePluginForDesktop = (uid) => activatePluginCredential(uid, '已切换到这个账号的插件凭据。');
+      const usePluginAccountOnly = (uid) => activatePluginCredential(uid, '已切换到这个插件账号。');
+      const logoutPluginCredential = async (uid) => {
+        if (typeof window !== 'undefined' && window.confirm
+          && !window.confirm('确定清除这个插件账号的凭据？不会注销上游账号。')) return;
+        setWorking('logout:' + uid);
+        setMessage('');
+        const res = await postJson('/workbuddy/login/logout', { uid });
+        setWorking('');
+        setMessage(res.data?.ok ? '已清除插件凭据。' : '退出失败：' + (res.data?.error || res.status));
+        if (res.data?.ok) {
+          setPluginRefreshKey((k) => k + 1);
+          if (reloadStatus) reloadStatus();
+          reload();
+        }
       };
       const startEdit = (a) => { setEditing(a.name); setDraft(a.alias || ''); setMessage(''); };
       /**
@@ -2423,21 +2772,31 @@ body.dark .wb-root,
         }
         reload();
       };
-      return h(Card, { title: '账号' },
-        error ? h(Alert, { bad: true }, error) : null,
+      return h(Fragment, null,
+        h(Card, { title: '账号' },
+          error ? h(Alert, { bad: true }, error) : null,
         message ? h(Alert, null, message) : null,
         data?.keyError ? h(Alert, null, 'AtRest 密钥获取失败：' + data.keyError + '（无法逐个验证账号可用性）') : null,
-        h('p', { className: 'wb-note', style: { marginTop: 0 } }, '登录目录下存在多个账号快照时可在此切换。切换会自动重启桥、清空上一个账号的体检结论与余额缓存 —— 与控制器里点「切换」完全等价。可以改名、上移/下移排序，也可以直接拖动；不想看到的可以隐藏（只记在 .state.json 里，不动登录目录的文件）；同一账号的多份登录快照只显示一行（自动合并，不影响切换）。'),
+        h('p', { className: 'wb-note', style: { marginTop: 0 } }, '登录目录下存在多个账号快照时可在此切换。切换会自动重启桥、清空上一个账号的体检结论与余额缓存 —— 与控制器里点「切换」完全等价。可以改名、上移/下移排序，也可以直接拖动；不想看到的可以隐藏（只记在 .state.json 里，不动登录目录的文件）；同一账号的多份登录快照只显示一行（自动合并，不影响切换）；插件登录得到的账号也在同一列表里（标「插件」），与桌面端同账号时合并为一行「双凭据」。'),
         data?.dir ? h('p', { className: 'wb-note' }, '登录目录：' + data.dir) : null,
+        effectiveSource === 'plugin'
+          ? h('p', { className: 'wb-note', style: { marginTop: '6px' } },
+            sameAccount
+              ? '当前实际使用插件账号，且与桌面端选中的是同一账号；两条凭据互通。'
+              : '当前实际使用插件账号；桌面端账号若与插件端同账号，会在该行显示「双凭据」和「用插件凭据」。')
+          : null,
         /* 账号是"每账号一行"的卡片式列表，不是表格。
            设置页是窄列（常见 600~700px），5~7 列的表格在这里必然被挤压 ——
            要么逐字折断、要么被卡片裁掉（用户截图里的样子）。账号通常就 2~3 个，
            列表既能容纳长域名，也不会有列宽问题。 */
         h('div', { style: { marginTop: '10px' } },
-          visible.length === 0
+          visible.length === 0 && pluginOnly.length === 0
             ? h('p', { className: 'wb-note' }, '全部账号都被隐藏了 —— 勾选下方「显示已隐藏」可以恢复。')
             : null,
           visible.map((a) => {
+            const pluginFor = a.userId ? pluginByUid.get(String(a.userId)) : null;
+            const pluginEffective = !!(pluginFor && pluginFor.active && effectiveSource === 'plugin');
+            const desktopEffective = !!(a.active && effectiveSource !== 'plugin');
             const drag = dragFileRef.current;
             const dt = dropTargetRef.current;
             const cls = 'wb-account'
@@ -2470,12 +2829,23 @@ body.dark .wb-root,
                 }, '⋮⋮'),
                 h('div', { className: 'wb-account-title' },
                   h('b', { title: a.path || a.name }, a.alias || a.name),
-                  a.active ? h(Pill, { tone: 'ok', text: '使用中' }) :
-                    (a.usable ? h(Pill, { tone: '', text: '可用' }) : h(Pill, { tone: 'bad', text: a.error ? '不可用' : '未验证' })),
+                  (pluginEffective || desktopEffective)
+                    ? h(Pill, { tone: 'ok', text: '使用中' })
+                    : a.active
+                      ? h(Pill, { tone: '', text: '已选（未生效）' })
+                      : (a.usable ? h(Pill, { tone: '', text: '可用' }) : h(Pill, { tone: 'bad', text: a.error ? '不可用' : '未验证' })),
+                  pluginFor ? h(Pill, { tone: '', text: '双凭据' }) : null,
                   a.hidden ? h(Pill, { tone: '', text: '已隐藏' }) : null),
                 h('div', { className: 'wb-account-primary' },
                   h(Btn, { disabled: saving, onClick: () => startEdit(a) }, '改名'),
-                  a.active ? null : h(Btn, { disabled: !!working || busy || !a.usable, onClick: () => switchTo(a.name), title: a.error || '' }, working === a.name ? '切换中…' : '切换'))),
+                  a.active ? null : h(Btn, { disabled: !!working || busy || !a.usable, onClick: () => switchTo(a.name, { forceDesktop: true }), title: a.error || '' }, working === a.name ? '切换中…' : '切换'),
+                  pluginFor && !(pluginFor.active && effectiveSource === 'plugin')
+                    ? h(Btn, {
+                      disabled: working === 'plugin:' + pluginFor.uid,
+                      onClick: () => usePluginForDesktop(pluginFor.uid),
+                      title: '把请求切到这个账号的插件凭据（同一账号，钱包不变）',
+                    }, working === 'plugin:' + pluginFor.uid ? '切换中…' : '用插件凭据')
+                    : null)),
               // ── sub：身份 + 凭据 ──
               h('div', { className: 'wb-account-sub' },
                 (a.alias && a.account ? a.account : (a.account || a.userId || '(未识别账号)'))
@@ -2483,6 +2853,14 @@ body.dark .wb-root,
               h('div', { className: 'wb-account-sub' },
                 '剩余 ' + (a.expiresAt ? fmtRemaining(a.expiresAt) : '未知')
                   + ' · 凭据 ' + (a.encrypted ? 'AtRest 信封' : '明文')),
+              pluginFor
+                ? h('div', { className: 'wb-account-sub' },
+                  h('span', null, '插件凭据 · '),
+                  h('span', null, pluginFor.nickname || String(pluginFor.uid).slice(0, 8) + '…'),
+                  pluginFor.expiresAt ? h('span', null, ' · ') : null,
+                  pluginFor.expiresAt ? h('span', null, '有效期至 ') : null,
+                  pluginFor.expiresAt ? h('span', null, fmtRemaining(pluginFor.expiresAt)) : null)
+                : null,
               // ── toolbar：次要操作（改名时变成输入框）──
               h('div', { className: 'wb-account-toolbar' },
                 editing === a.name
@@ -2507,6 +2885,31 @@ body.dark .wb-root,
                       // 生效中的那个不能隐藏（服务端也会拒），所以不渲染这个按钮
                       a.active ? null : h(Btn, { sm: true, disabled: !!drag, onClick: () => toggleHidden(a) }, a.hidden ? '恢复' : '隐藏'))));
           })),
+          ...pluginOnly.map((c) => {
+            const isEffective = c.active && effectiveSource === 'plugin'
+              && (!effectiveUid || String(c.uid) === String(effectiveUid));
+            return h('div', { key: 'p:' + c.uid, className: 'wb-account' },
+              h('div', { className: 'wb-account-head' },
+                h('div', { className: 'wb-account-title' },
+                  h('b', null, c.nickname || String(c.uid).slice(0, 8) + '…'),
+                  isEffective ? h(Pill, { tone: 'ok', text: '使用中' }) : h(Pill, { tone: '', text: '可用' }),
+                  h(Pill, { tone: '', text: '插件' })),
+                h('div', { className: 'wb-account-primary' },
+                  isEffective ? null : h(Btn, {
+                    disabled: working === 'plugin:' + c.uid,
+                    onClick: () => usePluginAccountOnly(c.uid),
+                  }, working === 'plugin:' + c.uid ? '切换中…' : '使用'),
+                  h(Btn, {
+                    disabled: working === 'logout:' + c.uid,
+                    onClick: () => logoutPluginCredential(c.uid),
+                  }, '退出'))),
+              h('div', { className: 'wb-account-sub' },
+                h('span', null, c.region === 'global' ? '国际版' : '国内版'),
+                c.expiresAt ? h('span', null, ' · ') : null,
+                c.expiresAt ? h('span', null, '有效期至 ') : null,
+                c.expiresAt ? h('span', null, fmtRemaining(c.expiresAt)) : null),
+              h('div', { className: 'wb-account-sub' }, 'UID ' + String(c.uid).slice(0, 8) + '…'));
+          }),
         // 不可用的账号把原因**写在页面上**，不要只藏在 tooltip 里
         visible.some((a) => !a.usable)
           ? h('div', { style: { marginTop: '10px' } },
@@ -2519,7 +2922,8 @@ body.dark .wb-root,
             h('input', { type: 'checkbox', checked: showHidden, onChange: (e) => setShowHidden(e.target.checked) }),
             '显示已隐藏',
             hiddenCount ? h(Pill, { tone: '', text: String(hiddenCount) }) : null),
-          h(Btn, { onClick: reload }, '刷新')));
+          h(Btn, { onClick: reload }, '刷新'))),
+        loginCard);
     }
 
     // ─────────────────────────── 用量 ───────────────────────────
@@ -2730,8 +3134,8 @@ body.dark .wb-root,
           h('div', { className: 'wb-actions-group' },
             h(Btn, { onClick: reload }, '刷新'),
             h(Btn, { onClick: () => downloadCsv('workbuddy-requests.csv',
-              ['time', 'model', 'stream', 'ok', 'ms', 'promptTokens', 'completionTokens', 'credit', 'status', 'code', 'error'],
-              rows.map((r) => [new Date(r.t).toISOString(), r.model, r.stream ? 1 : 0, r.ok ? 1 : 0, r.ms, r.promptTokens || 0, r.completionTokens || 0, r.credit || 0, r.status || '', r.code || '', r.error || ''])) }, '导出当前筛选 CSV'))),
+              ['time', 'model', 'stream', 'ok', 'ms', 'ttfbMs', 'overheadMs', 'promptTokens', 'completionTokens', 'credit', 'status', 'code', 'error'],
+              rows.map((r) => [new Date(r.t).toISOString(), r.model, r.stream ? 1 : 0, r.ok ? 1 : 0, r.ms, r.ttfbMs ?? '', r.overheadMs ?? '', r.promptTokens || 0, r.completionTokens || 0, r.credit || 0, r.status || '', r.code || '', r.error || ''])) }, '导出当前筛选 CSV'))),
         h('div', { className: 'wb-scroll' },
           h('table', { className: 'wb-table' },
             h('thead', null, h('tr', null,
@@ -2741,7 +3145,13 @@ body.dark .wb-root,
               h('td', { title: fmtTime(r.t) }, fmtClock(r.t)),
               h('td', null, r.model),
               h('td', null, r.stream ? '是' : '否'),
-              h('td', { className: 'num' }, fmtInt(r.ms) + ' ms'),
+              // 悬停看时延拆分：总耗时里有多少是等上游首字、多少是桥自身前置处理。
+              h('td', {
+                className: 'num',
+                title: typeof r.ttfbMs === 'number'
+                  ? `TTFT ${r.ttfbMs} ms · bridge overhead ${typeof r.overheadMs === 'number' ? r.overheadMs : 0} ms`
+                  : '',
+              }, fmtInt(r.ms) + ' ms'),
               h('td', { className: 'num' }, fmtTokens(r.promptTokens || 0)),
               h('td', { className: 'num' }, fmtTokens(r.completionTokens || 0)),
               h('td', { className: 'num' }, typeof r.credit === 'number' ? r.credit.toFixed(3) : '—'),
@@ -3831,7 +4241,7 @@ body.dark .wb-root,
         !status ? h(Card, null, '正在读取状态…') : null,
         status ? h('div', { key: tab, className: 'wb-tab-panel wb-slide-' + slideDir },
           tab === 'overview' ? h(OverviewPanel, panelProps) : null,
-          tab === 'accounts' ? h(AccountsPanel, { onStartConsole: startConsole, busy, reloadStatus }) : null,
+          tab === 'accounts' ? h(AccountsPanel, { onStartConsole: startConsole, busy, reloadStatus, pageStatus: status }) : null,
           tab === 'usage' ? h(UsagePanel, null) : null,
           tab === 'requests' ? h(RequestsPanel, null) : null,
           tab === 'checkin' ? h(CheckinPanel, {
