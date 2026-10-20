@@ -111,6 +111,13 @@ test('listModels / resolveModel 使用桥目录的元数据', async () => {
   } finally { await stub.close(); }
 });
 
+test('resolveModel：目录失败时退回最小元数据，不阻断已选模型调用', async () => {
+  // 端口 1 必然连接失败：模拟桥刚重启 / 目录接口短暂 401。
+  const adapter = makeAdapter('http://127.0.0.1:1');
+  const resolved = await adapter.resolveModel('workbuddy', 'stub-model');
+  assert.deepEqual(resolved, { provider: 'workbuddy', id: 'stub-model', name: 'stub-model' });
+});
+
 test('resolveModel：按桥给的 reasoning_efforts 逐模型声明档位（用户"每个模型只有三档"的那条链）', async () => {
   /*
    * 2026-10-12：档位原先在 adapter 里**写死**成低/中/高三档。上游对支持推理的

@@ -58,7 +58,7 @@ export const CODE = {
 
 /** 失败时给用户一句"下一步做什么"（dsh 只展示 message，错误码本身不解释）。 */
 export const ERROR_HINTS = {
-  [CODE.AUTH]: '登录态可能已失效：在 WorkBuddy 桌面端重新登录后重试。',
+  [CODE.AUTH]: '登录态可能已失效：到「账号」页重新登录（桌面端或插件登录均可），或运行 /workbuddy login 后重试。',
   [CODE.QUOTA]: '积分不足：签到可领取每日积分，或换一个免费模型。',
   [CODE.RATE_LIMIT]: '触发上游频率限制：稍等再试，或换一个模型。',
   [CODE.CONTEXT]: '上下文超出该模型上限：压缩对话，或换上下文更大的模型。',
@@ -894,7 +894,19 @@ export class WorkBuddyAdapter {
    */
   async resolveModel(provider, model, signal) {
     // 传 signal：取消一次生成时，冷启动的目录请求也能一起停下（不再空等桥）。
-    const catalog = await this.catalog({ signal });
+    /*
+     * 目录只是"选择器元数据"，不是模型调用本身。目录短暂失败时不能让
+     * dsh 认为模型不存在 —— 退回最小元数据，真正的调用由 stream() 决定。
+     * 这样桥刚重启/目录 401 的瞬间，已选模型的对话仍与原生模型一样可用。
+     */
+    let catalog;
+    try {
+      catalog = await this.catalog({ signal });
+    } catch (error) {
+      if (signal?.aborted) throw error;
+      this.log?.('resolveModel catalog failed; using minimal model info', String(error?.message || error));
+      return { provider, id: model, name: model };
+    }
     const hit = catalog.find((m) => m && m.id === model);
     if (!hit) return { provider, id: model, name: model };
     const [mapped] = toAdapterModels([hit]);

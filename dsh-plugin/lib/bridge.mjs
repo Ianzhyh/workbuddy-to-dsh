@@ -219,8 +219,8 @@ export class BridgeClient {
     return this.#json('/v1/auth/credentials', { signal, timeoutMs: 8000 });
   }
 
-  deviceLoginStart({ region = 'cn' } = {}, signal) {
-    return this.#json('/v1/auth/device', { method: 'POST', body: { region }, signal, timeoutMs: 30000 });
+  deviceLoginStart({ region = 'cn', open = false } = {}, signal) {
+    return this.#json('/v1/auth/device', { method: 'POST', body: { region, open: open === true }, signal, timeoutMs: 30000 });
   }
 
   deviceLoginPoll(state, signal) {
@@ -306,7 +306,7 @@ export class BridgeSupervisor {
 
   /**
    * 探测桥状态。**不抛错**——把失败翻译成状态。
-   * @returns {Promise<{state: 'running'|'stopped'|'unauthorized'|'foreign'|'error', health?: object, error?: string}>}
+   * @returns {Promise<{state: 'running'|'stopped'|'unauthenticated'|'degraded'|'unauthorized'|'foreign', health?: object, error?: string}>}
    */
   async probe(signal) {
     try {
@@ -341,8 +341,17 @@ export class BridgeSupervisor {
         && payload.ok === false
         && (payload.authFile !== undefined || /login|sign in|credential|凭据|登录|token/i.test(String(payload.error || '')));
       if (looksLikeOurBridge) {
+        /*
+         * 「从来没登录过」与「登录坏了」要分开：前者是首次安装的正常状态，
+         * 面板应该显示「未登录 + 去登录」，而不是吓人的红色「凭据异常」。
+         * 桥的 503 body 带 credential 段，据此区分。
+         */
+        const cred = payload.credential;
+        const noCredential = Boolean(cred)
+          && cred.desktop?.available !== true
+          && Number(cred.plugin?.count || 0) === 0;
         return {
-          state: 'degraded',
+          state: noCredential ? 'unauthenticated' : 'degraded',
           error: String(payload.error || error.message),
           authFile: payload.authFile,
           health: payload,
@@ -381,10 +390,12 @@ export class BridgeSupervisor {
       // 端口被别人占着：不抢，如实报错（抢端口比报错危险得多）
       return { ok: false, started: false, reused: false, state: status.state, error: status.error };
     }
-    if (status.state === 'degraded' && !restart) {
-      // 桥在跑，但登录凭据读不出来：**复用**它并把原因带上去，
-      // 绝不因为"健康检查不绿"就再拉一个（会撞端口，而且用户重新登录后同一个进程就能恢复）
-      return { ok: false, started: false, reused: true, state: 'degraded', error: status.error, health: status.health };
+    if (status.state === 'degraded' || status.state === 'unauthenticated') {
+      // 桥在跑，但登录凭据读不出来 / 还没登录：**复用**它并把原因带上去，
+      // 绝不因为"健康检查不绿"就再拉一个（会撞端口，而且用户重新登录后同一个进程就能恢复）。
+      // `restart` 也不能越过这里：503 body 没有 pid，stop() 停不掉它；
+      // 往下走 start() 只会再起一个实例、撞端口 —— 对用户是个假故障。
+      return { ok: false, started: false, reused: true, state: status.state, error: status.error, health: status.health };
     }
     if (status.state === 'running' && restart) {
       const stopped = await this.stop(signal);
@@ -405,6 +416,13 @@ export class BridgeSupervisor {
       }
       if (status.state === 'unauthorized' || status.state === 'foreign') {
         return { ok: false, started: true, reused: false, state: status.state, error: status.error };
+      }
+      /*
+       * 桥已经起来了，只是还没有凭据：这是首次安装的正常状态，必须立刻返回，
+       * 不能让首次启动白等 readyTimeoutMs（默认 30 秒）才弹出登录引导。
+       */
+      if (status.state === 'unauthenticated' || status.state === 'degraded') {
+        return { ok: false, started: true, reused: false, state: status.state, error: status.error, health: status.health };
       }
       lastError = status.error || lastError;
     }
@@ -481,8 +499,14 @@ export class BridgeSupervisor {
   async stop(signal) {
     const status = await this.probe(signal);
     if (status.state === 'stopped') return { ok: true, stopped: false, reason: 'bridge was not running' };
-    if (status.state !== 'running') return { ok: false, error: status.error || status.state };
-    const pid = status.health.pid;
+    /*
+     * 未登录 / 凭据异常时桥仍然是我们的进程：503 body 现在带 pid，可以正常停止。
+     * 只有 foreign / unauthorized（没有可信 pid）才拒绝。
+     */
+    const pid = status.health?.pid;
+    if (!['running', 'degraded', 'unauthenticated'].includes(status.state) || !Number.isFinite(pid)) {
+      return { ok: false, error: status.error || status.state };
+    }
     try {
       process.kill(pid, 'SIGTERM');
     } catch (error) {

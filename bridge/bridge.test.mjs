@@ -3125,7 +3125,8 @@ test('插件登录：设备码 → 加密落盘 → auto 回退 → 刷新轮换
       res.end(JSON.stringify(obj));
     };
     if (u.pathname === '/v2/plugin/auth/state') {
-      return send(200, { code: 0, data: { state: 'state-1', authUrl: 'https://example.invalid/login?state=state-1' } });
+      // http 桩 URL：open:true 必须被 https 校验挡住，避免测试真的弹出浏览器
+      return send(200, { code: 0, data: { state: 'state-1', authUrl: 'http://127.0.0.1/login?state=state-1' } });
     }
     if (u.pathname === '/v2/plugin/auth/token' && req.method === 'GET') {
       tokenPolls += 1;
@@ -3209,11 +3210,12 @@ test('插件登录：设备码 → 加密落盘 → auto 回退 → 刷新轮换
     const device = await (await fetch(`${bridge1.baseUrl}/v1/auth/device`, {
       method: 'POST',
       headers: { ...auth, 'content-type': 'application/json' },
-      body: JSON.stringify({ region: 'cn' }),
+      body: JSON.stringify({ region: 'cn', open: true }),
     })).json();
     assert.equal(device.ok, true);
     assert.ok(device.state);
     assert.match(device.url, /loginSessionId=/);
+    assert.equal(device.opened, false, '测试桩是 http URL：open 必须被 https 校验挡住，不能真弹浏览器');
 
     const poll1 = await (await fetch(`${bridge1.baseUrl}/v1/auth/device?state=${encodeURIComponent(device.state)}`, { headers: auth })).json();
     assert.equal(poll1.status, 'pending', '上游 code 11217 必须映射成 pending，而不是失败');
@@ -3239,6 +3241,7 @@ test('插件登录：设备码 → 加密落盘 → auto 回退 → 刷新轮换
     assert.equal(source.effective.source, 'plugin');
     assert.equal(source.desktop.available, false);
     assert.equal(source.plugin.count, 1);
+    assert.equal(source.loginRegion, 'cn', '登录区域建议应来自当前插件账号，而不是写死');
 
     // ④ 第一次 chat：令牌 60s 过期 < 5min 刷新余量 → 先刷新再请求
     assert.equal((await chat(bridge1.baseUrl)).status, 200);

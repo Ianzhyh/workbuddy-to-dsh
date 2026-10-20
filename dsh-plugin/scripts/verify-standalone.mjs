@@ -2,7 +2,8 @@
  * 独立分发包演练：把 dsh-plugin/ 拷到一个**没有仓库**的沙箱，验证：
  *   1. 插件的 projectRoot 解析到自带的 vendor/
  *   2. vendor 里的桥脚本**真的能启动**（用一份假登录文件 —— 于是 /health 会回 503，
- *      顺带验证插件把"桥活着但凭据读不出"认成 degraded 而不是 foreign）
+ *      顺带验证插件把"桥活着但凭据读不出 / 未登录"认成 degraded / unauthenticated
+ *      而不是 foreign）
  *   3. vendor 里的控制台脚本能启动，返回的是控制台自己的页面（按结构标记判断）
  *   4. 自检脚本 preflight 在独立目录里能跑出正确结论
  *
@@ -114,11 +115,12 @@ try {
   })();
   check(state !== null, '自带 vendor 的桥能启动并监听', `端口 ${BRIDGE_PORT}`);
   if (state) check(state.status === 503 && /login file/i.test(state.body.error || ''), '假登录文件下 /health 如实报 503 + 原因', `HTTP ${state.status}：${String(state.body.error || '').slice(0, 60)}`);
-  // 插件必须认领它（凭据异常），而不是误判成 foreign
+  // 插件必须认领它（凭据异常 / 未登录），而不是误判成 foreign
   const supMod = await import(pathToFileURL(join(pluginDir, 'lib', 'bridge.mjs')).href);
   const sup = new supMod.BridgeSupervisor({ host: '127.0.0.1', port: BRIDGE_PORT, token: 'drill-token', projectRoot: vendorDir, logPath: join(vendorDir, 'bridge', 'bridge.log') });
   const probed = await sup.probe();
-  check(probed.state === 'degraded', '插件把「桥活着但凭据读不出」认成 degraded（不是 foreign）', probed.state);
+  check(['degraded', 'unauthenticated'].includes(probed.state),
+    '插件把「桥活着但凭据读不出 / 未登录」认成 degraded / unauthenticated（不是 foreign）', probed.state);
   const ensured = await sup.ensure({ readyTimeoutMs: 3000 });
   check(ensured.reused === true && ensured.started === false, '这种状态下复用而不是再拉一个桥（避免撞端口）', `state=${ensured.state}`);
   if (!state) console.log('   桥的输出：\n' + bridgeOut.split('\n').slice(-8).map((l) => '     ' + l).join('\n'));

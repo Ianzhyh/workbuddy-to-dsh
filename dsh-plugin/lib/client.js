@@ -26,6 +26,9 @@ window.__ModuleLoader__.load({
     }
     const h0 = React.createElement;
     const { useState, useEffect, useCallback, useRef, useMemo, Fragment } = React;
+    /** 界面上的来源名：不要把 `plugin` / `auto` 这种内部值直接甩给用户。 */
+    const CREDENTIAL_SOURCE_LABELS = { auto: '自动', desktop: '桌面端', plugin: '插件登录', 'api-key': 'API Key' };
+    const credentialSourceLabel = (source) => CREDENTIAL_SOURCE_LABELS[source] || source || '—';
 
     /*
      * 带翻译的 createElement。
@@ -411,6 +414,7 @@ body.dark .wb-root,
       '再查一次': 'Check again',
       '查看失败': 'View failures',
       '去签到': 'Go to check-in',
+      '去登录': 'Go to sign-in',
       '启动桥': 'Start bridge',
       '重启桥': 'Restart bridge',
       '停止桥': 'Stop bridge',
@@ -475,10 +479,29 @@ body.dark .wb-root,
       '（兜底）': ' (fallback)',
       '，推荐': ', recommended',
       '桥在跑，但读不出登录凭据：': 'The bridge is running but cannot read the login credentials: ',
+      '未登录': 'Not signed in',
+      '运行中（未登录）': 'Running (not signed in)',
+      '还没有登录 WorkBuddy': 'WorkBuddy is not signed in yet',
+      '登录后显示积分余额': 'Credit balance will appear after sign-in',
+      '登录后可用': 'Available after sign-in',
+      '桥已经在运行，只是还没有登录：到「账号」页点「开始登录」即可。':
+        'The bridge is already running; it just is not signed in. Click "Sign in" on the Account tab.',
+      '桥已经在运行，但登录凭据读不出来：到「账号」页重新登录。':
+        'The bridge is already running, but the credentials cannot be read. Sign in again on the Account tab.',
+      '桥已停止。': 'Bridge stopped.',
+      '桥已就绪。': 'Bridge ready.',
       '未知原因': 'unknown reason',
       '端口上的桥与本插件的本地令牌不一致': 'The bridge on this port has a different local token than this plugin',
       '端口被别的服务占用了': 'The port is taken by another service',
       '桥没有在运行 —— 模型调用会失败': 'The bridge is not running — model calls will fail',
+      '还没有可用的登录凭据：没有检测到桌面端，也没有插件账号':
+        'No usable credentials yet: no desktop app and no plugin account found',
+      '在「账号」页点「开始登录」，浏览器授权一次即可，不需要安装 WorkBuddy 桌面端':
+        'Open the Account tab and click "Sign in"; one browser authorization is all you need — the desktop app is optional',
+      '到「账号」页重新走一次插件登录即可':
+        'Sign in again from the Account tab to restore the plugin credential',
+      '打开 WorkBuddy 桌面端重新登录一次；也可以在「账号」页改用插件登录':
+        'Sign in to the WorkBuddy desktop app again, or switch to plugin sign-in on the Account tab',
       '修法：打开 WorkBuddy 桌面端重新登录一次；不行再看 诊断 页的「登录文件 / 凭据解密」两项':
         'Fix: open the WorkBuddy desktop app and sign in again; if that fails, check the two "login file / credential decryption" items on the Diagnose tab',
       '登录令牌已过期（桥会在下次请求时尝试续期）': 'The login token has expired (the bridge will try to renew it on the next request)',
@@ -543,6 +566,8 @@ body.dark .wb-root,
       '显示已隐藏': 'Show hidden',
       '全部账号都被隐藏了 —— 勾选下方「显示已隐藏」可以恢复。':
         'All accounts are hidden — tick "Show hidden" below to restore them.',
+      '还没有账号。插件登录后，账号会出现在这里。':
+        'No accounts yet. After plugin sign-in, the account will appear here.',
       'AtRest 密钥获取失败：': 'Failed to get the AtRest key: ',
       '（无法逐个验证账号可用性）': ' (cannot verify each account\'s availability)',
       '登录目录下存在多个账号快照时可在此切换。切换会自动重启桥、清空上一个账号的体检结论与余额缓存 —— 与控制器里点「切换」完全等价。可以改名、上移/下移排序，也可以直接拖动；不想看到的可以隐藏（只记在 .state.json 里，不动登录目录的文件）；同一账号的多份登录快照只显示一行（自动合并，不影响切换）；插件登录得到的账号也在同一列表里（标「插件」），与桌面端同账号时合并为一行「双凭据」。':
@@ -571,6 +596,9 @@ body.dark .wb-root,
       '正在读取凭据来源…': 'Reading credential sources…',
       '当前来源': 'Current source',
       '凭据来源': 'Credential source',
+      '自动': 'Auto',
+      '桌面端': 'Desktop',
+      '插件登录': 'Plugin sign-in',
       '（由环境变量锁定）': ' (pinned by an environment variable)',
       '凭据存储：DPAPI 加密': 'Credential store: DPAPI encrypted',
       '凭据存储：仅内存': 'Credential store: memory only',
@@ -996,6 +1024,9 @@ body.dark .wb-root,
       // 动态前缀：思考内容 / 流内错误（整串规则，保留后半段）
       [/^思考：([\s\S]+)$/, 'Thinking: $1'],
       [/^上游报错：([\s\S]+)$/, 'Upstream error: $1'],
+      /* 凭据异常提示：前缀 + 桥侧原始原因（动态串，整串查词条查不到） */
+      [/^桥在跑，但读不出登录凭据：([\s\S]+)$/, 'The bridge is running but cannot read the login credentials: $1'],
+      [/^插件凭据读取失败：([\s\S]+)$/, 'Could not read plugin credential: $1'],
       // ── 时长 / 数量单位（fmtDuration / fmtRunSeconds / fmtMetricValue）──
       [/^(\d+) 秒$/, '$1s'],
       [/^(\d+) 分 (\d+) 秒$/, '$1m $2s'],
@@ -2108,10 +2139,11 @@ body.dark .wb-root,
       const state = bridge.state || 'unknown';
       const tone = state === 'running' ? 'ok' : (state === 'stopped' || state === 'degraded') ? 'bad' : 'warn';
       const text = state === 'running' ? '运行中'
-        : state === 'stopped' ? '未运行'
-          : state === 'degraded' ? '凭据异常'
-            : state === 'unauthorized' ? '令牌不符'
-              : state === 'foreign' ? '端口被占' : state;
+        : state === 'unauthenticated' ? '未登录'
+          : state === 'stopped' ? '未运行'
+            : state === 'degraded' ? '凭据异常'
+              : state === 'unauthorized' ? '令牌不符'
+                : state === 'foreign' ? '端口被占' : state;
       const con = status?.console || {};
       /**
        * 最近失败请求。
@@ -2131,10 +2163,32 @@ body.dark .wb-root,
       // 5 分钟一次足够，且这个接口会打到上游，不宜勤问。
       const { data: checkinData } = useJson('/workbuddy/checkin', { interval: 300000 });
       const checkinStatus = (checkinData?.status ? checkinData.status : checkinData) || status?.checkin?.status;
+      /*
+       * 凭据状态在 503 的 health body 里也有（desktop.available / plugin.count）——
+       * 首次安装、没装桌面端时，不能再让用户"去打开 WorkBuddy 登录"，而应直接引导
+       * 到「账号」页走插件登录。这里按三条分支给不同的修法。
+       */
+      const credential = health?.credential || {};
+      const credentialKnown = Boolean(credential.desktop || credential.plugin);
+      const desktopAvailable = credential.desktop?.available === true;
+      const pluginCount = Number(credential.plugin?.count ?? credential.pluginCount ?? 0);
       const alerts = [];
-      if (state === 'degraded') {
-        // 桥活着但登录凭据读不出来（最常见：WorkBuddy 登录过期）——不许说成"桥没跑"
-        alerts.push({ tone: 'bad', text: '桥在跑，但读不出登录凭据：' + (bridge.error || '未知原因'), action: 'restart' });
+      if (state === 'unauthenticated') {
+        alerts.push({ tone: 'warn', text: '还没有登录 WorkBuddy', action: 'account' });
+        alerts.push({ tone: 'warn', text: '在「账号」页点「开始登录」，浏览器授权一次即可，不需要安装 WorkBuddy 桌面端' });
+      } else if (state === 'degraded') {
+        if (credentialKnown && !desktopAvailable && pluginCount === 0) {
+          alerts.push({ tone: 'bad', text: '还没有可用的登录凭据：没有检测到桌面端，也没有插件账号', action: 'account' });
+          alerts.push({ tone: 'warn', text: '在「账号」页点「开始登录」，浏览器授权一次即可，不需要安装 WorkBuddy 桌面端' });
+        } else if (credentialKnown && !desktopAvailable) {
+          alerts.push({ tone: 'bad', text: '插件凭据读取失败：' + (credential.plugin?.error || bridge.error || '未知原因'), action: 'account' });
+          alerts.push({ tone: 'warn', text: '到「账号」页重新走一次插件登录即可' });
+        } else {
+          // 桥活着但登录凭据读不出来（最常见：WorkBuddy 登录过期）——不许说成"桥没跑"
+          // 旧桥的 503 body 没有 credential 段：按桌面凭据故障给保守修法。
+          alerts.push({ tone: 'bad', text: '桥在跑，但读不出登录凭据：' + (bridge.error || '未知原因'), action: 'account' });
+          alerts.push({ tone: 'warn', text: '打开 WorkBuddy 桌面端重新登录一次；也可以在「账号」页改用插件登录' });
+        }
       } else if (state === 'unauthorized') {
         alerts.push({ tone: 'bad', text: bridge.error || '端口上的桥与本插件的本地令牌不一致', action: 'restart' });
       } else if (state === 'foreign') {
@@ -2142,15 +2196,9 @@ body.dark .wb-root,
       } else if (state !== 'running') {
         alerts.push({ tone: 'bad', text: '桥没有在运行 —— 模型调用会失败', action: 'start' });
       }
-      const pluginMode = health?.credential?.source === 'plugin';
-      if (state === 'degraded') {
-        alerts.push({
-          tone: 'warn',
-          text: pluginMode
-            ? '修法：到「账号」页重新走一次插件登录；或切回桌面端（若已安装）'
-            : '修法：打开 WorkBuddy 桌面端重新登录一次；不行再看 诊断 页的「登录文件 / 凭据解密」两项',
-        });
-      }
+      const pluginMode = credential.effective?.source === 'plugin'
+        || credential.source === 'plugin'
+        || health?.auth?.source === 'plugin';
       if (health?.auth?.expired) {
         alerts.push({
           tone: 'bad',
@@ -2176,9 +2224,10 @@ body.dark .wb-root,
       // 控制台 /api/overview 的 routeLive 同样是迁移前口径（只认 settings.yaml /
       // profile patch），原生路由它看不见 —— 原生路由已注册时不作为问题提示。
 
-      const ACTION_LABEL = { start: '启动桥', restart: '重启桥', cleanup: '清理旧路由', requests: '查看失败', checkin: '去签到' };
+      const ACTION_LABEL = { start: '启动桥', restart: '重启桥', cleanup: '清理旧路由', requests: '查看失败', checkin: '去签到', account: '去登录' };
       const alertAction = (action) => {
-        if (action === 'requests' || action === 'checkin') onOpenTab(action);
+        if (action === 'account') onOpenTab('accounts');
+        else if (action === 'requests' || action === 'checkin') onOpenTab(action);
         else onAct(action);
       };
 
@@ -2207,25 +2256,32 @@ body.dark .wb-root,
             h('h3', null, '需要你动手'),
             ...alerts.map((a, i) => h('div', { key: i, className: 'wb-row' },
               h('span', { style: { minWidth: 0 } }, h(Pill, { tone: a.tone, text: a.text })),
-              a.action ? h(Btn, { disabled: busy, onClick: () => alertAction(a.action) }, ACTION_LABEL[a.action] || '处理') : null)))
+              a.action ? h(Btn, {
+                primary: a.action === 'account',
+                disabled: busy,
+                onClick: () => alertAction(a.action),
+              }, ACTION_LABEL[a.action] || '处理') : null)))
           : h(Card, { title: '需要你动手' }, h('p', { className: 'wb-note', style: { margin: 0 } }, '没有待办事项。')),
 
         h(Card, { title: '状态' },
-          h(Row, { label: '本地桥' }, h(Pill, { tone, text })),
-          health ? h(Row, { label: '进程 / 地址' }, 'pid ' + health.pid + ' · ' + (status?.config?.bridgeUrl || '') + '/v1') : null,
-          health ? h(Row, { label: '已运行' }, fmtDuration(health.uptimeMs)) : null,
-          health?.auth ? h(Row, { label: '凭据来源' }, health.auth.source || 'desktop') : null,
+          h(Row, { label: '本地桥' }, h(Pill, { tone, text: state === 'unauthenticated' ? '运行中（未登录）' : text })),
+          health ? h(Row, { label: '进程 / 地址' },
+            (health.pid ? 'pid ' + health.pid + ' · ' : '') + (status?.config?.bridgeUrl || '') + '/v1') : null,
+          health?.uptimeMs ? h(Row, { label: '已运行' }, fmtDuration(health.uptimeMs)) : null,
+          health?.auth ? h(Row, { label: '凭据来源' }, credentialSourceLabel(health.auth.source || 'desktop')) : null,
           health?.auth ? h(Row, { label: '登录账号' }, health.auth.userId || '(未识别)') : null,
           health?.auth ? h(Row, { label: '令牌剩余' }, fmtRemaining(health.auth.expiresAt)) : null,
           h(Row, { label: '上游端点' }, health?.auth?.endpoint || '—'),
-          h(Row, { label: '可用模型' }, fmtInt((status?.directory || []).length) + ' 个' + (status?.sampleModel ? '，推荐 ' + status.sampleModel : '')),
+          h(Row, { label: '可用模型' }, state === 'unauthenticated'
+            ? '登录后可用'
+            : fmtInt((status?.directory || []).length) + ' 个' + (status?.sampleModel ? '，推荐 ' + status.sampleModel : '')),
           h(Row, { label: 'dsh 原生路由' }, status?.route?.registered ? '已注册 provider=' + status.route.provider + (status.route.fallback ? '（兜底）' : '') : '未注册'),
           h(Row, { label: '数据控制台' }, h(Pill, { tone: con.state === 'running' ? 'ok' : 'bad', text: con.state === 'running' ? '运行中' : (con.state || '未运行') })),
           status?.config?.projectRoot ? h(Row, { label: '检出目录' }, status.config.projectRoot) : null),
 
         h(Card, { title: '操作' },
           h('div', { className: 'wb-actions' },
-            h(Btn, { primary: true, disabled: busy, onClick: () => onAct('start') }, '启动桥'),
+            h(Btn, { primary: state === 'stopped', disabled: busy, onClick: () => onAct('start') }, '启动桥'),
             h(Btn, { disabled: busy, onClick: () => onAct('restart') }, '重启桥'),
             h(Btn, { disabled: busy, onClick: () => onAct('stop') }, '停止桥'),
             h(Btn, { disabled: busy, onClick: () => onAct('console-start') }, '启动控制台'),
@@ -2276,6 +2332,7 @@ body.dark .wb-root,
       const quota = status?.quota;
       const error = status?.quotaError || (quota && quota.ok === false ? String(quota.error || '读取失败') : '');
       const total = typeof quota?.total === 'number' ? quota.total : null;
+      const needsLogin = status?.bridge?.state === 'unauthenticated';
       /** 缓存的积分属于账号 X、桥却登录着账号 Y → 显示不匹配警告（正常情况两者一致或尚未探测到） */
       const accountMismatch = Boolean(
         status?.quotaAccount
@@ -2335,11 +2392,13 @@ body.dark .wb-root,
             h('span', { className: 'wb-quota-label' }, '积分余额'),
             h('div', { className: 'wb-quota-total' }, total === null ? '—' : fmtInt(total)),
             h('div', { className: 'wb-note', style: { margin: '2px 0 0' } },
-              error
-                ? '读取失败：' + error
-                : (packages.length
-                  ? `${packages.length} 种套餐${status?.quotaAt ? ' · 更新于 ' + fmtClock(status.quotaAt) : ''}`
-                  : '还没有读到套餐明细')),
+              needsLogin
+                ? '登录后显示积分余额'
+                : (error
+                  ? '读取失败：' + error
+                  : (packages.length
+                    ? `${packages.length} 种套餐${status?.quotaAt ? ' · 更新于 ' + fmtClock(status.quotaAt) : ''}`
+                    : '还没有读到套餐明细'))),
             accountMismatch
               ? h('div', { className: 'wb-note', style: { margin: '2px 0 0', color: '#b45309' } },
                 '⚠ 积分还是上一个账号的（正在自动重读）—— 缓存 ' + String(status?.quotaAccount || '?').slice(0, 8) + '… / 桥 ' + String(status?.bridgeAccount || '?').slice(0, 8) + '…')
@@ -2348,7 +2407,7 @@ body.dark .wb-root,
                   '归属账号 ' + String(status.quotaAccount).slice(0, 8) + '…（与桥一致）')
                 : null)),
           h('div', { className: 'wb-actions', style: { margin: 0 } },
-            h(Btn, { primary: true, disabled: refreshing || busy, onClick: refreshQuota }, refreshing ? '刷新中…' : '刷新积分'),
+            h(Btn, { primary: true, disabled: refreshing || busy || needsLogin, onClick: refreshQuota }, refreshing ? '刷新中…' : '刷新积分'),
             h(Btn, { onClick: () => onOpenTab('usage') }, '看用量'))),
         message ? h('p', { className: 'wb-note', style: { margin: '6px 0 0' } }, message) : null,
         packages.length
@@ -2373,6 +2432,8 @@ body.dark .wb-root,
     function PluginLoginCard({ onChanged, onData, refreshKey }) {
       const { data, error, reload, loading } = useJson('/workbuddy/login', { interval: 15000, refreshKey });
       const [region, setRegion] = useState('cn');
+      /** 用户手动改过区域后，不再被服务端建议覆盖。 */
+      const regionTouched = useRef(false);
       const [pending, setPending] = useState(null);
       const [busy, setBusy] = useState('');
       const [message, setMessage] = useState('');
@@ -2383,12 +2444,17 @@ body.dark .wb-root,
       useEffect(() => {
         if (data && typeof onData === 'function') onData(data);
       }, [data, onData]);
+      // 国际版/国内版不再写死：桥按 env → 现有插件账号 → 桌面域名给出建议。
+      useEffect(() => {
+        if (regionTouched.current) return;
+        if (data?.loginRegion === 'global' || data?.loginRegion === 'cn') setRegion(data.loginRegion);
+      }, [data?.loginRegion]);
 
       const refreshAll = () => { reload(); if (onChanged) onChanged(); };
 
       const startLogin = async () => {
         setBusy('start'); setMessage(''); setCopied(false);
-        const res = await postJson('/workbuddy/login/start', { region });
+        const res = await postJson('/workbuddy/login/start', { region, open: true });
         if (!alive.current) return;
         setBusy('');
         if (res.data?.ok && res.data?.state && res.data?.url) {
@@ -2447,9 +2513,16 @@ body.dark .wb-root,
       const effective = data?.effective || {};
       const effectiveSource = effective.source || '';
       const sameAccount = data?.sameAccount === true;
+      /*
+       * 没装桌面端时不再展示「仅桌面端」——选了必然报错，对第一次用的用户
+       * 就是一个陷阱；auto 的文案也不再声称"桌面端优先"。
+       */
+      const desktopUsable = data?.desktop?.available === true;
       const sourceOptions = [
-        { value: 'auto', label: '自动（桌面端优先）' },
-        { value: 'desktop', label: '仅桌面端' },
+        { value: 'auto', label: desktopUsable ? '自动（桌面端优先）' : '自动' },
+        ...(desktopUsable || sourceValue === 'desktop'
+          ? [{ value: 'desktop', label: '仅桌面端' }]
+          : []),
         { value: 'plugin', label: '仅插件登录' },
       ];
       return h(Card, { title: '插件登录（不依赖桌面端）' },
@@ -2480,14 +2553,17 @@ body.dark .wb-root,
           h('span', { className: 'wb-note' },
             data?.storeMode === 'dpapi' ? '凭据存储：DPAPI 加密' : '凭据存储：仅内存'),
           h('span', { className: 'wb-note' }, '实际使用：'),
-          h('span', { className: 'wb-note' }, effectiveSource || '—')),
+          h('span', { className: 'wb-note' }, credentialSourceLabel(effectiveSource))),
         h('div', { className: 'wb-login-toolbar' },
           h('span', { className: 'wb-note' }, '登录区域'),
           h(Segmented, {
             value: region,
             options: [{ value: 'cn', label: '国内版' }, { value: 'global', label: '国际版' }],
             ariaLabel: '登录区域',
-            onChange: (e) => setRegion(e.target.value === 'global' ? 'global' : 'cn'),
+            onChange: (e) => {
+              regionTouched.current = true;
+              setRegion(e.target.value === 'global' ? 'global' : 'cn');
+            },
           }),
           h(Btn, { primary: true, disabled: !!pending || busy === 'start', onClick: startLogin },
             busy === 'start' ? '正在创建…' : (pending ? '等待授权…' : '开始登录'))),
@@ -2546,11 +2622,11 @@ body.dark .wb-root,
        */
       const effectiveSource = pageStatus?.bridge?.health?.credential?.source || '';
       if (api.availability.state !== 'ok' && (status === 503 || status === 404)) {
-        // 控制台没跑也不影响插件登录（它直接走桥），所以卡片放在 Gate 之后照常显示。
+        // 控制台没跑也不影响插件登录（它直接走桥）：登录卡放最前，别让 Gate 挡路。
         // 用 Fragment 而不是 div：两张卡都是 `.wb-tab-panel` 的直接子元素，才能吃到统一间距。
         return h(Fragment, null,
-          h(ConsoleGate, { availability: api.availability, onStartConsole, onProbe: api.probeConsole, busy, feature: '账号' }),
-          h(PluginLoginCard, { onChanged: reloadStatus, desktopAccounts: [], onData: setPluginLoginData }));
+          h(PluginLoginCard, { onChanged: reloadStatus, desktopAccounts: [], onData: setPluginLoginData }),
+          h(ConsoleGate, { availability: api.availability, onStartConsole, onProbe: api.probeConsole, busy, feature: '账号' }));
       }
       const accounts = data?.accounts || [];
       /*
@@ -2772,7 +2848,13 @@ body.dark .wb-root,
         }
         reload();
       };
+      /*
+       * 首次安装（一个账号都没有）：把插件登录卡放到最上面。桌面账号列表对
+       * "纯插件"用户没有意义，先看到「开始登录」才是最短路径。
+       */
+      const firstRun = distinct.length === 0 && pluginOnly.length === 0;
       return h(Fragment, null,
+        firstRun ? loginCard : null,
         h(Card, { title: '账号' },
           error ? h(Alert, { bad: true }, error) : null,
         message ? h(Alert, null, message) : null,
@@ -2791,7 +2873,9 @@ body.dark .wb-root,
            列表既能容纳长域名，也不会有列宽问题。 */
         h('div', { style: { marginTop: '10px' } },
           visible.length === 0 && pluginOnly.length === 0
-            ? h('p', { className: 'wb-note' }, '全部账号都被隐藏了 —— 勾选下方「显示已隐藏」可以恢复。')
+            ? h('p', { className: 'wb-note' }, distinct.length === 0
+              ? '还没有账号。插件登录后，账号会出现在这里。'
+              : '全部账号都被隐藏了 —— 勾选下方「显示已隐藏」可以恢复。')
             : null,
           visible.map((a) => {
             const pluginFor = a.userId ? pluginByUid.get(String(a.userId)) : null;
@@ -2923,7 +3007,7 @@ body.dark .wb-root,
             '显示已隐藏',
             hiddenCount ? h(Pill, { tone: '', text: String(hiddenCount) }) : null),
           h(Btn, { onClick: reload }, '刷新'))),
-        loginCard);
+        firstRun ? null : loginCard);
     }
 
     // ─────────────────────────── 用量 ───────────────────────────
@@ -4162,7 +4246,24 @@ body.dark .wb-root,
         try {
           if (action === 'start' || action === 'stop' || action === 'restart') {
             const res = await postJson('/workbuddy/bridge', { action });
-            if (!res.data?.ok) setError('桥操作失败：' + (res.data?.result?.error || res.data?.error || res.status));
+            const resultState = res.data?.result?.state;
+            if (!res.data?.ok) {
+              /*
+               * 未登录/凭据异常时桥本身是活着的，只是不能用 —— 不能再报
+               * "桥操作失败 + no usable credential"，那会让第一次用的人以为桥坏了。
+               */
+              if (resultState === 'unauthenticated') {
+                setError('桥已经在运行，只是还没有登录：到「账号」页点「开始登录」即可。');
+              } else if (resultState === 'degraded') {
+                setError('桥已经在运行，但登录凭据读不出来：到「账号」页重新登录。');
+              } else {
+                setError('桥操作失败：' + (res.data?.result?.error || res.data?.error || res.status));
+              }
+            } else if (action === 'stop') {
+              setToast('桥已停止。');
+            } else {
+              setToast('桥已就绪。');
+            }
           } else if (action === 'console-start') {
             const res = await postJson('/workbuddy/console', { action: 'start' });
             if (!res.data?.ok) setError('控制台启动失败：' + (res.data?.result?.error || res.data?.error || res.status));
@@ -4215,8 +4316,9 @@ body.dark .wb-root,
               '两边共用同一个桥与同一份 .state.json，改哪边另一边的结果都一样。')),
           h('div', { className: 'wb-actions' },
             status?.bridge?.state === 'running' ? h(Pill, { tone: 'ok', text: '桥运行中' })
-              : status?.bridge?.state === 'degraded' ? h(Pill, { tone: 'warn', text: '桥凭据异常' })
-                : h(Pill, { tone: 'bad', text: '桥未运行' }),
+              : status?.bridge?.state === 'unauthenticated' ? h(Pill, { tone: 'warn', text: '未登录' })
+                : status?.bridge?.state === 'degraded' ? h(Pill, { tone: 'warn', text: '桥凭据异常' })
+                  : h(Pill, { tone: 'bad', text: '桥未运行' }),
             con.state === 'running' ? h(Pill, { tone: 'ok', text: '控制台运行中' }) : h(Pill, { tone: 'warn', text: '控制台未运行' }),
             // 语言开关：与控制台右上角那个同款（显示的是「可切到的那门语言」）。
             // 标签用 Raw 渲染 —— 它是语言代码、不是文案，**不能**过翻译

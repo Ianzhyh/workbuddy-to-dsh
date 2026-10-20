@@ -37,7 +37,27 @@ Base URL 的客户端都能直连。
 
 在 **DeepSeek Harness（dsh）** 里用上 WorkBuddy 的模型，本仓库提供的是
 **原生 dsh 插件 + 本地 API 桥 + 可视化控制台**的完整组合 —— 装完模型直接出现在
-dsh 的模型选择器里，日常需要的接入、管理、监控、运维能力也全在同一个插件内：
+dsh 的模型选择器里，日常需要的接入、管理、监控、运维能力也全在同一个插件内。
+
+#### 一键即用：装完插件，三步开始对话
+
+| 步骤 | 操作 | 需要配置 |
+|---|---|---|
+| 1 | 安装插件（dsh 市场 / `dsh plugin add ...` / tgz） | **无** |
+| 2 | 设置 → WorkBuddy → 「账号」→「开始登录」（授权页自动打开） | **无** |
+| 3 | 浏览器授权完成，回模型选择器选一个模型 | **无** |
+
+- **没装桌面端也能用**：插件内设备码登录，不下载、不安装 WorkBuddy 客户端。
+- **装了桌面端更省事**：已登录的账号自动复用，第 2 步都可以跳过。
+- **不填任何东西**：不需要 API Key、Base URL、令牌、端口或环境变量；桥与控制台由插件自动拉起。
+- **国内 / 国际版自动预选**：登录区域跟随现有账号或桌面端域名，不用每次手动切。
+- **模型选择器即时刷新**：登录、切号、重启桥后自动广播目录更新，不需要重启 dsh。
+- **凭据不裸奔**：DPAPI + AES-GCM 加密保存；同一账号的桌面/插件双凭据自动合并，401/403 自动接管。
+
+<img src="docs/plugin-panel-first-run-login.png" width="100%"
+     alt="首次安装的 dsh「账号」页：插件登录卡直接排在账号列表前面，区域已自动预选，点「开始登录」即可在浏览器授权">
+
+能力清单：
 
 | 能力 | 说明 |
 |---|---|
@@ -60,6 +80,9 @@ dsh plugin --profile desktop add github:Ianzhyh/workbuddy-to-dsh
 ```
 
 装完**重启一次 dsh**，模型选择器里直接多出 WorkBuddy。
+
+> **插件登录需要 v1.8.0 或更高版本**。从 dsh 市场安装时请确认上架版本；
+> 旧版（≤1.7.0）仍要求 WorkBuddy 桌面端登录态。
 
 > ### ⚠️ 请先读这一段（免责与边界）
 >
@@ -124,7 +147,7 @@ dsh plugin --profile desktop add github:Ianzhyh/workbuddy-to-dsh
 
 # 方式二：release 附件（tgz 安装包，无构建、无需 allowBuilds 授权）
 #   从 GitHub Releases 下载 dsh-plugin-workbuddy-<版本>.tgz 后：
-dsh plugin --profile desktop add ./dsh-plugin-workbuddy-1.8.0.tgz
+dsh plugin --profile desktop add ./dsh-plugin-workbuddy-1.8.1.tgz
 
 # 方式三：从源码（插件在 dsh-plugin/ 子目录，接第 1 步的 git clone）
 dsh plugin --profile desktop add workbuddy-to-dsh/dsh-plugin

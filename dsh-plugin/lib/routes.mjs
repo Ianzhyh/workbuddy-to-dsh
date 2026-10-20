@@ -65,6 +65,20 @@ export function createRouteTable(deps) {
   const guard = (req) => req.headers['x-workbuddy-panel'] === '1';
 
   /**
+   * 凭据/账号变了：目录属于旧账号，必须重取，并通知 dsh 的模型选择器。
+   * dsh 不轮询目录，只认 `llm/adapters-updated`；只 invalidate 不通知的话，
+   * 用户登录成功、模型其实已经可用，选择器里却还是旧清单（看起来像没登录）。
+   */
+  const refreshModelCatalog = () => {
+    adapter.invalidate();
+    const task = typeof adapter.warmup === 'function' ? adapter.warmup() : Promise.resolve();
+    Promise.resolve(task).then(
+      () => notifyAdaptersUpdated(),
+      () => notifyAdaptersUpdated(),
+    );
+  };
+
+  /**
    * 只读路由的方法守门：只允许 GET/HEAD。
    * 目前非 GET 走进去也只是"当成读"（没有副作用），但显式拒绝更严谨 ——
    * 免得将来有人在某个读分支里加写逻辑，而代理/表单又恰好能打到它。
@@ -138,7 +152,10 @@ export function createRouteTable(deps) {
         if (!guard(req)) return sendJson(res, 403, { ok: false, error: 'missing x-workbuddy-panel header' });
         try {
           const body = await readJsonBody(req);
-          const started = await client.deviceLoginStart({ region: body?.region === 'global' ? 'global' : 'cn' });
+          const started = await client.deviceLoginStart({
+            region: body?.region === 'global' ? 'global' : 'cn',
+            open: body?.open === true,
+          });
           sendJson(res, 200, { ok: true, ...started });
         } catch (error) {
           sendJson(res, 200, { ok: false, error: String(error?.message || error) });
@@ -156,8 +173,7 @@ export function createRouteTable(deps) {
           const result = await client.deviceLoginPoll(String(body.state));
           if (result?.status === 'ready') {
             // 账号换了：模型目录与余额/签到缓存都属于上一个账号
-            adapter.invalidate();
-            adapter.warmup().catch(() => {});
+            refreshModelCatalog();
             onUpstreamMutation();
           }
           sendJson(res, 200, result);
@@ -189,8 +205,7 @@ export function createRouteTable(deps) {
           const body = await readJsonBody(req);
           if (!body?.uid) return sendJson(res, 400, { ok: false, error: 'uid is required' });
           const result = await client.authSetActive(String(body.uid));
-          adapter.invalidate();
-          adapter.warmup().catch(() => {});
+          refreshModelCatalog();
           onUpstreamMutation();
           sendJson(res, 200, { ok: true, ...result });
         } catch (error) {
@@ -207,8 +222,7 @@ export function createRouteTable(deps) {
           const body = await readJsonBody(req);
           if (!body?.uid) return sendJson(res, 400, { ok: false, error: 'uid is required' });
           const result = await client.authLogout(String(body.uid));
-          adapter.invalidate();
-          adapter.warmup().catch(() => {});
+          refreshModelCatalog();
           onUpstreamMutation();
           sendJson(res, 200, { ok: true, ...result });
         } catch (error) {
@@ -224,8 +238,7 @@ export function createRouteTable(deps) {
         try {
           const body = await readJsonBody(req);
           const result = await client.setAuthSource(String(body?.source || 'auto'));
-          adapter.invalidate();
-          adapter.warmup().catch(() => {});
+          refreshModelCatalog();
           onUpstreamMutation();
           sendJson(res, 200, { ok: true, ...result });
         } catch (error) {
@@ -435,7 +448,7 @@ export function createRouteTable(deps) {
           const action = String(body?.action || 'status');
           if (action === 'start') {
             const result = await supervisor.ensure({});
-            adapter.invalidate();
+            refreshModelCatalog();
             return sendJson(res, 200, { ok: result.ok, action, result });
           }
           if (action === 'stop') {
@@ -445,7 +458,7 @@ export function createRouteTable(deps) {
           }
           if (action === 'restart') {
             const result = await supervisor.ensure({ restart: true });
-            adapter.invalidate();
+            refreshModelCatalog();
             return sendJson(res, 200, { ok: result.ok, action, result });
           }
           const probe = await supervisor.probe();
@@ -507,7 +520,12 @@ export function createRouteTable(deps) {
     {
       kind: 'prefix',
       path: CONSOLE_API_PREFIX,
-      handler: createConsoleApiHandler({ consoleSupervisor, log, onUpstreamMutation }),
+      handler: createConsoleApiHandler({
+        consoleSupervisor,
+        log,
+        onUpstreamMutation,
+        onAccountSwitch: refreshModelCatalog,
+      }),
     },
   ];
 }

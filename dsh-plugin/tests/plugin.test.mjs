@@ -502,6 +502,29 @@ test('桥的健康检查：503 要认领成「凭据异常」，不能误判成"
     assert.equal(ensured.state, 'degraded');
   } finally { await ours.close(); }
 
+  // ①b 从来没登录过：503 里带 credential（桌面端不可用、插件账号 0 个）→ 未登录
+  const fresh = await startFake({
+    ok: false,
+    error: 'no usable credential (auto): desktop: login file not found; plugin: no plugin credential yet',
+    authFile: 'C:\\auth\\workbuddy-desktop.info',
+    credential: {
+      configured: 'auto',
+      desktop: { available: false, error: 'login file not found', userId: '' },
+      plugin: { available: false, count: 0, activeUid: '', uids: [], error: '' },
+    },
+  });
+  try {
+    const sup = new BridgeSupervisor({ host: '127.0.0.1', port: fresh.port, token: 't', projectRoot: '.', logPath: 'x' });
+    const probe = await sup.probe();
+    assert.equal(probe.state, 'unauthenticated', '首次安装没登录必须是「未登录」，不是「凭据异常」');
+    const ensured = await sup.ensure({ readyTimeoutMs: 500 });
+    assert.equal(ensured.reused, true, '未登录时也复用桥');
+    assert.equal(ensured.state, 'unauthenticated');
+    const restarted = await sup.ensure({ restart: true, readyTimeoutMs: 500 });
+    assert.equal(restarted.reused, true, '未登录时点重启不能再去起一个实例');
+    assert.equal(restarted.started, false, '未登录时重启必须复用，否则会撞端口');
+  } finally { await fresh.close(); }
+
   // ② 真的不是我们的服务：503 + HTML（比如某个反向代理）
   const foreign = await startFake('<html><body>503 Service Unavailable</body></html>', 503, 'text/html');
   try {
@@ -610,6 +633,41 @@ test('面板 /workbuddy/models 返回归一化目录（不是上游原始字段�
   assert.equal(model.maxTokens, 8192);
   assert.equal(model.images, true);
   assert.equal(model.credits, 0.5);
+});
+
+test('登录完成后刷新模型目录并广播 adapters-updated', async () => {
+  const { createRouteTable } = await import('../lib/routes.mjs');
+  const calls = [];
+  const route = createRouteTable({
+    snapshot: async () => ({}),
+    supervisor: { readLog: () => ({ lines: [] }) },
+    client: { deviceLoginPoll: async () => ({ ok: true, status: 'ready', account: { uid: 'uid-1' } }) },
+    adapter: {
+      catalogCache: { at: 0, models: [] },
+      catalogError: '',
+      invalidate() { calls.push('invalidate'); },
+      async warmup() { calls.push('warmup'); },
+    },
+    paths: { settingsPath: 'x', patchPath: 'y' },
+    provider: 'workbuddy',
+    log: () => {},
+    onUpstreamMutation: () => calls.push('mutation'),
+    notifyAdaptersUpdated: () => { calls.push('notify'); return true; },
+  }).find((r) => r.path === '/workbuddy/login/poll');
+
+  let payload;
+  const req = {
+    method: 'POST',
+    headers: { 'x-workbuddy-panel': '1' },
+    url: '/workbuddy/login/poll',
+    async *[Symbol.asyncIterator]() { yield Buffer.from(JSON.stringify({ state: 's' })); },
+  };
+  const res = { writeHead() {}, end(body) { payload = JSON.parse(body); } };
+  await route.handler(req, res);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(payload.status, 'ready');
+  assert.deepEqual(calls, ['invalidate', 'warmup', 'mutation', 'notify'],
+    '登录成功后必须重取目录并通知 dsh，否则选择器还显示旧账号的模型');
 });
 
 test('面板写操作要求 x-workbuddy-panel 头（挡住跨站简单请求）', async () => {

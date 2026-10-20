@@ -64,7 +64,7 @@ function sendJson(res, status, payload) {
  * @param {{ url: string, probe: (o?: object) => Promise<{state: string, error?: string}> }} deps.consoleSupervisor
  * @param {(line: string, detail?: unknown) => void} [deps.log]
  */
-export function createConsoleApiHandler({ consoleSupervisor, log = () => {}, onUpstreamMutation = () => {} }) {
+export function createConsoleApiHandler({ consoleSupervisor, log = () => {}, onUpstreamMutation = () => {}, onAccountSwitch = () => {} }) {
   /** 每个请求一个，避免并发请求互相干扰（SSE 长连接尤其需要）。 */
   return async function handleConsoleApi(req, res) {
     const url = new URL(req.url, 'http://127.0.0.1');
@@ -141,6 +141,10 @@ export function createConsoleApiHandler({ consoleSupervisor, log = () => {}, onU
       // 透传完成后（成功状态码才作废）：下一次 snapshot 会重新打上游取新余额
       if (mutatesQuota && upstream.ok) {
         try { onUpstreamMutation(); } catch { /* 回调异常不影响响应 */ }
+      }
+      // 换桌面账号会重启桥、换一份目录；不刷新适配器的话模型选择器还是旧账号的。
+      if (sub === '/account/switch' && method === 'POST' && upstream.ok) {
+        try { onAccountSwitch(); } catch { /* 同上 */ }
       }
     } catch (error) {
       if (ac.signal.aborted) { try { res.end(); } catch { /* 客户端已断开 */ } return; }

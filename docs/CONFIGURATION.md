@@ -58,7 +58,7 @@ copy .env.example .env
 | `WORKBUDDY_CREDENTIAL_SOURCE` | 不设置（桥按 `auto`） | `auto` / `desktop` / `plugin` / `api-key`。`auto` 是**软默认**：允许面板/控制台切换，登录成功后照常切到插件；只有显式写 `desktop` / `plugin` / `api-key` 才**锁定**来源（UI 切换会被拒绝）。`auto` 的顺序 = API key → 桌面端 → 插件（仅**本地**不可用时回退）；上游 401 不会中途换号 |
 | `WORKBUDDY_CREDENTIAL_STORE` | Windows `dpapi`，其他平台 `memory` | `dpapi` = DPAPI(CurrentUser) 保护 `store.key` + AES-256-GCM 凭据；`memory` = 不落盘。DPAPI 失败会自动退回 memory，**绝不写明文** |
 | `WORKBUDDY_CREDENTIAL_DIR` | `%USERPROFILE%\.workbuddy-bridge\credentials` | 凭据目录（`store.key` / `*.cred` / `active.json` / `source.json`） |
-| `WORKBUDDY_LOGIN_REGION` | `cn` | 设备码登录默认区域：`cn` / `global` |
+| `WORKBUDDY_LOGIN_REGION` | 自动建议 | 设备码登录默认区域：`cn` / `global`。不设置时桥按「现有插件账号 → 桌面账号域名（`.ai` → global）→ cn」给出建议，面板/控制台随环境预选；用户手动选过之后不再覆盖 |
 | `WORKBUDDY_LOGIN_UA` | `CLI/2.63.2 CodeBuddy/2.63.2` | 登录端点期望的 User-Agent；上游漂移时的逃生门 |
 | `WORKBUDDY_LOGIN_BASE` / `WORKBUDDY_LOGIN_ORIGIN` | 按区域 | 仅测试 / 应急覆盖登录端点 |
 | `WORKBUDDY_CREDENTIAL_FAILOVER` | `same-account` | 鉴权失败（401/403）时另一条凭据是否接管：`same-account` = 只在桌面端与插件端 **uid 相同**时接管（钱包不变）；`any` = 任意账号接管（会切换账号/钱包，显式 opt-in）；`off` = 不接管 |

@@ -960,8 +960,137 @@ async function verifyDegradedBridge() {
   }
 }
 
+/**
+ * 第五个场景：**首次安装、没有桌面端、也没有插件账号**。
+ * 这是"只装插件"用户第一次打开面板看到的状态。面板必须直接引导去「账号」页
+ * 插件登录，而不是让人去找一个没装过的 WorkBuddy 桌面端。
+ */
+async function verifyFirstRun() {
+  console.log('\n—— 场景 5：首次安装（无桌面端 / 无插件账号）——');
+  const health = {
+    ok: false,
+    error: 'no usable credential (auto): desktop: login file not found; plugin: no plugin credential yet',
+    authFile: 'C:\\Users\\demo\\AppData\\Local\\CodeBuddyExtension\\Data\\Public\\auth\\workbuddy-desktop.info',
+    credential: {
+      configured: 'auto',
+      envPinned: false,
+      storeMode: 'dpapi',
+      failover: 'same-account',
+      desktop: { available: false, error: 'login file not found', userId: '' },
+      plugin: { available: false, count: 0, activeUid: '', uids: [], error: '' },
+      sameAccount: false,
+    },
+  };
+  const firstRunRoutes = {
+    ...routes,
+    '/workbuddy/status': {
+      ...data.status,
+      quota: null,
+      quotaError: '',
+      quotaAccount: '',
+      bridgeAccount: '',
+      recentFailed: [],
+      directory: [],
+      sampleModel: '',
+      checkin: { status: { todayCheckedIn: true, active: true } },
+      bridge: { state: 'unauthenticated', health, error: health.error },
+    },
+    '/workbuddy/checkin': { status: { todayCheckedIn: true, active: true } },
+    // 没有桌面端 = 控制台的账号目录也是空的（否则账号卡会排在登录卡前面）
+    '/workbuddy/console-api/accounts': { dir: '', active: '', accounts: [], keyError: null },
+    '/workbuddy/login': {
+      ok: true,
+      configured: 'auto',
+      envPinned: false,
+      storeMode: 'dpapi',
+      failover: 'same-account',
+      fallbackReason: '',
+      loginRegion: 'global',
+      desktop: { available: false, error: 'login file not found', userId: '' },
+      plugin: { available: false, count: 0, activeUid: '', uids: [], error: '' },
+      sameAccount: false,
+      effective: { source: '', uid: '', region: '', endpoint: '', expiresAt: '' },
+      credentials: [],
+    },
+  };
+  const port = PORT + 5;
+  const page = await openPage(`http://127.0.0.1:${port}/harness.html`, {}, { width: 900, height: 1000, injectStub: false, cdpPort: 9337 });
+  const extra = createServer((req, res) => {
+    const path = new URL(req.url, `http://127.0.0.1:${port}`).pathname;
+    if (path === '/harness.html') { res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }); return res.end(harnessHtml(firstRunRoutes)); }
+    if (path === '/client.js') { res.writeHead(200, { 'content-type': 'text/javascript; charset=utf-8' }); return res.end(clientSource); }
+    if (path === '/vendor/react.js') { res.writeHead(200, { 'content-type': 'text/javascript; charset=utf-8' }); return res.end(react); }
+    if (path === '/vendor/react-dom.js') { res.writeHead(200, { 'content-type': 'text/javascript; charset=utf-8' }); return res.end(reactDom); }
+    res.writeHead(404); res.end('not found');
+  });
+  await new Promise((resolve) => extra.listen(port, '127.0.0.1', resolve));
+  const problems = [];
+  try {
+    await waitFor(page.cdp, 'window.__harness && window.__harness.rendered === true', 15000, '面板挂载');
+    await sleep(1000);
+    const text = await page.cdp.evaluate("document.querySelector('.wb-root') ? document.querySelector('.wb-root').innerText : ''");
+    if (!/还没有登录 WorkBuddy/.test(text)) problems.push('没有说明当前还没有登录');
+    if (/桥凭据异常/.test(text)) problems.push('首次安装（从来没登录）被说成了「桥凭据异常」');
+    if (!/未登录/.test(text)) problems.push('首次安装没有明确显示「未登录」');
+    if (!/登录后显示积分余额/.test(text)) problems.push('积分卡没有说明登录后才显示余额');
+    if (!/不需要安装 WorkBuddy 桌面端/.test(text)) problems.push('没有说明插件登录不依赖桌面端');
+    if (!/开始登录/.test(text)) problems.push('没有给出「开始登录」的修法');
+    const shot = await page.cdp.send('Page.captureScreenshot', { format: 'png', captureBeyondViewport: true });
+    writeFileSync(join(OUT_DIR, 'plugin-panel-first-run.png'), Buffer.from(shot.result.data, 'base64'));
+    // 首次安装的引导文案也必须能翻成英文（这些分支平时渲染扫描扫不到）
+    await page.cdp.evaluate("document.querySelector('.wb-lang').click()");
+    await sleep(500);
+    const cjk = await page.cdp.evaluate(`(() => {
+      const root = document.querySelector('.wb-root').cloneNode(true);
+      root.querySelectorAll('.wb-lang').forEach((el) => el.remove());
+      return (root.innerText.match(/[\\u4e00-\\u9fff]/g) || []).join('');
+    })()`);
+    if (cjk) problems.push(`首次安装引导的英文模式仍有中文：${[...new Set(cjk)].join('')}`);
+    const jumped = await page.cdp.evaluate(`(() => {
+      const btn = [...document.querySelectorAll('.wb-btn')].find((b) => b.textContent === 'Go to sign-in');
+      if (!btn) return 'no-button';
+      btn.click();
+      return 'clicked';
+    })()`);
+    await sleep(600);
+    const activeTab = await page.cdp.evaluate("(document.querySelector('.wb-tab.on') || {}).textContent || ''");
+    if (jumped !== 'clicked') problems.push('「去登录」按钮不存在或点不到');
+    else if (activeTab !== 'Account') problems.push(`点「去登录」没有跳到账号页（当前 ${activeTab}）`);
+    const cards = await page.cdp.evaluate("Array.from(document.querySelectorAll('.wb-card h3')).map((h) => h.textContent)");
+    if (!cards[0] || !/Plugin sign-in/.test(cards[0])) {
+      problems.push(`首次安装时插件登录卡没有排在账号卡前面（当前顺序：${cards.slice(0, 3).join(' / ')}）`);
+    }
+    if (cards.filter((t) => /Plugin sign-in/.test(t)).length !== 1) {
+      problems.push(`插件登录卡重复渲染了：${cards.filter((t) => /Plugin sign-in/.test(t)).length} 张`);
+    }
+    // 国际版环境：登录区域应默认选中 Global，而不是写死国内版
+    const regionValue = await page.cdp.evaluate("(document.querySelector('select[aria-label=\"Sign-in region\"]') || {}).value || ''");
+    if (regionValue !== 'global') problems.push(`登录区域没有跟随环境建议（当前 ${regionValue || '空'}）`);
+    const desktopOption = await page.cdp.evaluate("Array.from(document.querySelectorAll('.wb-segmented-item')).some((el) => el.textContent === 'Desktop only')");
+    if (desktopOption) problems.push('没有桌面端时仍显示「仅桌面端」选项 —— 新手选了必然失败');
+    // 切回中文，给 README 拍一张"首次安装的账号页"：登录卡在最前面。
+    await page.cdp.evaluate("document.querySelector('.wb-lang').click()");
+    await sleep(500);
+    const shotLogin = await page.cdp.send('Page.captureScreenshot', { format: 'png', captureBeyondViewport: true });
+    writeFileSync(join(OUT_DIR, 'plugin-panel-first-run-login.png'), Buffer.from(shotLogin.result.data, 'base64'));
+  } catch (error) {
+    problems.push(`场景 5 失败：${error.message}`);
+  } finally {
+    page.close();
+    await new Promise((r) => extra.close(r));
+  }
+  if (problems.length) {
+    console.error('场景 5 问题：');
+    for (const p of problems) console.error(` - ${p}`);
+    failed = true;
+  } else {
+    console.log('场景 5 通过：首次安装直接引导到插件登录，不要求桌面端。');
+  }
+}
+
 await verifyStaleHost();
 await verifyNarrow();
 await verifyDegradedBridge();
+await verifyFirstRun();
 
 process.exit(failed ? 1 : 0);

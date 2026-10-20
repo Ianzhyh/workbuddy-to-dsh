@@ -34,7 +34,7 @@ import { homedir, userInfo } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { createCipheriv, createDecipheriv, createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 
 // ── Static constants (values match the desktop app / official extension) ──
 /**
@@ -1614,6 +1614,24 @@ async function resolveCredentialAlternative(auth) {
   return null;
 }
 
+/**
+ * 登录区域默认值：显式 env > 当前插件账号 > 桌面账号域名 > 国内版。
+ * 以前面板写死 cn，国际版用户每次都要手动切；这里让环境自己说话。
+ */
+function suggestedLoginRegion() {
+  const env = String(process.env.WORKBUDDY_LOGIN_REGION || '').trim().toLowerCase();
+  if (env === 'global' || env === 'cn') return env;
+  try {
+    const active = listPluginCredentials().find((c) => c.active) || listPluginCredentials()[0];
+    if (active?.region === 'global' || active?.region === 'cn') return active.region;
+  } catch { /* 没有插件凭据 */ }
+  try {
+    const d = readStoredAuth();
+    if (/workbuddy\.ai|codebuddy\.ai|\.ai(?:\/|$)/i.test(`${d.domain || ''} ${d.endpoint || ''}`)) return 'global';
+  } catch { /* 桌面端不可用 */ }
+  return 'cn';
+}
+
 /** 诊断/健康用的来源状态：不含任何令牌。 */
 function credentialStatus() {
   const status = {
@@ -1655,6 +1673,7 @@ function credentialStatus() {
       expiresAt: auth.expiresAt ? new Date(auth.expiresAt).toISOString() : '',
     };
   } catch (e) { status.error = String(e?.message || e).slice(0, 400); }
+  status.loginRegion = suggestedLoginRegion();
   return status;
 }
 
@@ -1764,6 +1783,28 @@ function prunePendingLogins() {
 }
 
 /** 开始一次设备码登录：返回用户需要在浏览器打开的 URL。 */
+/**
+ * 打开授权页。只接受 https，且不等待子进程 —— 登录结果仍以轮询为准。
+ * 调用方必须显式要求（open:true）；默认不弹浏览器，方便脚本与远程环境。
+ */
+function openExternalUrl(url) {
+  let parsed;
+  try { parsed = new URL(String(url)); } catch { return false; }
+  if (parsed.protocol !== 'https:') return false;
+  try {
+    const [cmd, args] = process.platform === 'win32'
+      ? ['rundll32', ['url.dll,FileProtocolHandler', parsed.toString()]]
+      : process.platform === 'darwin'
+        ? ['open', [parsed.toString()]]
+        : ['xdg-open', [parsed.toString()]];
+    const child = spawn(cmd, args, { detached: true, stdio: 'ignore', windowsHide: true });
+    // xdg-open 在精简环境里可能不存在：不接 error 会变成未捕获异常，把桥带走
+    child.on('error', () => {});
+    child.unref();
+    return true;
+  } catch { return false; }
+}
+
 async function startDeviceLogin(region) {
   const cfg = loginRegionConfig(region);
   const url = `${cfg.loginBase}/v2/plugin/auth/state?platform=workbuddy`;
@@ -6492,8 +6533,9 @@ async function handleRequest(req, res) {
           expired: a.expiresAt ? a.expiresAt < Date.now() : false,
         };
       } catch (e) {
+        // 带上 pid：未登录/凭据异常时 stop() 也要能停掉自己的进程（否则用户点停止只会得到一个假错误）
         return json(res, 503, {
-          ok: false, error: e.message, authFile: AUTH_PATH, credential: credentialStatus(),
+          ok: false, error: e.message, authFile: AUTH_PATH, pid: process.pid, credential: credentialStatus(),
         });
       }
       // 这里**绝不能等上游**：控制台的探测超时是 4 秒，冷缓存时抓目录要好几秒，
@@ -6591,7 +6633,8 @@ async function handleRequest(req, res) {
       const region = body?.region || process.env.WORKBUDDY_LOGIN_REGION || 'cn';
       try {
         const started = await startDeviceLogin(region);
-        return json(res, 200, { ok: true, ...started });
+        const opened = body?.open === true ? openExternalUrl(started.url) : false;
+        return json(res, 200, { ok: true, ...started, opened });
       } catch (e) {
         return json(res, 502, { ok: false, error: e.message });
       }

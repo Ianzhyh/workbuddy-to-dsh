@@ -112,7 +112,7 @@ export function createTools(deps) {
       const list = catalog
         .filter((m) => m && typeof m.id === 'string')
         .filter((m) => !needle || m.id.toLowerCase().includes(needle) || String(m.name || '').toLowerCase().includes(needle));
-      if (!list.length) return needle ? `没有匹配 "${needle}" 的模型。` : '桥没有返回任何可用模型（先确认桥在运行、且 WorkBuddy 桌面端已登录）。';
+      if (!list.length) return needle ? `没有匹配 "${needle}" 的模型。` : '桥没有返回任何可用模型（先确认桥在运行，且已在「账号」页完成桌面端或插件登录）。';
       const lines = [`共 ${list.length} 个可用模型：`];
       for (const m of list) {
         const bits = [];
@@ -185,7 +185,7 @@ export function createTools(deps) {
         result = await client.checkin({ claim, signal: exec?.signal });
       } catch (error) {
         if (error?.status === 502 || /login|sign in|accessToken|凭据|登录/i.test(String(error?.message))) {
-          return `签到不可用：读不出 WorkBuddy 登录凭据（${error.message || 'HTTP ' + error.status}）。\n修法：打开 WorkBuddy 桌面端重新登录一次，然后重试。`;
+          return `签到不可用：读不出 WorkBuddy 登录凭据（${error.message || 'HTTP ' + error.status}）。\n修法：到插件「账号」页重新登录（桌面端或插件登录均可），然后重试。`;
         }
         if (error?.status === 401) {
           return '签到不可用：本地令牌与桥不一致（检查 .env 的 WORKBUDDY_LOCAL_TOKEN，或重启桥）。';

@@ -862,8 +862,11 @@ export function apply(ctx, rawConfig = {}) {
       log(`桥的登录账号已变化（${state.bridgeAccount} → ${account}）：作废积分/签到缓存`);
       state.quotaCache = { at: 0, value: null, error: '', account: null };
       state.checkinCache = { at: 0, value: null, error: '', account: null };
-      // 模型目录也属于"账号视角"的数据（不同账号可见模型可能不同）
+      // 模型目录也属于"账号视角"的数据（不同账号可见模型可能不同）。
+      // 只作废并通知选择器；让 listModels 在 UI 需要时再取，避免在探测路径里
+      // 额外打一次上游（控制台切号后桥可能还在重启）。
       adapter.invalidate();
+      notifyAdaptersUpdated();
       state.bridgeAccount = account;
       return { changed: true, account };
     }
@@ -1038,7 +1041,7 @@ export function apply(ctx, rawConfig = {}) {
               if (arg === 'start' || arg === 'restart') {
                 const result = await supervisor.ensure({ restart: arg === 'restart', signal });
                 adapter.invalidate();
-                if (result.ok) adapter.warmup().catch(() => {});
+                if (result.ok) adapter.warmup().then(() => notifyAdaptersUpdated(), () => notifyAdaptersUpdated());
                 return result.ok
                   ? { kind: 'success', text: `桥已就绪：${supervisor.baseUrl}/v1（pid ${result.health?.pid}${result.reused ? '，复用已有实例' : ''}）` }
                   : { kind: 'error', text: `桥启动失败：${result.error}` };
@@ -1070,7 +1073,7 @@ export function apply(ctx, rawConfig = {}) {
                   if (result?.status === 'ready') {
                     state.pendingLogin = null;
                     adapter.invalidate();
-                    adapter.warmup().catch(() => {});
+                    adapter.warmup().then(() => notifyAdaptersUpdated(), () => notifyAdaptersUpdated());
                     invalidateUpstreamCaches();
                     return { kind: 'success', text: `登录成功：${result.account?.uid || ''}。已切换为插件账号。` };
                   }
@@ -1080,11 +1083,11 @@ export function apply(ctx, rawConfig = {}) {
                   };
                 }
                 try {
-                  const started = await client.deviceLoginStart({ region: config.loginRegion || 'cn' }, signal);
+                  const started = await client.deviceLoginStart({ region: config.loginRegion || 'cn', open: true }, signal);
                   state.pendingLogin = { state: started.state, url: started.url, at: Date.now() };
                   return {
                     kind: 'success',
-                    text: `请在浏览器打开并完成授权（10 分钟内有效）：\n${started.url}\n完成后再次运行 /workbuddy login 检查结果。`,
+                    text: `已尝试打开浏览器授权页（10 分钟内有效）。若没有自动打开，请手动访问：\n${started.url}\n完成后再次运行 /workbuddy login 检查结果。`,
                   };
                 } catch (error) {
                   return { kind: 'error', text: `发起登录失败：${error?.message || error}` };
@@ -1108,7 +1111,7 @@ export function apply(ctx, rawConfig = {}) {
                   }
                   await client.authLogout(target.uid, signal);
                   adapter.invalidate();
-                  adapter.warmup().catch(() => {});
+                  adapter.warmup().then(() => notifyAdaptersUpdated(), () => notifyAdaptersUpdated());
                   invalidateUpstreamCaches();
                   return { kind: 'success', text: '已清除该插件账号的凭据（不影响上游账号）。' };
                 } catch (error) {

@@ -948,6 +948,8 @@ const I18N_EN = {
   '桥未运行，无法读取凭据来源。': 'Bridge is not running; cannot read credential sources.',
   '当前来源': 'Current source',
   '凭据来源': 'Credential source',
+  '桌面端': 'Desktop',
+  '插件登录': 'Plugin sign-in',
   '凭据存储：DPAPI 加密': 'Credential store: DPAPI encrypted',
   '凭据存储：仅内存': 'Credential store: memory only',
   '凭据加密存储不可用，本次登录只保存在内存：':
@@ -4480,7 +4482,12 @@ function distinctAccounts(list) {
 /* ── 插件登录（第二条凭据来源）──────────────────────────────────────────
  * 与插件面板走同一套桥端点；令牌永远不经过浏览器。
  */
-const pluginLoginState = { data: null, pending: null, timer: null, busy: '', region: 'cn' };
+const pluginLoginState = { data: null, pending: null, timer: null, busy: '', region: 'cn', regionTouched: false };
+/** 界面上的来源名：不把 `plugin` / `auto` 这种内部值直接甩给用户。 */
+const CREDENTIAL_SOURCE_LABELS = { auto: '自动', desktop: '桌面端', plugin: '插件登录', 'api-key': 'API Key' };
+function credentialSourceLabel(source) {
+  return CREDENTIAL_SOURCE_LABELS[source] || source || '—';
+}
 /** 实际生效的凭据来源（来自 /api/login 的 effective.source）；账号列表据此决定「使用中」标在哪。 */
 let lastCredentialSource = '';
 
@@ -4493,6 +4500,10 @@ async function loadPluginLogin() {
     pluginLoginState.data = await api('/api/login');
   } catch (err) {
     pluginLoginState.data = { ok: false, error: String((err && err.message) || err) };
+  }
+  if (!pluginLoginState.regionTouched
+    && (pluginLoginState.data?.loginRegion === 'cn' || pluginLoginState.data?.loginRegion === 'global')) {
+    pluginLoginState.region = pluginLoginState.data.loginRegion;
   }
   const nextSource = pluginLoginState.data?.effective?.source || '';
   const sourceChanged = nextSource !== lastCredentialSource;
@@ -4516,7 +4527,13 @@ function renderPluginLogin() {
   const sameAccount = d.sameAccount === true;
   const pending = pluginLoginState.pending;
   const region = pluginLoginState.region || 'cn';
-  const sourceOptions = [['auto', '自动（桌面端优先）'], ['desktop', '仅桌面端'], ['plugin', '仅插件登录']];
+  const desktopUsable = d.desktop?.available === true;
+  // 没装桌面端时不展示「仅桌面端」——选了必然失败；auto 也不再声称桌面端优先
+  const sourceOptions = [
+    ['auto', desktopUsable ? '自动（桌面端优先）' : '自动'],
+    ...(desktopUsable || source === 'desktop' ? [['desktop', '仅桌面端']] : []),
+    ['plugin', '仅插件登录'],
+  ];
   const regionOptions = [['cn', '国内版'], ['global', '国际版']];
   const sourceControl = d.envPinned
     ? '<span class="mono">' + escapeAttr(source) + '</span><span class="mono"> （由环境变量锁定）</span>'
@@ -4526,7 +4543,7 @@ function renderPluginLogin() {
   el.innerHTML =
     '<div class="panel-tools" style="margin:0 0 8px"><span class="hint">当前来源</span>' + sourceControl +
       '<span class="hint">' + storeText + '</span>' +
-      '<span class="hint">实际使用：</span><span class="mono">' + escapeAttr(effectiveSource || '—') + '</span></div>' +
+      '<span class="hint">实际使用：</span><span class="mono">' + escapeAttr(credentialSourceLabel(effectiveSource)) + '</span></div>' +
     (d.desktop && d.desktop.available && creds.length
       ? '<div class="hint" style="margin:0 0 8px">'
         + (sameAccount
@@ -4560,7 +4577,11 @@ function renderPluginLogin() {
   const srcSel = $('pluginLoginSource');
   if (srcSel) srcSel.onchange = () => changePluginSource(srcSel.value);
   const regSel = $('pluginLoginRegion');
-  if (regSel) regSel.onchange = () => { pluginLoginState.region = regSel.value; renderPluginLogin(); };
+  if (regSel) regSel.onchange = () => {
+    pluginLoginState.regionTouched = true;
+    pluginLoginState.region = regSel.value;
+    renderPluginLogin();
+  };
   if (pending) {
     const copyBtn = $('pluginLoginCopy');
     if (copyBtn) copyBtn.onclick = () => { copyText(pending.url); setMsg('授权链接已复制', 'good'); };
@@ -4576,7 +4597,7 @@ async function startPluginLogin() {
   renderPluginLogin();
   const r = await api('/api/login/start', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ region: pluginLoginState.region || 'cn' }),
+    body: JSON.stringify({ region: pluginLoginState.region || 'cn', open: true }),
   });
   pluginLoginState.busy = '';
   if (r.ok && r.state && r.url) {

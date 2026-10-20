@@ -44,6 +44,13 @@ clients can connect directly.
 dsh plugin --profile desktop add github:Ianzhyh/workbuddy-to-dsh
 ```
 
+**One-click ready:** install the plugin → open **Settings → WorkBuddy → Account → Sign in**
+(the browser opens automatically) → pick a WorkBuddy model. No desktop app, API key,
+Base URL, token, port or environment variable is required. If the desktop app is already
+signed in, its login is reused and step 2 is unnecessary. The China / Global region is
+pre-selected from the existing account or desktop domain, and the model picker refreshes
+after sign-in, account switches or bridge restarts — no extra dsh restart.
+
 ## ⚠️ Read this first (disclaimer & boundaries)
 
 - **Unofficial path.** This relies on WorkBuddy's undocumented upstream protocol and

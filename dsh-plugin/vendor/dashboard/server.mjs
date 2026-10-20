@@ -1478,7 +1478,10 @@ const server = createServer(async (req, res) => {
     if (route === '/api/login/start' && req.method === 'POST') {
       try {
         const body = JSON.parse(await readBody(req));
-        const started = await bridgeDeviceStart(body?.region === 'global' ? 'global' : 'cn');
+        const started = await bridgeDeviceStart(
+          body?.region === 'global' ? 'global' : 'cn',
+          { open: body?.open === true },
+        );
         sendJson(res, 200, { ok: true, ...started });
       } catch (err) {
         sendJson(res, 200, { ok: false, error: String(err?.message || err) });

@@ -139,7 +139,7 @@ async function bridgeJsonCall(path, { method = 'GET', body, timeoutMs = 15000 } 
 /** 插件登录：来源状态 / 凭据清单（永不含令牌）。 */
 export const bridgeAuthSource = () => bridgeJsonCall('/v1/auth/source');
 export const bridgeAuthCredentials = () => bridgeJsonCall('/v1/auth/credentials');
-export const bridgeDeviceStart = (region = 'cn') => bridgeJsonCall('/v1/auth/device', { method: 'POST', body: { region }, timeoutMs: 30000 });
+export const bridgeDeviceStart = (region = 'cn', { open = false } = {}) => bridgeJsonCall('/v1/auth/device', { method: 'POST', body: { region, open: open === true }, timeoutMs: 30000 });
 export const bridgeDevicePoll = (state) => bridgeJsonCall(`/v1/auth/device?state=${encodeURIComponent(state)}`, { timeoutMs: 30000 });
 export const bridgeDeviceCancel = (state) => bridgeJsonCall(`/v1/auth/device?state=${encodeURIComponent(state)}`, { method: 'DELETE', timeoutMs: 8000 });
 export const bridgeAuthActive = (uid) => bridgeJsonCall('/v1/auth/active', { method: 'POST', body: { uid }, timeoutMs: 8000 });
