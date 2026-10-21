@@ -63,7 +63,7 @@ request ledger when the host exposes them, otherwise a clearly-labelled estimate
 |---|---|---|
 | Model name | `DeepSeek-V4.1-Flash · ×0.11` / `· Free` | The multiplier comes from the model catalog; no need to open details |
 | Chat header | `Credits 715` | Hover for package remaining, today's spend and the last call; turns amber at ≤30%, red at ≤10%; click to refresh. A failed read keeps the last balance with an error mark; with an existing conversation and no valid sign-in, this seat becomes the sign-in entry |
-| End of the latest turn | `This turn: 0.03 credits` | Matched against the turn's tokens and the local request ledger when available; falls back to the latest completed request (the tooltip says so) on older hosts or when no match is provable |
+| End of the latest turn | `This turn: 0.03 credits` | Matched against the turn's tokens and the local request ledger when available; falls back to the latest completed request (marked `≈`, tooltip explains) on older hosts or when no match is provable |
 | Empty chat | `Connect WorkBuddy` | Starts browser authorization without opening Settings; the model picker refreshes automatically |
 
 `×0.11` is a **credit multiplier**, not a CNY price; free models are labelled as such.

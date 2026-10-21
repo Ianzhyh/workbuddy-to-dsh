@@ -271,6 +271,80 @@ try {
   const taWidth = await page.cdp.evaluate(`(() => { const t=document.querySelector('.wb-textarea'); const card=t ? t.closest('.wb-card') : null; return { tw: t ? t.offsetWidth : 0, cw: card ? card.clientWidth : 0 }; })()`);
   if (!(taWidth.tw > 0 && taWidth.tw <= taWidth.cw)) problems.push(`对话输入框超出卡片（textarea=${taWidth.tw}px > card=${taWidth.cw}px）`);
 
+  // 失败路径：503 不能留空助手气泡，原文要回输入框，发送按钮要恢复可用
+  const chatFailure = await page.cdp.evaluate(`(async () => {
+    const orig = window.__routes['/workbuddy/console-api/chat'];
+    window.__setRoute('/workbuddy/console-api/chat', { httpStatus: 503, payload: { ok: false, error: 'console down' } });
+    const ta = document.querySelector('.wb-textarea');
+    const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set;
+    setter.call(ta, '失败也要还给我');
+    ta.dispatchEvent(new Event('input', { bubbles: true }));
+    await new Promise((r) => setTimeout(r, 150));
+    const sendBtn = [...document.querySelectorAll('.wb-btn')].find((b) => b.textContent === '发送');
+    sendBtn.click();
+    await new Promise((r) => setTimeout(r, 700));
+    const assistants = [...document.querySelectorAll('.wb-msg.assistant')].map((el) => el.innerText);
+    const alert = (document.querySelector('.wb-alert.bad') || {}).innerText || '';
+    const restored = ta.value;
+    const sendAgain = [...document.querySelectorAll('.wb-btn')].find((b) => b.textContent === '发送');
+    const sendDisabled = sendAgain ? sendAgain.disabled : null;
+    const clear = [...document.querySelectorAll('.wb-btn')].find((b) => b.textContent === '清空对话');
+    if (clear) clear.click();
+    await new Promise((r) => setTimeout(r, 250));
+    window.__setRoute('/workbuddy/console-api/chat', orig);
+    return { assistants, alert, restored, sendDisabled };
+  })()`);
+  if (chatFailure.assistants.length) problems.push('503 后残留了空助手气泡');
+  if (!/控制台/.test(chatFailure.alert)) problems.push(`503 没有给出可行动的错误：${chatFailure.alert}`);
+  if (chatFailure.restored !== '失败也要还给我') problems.push(`503 后原文没有回到输入框：${chatFailure.restored}`);
+  if (chatFailure.sendDisabled) problems.push('503 后发送按钮仍被禁用');
+
+  // 上游空回答（有 finish_reason、无正文/思考）按失败处理，不能留空气泡
+  const chatEmpty = await page.cdp.evaluate(`(async () => {
+    const orig = window.__routes['/workbuddy/console-api/chat'];
+    window.__setRoute('/workbuddy/console-api/chat', {
+      sse: [JSON.stringify({ choices: [{ delta: {}, finish_reason: 'stop' }] })],
+    });
+    const ta = document.querySelector('.wb-textarea');
+    const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set;
+    setter.call(ta, '空回答测试');
+    ta.dispatchEvent(new Event('input', { bubbles: true }));
+    await new Promise((r) => setTimeout(r, 150));
+    const sendBtn = [...document.querySelectorAll('.wb-btn')].find((b) => b.textContent === '发送');
+    sendBtn.click();
+    await new Promise((r) => setTimeout(r, 800));
+    const assistants = [...document.querySelectorAll('.wb-msg.assistant')].map((el) => el.innerText);
+    const alert = (document.querySelector('.wb-alert.bad') || {}).innerText || '';
+    const restored = ta.value;
+    const clear = [...document.querySelectorAll('.wb-btn')].find((b) => b.textContent === '清空对话');
+    if (clear) clear.click();
+    await new Promise((r) => setTimeout(r, 250));
+    window.__setRoute('/workbuddy/console-api/chat', orig);
+    return { assistants, alert, restored };
+  })()`);
+  if (chatEmpty.assistants.length) problems.push('空回答后残留了空助手气泡');
+  if (!/空回答/.test(chatEmpty.alert)) problems.push(`空回答没有按失败提示：${chatEmpty.alert}`);
+  if (chatEmpty.restored !== '空回答测试') problems.push(`空回答后原文没有回到输入框：${chatEmpty.restored}`);
+
+  // 快速重复回车：同步两次 keydown 只能发一个请求
+  const chatDouble = await page.cdp.evaluate(`(async () => {
+    const ta = document.querySelector('.wb-textarea');
+    const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set;
+    setter.call(ta, '只发一次');
+    ta.dispatchEvent(new Event('input', { bubbles: true }));
+    await new Promise((r) => setTimeout(r, 150));
+    const before = window.__calls.filter((c) => String(c[0]).includes('/chat')).length;
+    ta.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true, cancelable: true }));
+    ta.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true, cancelable: true }));
+    await new Promise((r) => setTimeout(r, 1000));
+    const calls = window.__calls.filter((c) => String(c[0]).includes('/chat')).length - before;
+    const clear = [...document.querySelectorAll('.wb-btn')].find((b) => b.textContent === '清空对话');
+    if (clear) clear.click();
+    await new Promise((r) => setTimeout(r, 250));
+    return { calls };
+  })()`);
+  if (chatDouble.calls !== 1) problems.push(`快速重复回车发出了 ${chatDouble.calls} 次请求（应为 1）`);
+
   // 真跑一轮对话：往输入框塞字、触发 Enter（走 React 的 onChange 链），
   // 断言流式回答渲染出来、且逐轮元数据（耗时/tokens/扣分）贴在回答下方。
   const chatRun = await page.cdp.evaluate(`(async () => {
@@ -417,6 +491,36 @@ try {
   const quotaMsg = await page.cdp.evaluate(`(() => { const c=document.querySelector('.wb-quota'); return c ? c.innerText : ''; })()`);
   if (!/已刷新|刷新失败/.test(quotaMsg)) problems.push('刷新积分后没有给出结果提示');
   console.log(`积分刷新：POST /workbuddy/quota → ${/已刷新/.test(quotaMsg) ? '成功提示' : /旧构建/.test(quotaMsg) ? '旧构建降级提示' : /刷新失败/.test(quotaMsg) ? '失败提示' : '（无提示）'}`);
+
+  // 网络层直接 reject（不是 HTTP 错误）：刷新按钮不能永久 disabled
+  const quotaNetwork = await page.cdp.evaluate(`(async () => {
+    const orig = window.__routes['/workbuddy/quota'];
+    window.__setRoute('/workbuddy/quota', { fetchError: 'fixture network down' });
+    const card = document.querySelector('.wb-quota');
+    const btn = card && [...card.querySelectorAll('button')].find((b) => /刷新积分/.test(b.textContent));
+    if (!btn) { window.__setRoute('/workbuddy/quota', orig); return { found: false }; }
+    btn.click();
+    await new Promise((r) => setTimeout(r, 500));
+    const card2 = document.querySelector('.wb-quota');
+    const btn2 = card2 && [...card2.querySelectorAll('button')].find((b) => /刷新/.test(b.textContent));
+    const res = {
+      found: true,
+      text: card2 ? card2.innerText : '',
+      label: btn2 ? btn2.textContent : '',
+      disabled: btn2 ? btn2.disabled : null,
+    };
+    window.__setRoute('/workbuddy/quota', orig);
+    return res;
+  })()`);
+  if (!quotaNetwork.found) problems.push('找不到「刷新积分」按钮（网络异常用例）');
+  else {
+    if (/刷新中/.test(quotaNetwork.label) || quotaNetwork.disabled) {
+      problems.push('网络异常后「刷新积分」按钮卡在刷新中/禁用态');
+    }
+    if (!/fixture network down/.test(quotaNetwork.text)) {
+      problems.push(`网络异常没有把原因显示出来：${quotaNetwork.text.slice(0, 120)}`);
+    }
+  }
 
   // 破坏性操作必须二次确认，且确认后才真的发请求：
   //   清空账本（用量）/ 清空日志（日志）/ 清除体检结论（模型）
@@ -708,6 +812,16 @@ try {
   {
     const quota = await page.cdp.evaluate(`(async () => {
       const origQuota = window.__routes['/workbuddy/quota'];
+      const origUsage = window.__routes['/workbuddy/usage'];
+      const d = new Date();
+      const pad = (n) => String(n).padStart(2, '0');
+      const todayKey = d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate());
+      // total 是滚动 24h 的 1.24；当天桶只有 0.42 —— 胶囊必须取后者。
+      window.__setRoute('/workbuddy/usage', {
+        ok: true,
+        total: { credit: 1.24 },
+        days: [{ day: todayKey, credit: 0.42 }],
+      });
       const host = document.createElement('div');
       host.id = 'quota-probe';
       document.body.appendChild(host);
@@ -715,7 +829,7 @@ try {
       root.render(React.createElement(window.__module.ChatQuotaPill));
       await new Promise((r) => setTimeout(r, 800));
       const btn = host.querySelector('[data-workbuddy-quota]');
-      if (!btn) { root.unmount(); host.remove(); return { found: false }; }
+      if (!btn) { root.unmount(); host.remove(); window.__setRoute('/workbuddy/usage', origUsage); return { found: false }; }
       const text = btn.textContent;
       const title = btn.getAttribute('title') || '';
       const className = btn.className;
@@ -767,6 +881,7 @@ try {
       } : { present: false };
       failRoot.unmount(); failHost.remove();
       window.__setRoute('/workbuddy/quota', origQuota);
+      window.__setRoute('/workbuddy/usage', origUsage);
       root.unmount(); host.remove();
       return { found: true, text, title, className, posts, failed, mismatch, firstReadFailure };
     })()`);
@@ -776,6 +891,8 @@ try {
       if (quota.posts < 1) problems.push('点击积分胶囊没有强制刷新');
       if (!/最近一次请求失败/.test(quota.title)) problems.push(`最近一次请求失败没有写进胶囊 title：${quota.title}`);
       if (!/bad/.test(quota.className)) problems.push('最近一次请求失败没有把胶囊标红');
+      if (!/今日已用：0\.42 积分/.test(quota.title)) problems.push(`「今日已用」没有取本地当天桶：${quota.title}`);
+      if (/今日已用：1\.24/.test(quota.title)) problems.push('「今日已用」误用了滚动 24 小时 total');
       if (!quota.failed.present) problems.push('积分刷新失败后胶囊消失了（应当保留上次余额并标注错误）');
       else {
         if (quota.failed.disabled) problems.push('积分刷新失败后按钮仍是禁用态（busy 卡死）');
@@ -903,6 +1020,40 @@ try {
       } : null;
       turnRoot.unmount(); sessionHost.remove();
 
+      // 一轮多次请求：单条记录对不上（120/30），但两条同模型记录加总正好等于
+      // 本轮 usage —— 必须取合计，而不是退回"最近一次请求"。
+      const multiSnapshot = {
+        timeline: { turnOrder: [3] },
+        locations: { getTurn: (t) => (String(t) === '3' ? ['turn-node-3'] : []) },
+        nodes: {
+          get: (k) => (k === 'turn-node-3' ? {
+            kind: 'turn-tail',
+            data: { tokenUsage: { uncachedInputTokens: 100, cacheReadTokens: 20, cacheWriteTokens: 0, outputTokens: 30, routes: [{ model: 'stub-model' }] } },
+          } : undefined),
+        },
+        legacy: { turnTimings: new Map([[3, { startTime: new Date(now - 20000).toISOString(), endTime: new Date(now - 1000).toISOString() }]]) },
+      };
+      window.__setRoute('/workbuddy/requests', {
+        ok: true,
+        requests: [
+          { t: now - 3000, model: 'stub-model', ok: true, credit: 0.03, ms: 800, promptTokens: 60, completionTokens: 15 },
+          { t: now - 5000, model: 'stub-model', ok: true, credit: 0.02, ms: 700, promptTokens: 60, completionTokens: 15 },
+        ],
+      });
+      const multiHost = document.createElement('div');
+      multiHost.setAttribute('data-turn-tail', '3');
+      document.body.appendChild(multiHost);
+      const multiRoot = ReactDOM.createRoot(multiHost);
+      multiRoot.render(React.createElement(window.__module.ChatTurnCost, { turn: 3, seq: 3, useChat: (selector) => selector(multiSnapshot) }));
+      await new Promise((r) => setTimeout(r, 900));
+      const multiEl = multiHost.querySelector('[data-workbuddy-turn-cost]');
+      const multi = multiEl ? {
+        text: multiEl.textContent,
+        title: multiEl.getAttribute('title') || '',
+        exact: multiEl.getAttribute('data-exact'),
+      } : null;
+      multiRoot.unmount(); multiHost.remove();
+
       // 同一回合，但会话已经推进到第 2 轮：旧 tail 不能再显示"本轮"。
       const staleSnapshot = { ...snapshot, timeline: { turnOrder: [1, 2] } };
       const staleHost = document.createElement('div');
@@ -953,7 +1104,7 @@ try {
 
       window.__setRoute('/workbuddy/status', origStatus);
       window.__setRoute('/workbuddy/requests', origRequests);
-      return { login: waiting ? 'ok' : 'no-link', cancelled, cancelCalls, exact, staleText, fallback, oldStaleBefore, oldStaleAfter };
+      return { login: waiting ? 'ok' : 'no-link', cancelled, cancelCalls, exact, multi, staleText, fallback, oldStaleBefore, oldStaleAfter };
     })()`);
     if (chatBits.login !== 'ok') problems.push('空会话「连接 WorkBuddy」没有进入等待授权/没给授权链接');
     if (chatBits.login === 'ok' && (!chatBits.cancelled || chatBits.cancelCalls < 1)) {
@@ -964,11 +1115,19 @@ try {
       if (!/0\.05/.test(chatBits.exact.text)) problems.push(`本轮积分没有按 token 对到正确请求：${chatBits.exact.text}`);
       if (chatBits.exact.exact !== '1') problems.push('本轮积分没有标记为账本核对结果');
       if (!/核对/.test(chatBits.exact.title)) problems.push(`本轮积分的 title 没说明核对：${chatBits.exact.title}`);
+      if (/≈/.test(chatBits.exact.text)) problems.push('账本核对结果被误标成估算（≈）');
+    }
+    if (!chatBits.multi) problems.push('一轮多次请求的回合没有渲染积分');
+    else {
+      if (!/0\.05/.test(chatBits.multi.text)) problems.push(`多请求回合没有取账本合计：${chatBits.multi.text}`);
+      if (chatBits.multi.exact !== '1') problems.push('多请求回合没有标记为账本核对结果');
+      if (!/2 次请求/.test(chatBits.multi.title)) problems.push(`多请求回合 title 没说明请求数：${chatBits.multi.title}`);
     }
     if (chatBits.staleText) problems.push(`非最后一轮仍在显示每轮积分：${chatBits.staleText}`);
     if (!chatBits.fallback) problems.push('旧宿主（没有 useChat）下每轮积分不显示');
     else {
       if (!/0\.03/.test(chatBits.fallback.text)) problems.push(`旧宿主每轮积分回退取值不对：${chatBits.fallback.text}`);
+      if (!/≈/.test(chatBits.fallback.text)) problems.push(`旧宿主回退没有在可见文案标 ≈：${chatBits.fallback.text}`);
       if (chatBits.fallback.exact !== '0') problems.push('旧宿主回退值被误标成账本核对结果');
       if (!/估算/.test(chatBits.fallback.title)) problems.push(`旧宿主回退没有标注估算：${chatBits.fallback.title}`);
     }

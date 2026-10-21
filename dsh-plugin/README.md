@@ -26,7 +26,7 @@ dsh 的模型选择器会自动刷新，不需要再重启一次。
 - **每轮积分**：最新一轮回复末尾显示「本轮 x.xxx 积分 / 免费」。
   宿主通过标准 prop `useChat` 给出本轮 `tokenUsage` / `turnTimings` 时，会拿
   tokens 与本地请求账本核对，得到**实际扣费**；旧宿主或核对不上时才退回
-  「最近一次已完成的模型请求」估算（悬停注明）。只有最后一个回合显示，
+  「最近一次已完成的模型请求」估算（可见文案标 `≈`，悬停注明）。只有最后一个回合显示，
   新回合开始后旧标签会自动消失。
 
 这些分别注册在 `conversation.session.header.utilities`、`conversation.hero.options`、

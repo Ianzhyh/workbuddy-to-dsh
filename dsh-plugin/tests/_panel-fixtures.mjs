@@ -271,11 +271,19 @@ window.confirm = function (message) { window.__dialogs.push(String(message)); re
     // 之后正常。用来钉住「404 必须自动重试、不能把红字挂一分钟」这条回归。
     const route = ROUTES[path];
     window.__hits[path] = (window.__hits[path] || 0) + 1;
+    // fetchError：模拟网络层直接 reject（桥刚退出、断网），不是 HTTP 错误。
+    if (route && route.fetchError) return Promise.reject(new Error(String(route.fetchError)));
     if (route && route.firstStatus && window.__hits[path] === 1) {
       return Promise.resolve(new Response(JSON.stringify({ ok: false, error: 'not ready' }), { status: route.firstStatus, headers: { 'content-type': 'application/json' } }));
     }
     // sse：对话流（text/event-stream）。用来端到端验证对话测试的渲染、
     // 逐轮元数据、以及"空助手消息不回灌"这条逻辑。
+    if (route && Object.prototype.hasOwnProperty.call(route, 'httpStatus')) {
+      return Promise.resolve(new Response(JSON.stringify(route.payload !== undefined ? route.payload : {}), {
+        status: route.httpStatus,
+        headers: { 'content-type': 'application/json' },
+      }));
+    }
     if (route && Array.isArray(route.sse)) {
       const payload = route.sse.map((line) => 'data: ' + line + '\\n\\n').join('') + 'data: [DONE]\\n\\n';
       return Promise.resolve(new Response(payload, { status: 200, headers: { 'content-type': 'text/event-stream' } }));

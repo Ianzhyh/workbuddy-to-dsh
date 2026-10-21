@@ -1403,11 +1403,21 @@ body.dark .wb-root,
       }
     }
     async function postJson(path, body, method) {
-      const res = await fetch(path, { method: method || 'POST', headers: PANEL_HEADERS, body: body === undefined ? undefined : JSON.stringify(body), cache: 'no-store' });
-      const text = await res.text();
-      let data;
-      try { data = JSON.parse(text); } catch (e) { data = { ok: false, error: text.slice(0, 200) }; }
-      return { status: res.status, data };
+      /*
+       * 网络断/桥刚退出时 fetch 会直接 reject。**这里统一吞成失败响应**：
+       * 面板里有几十个 `const res = await postJson(...); setBusy(false)` 的写法，
+       * 任何一处没包 try/catch 都会留下未处理 rejection 和永久 disabled 的按钮。
+       * 统一返回 `{status:0, data:{ok:false,error}}`，调用方按普通失败分支处理。
+       */
+      try {
+        const res = await fetch(path, { method: method || 'POST', headers: PANEL_HEADERS, body: body === undefined ? undefined : JSON.stringify(body), cache: 'no-store' });
+        const text = await res.text();
+        let data;
+        try { data = JSON.parse(text); } catch (e) { data = { ok: false, error: text.slice(0, 200) }; }
+        return { status: res.status, data };
+      } catch (error) {
+        return { status: 0, data: { ok: false, error: String(error?.message || error) } };
+      }
     }
 
     /**
@@ -1567,6 +1577,11 @@ body.dark .wb-root,
     function fmtTime(ts) {
       const d = parseDate(ts);
       return d ? d.toLocaleString('zh-CN', { hour12: false }) : '—';
+    }
+    /** 本地日期键 `YYYY-MM-DD`，与桥的 usage.days[].day 同一口径（不用 UTC）。 */
+    function localDayKey(date = new Date()) {
+      const pad = (n) => String(n).padStart(2, '0');
+      return date.getFullYear() + '-' + pad(date.getMonth() + 1) + '-' + pad(date.getDate());
     }
     function fmtClock(ts) {
       const d = parseDate(ts);
@@ -3744,6 +3759,9 @@ body.dark .wb-root,
                     setMessage('目录刷新失败，请稍后重试。');
                   }
                   reload();
+                } catch (e) {
+                  // getJson 在断网时仍会 reject；按钮必须复位并给出可读结论。
+                  setMessage('目录刷新失败，请稍后重试。');
                 } finally { setRefreshing(false); }
               },
             }, refreshing ? '刷新中…' : '刷新目录'),
@@ -4462,9 +4480,20 @@ body.dark .wb-root,
       const lastRecent = lastAt > 0 && Date.now() - lastAt <= 5 * 60 * 1000;
       const lastFailed = last && last.ok === false && lastRecent;
       const lastCredit = last && last.ok !== false && typeof last.credit === 'number' ? last.credit : null;
-      const today = usageData?.ok !== false && typeof usageData?.total?.credit === 'number'
-        ? usageData.total.credit
+      /*
+       * 「今日已用」必须取本地当天的日桶。直接读 total.credit 是**滚动 24h**，
+       * 凌晨会把昨天下午的用量算进今天。旧宿主没有 days 时才退回 24h 并改标签。
+       */
+      const usageBuckets = Array.isArray(usageData?.days) ? usageData.days : null;
+      const todayKey = localDayKey();
+      const todayBucket = usageBuckets
+        ? usageBuckets.find((d) => d && (d.day || d.key) === todayKey)
         : null;
+      const today = usageData?.ok === false
+        ? null
+        : (usageBuckets
+          ? (todayBucket && typeof todayBucket.credit === 'number' ? todayBucket.credit : 0)
+          : (typeof usageData?.total?.credit === 'number' ? usageData.total.credit : null));
       // 读取/刷新失败、最近一次请求失败或积分仍属上一个账号 → 红点；其余按套餐余量分级。
       const tone = error || lastFailed || accountMismatch ? 'bad' : ratioTone;
       const titleLines = [
@@ -4474,7 +4503,12 @@ body.dark .wb-root,
           ? (en ? 'These credits still belong to the previous account; refreshing…' : '积分还是上一个账号的，正在自动重读…')
           : '',
         ratio !== null ? (en ? 'Package remaining: ' : '套餐余量：') + Math.round(ratio * 100) + '%' : '',
-        today !== null ? (en ? 'Used today: ' : '今日已用：') + fmtCreditShort(today) + (en ? ' credits' : ' 积分') : '',
+        today !== null
+          ? (en
+            ? (usageBuckets ? 'Used today: ' : 'Used in the last 24h: ')
+            : (usageBuckets ? '今日已用：' : '最近24小时已用：'))
+            + fmtCreditShort(today) + (en ? ' credits' : ' 积分')
+          : '',
         lastFailed
           ? (en ? 'Last request failed: ' : '最近一次请求失败：')
             + 'HTTP ' + (last.status || '—') + (last.error ? ' · ' + String(last.error).slice(0, 120) : '')
@@ -4682,7 +4716,11 @@ body.dark .wb-root,
         const attempt = async (tries) => {
           if (!alive) return;
           try {
-            const { data } = await getJson('/workbuddy/requests?limit=20');
+            /*
+             * 取 100 条而不是 1 条：历史会话的最后一轮可能已经被其它窗口的请求
+             * 挤出前 20；按 tokens 匹配需要它还在窗口里，否则只能退回估算。
+             */
+            const { data } = await getJson('/workbuddy/requests?limit=100');
             if (!alive) return;
             const hit = pickTurnCost(data?.requests, turnUsage, timing, mountAt);
             /*
@@ -4708,9 +4746,11 @@ body.dark .wb-root,
       const creditText = info.credit === 0
         ? (en ? 'free' : '免费')
         : fmtCreditShort(info.credit) + (en ? ' credits' : ' 积分');
+      // 估算值在可见文案里就标 ≈，不让用户必须悬停才知道。
+      const approx = info.exact || info.credit === 0 ? '' : '≈';
       const text = info.credit === 0
         ? (en ? 'Free this turn' : '本轮免费')
-        : (en ? 'This turn: ' : '本轮 ') + fmtCreditShort(info.credit) + (en ? ' credits' : ' 积分');
+        : (en ? 'This turn: ' + approx : '本轮 ' + approx) + fmtCreditShort(info.credit) + (en ? ' credits' : ' 积分');
       const title = (info.exact
         ? (en ? 'Matched against this turn’s tokens and the local request ledger: ' : '按本轮 tokens 与本地账本核对：')
         : (en ? 'Estimated from the latest model request (may belong to another session): ' : '按最近一次模型请求估算（并发时可能对到另一会话）：'))

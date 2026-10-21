@@ -65,7 +65,7 @@ dsh 的模型选择器里，日常需要的接入、管理、监控、运维能�
 |---|---|---|
 | **模型名** | `DeepSeek-V4.1-Flash · ×0.11` / `· 免费` | 倍率来自模型目录，选模型时就能看到；不用点进详情 |
 | **对话页顶部** | `积分 715` | 悬停看套餐余量 / 今日已用 / 最近一次调用；余量 ≤30% 变黄、≤10% 变红；点一下强制刷新。读取失败时保留上次余额并标红；已有对话但未登录/凭据异常时，这里直接变成登录入口 |
-| **每轮回复末尾** | `本轮 0.03 积分` | 优先用宿主给出的本轮 tokens 与本地请求账本核对，拿到实际扣费；旧宿主或核对不上时退回「最近一次已完成请求」估算（悬停注明） |
+| **每轮回复末尾** | `本轮 0.03 积分` | 优先用宿主给出的本轮 tokens 与本地请求账本核对，拿到实际扣费；旧宿主或核对不上时退回「最近一次已完成请求」估算并标 `≈`（悬停有说明） |
 | **空会话欢迎区** | `连接 WorkBuddy` | 未登录时直接发起浏览器授权，不用先进设置页；成功后模型选择器自动刷新 |
 
 > `×0.11` 是**积分消耗倍率**，不是人民币单价；免费模型直接标「免费」。
@@ -161,7 +161,7 @@ dsh plugin --profile desktop add github:Ianzhyh/workbuddy-to-dsh
 
 # 方式二：release 附件（tgz 安装包，无构建、无需 allowBuilds 授权）
 #   从 GitHub Releases 下载 dsh-plugin-workbuddy-<版本>.tgz 后：
-dsh plugin --profile desktop add ./dsh-plugin-workbuddy-1.9.0.tgz
+dsh plugin --profile desktop add ./dsh-plugin-workbuddy-1.9.1.tgz
 
 # 方式三：从源码（插件在 dsh-plugin/ 子目录，接第 1 步的 git clone）
 dsh plugin --profile desktop add workbuddy-to-dsh/dsh-plugin
