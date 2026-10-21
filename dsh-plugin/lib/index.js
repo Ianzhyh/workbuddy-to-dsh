@@ -39,6 +39,7 @@ import { toDirectory, pickDefaultModel } from './models.mjs';
 import { createTools } from './tools.mjs';
 import { createRouteTable, mountRoutes } from './routes.mjs';
 import { cleanLegacyRoutes, detectLegacyRoutes } from './legacy.mjs';
+import { PLUGIN_PACKAGE_NAMES } from './packageNames.mjs';
 
 export const name = 'workbuddy';
 /** 硬依赖 llm：没有它就没有「原生路由」这件事，插件保持不激活比半激活好。 */
@@ -448,7 +449,7 @@ function resolveDshPaths() {  const home = process.env.DSH_HOME || join(homedir(
  * 这是「面板为什么没出现」最关键的一条诊断：宿主端把每个声明了 `dsh.client`
  * 的 Loader 条目组装成一条引导行，`ctx.clientModules.graph()` 就是那张表。
  */
-export function clientGraphSummary(clientModules, packageName = ['dsh-plugin-workbuddy', 'workbuddy-to-dsh']) {
+export function clientGraphSummary(clientModules, packageName = PLUGIN_PACKAGE_NAMES) {
   if (!clientModules || typeof clientModules.graph !== 'function') {
     return { available: false, reason: 'clientModules 服务不可用（当前不是 Web 组合）' };
   }

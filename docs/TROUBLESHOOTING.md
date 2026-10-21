@@ -13,6 +13,39 @@ node tools\doctor.mjs
 
 ## 按症状定位
 
+### dsh 启动失败：`workbuddy-to-dsh: import failed`
+
+**症状**：dsh 弹出「应用无法启动或已意外停止」，错误里有
+
+```
+web boot: 1 entry did not activate
+workbuddy-to-dsh: import failed (see console for the import error)
+```
+
+**原因**：dsh 用 **Loader 条目的包名** 当客户端模块 id。两种安装形态的包名不同：
+
+- `dsh plugin add github:Ianzhyh/workbuddy-to-dsh` → 根包 `workbuddy-to-dsh`
+- tgz / 单文件夹安装 → 子包 `dsh-plugin-workbuddy`
+
+客户端 bundle 必须按实际包名注册。**v1.9.3 已修复**（issue #3），旧版本只注册了
+`dsh-plugin-workbuddy`，因此 GitHub 直装必然启动失败。这不是模型或上游的问题。
+
+**处理**：
+
+```sh
+# 先升级（或删掉重装；dsh 起不来时 CLI 仍然可用）
+dsh plugin --profile desktop update workbuddy-to-dsh
+dsh plugin --profile desktop remove workbuddy-to-dsh
+dsh plugin --profile desktop add github:Ianzhyh/workbuddy-to-dsh
+```
+
+tgz 安装的把包名换成 `dsh-plugin-workbuddy`，然后重启 dsh。升级后仍失败时，
+把 crash log（`%APPDATA%\@deepseek-ai\dsh-desktop\crash-*-web-boot.log`）里
+`import failed:` 后面那一行贴到 issue —— 新版本会带上具体原因。
+
+> 维护者注意：新增/修改安装形态时，按 `CONTRIBUTING.md` 的「安装形态」清单
+> 同步所有包名引用；`npm run test:plugin` 与 `npm run verify:github` 会拦截漂移。
+
 ### 模型没有出现在 dsh 的模型选择器里
 
 三个必要条件，缺一不可 —— 逐项确认：

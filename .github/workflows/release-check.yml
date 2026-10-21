@@ -46,6 +46,9 @@ jobs:
       - name: 独立分发包演练（没有仓库时也能跑起来）
         run: node dsh-plugin/scripts/verify-standalone.mjs
 
+      - name: GitHub 直装形态演练（根包 pack + 安装 + 客户端 id 契约）
+        run: npm run verify:github
+
   cross-platform:
     # B4：README 承认 macOS/Linux「已实现未实测」—— 矩阵 CI 是唯一低成本的
     # 兑现方式。跑除 verify-standalone 之外的跨平台子集（独立演练的跨平台

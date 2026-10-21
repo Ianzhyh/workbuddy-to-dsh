@@ -19,7 +19,23 @@
 
 ## [Unreleased]
 
-（暂无）
+### Added
+
+- **GitHub 直装形态的发布门禁**：新增 `npm run verify:github`（已接入
+  `release:check`），真实执行根包 `npm pack` → 安装到临时 profile 的
+  `node_modules/workbuddy-to-dsh` → 校验 Loader 名、客户端注册 id、运行时文件与
+  `projectRoot`，并实际启动安装后的桥与控制台。issue #3 这类「根包形态没验证」
+  的漏洞会在发版前被拦下。
+- **安装契约测试**：新增 `install-contract.test.mjs` 与
+  `lib/packageNames.mjs` 单一来源，把两种安装形态的 manifest、`cordis.patch.yml`、
+  `client.js` 注册列表、`NATIVE_PLUGIN_BUNDLES` 互相对照；任何一处漏改直接红。
+- 故障排查文档补充 `workbuddy-to-dsh: import failed` 的根因、恢复命令与日志位置；
+  `CONTRIBUTING.md` 增加新增/修改安装形态的检查清单。
+- `install-contract` 一并校验发版版本号的 5 处同步（根包 / 子包 / lockfile 两处 /
+  OpenAPI / README 的 tgz 文件名），漏 bump 会直接红。
+- 根包 `files` 收紧为运行时白名单：本地 `npm pack` 不再带入 `bridge.log` /
+  `usage.jsonl` / `*.bak` / 测试文件；`verify:github` 会把「发布物里混入日志或备份」
+  直接判失败。
 
 ## [1.9.3] - 2026-10-21
 

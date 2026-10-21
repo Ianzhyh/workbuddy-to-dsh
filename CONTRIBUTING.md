@@ -137,9 +137,26 @@ node dsh-plugin\scripts\vendor.mjs          :: 重新生成
 node dsh-plugin\scripts\vendor.mjs --check  :: CI 与门禁会自动校验
 ```
 
+## 安装形态（包名）变更
+
+dsh 的 Loader 条目名、客户端模块 id、profile 依赖名是**同一个字符串**。三处不一致会让
+web boot 报 `import failed` 并中止整个应用（issue #3）。新增/修改安装形态时逐项确认：
+
+1. 根包 / 子包 `package.json` 的 `name`；
+2. 各自 `cordis.patch.yml` 里 `insert[].name`；
+3. `dsh-plugin/lib/packageNames.mjs` 的 `PLUGIN_PACKAGE_NAMES`；
+4. `dsh-plugin/lib/client.js` 的固定注册列表（浏览器 bundle 不能 import 第 3 项 ——
+   它还必须能从 `/plugins/<id>/client.js` 的 URL 里读出实际 id）；
+5. 仓库根 `lib/dsh.mjs` 的 `NATIVE_PLUGIN_BUNDLES`。
+
+`npm run test:plugin` 里的 `install-contract` 会把这些点互相对照；`npm run verify:github`
+会用根包真实 `npm pack` + 安装到临时 profile，验证 Loader 名、客户端注册和运行时文件。
+`release:check` 已包含这两道门禁。
+
 ## 发版四步
 
-1. `npm run release:check` 全绿；改了 `dashboard/` 或 `tools/dev/` 还要 `npm run test:ui` 全绿
+1. `npm run release:check` 全绿（含 `verify:standalone` 与 `verify:github` 两种安装形态演练）；
+   改了 `dashboard/` 或 `tools/dev/` 还要 `npm run test:ui` 全绿
    （它不在 `release:check` 里：需要本机 Chrome，且要几分钟，不适合塞进 CI 矩阵）；
    改了面板或 `dsh-plugin/` 还要 `npm run panel:check`；
 2. 在 `CHANGELOG.md` 的 `[Unreleased]` 落本次变化，转成版本条目（Keep a Changelog），

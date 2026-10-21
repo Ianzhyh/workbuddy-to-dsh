@@ -349,7 +349,9 @@ npm run release:check      # = vendor:check + 单测 + 独立分发演练（发�
   要同时服务单文件夹分发（`dsh-plugin-workbuddy`）与 github 直装
   （`workbuddy-to-dsh`），所以它会按两个已知包名 + `<script src>` 里的实际 id
   各注册一次；只写死一个，另一种安装方式会在 web boot 时报 `import failed`
-  （issue #3）。两份 bundle 同时存在时，重复注册会被忽略。
+  （issue #3）。两份 bundle 同时存在时，重复注册会被忽略。包名清单的单一来源是
+  `lib/packageNames.mjs`；改动安装形态后跑 `npm run test:plugin`（install-contract）
+  与 `npm run verify:github`（真实根包打包安装演练）。
 - **桥与控制台都是独立进程**：插件停用/卸载只会摘掉路由、工具与入口页，
   **不会杀掉桥**，也不会去停别人（双击 `启动.cmd`）起的控制台 ——
   只停自己拉起来的那个。

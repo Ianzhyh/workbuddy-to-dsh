@@ -19,6 +19,7 @@ import { fileURLToPath } from 'node:url';
 
 // 直接复用插件自己的解析逻辑，保证"自检结论"和"插件实际行为"一致
 import { detectProjectRoot, readProjectEnv } from '../lib/index.js';
+import { PLUGIN_PACKAGE_NAMES } from '../lib/packageNames.mjs';
 import { CONSOLE_MARKER } from '../lib/console.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -200,16 +201,14 @@ const profilesDir = join(dshHome, 'profiles');
 if (!existsSync(profilesDir)) {
   record('warn', 'dsh profile', `${profilesDir} 不存在`, `确认 DSH_HOME（当前 ${dshHome}）；dsh 桌面版一般是 ~/.dsh`);
 } else {
-  // 两种安装形态的包名：单文件夹分发 / github 直装（仓库根）。
-  const PLUGIN_PACKAGES = ['dsh-plugin-workbuddy', 'workbuddy-to-dsh'];
   const installed = [];
   for (const name of readdirSync(profilesDir)) {
     const pkgPath = join(profilesDir, name, 'package.json');
     if (!existsSync(pkgPath)) continue;
     try {
       const pkg = JSON.parse(readFileSync(pkgPath, 'utf8'));
-      const dep = PLUGIN_PACKAGES.find((p) => pkg.dependencies?.[p]);
-      const inBundles = (pkg.dsh?.profile?.bundles || []).some((b) => PLUGIN_PACKAGES.includes(b));
+      const dep = PLUGIN_PACKAGE_NAMES.find((p) => pkg.dependencies?.[p]);
+      const inBundles = (pkg.dsh?.profile?.bundles || []).some((b) => PLUGIN_PACKAGE_NAMES.includes(b));
       if (dep) installed.push(`${name}（${pkg.dependencies[dep]}）`);
       else if (inBundles) installed.push(`${name}（bundle）`);
     } catch { /* 忽略坏 JSON */ }
