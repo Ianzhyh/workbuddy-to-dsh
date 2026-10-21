@@ -103,7 +103,8 @@ console.log(`发布产物：${pub.length} 字节  sha256 ${sha(pub)}\n`);
 // ── 2. 与本地打包产物逐字节比对 ─────────────────────────────────────────
 const localPath = join(ROOT, 'dsh-plugin', asset);
 if (!existsSync(localPath)) {
-  console.log(`· 本地没有 ${asset}（没跑过 npm run pack:plugin？），跳过逐字节比对`);
+  // 「没打包所以跳过」是假绿：这样发布物到底是不是门禁验过的那份，没人知道。
+  bad(`本地没有 ${asset} —— 先跑 npm run pack:plugin，再验证；不能跳过`);
 } else if (pub.equals(readFileSync(localPath))) {
   ok('与本地打包产物逐字节一致 —— 门禁验的就是用户下载到的那份');
 } else {
@@ -165,6 +166,9 @@ else ok(`关键文件齐全（${need.length} 项）`);
  * 只比大小会漏掉同样大小却内容不同的情况。
  */
 const mirrors = [
+  ['package/package.json', 'dsh-plugin/package.json'],
+  ['package/README.md', 'dsh-plugin/README.md'],
+  ['package/cordis.patch.yml', 'dsh-plugin/cordis.patch.yml'],
   ['package/lib/client.js', 'dsh-plugin/lib/client.js'],
   ['package/vendor/dashboard/public/index.html', 'dashboard/public/index.html'],
   ['package/vendor/dashboard/public/style.css', 'dashboard/public/style.css'],
@@ -174,7 +178,8 @@ const mirrors = [
 for (const [inPkg, inRepo] of mirrors) {
   const f = byName.get(inPkg);
   const local = join(ROOT, inRepo);
-  if (!f || !existsSync(local)) continue;
+  if (!f) { bad(`包内缺少 ${inPkg}，无法与仓库比对`); continue; }
+  if (!existsSync(local)) { bad(`仓库文件不存在：${inRepo}`); continue; }
   if (f.body.equals(readFileSync(local))) ok(`${inPkg} 与仓库逐字节一致`);
   else bad(`${inPkg} 与仓库**不一致** —— 可能打进了旧快照，重跑 npm run pack:plugin`);
 }

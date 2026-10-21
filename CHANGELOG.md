@@ -61,10 +61,20 @@
   现在只接受本机 `LOCAL_TOKEN`；client key 仍可正常聊天、列模型，但不能再
   切号、删凭据或清历史。
 
+- **账本明细只解析尾部**：`/v1/requests` 以前每次 `JSON.parse` 整本账（上万行），
+  聊天页 15 秒、请求页 5 秒各来一次。现在从尾部凑够 `limit` 就停，坏行跳过，
+  返回顺序与过滤语义不变。
+
 ### Changed
 
 - `test:lib` / `test:bridge` 改用 glob，新增测试文件不会再因为忘记加入脚本而漏跑。
-- 新增 `request-guard` 与 client-key 管理面 403 的回归断言。
+- 新增 `request-guard`、client-key 管理面 403、`a11y-markup` 与账本尾部解析的回归断言。
+- **可访问性**：插件 9 个标签补 `tablist/tab/tabpanel`、`aria-selected/controls/labelledby`
+  与左右/Home/End 键盘导航；Alert 与登录错误可被读屏播报；错误全文不再只藏在
+  `title` 里；输入框与标签补 `focus-visible` 轮廓；控制台导航补 `aria-pressed`，
+  操作反馈同步进 liveRegion。
+- **`verify:release` 改为 fail-closed**：本地没有 tgz 不再「跳过即绿」；mirrors
+  增加 `package.json` / README / patch，包内缺文件直接失败。
 
 ## [1.9.3] - 2026-10-21
 

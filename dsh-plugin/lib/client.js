@@ -132,6 +132,7 @@ body.dark .wb-root,
 .wb-tab{position:relative;z-index:1;appearance:none;border:0;border-radius:999px;padding:5px 12px;font:inherit;font-size:12.5px;cursor:pointer;background:transparent;color:var(--dsw-alias-label-secondary,light-dark(#61666b,#cfd3d6));transition:color var(--wb-anim-fast),transform var(--wb-anim-fast)}
 .wb-tab:hover{background:var(--dsw-alias-interactive-bg-hover,light-dark(#2631480f,#ffffff14));color:var(--dsw-alias-label-primary,light-dark(#0f1115,#f9fafb))}
 .wb-tab:active{transform:scale(0.96)}
+.wb-tab:focus-visible{outline:2px solid var(--dsw-alias-brand-primary,#6366f1);outline-offset:2px}
 .wb-tab.on{background:var(--dsw-alias-brand-primary,light-dark(#0f1115,#f9fafb));color:var(--dsw-alias-label-primary-foreground,light-dark(#ffffff,#0f1115));font-weight:600;box-shadow:0 1px 2px light-dark(rgba(0,0,0,0.1),rgba(0,0,0,0.3))}
 .wb-tabs.has-indicator .wb-tab.on{background:transparent;box-shadow:none}
 .wb-tab-panel{min-width:0;display:flex;flex-direction:column;gap:12px;animation:wb-panel-slide-right .24s var(--wb-ease) both}
@@ -168,7 +169,7 @@ body.dark .wb-root,
 .wb-chat-login-cancel{appearance:none;border:0;background:transparent;padding:0;font:inherit;font-size:11.5px;line-height:18px;color:var(--dsw-alias-label-tertiary,light-dark(#81858c,#adb2b8));cursor:pointer;white-space:nowrap}
 .wb-chat-login-cancel:hover{color:var(--dsw-alias-label-secondary,light-dark(#61666b,#cfd3d6));text-decoration:underline}
 .wb-chat-login-cancel:focus-visible{outline:2px solid var(--dsw-alias-brand-primary,#6366f1);outline-offset:1px}
-.wb-chat-login-error{font-size:11.5px;line-height:18px;color:#e5534b;white-space:nowrap;margin-left:6px;max-width:220px;overflow:hidden;text-overflow:ellipsis;display:inline-block;vertical-align:middle}
+.wb-chat-login-error{font-size:11.5px;line-height:18px;color:light-dark(#a40e26,#ffb3ad);margin-left:6px;max-width:100%;overflow-wrap:anywhere;display:inline;vertical-align:middle}
 .wb-dot{width:7px;height:7px;border-radius:50%;background:var(--dsw-alias-label-tertiary,#adb2b8);flex:none;transition:transform var(--wb-anim-fast)}
 @keyframes wb-pulse{0%{box-shadow:0 0 0 0 rgba(46,160,67,0.45)}70%{box-shadow:0 0 0 5px rgba(46,160,67,0)}100%{box-shadow:0 0 0 0 rgba(46,160,67,0)}}
 .wb-dot.ok{background:#2ea043;animation:wb-pulse 2.2s infinite ease-out}
@@ -221,6 +222,7 @@ body.dark .wb-root,
 .wb-account-head b{min-width:0;overflow-wrap:anywhere}
 .wb-input,.wb-select{background:transparent;border:0;border-bottom:.5px solid var(--dsw-alias-border-l2,light-dark(#0000001a,#ffffff1f));color:inherit;font:inherit;font-size:12.5px;padding:4px 4px;min-width:0;max-width:100%;transition:border-color var(--wb-anim-fast)}
 .wb-input:focus{outline:none;border-bottom-color:var(--dsw-alias-brand-primary,light-dark(#0f1115,#f9fafb))}
+.wb-input:focus-visible,.wb-select:focus-visible,.wb-textarea:focus-visible{outline:2px solid var(--dsw-alias-brand-primary,#6366f1);outline-offset:1px}
 .wb-input{width:200px}
 /* 拖拽手柄（账号排序）：握这里才拖动，避开行内按钮与文本选择 */
 .wb-grip{
@@ -1004,6 +1006,7 @@ body.dark .wb-root,
         'The bridge is not running right now: the last few lines in the log are usually why it exited.',
 
       // ── 标签页 ──
+      'WorkBuddy 设置': 'WorkBuddy settings',
       '概览': 'Overview',
       '用量': 'Usage',
       '请求': 'Requests',
@@ -1763,7 +1766,12 @@ body.dark .wb-root,
       }, props.children);
     }
     function Alert(props) {
-      return h('p', { className: 'wb-alert' + (props.bad ? ' bad' : '') }, props.children);
+      // 读屏要能听到失败原因和操作结果：bad 用 alert（assertive），普通提示用 status（polite）。
+      return h('p', {
+        className: 'wb-alert' + (props.bad ? ' bad' : ''),
+        role: props.bad ? 'alert' : 'status',
+        'aria-live': props.bad ? 'assertive' : 'polite',
+      }, props.children);
     }
     /**
      * 分段胶囊选择器：全圆角 (9999px) 胶囊群，解决原生 <select> 在 Windows 下尖角直角菜单的风格割裂问题。
@@ -5015,7 +5023,8 @@ body.dark .wb-root,
         error ? h('span', {
           className: 'wb-chat-login-error',
           title: error,
-        }, (en ? 'Sign-in failed: ' : '登录失败：') + (error.length > 48 ? error.slice(0, 48) + '…' : error)) : null);
+          role: 'alert',
+        }, (en ? 'Sign-in failed: ' : '登录失败：') + error) : null);
     }
 
     function WorkBuddyPanel() {
@@ -5042,6 +5051,25 @@ body.dark .wb-root,
           return nextTab;
         });
       }, []);
+      /** 标签栏键盘导航：左右切换、Home/End 跳到首尾（WAI-ARIA tabs 的常规行为）。 */
+      const onTabsKeyDown = useCallback((event) => {
+        const index = TABS.findIndex((t) => t.id === tab);
+        if (index < 0) return;
+        let next = -1;
+        if (event.key === 'ArrowRight') next = (index + 1) % TABS.length;
+        else if (event.key === 'ArrowLeft') next = (index - 1 + TABS.length) % TABS.length;
+        else if (event.key === 'Home') next = 0;
+        else if (event.key === 'End') next = TABS.length - 1;
+        if (next < 0) return;
+        event.preventDefault();
+        const nextId = TABS[next].id;
+        switchTab(nextId);
+        if (typeof requestAnimationFrame === 'function') {
+          requestAnimationFrame(() => {
+            try { tabsRef.current?.querySelector('#wb-tab-' + nextId)?.focus(); } catch (e) { /* 卸载中 */ }
+          });
+        }
+      }, [tab, switchTab]);
 
       useEffect(() => {
         if (!tabsRef.current || typeof window === 'undefined') return undefined;
@@ -5201,15 +5229,34 @@ body.dark .wb-root,
             }, h(Raw, { text: lang === 'en' ? '中' : 'EN' })))),
         error ? h(Alert, { bad: true }, error) : null,
         toast ? h(Alert, null, toast) : null,
-        h('div', { className: 'wb-tabs' + (indicatorStyle.opacity ? ' has-indicator' : ''), ref: tabsRef },
+        h('div', {
+          className: 'wb-tabs' + (indicatorStyle.opacity ? ' has-indicator' : ''),
+          ref: tabsRef,
+          role: 'tablist',
+          'aria-label': 'WorkBuddy 设置',
+          onKeyDown: onTabsKeyDown,
+        },
           indicatorStyle.opacity ? h('div', { className: 'wb-tab-indicator', style: indicatorStyle }) : null,
           TABS.map((t) => h('button', {
             key: t.id,
+            id: 'wb-tab-' + t.id,
+            type: 'button',
+            role: 'tab',
+            'aria-selected': tab === t.id,
+            'aria-controls': 'wb-panel-' + t.id,
+            tabIndex: tab === t.id ? 0 : -1,
             className: 'wb-tab' + (tab === t.id ? ' on' : ''),
             onClick: () => switchTab(t.id),
           }, t.label))),
         !status ? h(Card, null, '正在读取状态…') : null,
-        status ? h('div', { key: tab, className: 'wb-tab-panel wb-slide-' + slideDir },
+        status ? h('div', {
+          key: tab,
+          id: 'wb-panel-' + tab,
+          role: 'tabpanel',
+          'aria-labelledby': 'wb-tab-' + tab,
+          tabIndex: 0,
+          className: 'wb-tab-panel wb-slide-' + slideDir,
+        },
           tab === 'overview' ? h(OverviewPanel, panelProps) : null,
           tab === 'accounts' ? h(AccountsPanel, { onStartConsole: startConsole, busy, reloadStatus, pageStatus: status }) : null,
           tab === 'usage' ? h(UsagePanel, null) : null,

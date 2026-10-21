@@ -5234,8 +5234,25 @@ function readUsageRows() {
  * 也不会泄漏出去。
  */
 function recentRequests(limit = 50) {
-  const rows = readUsageRows();
-  return rows.slice(-limit).reverse().map((r) => ({
+  /*
+   * 只解析尾部：`readUsageRows()` 会把整本账（可能上万行）全部 JSON.parse，
+   * 而聊天页每 15 秒、请求页每 5 秒都只要最新 N 条。从尾部往前凑够 limit
+   * 就停；解析失败的行和坏行跳过，语义与 readUsageRows 的过滤一致。
+   */
+  let rows = [];
+  try {
+    syncUsageMirror(usageFile());
+    rows = [];
+    for (let i = usageLines.length - 1; i >= 0 && rows.length < limit; i -= 1) {
+      try {
+        const r = JSON.parse(usageLines[i]);
+        if (r && typeof r.t === 'number') rows.push(r);
+      } catch { /* 坏行跳过 */ }
+    }
+  } catch {
+    rows = [];
+  }
+  return rows.map((r) => ({
     t: r.t,
     model: r.model || '',
     stream: r.stream === true,

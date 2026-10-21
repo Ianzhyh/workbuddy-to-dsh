@@ -783,6 +783,10 @@ header {
   background: var(--panel-muted);
 }
 .nav-tab:hover svg { opacity: 1; }
+.nav-tab:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
 .nav-tab:active {
   transform: scale(0.96);
 }
@@ -848,7 +852,14 @@ header {
   from { opacity: 0; transform: translateX(-6px); }
   to { opacity: 1; transform: translateX(0); }
 }
-.msg.err { color: var(--fail); }
+.msg.err {
+  color: var(--fail);
+  /* 错误全文不能只活在 title 里：窄屏/触屏/键盘都要能读全 */
+  white-space: normal;
+  overflow-wrap: anywhere;
+  max-width: min(440px, 100%);
+  line-height: 1.45;
+}
 .msg.good { color: var(--ok); }
 
 /*

@@ -126,6 +126,48 @@ try {
   if (result.harness.applyError) problems.push(`apply 抛错：${result.harness.applyError}`);
   if (result.errors.length) problems.push(`页面有错误：${result.errors.join(' | ')}`);
 
+  // ── a11y：标签栏必须有 tab/tablist/tabpanel 语义与键盘导航；Alert 要能被读屏播报
+  const a11y = JSON.parse(await page.cdp.evaluate(`JSON.stringify((() => {
+    const tabs = [...document.querySelectorAll('[role="tab"]')];
+    const selected = document.querySelector('[role="tab"][aria-selected="true"]');
+    const panel = document.querySelector('[role="tabpanel"]');
+    return {
+      tablist: document.querySelectorAll('[role="tablist"]').length,
+      tabs: tabs.length,
+      selected: selected ? selected.id : '',
+      selectedTabIndex: selected ? selected.tabIndex : null,
+      panel: panel ? { id: panel.id, labelledby: panel.getAttribute('aria-labelledby') } : null,
+      alertRoles: [...document.querySelectorAll('.wb-alert')].map((el) => el.getAttribute('role')),
+    };
+  })())`));
+  if (a11y.tablist !== 1) problems.push(`标签栏缺少 role=tablist（实际 ${a11y.tablist}）`);
+  if (a11y.tabs !== 9) problems.push(`role=tab 的数量不对：${a11y.tabs}`);
+  if (!a11y.selected) problems.push('没有 aria-selected=true 的标签');
+  if (a11y.selectedTabIndex !== 0) problems.push(`当前标签的 tabIndex 应为 0：${a11y.selectedTabIndex}`);
+  if (!a11y.panel || a11y.panel.labelledby !== a11y.selected) {
+    problems.push(`tabpanel 的 aria-labelledby 与当前标签不一致：${JSON.stringify(a11y.panel)} / ${a11y.selected}`);
+  }
+  for (const role of a11y.alertRoles) {
+    if (role !== 'alert' && role !== 'status') problems.push(`Alert 缺少 role=alert/status：${role}`);
+  }
+  // 键盘：当前标签上按 ArrowRight，选中态应前移（WAI-ARIA tabs 常规行为）
+  const beforeKeyboard = a11y.selected;
+  await page.cdp.evaluate(`(() => {
+    const el = document.querySelector('[role="tab"][aria-selected="true"]');
+    if (!el) return false;
+    el.focus();
+    el.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true, cancelable: true }));
+    return true;
+  })()`);
+  await sleep(250);
+  const afterKeyboard = await page.cdp.evaluate("(document.querySelector('[role=\"tab\"][aria-selected=\"true\"]') || {}).id || ''");
+  if (!afterKeyboard || afterKeyboard === beforeKeyboard) {
+    problems.push(`标签栏 ArrowRight 没有切换选中态：${beforeKeyboard} → ${afterKeyboard}`);
+  }
+  // 回到概览，后面的逐页断言从默认页开始（键盘切换已经把它移走了）
+  await page.cdp.evaluate("(() => { const b=document.querySelector('#wb-tab-overview'); if(b) b.click(); return !!b; })()");
+  await sleep(200);
+
   // 逐个标签页走一遍：每个面板都要真的渲染出内容（不是只挂个空壳）
   const EXPECT = {
     概览: ['本地桥', 'dsh 原生路由', '积分余额', '启动桥', '复制诊断报告'],

@@ -3462,3 +3462,30 @@ test('目录刷新竞态：换来源后旧目录请求晚到，不能覆盖新�
     rmSync(bridge.dir, { recursive: true, force: true });
   }
 });
+
+test('账本明细只解析尾部：大量历史 + 坏行仍返回最新 N 条', { timeout: 60_000 }, async () => {
+  const bridge = await startBridge();
+  try {
+    const lines = [];
+    for (let i = 1; i <= 5000; i += 1) {
+      lines.push(JSON.stringify({
+        t: i, model: `m${i}`, stream: false, ms: 1, ok: true, promptTokens: 1, completionTokens: 1,
+      }));
+    }
+    lines.push('{broken-json');
+    lines.push(JSON.stringify({ t: 999999, model: 'last', stream: false, ms: 2, ok: true }));
+    writeFileSync(join(bridge.dir, 'usage.jsonl'), `${lines.join('\n')}\n`);
+
+    const one = await (await fetch(`${bridge.baseUrl}/v1/requests?limit=1`, { headers: auth })).json();
+    assert.equal(one.requests.length, 1);
+    assert.equal(one.requests[0].model, 'last', 'limit=1 必须拿到最后一条，且坏行不能把结果挤掉');
+
+    const fifty = await (await fetch(`${bridge.baseUrl}/v1/requests?limit=50`, { headers: auth })).json();
+    assert.equal(fifty.requests.length, 50);
+    assert.equal(fifty.requests[0].model, 'last');
+    assert.equal(fifty.requests[49].model, 'm4952', '尾部 50 条按时间倒序，且不解析整本账');
+  } finally {
+    await bridge.stop();
+    rmSync(bridge.dir, { recursive: true, force: true });
+  }
+});
