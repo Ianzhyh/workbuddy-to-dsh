@@ -601,6 +601,38 @@ try {
   await sleep(600);
   const overviewText = await page.cdp.evaluate("document.querySelector('.wb-root') ? document.querySelector('.wb-root').innerText : ''");
   if (!/今日还没签到/.test(overviewText)) problems.push('概览没有提示「今日还没签到」');
+
+  // 网页搜索：已接入时必须在概览顶部显示状态卡；未接入时必须出现待办提醒 + 接入按钮
+  if (offline || liveStatus?.webSearch?.available === true) {
+    if (!/网页搜索/.test(overviewText)) problems.push('概览没有「网页搜索」状态卡');
+    if (!/已接入本地桥/.test(overviewText)) problems.push('网页搜索已接入时状态卡没有显示「已接入本地桥」');
+
+    const searchAlert = await page.cdp.evaluate(`(async () => {
+      const orig = window.__routes['/workbuddy/status'];
+      window.__setRoute('/workbuddy/status', {
+        ...orig,
+        webSearch: {
+          available: true, configured: false, reason: 'endpoint',
+          expectedBaseURL: 'http://127.0.0.1:8790/v1', baseURL: '', apiKeyRef: 'WORKBUDDY_SEARCH_BRIDGE_KEY',
+        },
+      });
+      const refresh = [...document.querySelectorAll('.wb-btn')].find((b) => b.textContent.includes('刷新状态'));
+      refresh && refresh.click();
+      await new Promise((r) => setTimeout(r, 700));
+      const text = document.querySelector('.wb-root')?.innerText || '';
+      const hasAction = [...document.querySelectorAll('.wb-btn')].some((b) => b.textContent === '接入搜索');
+      window.__setRoute('/workbuddy/status', orig);
+      refresh && refresh.click();
+      await new Promise((r) => setTimeout(r, 300));
+      return { text, hasAction };
+    })()`);
+    if (!/网页搜索还没接入 WorkBuddy/.test(searchAlert.text)) {
+      problems.push('网页搜索未接入时没有出现提醒');
+    }
+    if (!searchAlert.hasAction) problems.push('网页搜索未接入时没有「接入搜索」按钮');
+  } else {
+    console.log('实时宿主还没有 webSearch 状态，跳过网页搜索卡片断言');
+  }
   // 失败提醒的期望取决于数据源：离线/旧宿主模式（桩覆盖 requests 通道）必须出现；
   // 实时模式走真宿主快照的 recentFailed（真实账本），没有失败就没有提醒 —— 正确行为。
   // 失败提醒的期望取决于数据源：离线/旧宿主模式（桩覆盖 requests 通道）必须出现；

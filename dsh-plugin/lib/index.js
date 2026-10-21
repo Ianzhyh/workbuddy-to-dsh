@@ -38,7 +38,11 @@ import { WorkBuddyAdapter } from './adapter.mjs';
 import { toDirectory, pickDefaultModel } from './models.mjs';
 import { createTools } from './tools.mjs';
 import { createRouteTable, mountRoutes } from './routes.mjs';
-import { configureWorkBuddyWebSearch, verifyWorkBuddyWebSearch } from './web-search-config.mjs';
+import {
+  configureWorkBuddyWebSearch,
+  deriveWebSearchStatus,
+  verifyWorkBuddyWebSearch,
+} from './web-search-config.mjs';
 import { cleanLegacyRoutes, detectLegacyRoutes } from './legacy.mjs';
 import { PLUGIN_PACKAGE_NAMES } from './packageNames.mjs';
 
@@ -963,6 +967,61 @@ export function apply(ctx, rawConfig = {}) {
     state.checkinInflight.catch(() => {});
   }
 
+  /**
+   * 面板用来判断“网页搜索是否已接上本地桥”。
+   *
+   * 只读 settings/credentials，不发搜索请求（status 每 8 秒轮询，不能顺带
+   * 消耗搜索额度）。真正的一键配置会再跑一次 verifyWorkBuddyWebSearch。
+   */
+  async function webSearchStatus() {
+    const expectedBaseURL = `${supervisor.baseUrl}/v1`;
+    const settings = ctx.get('settings');
+    const credentials = ctx.get('credentials');
+    const unavailable = {
+      available: false,
+      configured: false,
+      pointsToBridge: false,
+      providerSelected: false,
+      provider: '',
+      baseURL: '',
+      apiKeyRef: '',
+      expectedBaseURL,
+      reason: 'unavailable',
+    };
+    if (!settings || typeof settings.get !== 'function') return unavailable;
+
+    let section;
+    let webSection;
+    try {
+      section = settings.get('web-search-deepseek');
+      webSection = settings.get('web');
+    } catch (error) {
+      return { ...unavailable, available: true, reason: 'error', error: String(error?.message || error) };
+    }
+    if (section === undefined) return { ...unavailable, available: true, reason: 'namespace-missing' };
+
+    const apiKeyRef = typeof section?.apiKeyEnv === 'string' ? section.apiKeyEnv : '';
+    const literalKey = typeof section?.apiKey === 'string' && section.apiKey.length > 0;
+    let keyConfigured = literalKey;
+    if (!keyConfigured && credentials && typeof credentials.describe === 'function') {
+      try {
+        keyConfigured = (await credentials.describe(apiKeyRef || 'DEEPSEEK_API_KEY'))?.configured === true;
+      } catch { /* 凭据服务读不到就按未配置处理，让面板提醒用户 */ }
+    }
+
+    return {
+      available: true,
+      expectedBaseURL,
+      keyConfigured,
+      ...deriveWebSearchStatus({
+        section,
+        webSection,
+        expectedBaseURL,
+        keyConfigured,
+      }),
+    };
+  }
+
   async function snapshot({ signal, quota = false } = {}) {
     const probe = await supervisor.probe(signal);
     const consoleProbe = await consoleSupervisor.probe({ signal, cached: true });
@@ -1042,6 +1101,8 @@ export function apply(ctx, rawConfig = {}) {
       catalogAt: adapter.catalogCache.at ? new Date(adapter.catalogCache.at).toISOString() : null,
       catalogError: adapter.catalogError || '',
       legacy: { found: state.legacy.found, files: state.legacy.files, cleaned: state.legacy.cleaned },
+      /** 网页搜索是否已指向本地桥（面板据此高亮提醒并给一键接入按钮） */
+      webSearch: await webSearchStatus(),
       quota: quotaValue,
       quotaError,
       /** 上次成功读到积分的时刻（ISO）；面板用它显示"更新于" */

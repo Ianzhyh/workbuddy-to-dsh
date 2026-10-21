@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   configureWorkBuddyWebSearch,
+  deriveWebSearchStatus,
   verifyWorkBuddyWebSearch,
   SEARCH_KEY_REF,
 } from '../lib/web-search-config.mjs';
@@ -103,6 +104,54 @@ test('一键配置：服务缺失/空令牌/非法 URL 必须明确失败', asyn
     configureWorkBuddyWebSearch({ settings: { update() {} }, credentials: { set() {} }, baseURL: 'not-a-url', token: 't' }),
     /invalid bridge base URL/i,
   );
+});
+
+test('状态判断：只有接口地址、凭据、provider 三者都对才算已接入', () => {
+  const expected = 'http://127.0.0.1:8790/v1';
+  const ready = deriveWebSearchStatus({
+    section: { baseURL: 'http://127.0.0.1:8790/v1///', apiKeyEnv: SEARCH_KEY_REF },
+    webSection: { searchProvider: 'deepseek-official' },
+    expectedBaseURL: expected,
+    keyConfigured: true,
+  });
+  assert.equal(ready.configured, true);
+  assert.equal(ready.reason, '');
+
+  const noEndpoint = deriveWebSearchStatus({
+    section: { apiKeyEnv: 'DEEPSEEK_API_KEY' },
+    webSection: undefined,
+    expectedBaseURL: expected,
+    keyConfigured: true,
+  });
+  assert.equal(noEndpoint.configured, false);
+  assert.equal(noEndpoint.reason, 'endpoint');
+
+  const noKey = deriveWebSearchStatus({
+    section: { baseURL: expected, apiKeyEnv: SEARCH_KEY_REF },
+    expectedBaseURL: expected,
+    keyConfigured: false,
+  });
+  assert.equal(noKey.configured, false);
+  assert.equal(noKey.reason, 'key');
+
+  const wrongProvider = deriveWebSearchStatus({
+    section: { baseURL: expected, apiKeyEnv: SEARCH_KEY_REF },
+    webSection: { searchProvider: 'deepseek-search-api' },
+    expectedBaseURL: expected,
+    keyConfigured: true,
+  });
+  assert.equal(wrongProvider.configured, false);
+  assert.equal(wrongProvider.reason, 'provider');
+
+  // rc.6 没有 web 分节：沿用 bundle patch 的 deepseek-official，不能误判
+  const noWebSection = deriveWebSearchStatus({
+    section: { baseURL: expected, apiKeyEnv: SEARCH_KEY_REF },
+    webSection: undefined,
+    expectedBaseURL: expected,
+    keyConfigured: true,
+  });
+  assert.equal(noWebSection.configured, true);
+  assert.equal(noWebSection.providerSelected, true);
 });
 
 test('自检：走 dsh web 服务搜一次，成功/失败/缺失三种结果分明', async () => {

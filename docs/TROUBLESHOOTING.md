@@ -204,9 +204,18 @@ dsh 自带的 `dsh-web-search-deepseek` 默认调用 DeepSeek 的 Anthropic Mess
 **一键配置**：dsh **设置 → WorkBuddy → 概览 → 操作 → 一键接入 WorkBuddy 搜索**，
 或运行 `/workbuddy websearch`。它会把 `web-search-deepseek` 的接口地址指到桥，把桥令牌
 写进独立凭据引用 `WORKBUDDY_SEARCH_BRIDGE_KEY`（不覆盖 `DEEPSEEK_API_KEY`），并用 dsh
-自己的 web 服务真搜一次做自检；结果会直接显示在按钮下方/命令回执里。
+自己的 web 服务真搜一次做自检；结果会直接显示在按钮下方/命令回执里。概览顶部有独立的
+「网页搜索」状态卡，未接入时「需要你动手」里也会高亮提醒并给出「接入搜索」按钮。
 
-手动兜底：在 dsh **设置 → 插件 → 内置插件设置 → 网页搜索**里：
+验证提示词（贴进 dsh 对话）：
+
+```text
+请使用 web_search 工具搜索「DeepSeek 最新发布」，取 5 条结果，按“标题 + 链接 + 一句摘要”列出；搜索失败就把错误原样告诉我。
+```
+
+手动兜底（优先用一键）：在 dsh **设置 → 插件 → 内置插件设置 → 网页搜索**里。
+注意手动填 API Key 会写进当前 `apiKeyEnv`（默认 `DEEPSEEK_API_KEY`），可能覆盖已有的
+DeepSeek key；一键接入用独立引用，不会动它。
 
 1. 选 **Messages API**；
 2. 接口地址填 `http://127.0.0.1:8790/v1`；

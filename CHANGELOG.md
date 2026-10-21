@@ -32,7 +32,8 @@
   web-search-deepseek 接口地址指向本地桥，把桥令牌写进独立凭据引用（不覆盖用户的
   DeepSeek key），再用 dsh 自己的 web 服务真搜一次做自检并回报结果。dsh 未注册
   `web` settings 分节（rc.6 的 provider 选择在 bundle patch 里）时会跳过该步而不是
-  报错。
+  报错。概览顶部新增独立的「网页搜索」状态卡；未接入或缺少桥令牌时在「需要你动手」
+  里高亮提醒，并直接给出「接入搜索」按钮。状态检查只读配置，不消耗搜索额度。
 
 - **GitHub 直装形态的发布门禁**：新增 `npm run verify:github`（已接入
   `release:check`），真实执行根包 `npm pack` → 安装到临时 profile 的

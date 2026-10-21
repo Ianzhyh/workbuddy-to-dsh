@@ -456,6 +456,18 @@ body.dark .wb-root,
       '清理旧路由': 'Clean up old routes',
       '复制诊断报告': 'Copy diagnostic report',
       '复制桥地址': 'Copy bridge URL',
+      '网页搜索': 'Web search',
+      '已接入本地桥': 'Connected to local bridge',
+      '未接入（走 DeepSeek）': 'Not connected (uses DeepSeek)',
+      '搜索走 WorkBuddy 额度，不消耗 DeepSeek。': 'Search uses WorkBuddy quota, not DeepSeek.',
+      '接入后搜索走 WorkBuddy 额度，不消耗 DeepSeek 钱包；点下面的按钮即可。':
+        'After connecting, search uses WorkBuddy quota instead of the DeepSeek wallet; use the button below.',
+      '重新接入 WorkBuddy 搜索': 'Reconnect WorkBuddy web search',
+      '接入搜索': 'Connect search',
+      '网页搜索还没接入 WorkBuddy：现在仍走 DeepSeek，会消耗 DeepSeek 钱包':
+        'Web search is not connected to WorkBuddy yet: it still uses DeepSeek and consumes the DeepSeek wallet',
+      'dsh 没有加载网页搜索 provider，无法一键接入':
+        'dsh did not load the web search provider; one-click setup is unavailable',
       '一键接入 WorkBuddy 搜索': 'One-click WorkBuddy web search',
       '配置中…': 'Configuring…',
       '把 dsh 的网页搜索指向本地桥（使用 WorkBuddy 搜索额度，不消耗 DeepSeek）':
@@ -2313,6 +2325,9 @@ body.dark .wb-root,
       const alerts = [];
       const [searchBusy, setSearchBusy] = useState(false);
       const [searchMsg, setSearchMsg] = useState('');
+      const search = status?.webSearch;
+      const searchKnown = search?.available === true;
+      const searchReady = searchKnown && search.configured === true;
       async function enableSearch() {
         setSearchBusy(true);
         setSearchMsg('');
@@ -2323,6 +2338,7 @@ body.dark .wb-root,
             if (res.data.verified === true) msg += t('（自检通过）');
             else if (res.data.verified === false) msg += t('（自检失败：') + (res.data.verifyError || '') + '）';
             setSearchMsg(msg);
+            reload();
           } else {
             setSearchMsg(t('切换失败：') + (res.data?.error || ('HTTP ' + res.status)));
           }
@@ -2377,13 +2393,19 @@ body.dark .wb-root,
         alerts.push({ tone: 'warn', text: '今日还没签到', action: 'checkin' });
       }
       if (status?.legacy?.found) alerts.push({ tone: 'warn', text: '检测到旧的 llm-pi-ai 路由，与插件撞名，建议清理', action: 'cleanup' });
+      if (searchKnown && !searchReady) {
+        alerts.push(search.reason === 'namespace-missing'
+          ? { tone: 'warn', text: 'dsh 没有加载网页搜索 provider，无法一键接入' }
+          : { tone: 'warn', text: '网页搜索还没接入 WorkBuddy：现在仍走 DeepSeek，会消耗 DeepSeek 钱包', action: 'websearch' });
+      }
       // 控制台 /api/overview 的 routeLive 同样是迁移前口径（只认 settings.yaml /
       // profile patch），原生路由它看不见 —— 原生路由已注册时不作为问题提示。
 
-      const ACTION_LABEL = { start: '启动桥', restart: '重启桥', cleanup: '清理旧路由', requests: '查看失败', checkin: '去签到', account: '去登录' };
+      const ACTION_LABEL = { start: '启动桥', restart: '重启桥', cleanup: '清理旧路由', requests: '查看失败', checkin: '去签到', account: '去登录', websearch: '接入搜索' };
       const alertAction = (action) => {
         if (action === 'account') onOpenTab('accounts');
         else if (action === 'requests' || action === 'checkin') onOpenTab(action);
+        else if (action === 'websearch') enableSearch();
         else onAct(action);
       };
 
@@ -2426,6 +2448,27 @@ body.dark .wb-root,
         // 积分卡放在最前：这是大家真正在意的东西，值得单独一张卡 + 大号数字
         unauthenticated ? null : h(QuotaCard, { status, reload, busy, onOpenTab }),
 
+        // 网页搜索单独一张卡、紧跟积分：没接入时这里是第一眼能看到的状态 + 主按钮
+        unauthenticated ? null : (searchKnown
+          ? h(Card, { title: '网页搜索' },
+            h(Row, { label: '状态' }, h(Pill, {
+              tone: searchReady ? 'ok' : 'warn',
+              text: searchReady ? '已接入本地桥' : '未接入（走 DeepSeek）',
+            })),
+            h('p', { className: 'wb-note', style: { margin: '6px 0 0' } },
+              searchReady
+                ? '搜索走 WorkBuddy 额度，不消耗 DeepSeek。'
+                : '接入后搜索走 WorkBuddy 额度，不消耗 DeepSeek 钱包；点下面的按钮即可。'),
+            h('div', { className: 'wb-actions', style: { marginTop: '10px' } },
+              h(Btn, {
+                primary: !searchReady,
+                disabled: busy || searchBusy,
+                onClick: enableSearch,
+                title: '把 dsh 的网页搜索指向本地桥（使用 WorkBuddy 搜索额度，不消耗 DeepSeek）',
+              }, searchBusy ? '配置中…' : (searchReady ? '重新接入 WorkBuddy 搜索' : '一键接入 WorkBuddy 搜索'))),
+            searchMsg ? h('p', { className: 'wb-note', style: { margin: '8px 0 0' } }, searchMsg) : null)
+          : null),
+
         alerts.length
           ? h('div', { className: 'wb-card' },
             h('h3', null, '需要你动手'),
@@ -2433,7 +2476,7 @@ body.dark .wb-root,
               h('span', { style: { minWidth: 0 } }, h(Pill, { tone: a.tone, text: a.text })),
               a.action ? h(Btn, {
                 primary: a.action === 'account',
-                disabled: busy,
+                disabled: busy || (a.action === 'websearch' && searchBusy),
                 onClick: () => alertAction(a.action),
               }, ACTION_LABEL[a.action] || '处理') : null)))
           : (unauthenticated
@@ -2466,12 +2509,13 @@ body.dark .wb-root,
             h(Btn, { onClick: () => onOpenTab('diagnose') }, '去诊断 →'),
             h(Btn, { disabled: busy, onClick: report }, '复制诊断报告'),
             h(Btn, { onClick: () => copyText(status?.config?.bridgeUrl + '/v1') }, '复制桥地址'),
-            h(Btn, {
+            // 旧宿主没有 webSearch 状态：保留操作区里的兜底入口，新宿主用上面的独立卡片
+            !searchKnown ? h(Btn, {
               disabled: busy || searchBusy,
               onClick: enableSearch,
               title: '把 dsh 的网页搜索指向本地桥（使用 WorkBuddy 搜索额度，不消耗 DeepSeek）',
-            }, searchBusy ? '配置中…' : '一键接入 WorkBuddy 搜索')),
-          searchMsg ? h('p', { className: 'wb-note', style: { margin: '8px 0 0' } }, searchMsg) : null));
+            }, searchBusy ? '配置中…' : '一键接入 WorkBuddy 搜索') : null),
+          !searchKnown && searchMsg ? h('p', { className: 'wb-note', style: { margin: '8px 0 0' } }, searchMsg) : null));
     }
 
     /**

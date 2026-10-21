@@ -69,6 +69,20 @@ export const FIXTURES = {
     catalogAt: new Date(now - 300_000).toISOString(),
     catalogError: '',
     legacy: { found: false, files: [], cleaned: null },
+    // 已接入形态：面板顶部应显示「网页搜索 / 已接入本地桥」；未接入形态在
+    // panel-render.mjs 里通过覆盖路由单独验（提醒 + 接入按钮）。
+    webSearch: {
+      available: true,
+      configured: true,
+      pointsToBridge: true,
+      providerSelected: true,
+      provider: '',
+      baseURL: 'http://127.0.0.1:8790/v1',
+      expectedBaseURL: 'http://127.0.0.1:8790/v1',
+      apiKeyRef: 'WORKBUDDY_SEARCH_BRIDGE_KEY',
+      keyConfigured: true,
+      reason: '',
+    },
     /*
      * 权益包：**必须带 monthly / expiresAt** —— 不带就渲染不出
      * 「月度 · 到期 2026-10-31 23:59:59」那一行（那是两段 join 出来的拼接串，

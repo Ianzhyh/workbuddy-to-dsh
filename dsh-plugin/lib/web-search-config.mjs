@@ -73,6 +73,36 @@ export async function configureWorkBuddyWebSearch({ settings, credentials, baseU
 }
 
 /**
+ * 判断 dsh 的网页搜索当前是否真的指向本地桥。
+ *
+ * 只做配置层判断（不发起搜索）：接口地址、凭据引用、provider 选择三者都对了
+ * 才算“已接入”。凭据是否真的存在由调用方查 credentials 后传入。
+ *
+ * @param {object} deps
+ * @param {object | undefined} deps.section `web-search-deepseek` 的已解析分节
+ * @param {object | undefined} deps.webSection `web` 分节的已解析值（rc.6 不存在）
+ * @param {string} deps.expectedBaseURL 本地桥地址，例如 http://127.0.0.1:8790/v1
+ * @param {boolean} deps.keyConfigured 凭据引用（或字面 apiKey）是否已配置
+ * @returns {{ configured: boolean, pointsToBridge: boolean, providerSelected: boolean, provider: string, baseURL: string, apiKeyRef: string, reason: string }}
+ */
+export function deriveWebSearchStatus({ section, webSection, expectedBaseURL, keyConfigured = false }) {
+  const normalize = (value) => (typeof value === 'string' ? value.replace(/\/+$/, '') : '');
+  const baseURL = normalize(section?.baseURL);
+  const apiKeyRef = typeof section?.apiKeyEnv === 'string' ? section.apiKeyEnv : '';
+  const provider = typeof webSection?.searchProvider === 'string' ? webSection.searchProvider : '';
+  const pointsToBridge = baseURL !== '' && baseURL === normalize(expectedBaseURL);
+  // rc.6 没有 `web` 分节；没有显式选择时沿用 bundle patch 的 deepseek-official。
+  const providerSelected = provider === '' || provider === 'deepseek-official';
+  const configured = pointsToBridge && keyConfigured === true && providerSelected;
+  const reason = configured
+    ? ''
+    : !pointsToBridge ? 'endpoint'
+      : !keyConfigured ? 'key'
+        : 'provider';
+  return { configured, pointsToBridge, providerSelected, provider, baseURL, apiKeyRef, reason };
+}
+
+/**
  * 用 dsh 自己的 web 服务跑一次真实搜索，证明「配置 + 凭据 + 桥」整条链路可用。
  *
  * 这比只回显 baseURL 更可靠：令牌不对、桥没起、provider 没热更，都会在这里
