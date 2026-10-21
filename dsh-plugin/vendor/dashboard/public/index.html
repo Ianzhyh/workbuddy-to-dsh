@@ -2413,11 +2413,22 @@ function fmtAgo(t) {
 }
 
 /** 触发一次浏览器下载。CSV 前置 BOM，否则 Excel 打开中文列名是乱码。 */
+/*
+ * CSV 单元格：先中和公式再处理分隔符。
+ *
+ * 引号只解决逗号/换行，**不阻止 Excel/WPS 把 `=`、`+`、`-`、`@` 或制表符
+ * 开头的单元格当公式执行**。模型名与上游错误原文都可控，`=HYPERLINK(...)`
+ * 能通过桥的字符校验并落进账本；用户在 Excel 里打开导出文件就会执行。
+ * 危险前缀前加一个单引号，显示时仍是原文本。
+ */
+function csvCell(value) {
+  let s = value === null || value === undefined ? '' : String(value);
+  if (/^[=+\-@\t\r]/.test(s)) s = "'" + s;
+  return /[",\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+}
+
 function downloadCsv(filename, rows) {
-  const csv = rows.map((r) => r.map((cell) => {
-    const s = cell === null || cell === undefined ? '' : String(cell);
-    return /[",\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
-  }).join(',')).join('\r\n');
+  const csv = rows.map((r) => r.map(csvCell).join(',')).join('\r\n');
 
   const blob = new Blob(['\ufeff' + csv], { type: 'text/csv;charset=utf-8' });
   const url = URL.createObjectURL(blob);

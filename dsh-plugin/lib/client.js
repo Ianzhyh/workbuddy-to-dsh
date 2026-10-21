@@ -1605,12 +1605,21 @@ body.dark .wb-root,
       const d = parseDate(ts);
       return d ? d.toLocaleTimeString('zh-CN', { hour12: false }) : '—';
     }
+    /**
+     * CSV 单元格。
+     *
+     * 引号只解决分隔符，**不阻止公式**：Excel / WPS 会把 `=`、`+`、`-`、`@`
+     * 或制表符开头的单元格当公式执行。模型名与上游错误原文都是可控文本，
+     * `=HYPERLINK("http://…")` 能顺利通过桥的字符校验并进账本 —— 用户导出后
+     * 用 Excel 打开就会执行。危险前缀前加一个单引号，让它按文本显示。
+     */
+    function csvCell(value) {
+      let s = value === null || value === undefined ? '' : String(value);
+      if (/^[=+\-@\t\r]/.test(s)) s = `'${s}`;
+      return /[",\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+    }
     function downloadCsv(name, header, rows) {
-      const esc = (v) => {
-        const s = v === null || v === undefined ? '' : String(v);
-        return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
-      };
-      const text = '\ufeff' + [header, ...rows].map((r) => r.map(esc).join(',')).join('\n') + '\n';
+      const text = '\ufeff' + [header, ...rows].map((r) => r.map(csvCell).join(',')).join('\n') + '\n';
       try {
         const url = URL.createObjectURL(new Blob([text], { type: 'text/csv;charset=utf-8' }));
         const a = document.createElement('a');
@@ -5255,6 +5264,8 @@ body.dark .wb-root,
     exports.ChatQuotaPill = ChatQuotaPill;
     exports.ChatLoginButton = ChatLoginButton;
     exports.ChatTurnCost = ChatTurnCost;
+    // 供安全回归用例直接验证，不参与界面渲染
+    exports.csvCell = csvCell;
     return module.exports;
   }
 

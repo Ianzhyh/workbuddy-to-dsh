@@ -5450,33 +5450,51 @@ const CATALOG_TTL_MS = 5 * 60 * 1000;
 // 该放行。它同时也是「模型预校验能不能启用」的唯一开关（见 preflightModelError）。
 let catalogCache = { at: 0, models: [], shape: null, upstreamModelCount: 0 };
 let catalogRefreshing = null;
+/**
+ * 目录代次：换号 / 换来源时 +1。
+ *
+ * 光清空缓存不够 —— 换号前已经在飞的目录请求还会把**旧账号**的结果写回来。
+ * `fetchCatalog` 捕获发起时的代次，写缓存前必须再核对；不一致就直接丢弃。
+ * 这也是 `refreshCatalog({force:true})` 存在的原因：旧请求无法取消，只能作废
+ * 它的结果并立刻发起新一代请求。
+ */
+let catalogGeneration = 0;
 
 /**
  * 换号 / 换凭据来源后，模型目录可能属于另一个账号或另一个区域：清空并后台重取。
  * 不能在旧目录上继续做预校验，否则会把新账号可用的模型误杀。
  */
 function invalidateCatalogCache() {
+  catalogGeneration += 1;
   catalogCache = { at: 0, models: [], shape: null, upstreamModelCount: 0 };
-  refreshCatalog().catch(() => {});
+  refreshCatalog({ force: true }).catch(() => {});
 }
 
 /**
  * 触发一次目录刷新；同一时刻只允许一个在飞（并发调用复用同一个 Promise）。
  *
- * 返回 `{ ok, at }`：`ok` 表示这次确实把缓存更新了（失败或空目录都算 false）。
- * 手动刷新目录（`/v1/models?refresh=1`）要靠它判断「是不是白刷了一次」，
- * 以便如实告诉用户「刷新失败，仍显示旧缓存」。
+ * `force`：忽略在飞请求，按当前代次重新发起。只给 `invalidateCatalogCache`
+ * 用 —— 普通调用必须复用在飞请求，否则每次轮询都会多打一轮上游。
+ *
+ * 返回 `{ ok, at }`：`ok` 表示这次确实把缓存更新了（失败、空目录、因换号
+ * 作废都算 false）。手动刷新目录（`/v1/models?refresh=1`）要靠它判断
+ * 「是不是白刷了一次」，以便如实告诉用户「刷新失败，仍显示旧缓存」。
  */
-function refreshCatalog() {
-  if (catalogRefreshing) return catalogRefreshing;
-  catalogRefreshing = fetchCatalog()
-    .then((r) => ({ ok: r.upstreamOk, at: catalogCache.at }))
+function refreshCatalog({ force = false } = {}) {
+  if (catalogRefreshing && !force) return catalogRefreshing;
+  const generation = catalogGeneration;
+  const promise = fetchCatalog(generation)
+    .then((r) => ({ ok: r.upstreamOk && !r.stale, at: catalogCache.at }))
     .catch((e) => {
       log('catalog fetch failed', e.message);
       return { ok: false, at: catalogCache.at };
     })
-    .finally(() => { catalogRefreshing = null; });
-  return catalogRefreshing;
+    .finally(() => {
+      // 只清自己的标记：换号后旧请求晚到的 finally 不能把新一代的在飞标记抹掉
+      if (catalogRefreshing === promise) catalogRefreshing = null;
+    });
+  catalogRefreshing = promise;
+  return promise;
 }
 
 /**
@@ -5580,7 +5598,7 @@ function preflightModelError(model) {
     + ' set WORKBUDDY_SKIP_MODEL_PREFLIGHT=1 to forward unknown model ids anyway.';
 }
 
-async function fetchCatalog() {
+async function fetchCatalog(generation = catalogGeneration) {
   // 是否**真的**从上游取到了目录。下面 FEATURED 补全会让 merged 永远非空，
   // 所以不能靠「目录非空」判断这次抓取成没成功。
   let upstreamOk = false;
@@ -5768,6 +5786,15 @@ async function fetchCatalog() {
 
     const models = [...merged.values()];
     if (models.length && !hardError) {
+      /*
+       * 发起后发生过换号 / 换来源：这份结果属于**旧凭据**，绝不能写进新缓存。
+       * 旧请求无法取消（已经打出去了），只能在这里作废；invalidate 已经用
+       * force 发起了新一代请求，最终缓存由新一代决定。
+       */
+      if (generation !== catalogGeneration) {
+        log('catalog refresh result discarded: credential/source changed');
+        return { models: catalogCache.models, upstreamOk: false, stale: true };
+      }
       // 目录里排掉的东西登记下来，便于在 /health 的 upstreamShape 里追溯
       shape.droppedNonChat = models.filter((m) => isNonChatModel(m)).map((m) => m.id);
       // 与写进缓存的 models 用**同一套过滤**，保证这个计数就是"桥认识几个模型"，

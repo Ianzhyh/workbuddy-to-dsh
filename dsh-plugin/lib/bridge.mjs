@@ -10,11 +10,31 @@
  * 本模块不 import 任何 dsh API，可被单元测试独立驱动。
  */
 import { spawn } from 'node:child_process';
-import { existsSync, mkdirSync, openSync, closeSync, readSync, statSync } from 'node:fs';
+import { existsSync, mkdirSync, openSync, closeSync, readSync, renameSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 
 /** 默认的桥脚本相对项目根的位置。 */
 export const BRIDGE_SCRIPT_REL = join('bridge', 'workbuddy-bridge.mjs');
+
+/**
+ * 桥日志滚动上限（与控制台同一口径，见 dashboard/server.mjs）。
+ *
+ * 文档承诺「每次启动桥时检查，超过 2MB 滚动为 bridge.log.1」；但插件拉起桥的
+ * 路径原先只 append、从不滚动 —— dsh 用户长期跑下来日志会无限增长。
+ *
+ * 导出是为了能用临时文件直接测，不必真的起一个桥进程。
+ */
+export const BRIDGE_LOG_MAX_BYTES = 2 * 1024 * 1024;
+
+export function rotateLogIfNeeded(file, maxBytes = BRIDGE_LOG_MAX_BYTES) {
+  try {
+    if (existsSync(file) && statSync(file).size > maxBytes) {
+      renameSync(file, `${file}.1`);
+    }
+  } catch {
+    /* 滚动失败（文件被占用等）不影响启动 */
+  }
+}
 /** 默认的桥日志相对项目根的位置（与控制台共用）。 */
 export const BRIDGE_LOG_REL = join('bridge', 'bridge.log');
 
@@ -449,6 +469,8 @@ export class BridgeSupervisor {
     let logFd = null;
     try {
       mkdirSync(dirname(this.logPath), { recursive: true });
+      // 只在**本次真的要拉起新进程**时滚动：桥还活着时上面已经 return 了。
+      rotateLogIfNeeded(this.logPath);
       logFd = openSync(this.logPath, 'a');
     } catch { /* 日志打不开不该阻止桥启动 */ }
 

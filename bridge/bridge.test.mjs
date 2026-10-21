@@ -3364,3 +3364,80 @@ test('插件登录：设备码 → 加密落盘 → auto 回退 → 刷新轮换
     rmSync(credRoot, { recursive: true, force: true });
   }
 });
+
+test('目录刷新竞态：换来源后旧目录请求晚到，不能覆盖新一代结果', { timeout: 60_000 }, async () => {
+  /*
+   * 回归：invalidateCatalogCache() 以前只清缓存、再调 refreshCatalog()；
+   * 若此刻已有一个目录请求在飞，refreshCatalog() 会把**旧请求**原样返回，
+   * 于是换来源后既没有重新取目录，旧请求晚到的结果还会写回新缓存 ——
+   * 新账号在最长 5 分钟内继续看到旧账号的模型。
+   *
+   * 用一个按请求次数变脸的假上游：第 2 次（换来源前触发的 refresh）故意慢，
+   * 第 3 次（换来源后强制发起）返回 new-model。旧实现只有 2 次请求，
+   * 最终目录仍是 old-model。
+   */
+  let personalCalls = 0;
+  let slowNext = false;
+  let slowStartedResolve;
+  const slowStarted = new Promise((resolve) => { slowStartedResolve = resolve; });
+  const stub = createServer((req, res) => {
+    const path = new URL(req.url, 'http://127.0.0.1').pathname;
+    const send = (models) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ code: 0, data: { models } }));
+    };
+    if (path === '/v2/enterprises/personal/models') {
+      personalCalls += 1;
+      const n = personalCalls;
+      const model = n >= 3 ? 'new-model' : 'old-model';
+      const payload = [{ id: model, maxInputTokens: 128000, maxOutputTokens: 4096 }];
+      if (slowNext) {
+        slowNext = false;
+        slowStartedResolve();
+        setTimeout(() => send(payload), 500);
+        return;
+      }
+      return send(payload);
+    }
+    if (path === '/v3/config') return send([]);
+    res.writeHead(404, { 'content-type': 'application/json' });
+    res.end('{}');
+  });
+  await new Promise((r) => stub.listen(0, '127.0.0.1', r));
+  const stubBase = `http://127.0.0.1:${stub.address().port}`;
+  const bridge = await startBridge({
+    CODEBUDDY_ENDPOINT: stubBase,
+    CODEBUDDY_API_KEY: 'api-key-race',
+    WORKBUDDY_SKIP_MODEL_PREFLIGHT: '1',
+    WORKBUDDY_AUTO_CHECKIN: '0',
+  });
+  try {
+    const warm = await (await fetch(bridge.baseUrl + '/v1/models?all=1', { headers: auth })).json();
+    assert.ok(warm.data.some((m) => m.id === 'old-model'), '先预热旧目录');
+
+    // 让下一次目录请求变慢，并等它真的开始
+    slowNext = true;
+    const slowRefresh = fetch(bridge.baseUrl + '/v1/models?refresh=1', { headers: auth });
+    await slowStarted;
+
+    // 旧请求在飞时换来源 → 必须作废旧请求并发起新一代
+    const switched = await fetch(bridge.baseUrl + '/v1/auth/source', {
+      method: 'POST',
+      headers: { ...auth, 'content-type': 'application/json' },
+      body: JSON.stringify({ source: 'api-key' }),
+    });
+    assert.equal(switched.status, 200);
+    await slowRefresh; // 旧请求完成（可能写回）
+    await new Promise((r) => setTimeout(r, 700)); // 给晚到的写回留出窗口
+
+    const final = await (await fetch(bridge.baseUrl + '/v1/models?all=1', { headers: auth })).json();
+    const ids = final.data.map((m) => m.id);
+    assert.ok(ids.includes('new-model'), `最终目录必须来自新一代请求：${ids}`);
+    assert.ok(!ids.includes('old-model'), `旧请求晚到不能覆盖新目录：${ids}`);
+    assert.ok(personalCalls >= 3, `换来源后必须重新打一次目录（实际 ${personalCalls} 次）`);
+  } finally {
+    await bridge.stop();
+    await new Promise((r) => stub.close(r));
+    rmSync(bridge.dir, { recursive: true, force: true });
+  }
+});

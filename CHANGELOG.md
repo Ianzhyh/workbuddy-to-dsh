@@ -33,9 +33,29 @@
   `CONTRIBUTING.md` 增加新增/修改安装形态的检查清单。
 - `install-contract` 一并校验发版版本号的 5 处同步（根包 / 子包 / lockfile 两处 /
   OpenAPI / README 的 tgz 文件名），漏 bump 会直接红。
+- 新增 `csv-injection`（两处导出行为）、`log-rotation`（2MB 滚动）与桥的
+  「换来源后旧目录晚到」竞态回归用例。
 - 根包 `files` 收紧为运行时白名单：本地 `npm pack` 不再带入 `bridge.log` /
   `usage.jsonl` / `*.bak` / 测试文件；`verify:github` 会把「发布物里混入日志或备份」
   直接判失败。
+
+### Fixed
+
+- **换号 / 换凭据来源时的模型目录竞态**：换号前已经在飞的目录请求无法取消，
+  晚到的**旧账号**结果会写进新缓存，最长 5 分钟内模型选择器仍显示旧目录。
+  现在目录带代次：`invalidateCatalogCache()` 立即开启新一代并作废旧结果；
+  旧请求的 `finally` 也不会再误清新一代的在飞标记。
+- **CSV 公式注入**：插件面板与控制台的导出都只转义了逗号/引号，Excel / WPS
+  会把 `=`、`+`、`-`、`@`、制表符或回车开头的单元格当公式执行。模型名与上游
+  错误原文都可控，`=HYPERLINK(...)` 能一路进账本。现在两处统一用 `csvCell`
+  给危险前缀加单引号，并加了行为回归用例。
+- **插件拉起桥时日志不滚动**：文档承诺每次启动检查 2MB 并滚成 `bridge.log.1`，
+  实际只有控制台路径做了，dsh 插件长期运行会让 `bridge.log` 无限增长。现在
+  插件 supervisor 在 spawn 前走同一套滚动逻辑。
+
+### Changed
+
+- `test:lib` / `test:bridge` 改用 glob，新增测试文件不会再因为忘记加入脚本而漏跑。
 
 ## [1.9.3] - 2026-10-21
 
