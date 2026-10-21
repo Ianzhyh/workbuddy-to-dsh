@@ -52,7 +52,7 @@
   },
   "scripts": {
     "start": "node dashboard/server.mjs",
-    "bridge": "node bridge/workbuddy-bridge.mjs",
+    "bridge": "node bridge/launch.mjs",
     "connect": "node tools/connect.mjs",
     "doctor": "node tools/doctor.mjs",
     "verify": "node tools/verify-atrest.mjs",

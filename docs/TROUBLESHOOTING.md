@@ -134,7 +134,7 @@ refreshToken : envelope keyId=9127dea1b44020a7 -> DECRYPTED len=698 jws-like=tru
 |---|---|---|
 | `11101` | `Non-stream chat request is currently not supported` | 上游只接受流式。桥已自动转换；若仍出现，说明请求绕过了桥 |
 | `11101` | `cannot unmarshal object into Go struct field Request.tool_choice of type string` | 客户端发了 **OpenAI 对象形式**的 `tool_choice`（`{"type":"function",...}`），而上游的 Go 结构体只收字符串。桥已在 `normalizePayload` 里归一化，正常不会出现；若出现，说明请求绕过了桥 |
-| `11128` | `Illegal API invocation from an unapproved channel` | 请求结构或调用方身份不被认可。常见于 `system` 提示词被放在 `developer` 角色、User-Agent 不匹配、**Claude Code 的固定 system 模板被逐字拉黑**（2026-10-08），或 **dsh 身份句 `You are an AI agent powered by DeepSeek Harness.`**（2026-10-21）。桥已内置对这两类 system 模板的最小改写；正常不会再出现。若再现：看桥日志 `normalize:` 行与「2026-10-21」小节，确认是否出现新的模板句 |
+| `11128` | `Illegal API invocation from an unapproved channel` | 请求结构或调用方身份不被认可。常见于 `system` 提示词被放在 `developer` 角色、User-Agent 不匹配、**Claude Code 的固定 system 模板被逐字拉黑**（2026-10-08），或 **dsh 身份句 `You are an AI agent powered by DeepSeek Harness.`**（2026-10-21）。桥已内置对这两类 system 模板的最小改写，并在三条协议路径上做渐进兜底（删品牌行 → 删首段 → 中性 system）；成功时响应头带 `X-WorkBuddy-11128-Fallback`。若再现：看桥日志 `normalize:` / `retrying with` 行与「2026-10-21」小节，确认是否出现新的模板句或 tools/工具结果触发 |
 | `11133` | 网关包装的上游故障 —— **但真因在 `extError.code` 里** | 桥会看 `extError.code` 分流（见下）：**确定性**的（`model_param_invalid` / `invalid_reasoning_effort` …）立刻返回，**瞬时**的才退避重试 |
 
 > **`11133` 为什么要分流（2026-10-13 修）**：`11133` 只是网关的**包装码**，
@@ -178,10 +178,47 @@ refreshToken : envelope keyId=9127dea1b44020a7 -> DECRYPTED len=698 jws-like=tru
 版本）即可。
 
 - 复核：`node tools/dev/probe-audit-template.mjs` 会分别发“dsh 身份句”和
-  “中性身份句”两条最小请求；前者也应 200（说明改写层生效）。
-- 若上游再新增 system 黑名单：桥会先去掉含 `DeepSeek Harness` 的 system 行重试一次，
-  仍失败再退回中性 system；`preflight` 的「上游 11128」项会直接指出本次桥日志里
-  出现过拦截。若仍复现，检查日志里是否出现了**新的** system 模板句。
+  “中性身份句”两条最小请求，并额外发一条 **dsh 形状的 `/v1/chat/completions`**
+  （system + tools + tool 结果）；任何一条失败时脚本退出码为 1。
+- 若上游再新增 system 黑名单：桥按**渐进降级**重试，顺序是
+  ① 删含 `DeepSeek Harness` 的品牌行 → ② 删第一条 system 的首段（保留后面的
+  skills/workspace/规则）→ ③ 整段中性 system。成功时响应头带
+  `X-WorkBuddy-11128-Fallback: <策略>`，账本同时记 `fallback` / `fallbackOk`。
+- 三条协议（`/v1/chat/completions`、`/v1/messages`、`/v1/responses`）现在共用
+  同一套兜底；不再只有 OpenAI 路径能恢复。
+- `preflight` 会优先查 `/v1/requests`：**仍失败**的 11128 会告警；已通过兜底恢复的
+  会显示为 ok（并给出策略），不再把日志里的“retrying”误报成故障。
+- 若仍复现：检查日志里是否出现了**新的** system 模板句，或 tools/工具结果字段；
+  设置 `WORKBUDDY_SHAPE=1` 可打印请求形状（不含对话内容）。
+
+### 让 dsh 的网页搜索走 WorkBuddy，而不是 DeepSeek
+
+dsh 自带的 `dsh-web-search-deepseek` 默认调用 DeepSeek 的 Anthropic Messages +
+`web_search_20250305`，需要 DeepSeek key/钱包。桥现在提供 WorkBuddy 原生搜索：
+
+- `POST /v1/web_search`：直连 WorkBuddy `/agenttool/v1/search`，返回
+  `{ provider, results:[{title,url,snippet}], total_results, response_time_ms }`；
+- `/v1/messages` 识别 `web_search_20250305`，返回 dsh provider 能解析的
+  `web_search_tool_result` 块（不再打 DeepSeek）。
+
+**一键配置**：dsh **设置 → WorkBuddy → 概览 → 操作 → 一键接入 WorkBuddy 搜索**，
+或运行 `/workbuddy websearch`。它会把 `web-search-deepseek` 的接口地址指到桥，把桥令牌
+写进独立凭据引用 `WORKBUDDY_SEARCH_BRIDGE_KEY`（不覆盖 `DEEPSEEK_API_KEY`），并用 dsh
+自己的 web 服务真搜一次做自检；结果会直接显示在按钮下方/命令回执里。
+
+手动兜底：在 dsh **设置 → 插件 → 内置插件设置 → 网页搜索**里：
+
+1. 选 **Messages API**；
+2. 接口地址填 `http://127.0.0.1:8790/v1`；
+3. API Key 填桥本地令牌（`dsh-plugin/.bridge-token` 或控制台「客户端接入」）；
+4. 保存后搜一次，桥日志应出现 `web_search (anthropic) results=...`。
+   也可以先运行 `node tools/dev/probe-web-search.mjs "DeepSeek latest news"` 单独验证桥链路。
+
+也可在启动 dsh 前设 `DEEPSEEK_SEARCH_BASE_URL=http://127.0.0.1:8790/v1` 与
+`DEEPSEEK_API_KEY=<桥令牌>`。原生分支是非流式的（dsh provider 默认不带 stream；
+`stream:true` 会收到明确 400）。上游搜索限流 code `15001` 会被桥映射成 429；
+这不是 DeepSeek 余额问题。若搜索仍走 DeepSeek，检查 dsh 设置里是否又切回了
+DeepSeek Search API，或桥日志有没有搜到请求。
 
 ### 上游版本漂移（身份指纹整体被拒）
 
@@ -198,6 +235,10 @@ WORKBUDDY_IDE_NAME=VSCode
 ```
 
 判定是否是版本漂移：控制台「对话测试」发一条最短消息 —— 若同样被拒，且 `verify-atrest` 显示凭据一切正常，即命中本症状。
+
+> 插件自动拉起的桥也会读取 `.env` 里的这三个变量（以及 `WORKBUDDY_11128_FALLBACK`、
+> `WORKBUDDY_SKIP_MODEL_PREFLIGHT`、超时/连接池等）；改完重启桥即可。
+> `npm run bridge` 现在走 `bridge/launch.mjs`，同样会加载 `.env`。
 
 ### 模型名含中文 / 特殊字符 → 500 且报 `Invalid character in header content`
 

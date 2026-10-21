@@ -21,6 +21,19 @@
 
 ### Added
 
+- **WorkBuddy 原生网页搜索（不消耗 DeepSeek 钱包）**：新增 `POST /v1/web_search`
+  直连 WorkBuddy `/agenttool/v1/search`（结构化标题/URL/snippet、限流映射 429），
+  并让 `/v1/messages` 识别 `web_search_20250305`，直接返回 dsh provider 需要的
+  Anthropic `web_search_tool_result` + text citations。dsh 内置的 Web search
+  provider 只需把接口地址指到桥（`http://127.0.0.1:8790/v1`）、API key 填桥令牌，
+  搜索就不再发往 DeepSeek。支持 `WORKBUDDY_SEARCH_BASE` /
+  `WORKBUDDY_SEARCH_VERSION` / `WORKBUDDY_SEARCH_TIMEOUT_MS`。插件面板「概览 →
+  操作」与 `/workbuddy websearch` 提供**一键接入 WorkBuddy 搜索**：自动把 dsh 的
+  web-search-deepseek 接口地址指向本地桥，把桥令牌写进独立凭据引用（不覆盖用户的
+  DeepSeek key），再用 dsh 自己的 web 服务真搜一次做自检并回报结果。dsh 未注册
+  `web` settings 分节（rc.6 的 provider 选择在 bundle patch 里）时会跳过该步而不是
+  报错。
+
 - **GitHub 直装形态的发布门禁**：新增 `npm run verify:github`（已接入
   `release:check`），真实执行根包 `npm pack` → 安装到临时 profile 的
   `node_modules/workbuddy-to-dsh` → 校验 Loader 名、客户端注册 id、运行时文件与
@@ -46,11 +59,29 @@
   400 code 11128；同一凭据发最小消息（中性 system）是 200。桥现在只对 **system**
   做最小改写，把这一句换成中性身份句；用户消息、工具定义/结果与 system 其余内容
   原样保留。新增桥端回归用例。
-- **11128 未知模板兜底**：上游若再新增 system 黑名单，桥会先去掉含
-  `DeepSeek Harness` 的 system 行重试一次，仍失败再退回中性 system；user、tools
-  与工具结果不动。可用 `WORKBUDDY_11128_FALLBACK=0` 关闭。
-- `probe-audit-template` 增加 dsh 身份句/中性句两条探针并改用落盘令牌；
-  `preflight` 会读本次桥日志，出现 11128 时直接给处置建议。
+- **11128 未知模板兜底（三条协议统一）**：upstream 再新增 system 黑名单时，桥按
+  “删品牌行 → 删首段（保留后续 instructions）→ 整段中性 system”渐进重试；
+  `/v1/chat/completions`、`/v1/messages`、`/v1/responses` 共用同一套逻辑。
+  user、tools 与工具结果不动；成功时回 `X-WorkBuddy-11128-Fallback` 响应头，
+  账本记 `fallback` / `fallbackOk`。可用 `WORKBUDDY_11128_FALLBACK=0` 关闭。
+- **Anthropic/Responses 的鉴权错误不再误导**：上游 401/403 统一回 502 +
+  `upstream_auth_error`（Anthropic 为 `authentication_error`），并保留上游原文；
+  不再让 Claude Code/Codex 以为是本地令牌错误。
+- **非法/重复 tool name 本地拦截**：上游对含 `.` / `/` / 空格或重名的工具名回
+  确定性 400（11152 / `invalid_request_error`），整轮失败。桥现在在打上游前
+  校验并返回可读 400，明确指出是哪个工具。
+- **首字节/排队超时**：新增 `WORKBUDDY_FIRST_BYTE_TIMEOUT_MS`（默认 120s）与
+  `WORKBUDDY_QUEUE_TIMEOUT_MS`（默认 120s）、`WORKBUDDY_MAX_SOCKETS`（默认 32）；
+  上游只回响应头不说话或连接池排队过久时不再永久 loading。插件空闲看门狗默认
+  开到 5 分钟（显式 0 可关）。
+- **`.env` 逃生门真正到桥**：插件自动拉起桥时现在会透传版本指纹、11128 开关、
+  跳过预校验、超时/连接池/重试/诊断等非机密变量；`npm run bridge` 改走
+  `bridge/launch.mjs`，同样加载 `.env`。
+- `probe-audit-template` 增加 dsh 形状的 `/v1/chat/completions` 探针，失败时退出码为 1；
+  `preflight` 改用 `/v1/requests` 区分“11128 已兜底恢复”和“仍失败”。
+- **桌面换号后仍用旧内存令牌**：`memoryAuth` 现在绑定登录文件指纹；文件被
+  桌面端替换（换号/刷新）后立即丢弃，不再用旧账号令牌直到过期。跨账号
+  failover 时同时失效模型目录，避免旧目录误杀新账号模型。
 - **换号 / 换凭据来源时的模型目录竞态**：换号前已经在飞的目录请求无法取消，
   晚到的**旧账号**结果会写进新缓存，最长 5 分钟内模型选择器仍显示旧目录。
   现在目录带代次：`invalidateCatalogCache()` 立即开启新一代并作废旧结果；

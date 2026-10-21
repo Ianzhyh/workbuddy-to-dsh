@@ -527,6 +527,11 @@ copilot.tencent.com/v2/chat/completions   ← 上游只说 OpenAI 协议，且�
 
 两条路径最终汇到上游同一个端点，所以**用量、积分、账本、控制台是统一的**。
 
+网页搜索另走 WorkBuddy 的原生 `POST /agenttool/v1/search`：桥暴露
+`POST /v1/web_search`，并在 `/v1/messages` 识别 `web_search_20250305`。dsh 的
+Web search provider 把接口地址指到桥后，搜索走 WorkBuddy 账号、**不消耗 DeepSeek
+钱包**；配置步骤见 [`dsh-plugin/README.md`](dsh-plugin/README.md#让-dsh-的网页搜索走-workbuddy不消耗-deepseek-钱包)。
+
 上游比 OpenAI 规范更严的地方（`developer` 角色、`tool_choice` 只认字符串、首条必须
 是 `system`）都在同一次归一化里处理；缺的能力（embedding）明确返回 501 而不是伪造。
 详见 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)。

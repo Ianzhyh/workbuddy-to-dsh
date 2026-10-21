@@ -55,6 +55,16 @@ const upstream = createServer((req, res) => {
     try { lastUpstreamBody = JSON.parse(Buffer.concat(chunks).toString('utf8')); }
     catch { lastUpstreamBody = null; }
 
+    if (scenario.kind === '11128thenText') {
+      scenario.calls = (scenario.calls || 0) + 1;
+      if (scenario.calls === 1) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ code: 11128, msg: 'Illegal API invocation from an unapproved channel' }));
+        return;
+      }
+      // 第二次走下面的正常文本分支
+    }
+
     if (scenario.kind === 'error') {
       res.writeHead(401, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ msg: 'upstream says no', code: 40101 }));
@@ -1583,6 +1593,45 @@ test('被丢掉的工具必须在请求日志里可见（否则「模型有个�
   assert.ok(!/dropped=\S*exec_command/.test(line),
     `exec_command 是普通 function，不该出现在 dropped 里：${line}`);
   assert.match(line, /freeform=apply_patch/, '同一行应能看到 apply_patch 确实被转发了');
+});
+
+test('11128：Responses 路径也要渐进兜底，成功时回 fallback 头', async () => {
+  await waitReady();
+  scenario = { kind: '11128thenText' };
+  const { status, headers } = await post({
+    model: 'gpt-5.1-codex',
+    stream: false,
+    input: [
+      {
+        type: 'message',
+        role: 'developer',
+        content: `First paragraph identity.
+
+Second paragraph instructions.`,
+      },
+      { type: 'message', role: 'user', content: 'hi' },
+    ],
+  });
+  assert.equal(status, 200, '第一次 11128 后应降级 system 并成功');
+  assert.equal(scenario.calls, 2, '应只多打一次上游');
+  assert.equal(headers.get('x-workbuddy-11128-fallback'), 'drop-first-system-paragraph');
+  assert.ok(lastUpstreamBody.messages.some((m) => m.role === 'system' && m.content.includes('Second paragraph instructions')),
+    '第二条请求应保留首段之后的 system instructions');
+});
+
+test('上游 401：Responses 非流式回 502 + upstream_auth_error，并提示重登 WorkBuddy', async () => {
+  await waitReady();
+  scenario = { kind: 'error' };
+  const { status, text } = await post({
+    model: 'gpt-5.1-codex',
+    stream: false,
+    input: [{ type: 'message', role: 'user', content: 'hi' }],
+  });
+  assert.equal(status, 502, '上游登录过期不能原样回 401');
+  const j = JSON.parse(text);
+  assert.equal(j.error.code, 'upstream_auth_error');
+  assert.match(j.error.message, /upstream login expired/i);
+  assert.match(j.error.message, /upstream says no/, '上游原始 msg 仍应保留用于排查');
 });
 
 // ── 收尾 ──────────────────────────────────────────────────────────────────

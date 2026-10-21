@@ -121,7 +121,7 @@ if (!authDir) {
 } else {
   const infos = readdirSync(authDir).filter((f) => f.endsWith('.info'));
   record(infos.length || pluginLoginDetected ? 'ok' : 'bad', 'WorkBuddy 登录文件',
-    `${authDir}（${infos.length} 个：${infos.join('、') || '空'}）${pluginLoginDetected ? ' · 当前使用插件登录' : ''}`,
+    `${authDir}（${infos.length} 个：${infos.join('、') || '空'}）${pluginLoginDetected ? ' · 检测到插件登录凭据（是否生效看端口检查）' : ''}`,
     infos.length || pluginLoginDetected ? null : '在 WorkBuddy 桌面端登录一次账号；或改用「插件登录」');
   const active = process.env.WORKBUDDY_AUTH_FILE || (existsSync(join(authDir, 'workbuddy-desktop.info')) ? join(authDir, 'workbuddy-desktop.info') : '');
   if (!active) {
@@ -159,13 +159,23 @@ const probeBridge = async (port) => {
     });
     const body = await res.json().catch(() => ({}));
     if (res.ok && body && (body.ok !== undefined || body.pid !== undefined)) {
-      return { state: 'ours', note: body.pid ? `pid ${body.pid}` : '' };
+      return {
+        state: 'ours',
+        note: body.pid ? `pid ${body.pid}` : '',
+        authSource: body.auth?.source || '',
+        startedAtMs: Date.parse(body.startedAt) || 0,
+      };
     }
     // 桥活着但**登录凭据读不出来**时 /health 回 503（body 里带 authFile 与原因）。
     // 这与"端口上是别的服务"完全不同，必须分开报 —— 否则用户会去找不存在的端口冲突。
     if (body && body.ok === false
       && (body.authFile !== undefined || /login|sign in|credential|凭据|登录/i.test(String(body.error || '')))) {
-      return { state: 'degraded', note: String(body.error || '登录凭据读不出来'), authFile: body.authFile };
+      return {
+        state: 'degraded',
+        note: String(body.error || '登录凭据读不出来'),
+        authFile: body.authFile,
+        startedAtMs: Date.parse(body.startedAt) || 0,
+      };
     }
     if (res.status === 401) return { state: 'other', note: 'HTTP 401（有服务在，但鉴权不过：可能 token 不对或不是本项目的桥）' };
     return { state: 'other', note: `HTTP ${res.status}` };
@@ -186,7 +196,7 @@ const probeConsole = async (port) => {
 const bridgePortState = await probeBridge(bridgePort);
 const consolePortState = await probeConsole(consolePort);
 record(bridgePortState.state === 'other' ? 'warn' : bridgePortState.state === 'degraded' ? 'warn' : 'ok', `端口 ${bridgePort}（桥）`,
-  bridgePortState.state === 'ours' ? `本项目的桥在跑（${bridgePortState.note || '已响应'}）`
+  bridgePortState.state === 'ours' ? `本项目的桥在跑（${bridgePortState.note || '已响应'}${bridgePortState.authSource ? `，凭据 ${bridgePortState.authSource}` : ''}）`
     : bridgePortState.state === 'degraded' ? `本项目的桥在跑，但读不出登录凭据：${bridgePortState.note}${bridgePortState.authFile ? `（${bridgePortState.authFile}）` : ''}`
       : bridgePortState.state === 'other' ? `被别的服务占用：${bridgePortState.note}`
         : '空闲（插件会在加载时拉起桥）',
@@ -214,19 +224,54 @@ if (bridgePortState.state === 'ours' || bridgePortState.state === 'degraded') {
   record('info', '桥未运行', '这不是错误：插件加载时会自动拉起（已在跑就复用）', '也可以手动 `node bridge/workbuddy-bridge.mjs`');
 }
 
-/** 5b. 本次桥运行是否被上游 11128 拦截过（2026-10-21 dsh 身份句就是这类） */
-if (projectRoot) {
-  const tail = readLogTail(join(projectRoot, 'bridge', 'bridge.log'));
-  if (tail) {
-    const lines = tail.split(/\r?\n/);
-    let start = 0;
-    for (let i = lines.length - 1; i >= 0; i -= 1) {
-      if (lines[i].includes('workbuddy-bridge listening')) { start = i; break; }
+/**
+ * 5b. 本次桥运行是否被上游 11128 拦截过。
+ *
+ * 优先查 `/v1/requests`：新桥会把“兜底成功”记成一条 ok + fallback 字段，
+ * 把“仍失败”记成 code 11128。这样能区分“已恢复”和“还在断”，不会像只扫日志
+ * 那样把已经救回的 11128 也报成告警。
+ */
+if (bridgePortState.state === 'ours' || bridgePortState.state === 'degraded') {
+  let requests = null;
+  try {
+    const r = await fetch(`http://127.0.0.1:${bridgePort}/v1/requests?limit=100`, {
+      headers: { authorization: `Bearer ${token}` },
+      signal: AbortSignal.timeout(5000),
+    });
+    const body = await r.json().catch(() => null);
+    if (Array.isArray(body?.requests)) requests = body.requests;
+  } catch { /* 旧桥/接口不可用：退回日志扫描 */ }
+
+  if (requests) {
+    // 只看**本次桥运行**的记录：上一次运行（升级/重启前）的 11128 不应继续告警。
+    const since = bridgePortState.startedAtMs || 0;
+    const current = since ? requests.filter((r) => Number(r.t) >= since) : requests;
+    const failed11128 = current.filter((r) => Number(r.code) === 11128 || /11128/.test(String(r.error || '')));
+    const recovered = current.filter((r) => r.ok === true && typeof r.fallback === 'string');
+    if (failed11128.length) {
+      const latest = failed11128[0];
+      record('warn', '上游 11128',
+        `${failed11128.length} 条仍未恢复（最新：${new Date(latest.t).toISOString()}，${latest.error || '来源/模板拦截'}）`,
+        '看 bridge/bridge.log 的 `upstream error` 行；运行 `node tools/dev/probe-audit-template.mjs` 定位是 system 还是 tools/工具结果');
+    } else if (recovered.length) {
+      const strategies = [...new Set(recovered.map((r) => r.fallback))].join(' / ');
+      record('ok', '上游 11128 兜底', `${recovered.length} 次已通过 ${strategies} 恢复（system 可能与上游模板不同）`, null);
     }
-    const hits = lines.slice(start).filter((line) => line.includes('11128'));
-    if (hits.length) {
-      record('warn', '上游 11128', `本次桥运行出现 ${hits.length} 次来源/模板拦截`,
-        '重启桥（新版本会对 system 身份句做最小改写）；若仍出现，运行 `node tools/dev/probe-audit-template.mjs` 并把日志最后几行发到 issue');
+  } else if (projectRoot) {
+    // 旧桥没有 fallback 字段 / 接口不可用：只能如实说“日志里有，无法判断是否已恢复”。
+    const tail = readLogTail(join(projectRoot, 'bridge', 'bridge.log'));
+    if (tail) {
+      const lines = tail.split(/\r?\n/);
+      let start = 0;
+      for (let i = lines.length - 1; i >= 0; i -= 1) {
+        if (lines[i].includes('workbuddy-bridge listening')) { start = i; break; }
+      }
+      const hits = lines.slice(start).filter((line) => line.includes('11128'));
+      if (hits.length) {
+        record('warn', '上游 11128',
+          `日志中出现 ${hits.length} 次 11128；当前桥不支持从账本区分“已兜底恢复/仍失败”`,
+          '升级/重启桥后再跑一次自检；若仍失败，运行 `node tools/dev/probe-audit-template.mjs`');
+      }
     }
   }
 }

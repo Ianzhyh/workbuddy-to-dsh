@@ -710,7 +710,14 @@ test('消费方提前 break：上游连接必须被立刻收掉（不留幽灵�
       if (got >= 2) break; // 消费者不想要了
     }
     const framesAtBreak = framesWritten;
-    await new Promise((r) => setTimeout(r, 600)); // 给传播留时间
+    /*
+     * 给取消传播留时间，但不要用固定的 600ms —— 门禁并行跑桥测试时机器负载高，
+     * 600ms 偶尔不够，会把“取消其实生效了”误判成连接泄漏。最多等 3s，期间
+     * 一旦 close 就继续断言；帧数在这段时间若继续增长仍会失败。
+     */
+    for (let i = 0; i < 60 && closedAt === null; i += 1) {
+      await new Promise((r) => setTimeout(r, 50));
+    }
 
     assert.equal(finished, false,
       '消费方 break 之后上游仍把整条流跑完了 —— 连接泄漏，白烧额度与并发');

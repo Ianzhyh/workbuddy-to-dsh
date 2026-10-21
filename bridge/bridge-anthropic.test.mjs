@@ -68,6 +68,22 @@ const upstream = createServer((req, res) => {
     try { lastUpstreamBody = JSON.parse(Buffer.concat(chunks).toString('utf8')); }
     catch { lastUpstreamBody = null; }
 
+    if (scenario.kind === 'error401') {
+      res.writeHead(401, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ msg: 'upstream says no', code: 40101 }));
+      return;
+    }
+
+    if (scenario.kind === '11128thenText') {
+      scenario.calls = (scenario.calls || 0) + 1;
+      if (scenario.calls === 1) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ code: 11128, msg: 'Illegal API invocation from an unapproved channel' }));
+        return;
+      }
+      // 第二次走下面的正常文本分支
+    }
+
     if (scenario.kind === 'midBreak') {
       // 先给半句正文，然后**粗暴掐断**（模拟上游/网络中断）
       res.writeHead(200, { 'Content-Type': 'text/event-stream' });
@@ -440,6 +456,41 @@ test('count_tokens：纯文本请求不受影响（图片修复不得改变文�
   assert.equal(j.input_tokens, 7,
     '"hello world"（11 字符 ASCII → ceil(11/4)=3）加 1 条消息开销 4 应为 7'
     + `，实际 ${j.input_tokens} —— 图片分支不得改变纯文本口径`);
+});
+
+test('11128：Anthropic 路径也要渐进兜底，成功时回 fallback 头', async () => {
+  await waitReady();
+  scenario = { kind: '11128thenText' };
+  const { status, headers } = await post({
+    model: 'm',
+    stream: false,
+    max_tokens: 8,
+    system: `First paragraph identity.
+
+Second paragraph instructions.`,
+    messages: [{ role: 'user', content: 'hi' }],
+  });
+  assert.equal(status, 200, '第一次 11128 后应降级 system 并成功');
+  assert.equal(scenario.calls, 2, '应只多打一次上游');
+  assert.equal(headers.get('x-workbuddy-11128-fallback'), 'drop-first-system-paragraph');
+  assert.ok(lastUpstreamBody.messages.some((m) => m.role === 'system' && m.content.includes('Second paragraph instructions')),
+    '第二条请求应保留首段之后的 system instructions');
+});
+
+test('上游 401：Anthropic 路径回 502 + authentication_error，并提示重登 WorkBuddy', async () => {
+  await waitReady();
+  scenario = { kind: 'error401' };
+  const res = await post({
+    model: 'm',
+    stream: false,
+    max_tokens: 8,
+    messages: [{ role: 'user', content: 'hi' }],
+  });
+  assert.equal(res.status, 502, '上游登录过期不能原样回 401，否则客户端会怀疑本地令牌');
+  const j = await res.json();
+  assert.equal(j.error.type, 'authentication_error');
+  assert.match(j.error.message, /upstream login expired/i);
+  assert.match(j.error.message, /upstream says no/, '上游原始 msg 仍应保留用于排查');
 });
 
 // ── 收尾 ──────────────────────────────────────────────────────────────────

@@ -202,6 +202,15 @@ async function startStubUpstream(models = ['stub-model'], opts = {}) {
           return res.end(opts.chatRaw);
         }
         /*
+         * `chatHang`：只回响应头，永远不写 body、不 end —— 模拟“连接建立了但
+         * 上游一直不说话”。首字节超时用例靠它验证不会永久 loading。
+         */
+        if (opts.chatHang) {
+          res.writeHead(200, { 'content-type': 'text/event-stream' });
+          res.flushHeaders();
+          return;
+        }
+        /*
          * `opts.chatSequence`：按顺序返回**不同**的响应，用于测「重试若干次后成功」。
          * 每项 `{ status, type, raw }`；用完最后一项后**一直重复它**。
          *
@@ -3560,7 +3569,9 @@ test('桥：未知 system 模板触发 11128 时，用中性 system 重试一次
         stream: false,
         tools: [tool],
         messages: [
-          { role: 'system', content: 'You are a quirky host agent.\nKeep this extra instruction.' },
+          { role: 'system', content: `You are a quirky host agent.
+
+Keep this extra instruction.` },
           { role: 'user', content: 'hi' },
         ],
       }),
@@ -3575,12 +3586,282 @@ test('桥：未知 system 模板触发 11128 时，用中性 system 重试一次
     assert.ok(first.messages.some((m) => m.role === 'system' && m.content.includes('quirky')),
       '第一次应保留原始 system');
     assert.ok(!second.messages.some((m) => m.role === 'system' && m.content.includes('quirky')),
-      '重试必须去掉触发黑名单的 system 指令');
-    assert.ok(second.messages.some((m) => m.role === 'system' && m.content.includes('helpful AI assistant')),
-      '重试应带中性 system');
+      '重试必须去掉触发黑名单的 system 首段');
+    assert.ok(second.messages.some((m) => m.role === 'system' && m.content.includes('Keep this extra instruction')),
+      '渐进降级应保留 system 后面的 instructions，而不是整段丢掉');
+    assert.equal(res.headers.get('x-workbuddy-11128-fallback'), 'drop-first-system-paragraph',
+      '响应头必须标明本次用的是哪一级兜底');
     assert.ok(second.messages.some((m) => m.role === 'user' && m.content === 'hi'),
       'user 消息必须原样保留');
     assert.deepEqual(second.tools, first.tools, 'tools 必须原样保留');
+    const ledger = readFileSync(join(bridge.dir, 'usage.jsonl'), 'utf8').trim().split(/\r?\n/).map((l) => JSON.parse(l));
+    assert.equal(ledger.at(-1).fallback, 'drop-first-system-paragraph', '账本必须记下兜底策略');
+    assert.equal(ledger.at(-1).fallbackOk, true, '账本必须能区分兜底是否成功');
+  } finally {
+    await bridge.stop();
+    try { await stub.close(); } catch { /* 忽略 */ }
+    rmSync(bridge.dir, { recursive: true, force: true });
+  }
+});
+
+test('桥：11128 连续命中时逐级降级，最后才换中性 system，且响应头/账本可见', { timeout: 90_000 }, async () => {
+  const stub = await startStubUpstream(['fallback3-model'], {
+    chatSequence: [
+      {
+        status: 400,
+        type: 'application/json',
+        raw: JSON.stringify({ code: 11128, msg: 'Illegal API invocation from an unapproved channel' }),
+      },
+      {
+        status: 400,
+        type: 'application/json',
+        raw: JSON.stringify({ code: 11128, msg: 'Illegal API invocation from an unapproved channel' }),
+      },
+      {
+        status: 200,
+        type: 'text/event-stream',
+        raw: 'data: {"choices":[{"delta":{"content":"ok"}}]}\n\ndata: {"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":1,"total_tokens":4}}\n\ndata: [DONE]\n\n',
+      },
+    ],
+  });
+  const bridge = await startBridge({ CODEBUDDY_ENDPOINT: stub.base }, { auth: READABLE_FAKE_AUTH });
+  try {
+    await fetch(bridge.baseUrl + '/v1/models?all=1');
+    const tool = { type: 'function', function: { name: 'foo', description: 'foo', parameters: { type: 'object', properties: {} } } };
+    const res = await fetch(bridge.baseUrl + '/v1/chat/completions', {
+      method: 'POST',
+      headers: { ...auth, 'content-type': 'application/json' },
+      body: JSON.stringify({
+        model: 'fallback3-model',
+        stream: false,
+        tools: [tool],
+        messages: [
+          { role: 'system', content: 'First paragraph identity.\n\nSecond paragraph instructions.' },
+          { role: 'user', content: 'hi' },
+        ],
+      }),
+      signal: AbortSignal.timeout(15000),
+    });
+    assert.equal(res.status, 200);
+    await res.text();
+
+    assert.equal(stub.seen.length, 3, '11128 连续命中时应依次尝试：删首段 → 中性 system');
+    const second = JSON.parse(stub.seen[1].body);
+    const third = JSON.parse(stub.seen[2].body);
+    assert.ok(second.messages.some((m) => m.role === 'system' && m.content.includes('Second paragraph instructions')),
+      '第二级应保留首段之后的 instructions');
+    assert.ok(!third.messages.some((m) => m.role === 'system' && m.content.includes('Second paragraph instructions')),
+      '最后一级才整段换中性 system');
+    assert.ok(third.messages.some((m) => m.role === 'system' && m.content.includes('helpful AI assistant')));
+    assert.deepEqual(third.tools, JSON.parse(stub.seen[0].body).tools, 'tools 必须始终原样保留');
+    assert.equal(res.headers.get('x-workbuddy-11128-fallback'), 'neutral-system');
+    const ledger = readFileSync(join(bridge.dir, 'usage.jsonl'), 'utf8').trim().split(/\r?\n/).map((l) => JSON.parse(l));
+    assert.equal(ledger.at(-1).fallback, 'neutral-system');
+    assert.equal(ledger.at(-1).fallbackOk, true);
+  } finally {
+    await bridge.stop();
+    try { await stub.close(); } catch { /* 忽略 */ }
+    rmSync(bridge.dir, { recursive: true, force: true });
+  }
+});
+
+test('桥：非法 tool name 本地 400，不调用上游', { timeout: 90_000 }, async () => {
+  const stub = await startStubUpstream(['tool-model']);
+  const bridge = await startBridge(
+    { CODEBUDDY_ENDPOINT: stub.base, WORKBUDDY_SKIP_MODEL_PREFLIGHT: '1' },
+    { auth: READABLE_FAKE_AUTH },
+  );
+  try {
+    const res = await fetch(bridge.baseUrl + '/v1/chat/completions', {
+      method: 'POST',
+      headers: { ...auth, 'content-type': 'application/json' },
+      body: JSON.stringify({
+        model: 'tool-model',
+        stream: false,
+        messages: [{ role: 'system', content: 'You are a helpful assistant.' }, { role: 'user', content: 'hi' }],
+        tools: [{ type: 'function', function: { name: 'bad.tool/name', description: 'x', parameters: { type: 'object', properties: {} } } }],
+      }),
+      signal: AbortSignal.timeout(15000),
+    });
+    assert.equal(res.status, 400);
+    const body = await res.json();
+    assert.match(body.error.message, /tool name.*invalid/i);
+    assert.equal(stub.seen.length, 0, '非法工具名必须在本地拦下，绝不能花一次上游往返');
+  } finally {
+    await bridge.stop();
+    try { await stub.close(); } catch { /* 忽略 */ }
+    rmSync(bridge.dir, { recursive: true, force: true });
+  }
+});
+
+test('桥：上游只回响应头不说话时，首字节超时返回 504（不能永久 loading）', { timeout: 30_000 }, async () => {
+  const stub = await startStubUpstream(['hang-model'], { chatHang: true });
+  const bridge = await startBridge(
+    {
+      CODEBUDDY_ENDPOINT: stub.base,
+      WORKBUDDY_SKIP_MODEL_PREFLIGHT: '1',
+      WORKBUDDY_FIRST_BYTE_TIMEOUT_MS: '150',
+    },
+    { auth: READABLE_FAKE_AUTH },
+  );
+  try {
+    const startedAt = Date.now();
+    const res = await fetch(bridge.baseUrl + '/v1/chat/completions', {
+      method: 'POST',
+      headers: { ...auth, 'content-type': 'application/json' },
+      body: JSON.stringify({
+        model: 'hang-model',
+        stream: false,
+        messages: [{ role: 'system', content: 'You are a helpful assistant.' }, { role: 'user', content: 'hi' }],
+      }),
+      signal: AbortSignal.timeout(10_000),
+    });
+    assert.equal(res.status, 504);
+    const body = await res.json();
+    assert.match(body.error.message, /first-byte timeout/i);
+    assert.ok(Date.now() - startedAt < 5000, '首字节超时必须及时收尾，不能等客户端超时');
+  } finally {
+    await bridge.stop();
+    try { await stub.close(); } catch { /* 忽略 */ }
+    rmSync(bridge.dir, { recursive: true, force: true });
+  }
+});
+
+test('桥：桌面登录文件换号后，刷新出的 memoryAuth 不能继续压过新文件', { timeout: 60_000 }, async () => {
+  const stub = await startStubUpstream(['switch-model'], {
+    chatSequence: [
+      {
+        status: 401,
+        type: 'application/json',
+        raw: JSON.stringify({ code: 40101, msg: 'token expired' }),
+      },
+      {
+        status: 200,
+        type: 'text/event-stream',
+        raw: 'data: {"choices":[{"delta":{"content":"ok"}}]}\n\ndata: {"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":1,"total_tokens":4}}\n\ndata: [DONE]\n\n',
+      },
+    ],
+  });
+  const bridge = await startBridge(
+    { CODEBUDDY_ENDPOINT: stub.base, WORKBUDDY_SKIP_MODEL_PREFLIGHT: '1' },
+    {
+      auth: {
+        auth: {
+          accessToken: 'old-file-token',
+          refreshToken: 'r1',
+          domain: 'example.invalid',
+          expiresAt: Date.now() + 3_600_000,
+        },
+      },
+    },
+  );
+  try {
+    const send = () => fetch(bridge.baseUrl + '/v1/chat/completions', {
+      method: 'POST',
+      headers: { ...auth, 'content-type': 'application/json' },
+      body: JSON.stringify({
+        model: 'switch-model',
+        stream: false,
+        messages: [{ role: 'system', content: 'You are a helpful assistant.' }, { role: 'user', content: 'hi' }],
+      }),
+      signal: AbortSignal.timeout(15000),
+    });
+    assert.equal((await send()).status, 200, '第一次 401 应刷新后成功');
+    assert.match(String(stub.seen.at(-1).headers.authorization), /refreshed-1/,
+      '刷新后的令牌应被用于重试');
+
+    // 模拟桌面端换号：原子替换登录文件（内容与尺寸都变）。
+    writeFileSync(join(bridge.dir, 'fake-auth.info'), JSON.stringify({
+      auth: {
+        accessToken: 'new-file-token-after-switch',
+        refreshToken: 'r2',
+        domain: 'example.invalid',
+        expiresAt: Date.now() + 3_600_000,
+      },
+    }));
+    assert.equal((await send()).status, 200);
+    assert.match(String(stub.seen.at(-1).headers.authorization), /new-file-token-after-switch/,
+      '登录文件变了就必须丢弃 memoryAuth，不能继续用旧账号令牌');
+  } finally {
+    await bridge.stop();
+    try { await stub.close(); } catch { /* 忽略 */ }
+    rmSync(bridge.dir, { recursive: true, force: true });
+  }
+});
+
+test('桥：身份句带点号版本时只替换句子，不得吃掉后面的指令', { timeout: 60_000 }, async () => {
+  const stub = await startStubUpstream(['version-model']);
+  const bridge = await startBridge(
+    { CODEBUDDY_ENDPOINT: stub.base, WORKBUDDY_SKIP_MODEL_PREFLIGHT: '1' },
+    { auth: READABLE_FAKE_AUTH },
+  );
+  try {
+    const res = await fetch(bridge.baseUrl + '/v1/chat/completions', {
+      method: 'POST',
+      headers: { ...auth, 'content-type': 'application/json' },
+      body: JSON.stringify({
+        model: 'version-model',
+        stream: false,
+        messages: [
+          {
+            role: 'system',
+            content: 'You are an AI agent powered by DeepSeek Harness v5.8.3. Keep this rule.',
+          },
+          { role: 'user', content: 'hi' },
+        ],
+      }),
+      signal: AbortSignal.timeout(15000),
+    });
+    assert.equal(res.status, 200);
+    await res.text();
+    const system = JSON.parse(stub.seen.at(-1).body).messages.find((m) => m.role === 'system').content;
+    assert.ok(!system.includes('DeepSeek Harness'), '身份句必须被替换');
+    assert.ok(!system.includes('NEUTRAL8.3'), '版本号的小数点不能被拆成残留碎片');
+    assert.ok(system.includes('Keep this rule'), '身份句后面的指令必须保留');
+  } finally {
+    await bridge.stop();
+    try { await stub.close(); } catch { /* 忽略 */ }
+    rmSync(bridge.dir, { recursive: true, force: true });
+  }
+});
+
+test('桥：连接池排队超过上限时按超时失败，不能无限挂着', { timeout: 30_000 }, async () => {
+  const stub = await startStubUpstream(['queue-model'], { chatHang: true });
+  const bridge = await startBridge(
+    {
+      CODEBUDDY_ENDPOINT: stub.base,
+      WORKBUDDY_SKIP_MODEL_PREFLIGHT: '1',
+      WORKBUDDY_MAX_SOCKETS: '1',
+      WORKBUDDY_QUEUE_TIMEOUT_MS: '200',
+      WORKBUDDY_FIRST_BYTE_TIMEOUT_MS: '5000',
+    },
+    { auth: READABLE_FAKE_AUTH },
+  );
+  try {
+    const ac = new AbortController();
+    const payload = JSON.stringify({
+      model: 'queue-model',
+      stream: false,
+      messages: [{ role: 'system', content: 'You are a helpful assistant.' }, { role: 'user', content: 'hi' }],
+    });
+    const first = fetch(bridge.baseUrl + '/v1/chat/completions', {
+      method: 'POST',
+      headers: { ...auth, 'content-type': 'application/json' },
+      body: payload,
+      signal: ac.signal,
+    }).catch(() => null);
+    await new Promise((r) => setTimeout(r, 200)); // 让第一条占住唯一 socket
+    const second = await fetch(bridge.baseUrl + '/v1/chat/completions', {
+      method: 'POST',
+      headers: { ...auth, 'content-type': 'application/json' },
+      body: payload,
+      signal: AbortSignal.timeout(5000),
+    });
+    assert.equal(second.status, 504);
+    const body = await second.json();
+    assert.match(body.error.message, /socket queue timeout/i);
+    ac.abort();
+    await first;
   } finally {
     await bridge.stop();
     try { await stub.close(); } catch { /* 忽略 */ }

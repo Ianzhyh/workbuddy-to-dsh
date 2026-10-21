@@ -456,6 +456,13 @@ body.dark .wb-root,
       '清理旧路由': 'Clean up old routes',
       '复制诊断报告': 'Copy diagnostic report',
       '复制桥地址': 'Copy bridge URL',
+      '一键接入 WorkBuddy 搜索': 'One-click WorkBuddy web search',
+      '配置中…': 'Configuring…',
+      '把 dsh 的网页搜索指向本地桥（使用 WorkBuddy 搜索额度，不消耗 DeepSeek）':
+        'Point dsh web search at the local bridge (uses WorkBuddy search quota, not DeepSeek).',
+      '已切换：网页搜索 → ': 'Switched: web search → ',
+      '（自检通过）': ' (self-test passed)',
+      '（自检失败：': ' (self-test failed: ',
       '去诊断 →': 'Go to diagnose →',
       '看用量': 'View usage',
 
@@ -2304,6 +2311,25 @@ body.dark .wb-root,
       const desktopAvailable = credential.desktop?.available === true;
       const pluginCount = Number(credential.plugin?.count ?? credential.pluginCount ?? 0);
       const alerts = [];
+      const [searchBusy, setSearchBusy] = useState(false);
+      const [searchMsg, setSearchMsg] = useState('');
+      async function enableSearch() {
+        setSearchBusy(true);
+        setSearchMsg('');
+        try {
+          const res = await postJson('/workbuddy/web-search/enable', {});
+          if (res.status >= 200 && res.status < 300 && res.data?.ok) {
+            let msg = t('已切换：网页搜索 → ') + (res.data.baseURL || '');
+            if (res.data.verified === true) msg += t('（自检通过）');
+            else if (res.data.verified === false) msg += t('（自检失败：') + (res.data.verifyError || '') + '）';
+            setSearchMsg(msg);
+          } else {
+            setSearchMsg(t('切换失败：') + (res.data?.error || ('HTTP ' + res.status)));
+          }
+        } finally {
+          setSearchBusy(false);
+        }
+      }
       if (state === 'degraded') {
         if (credentialKnown && !desktopAvailable && pluginCount === 0) {
           alerts.push({ tone: 'bad', text: '还没有可用的登录凭据：没有检测到桌面端，也没有插件账号', action: 'account' });
@@ -2439,7 +2465,13 @@ body.dark .wb-root,
             h(Btn, { disabled: busy, onClick: () => reload() }, '刷新状态'),
             h(Btn, { onClick: () => onOpenTab('diagnose') }, '去诊断 →'),
             h(Btn, { disabled: busy, onClick: report }, '复制诊断报告'),
-            h(Btn, { onClick: () => copyText(status?.config?.bridgeUrl + '/v1') }, '复制桥地址'))));
+            h(Btn, { onClick: () => copyText(status?.config?.bridgeUrl + '/v1') }, '复制桥地址'),
+            h(Btn, {
+              disabled: busy || searchBusy,
+              onClick: enableSearch,
+              title: '把 dsh 的网页搜索指向本地桥（使用 WorkBuddy 搜索额度，不消耗 DeepSeek）',
+            }, searchBusy ? '配置中…' : '一键接入 WorkBuddy 搜索')),
+          searchMsg ? h('p', { className: 'wb-note', style: { margin: '8px 0 0' } }, searchMsg) : null));
     }
 
     /**

@@ -38,6 +38,7 @@ import { WorkBuddyAdapter } from './adapter.mjs';
 import { toDirectory, pickDefaultModel } from './models.mjs';
 import { createTools } from './tools.mjs';
 import { createRouteTable, mountRoutes } from './routes.mjs';
+import { configureWorkBuddyWebSearch, verifyWorkBuddyWebSearch } from './web-search-config.mjs';
 import { cleanLegacyRoutes, detectLegacyRoutes } from './legacy.mjs';
 import { PLUGIN_PACKAGE_NAMES } from './packageNames.mjs';
 
@@ -285,9 +286,10 @@ export const DEFAULTS = {
   defaultReasoningEffort: undefined,
   /**
    * 空闲看门狗（毫秒，0 = 关）：只抓"上游多久没吐数据"，不看总时长，
-   * 所以不会误杀长回答。默认关 —— 与「不加默认上游超时」的红线一致。
+   * 所以不会误杀长回答。默认 5 分钟 —— 与首字节超时互补，覆盖“流到一半停了”
+   * 这种永久 loading；显式配 0 可关闭。
    */
-  streamIdleTimeoutMs: 0,
+  streamIdleTimeoutMs: 300_000,
   migrateLegacy: true,
   tools: true,
   commands: true,
@@ -431,6 +433,68 @@ export function readProjectEnv(projectRoot) {
   return out;
 }
 
+/**
+ * 从 `.env` / 进程环境透传给**插件拉起的桥**的非机密变量。
+ *
+ * 插件是独立进程：它读了 `.env` 不代表桥读得到。这里只列模型调用可靠性相关
+ * 的开关；凭据、令牌、API key 一律不在此列，避免把秘密复制进子进程环境。
+ */
+export const BRIDGE_ENV_PASSTHROUGH = Object.freeze([
+  // 插件登录身份
+  'WORKBUDDY_PLUGIN_IDENTITY',
+  'WORKBUDDY_PLUGIN_APP_VERSION_CN',
+  'WORKBUDDY_PLUGIN_APP_VERSION_GLOBAL',
+  'WORKBUDDY_CREDENTIAL_FAILOVER',
+  'WORKBUDDY_LOGIN_UA',
+  'WORKBUDDY_LOGIN_BASE',
+  'WORKBUDDY_LOGIN_ORIGIN',
+  // 桌面端出站身份（上游版本漂移时的逃生门）
+  'WORKBUDDY_APP_VERSION',
+  'WORKBUDDY_IDE_VERSION',
+  'WORKBUDDY_IDE_NAME',
+  // 11128 / 预校验 / 诊断
+  'WORKBUDDY_11128_FALLBACK',
+  'WORKBUDDY_SKIP_MODEL_PREFLIGHT',
+  'WORKBUDDY_SHAPE',
+  // 超时、连接池、重试
+  'WORKBUDDY_TIMEOUT_MS',
+  'WORKBUDDY_FIRST_BYTE_TIMEOUT_MS',
+  'WORKBUDDY_QUEUE_TIMEOUT_MS',
+  'WORKBUDDY_MAX_SOCKETS',
+  'WORKBUDDY_5XX_RETRY',
+  'WORKBUDDY_5XX_RETRY_DELAY_MS',
+  'WORKBUDDY_TRANSIENT_400_RETRY',
+  'WORKBUDDY_TRANSIENT_400_DELAYS',
+  'WORKBUDDY_TRANSPORT_RETRY_MS',
+  'WORKBUDDY_429_WAITS',
+  'WORKBUDDY_KEEPALIVE_MS',
+  'WORKBUDDY_LOG',
+  'WORKBUDDY_MAX_BODY_BYTES',
+  'WORKBUDDY_ACTIVE_ALERT_MS',
+  'WORKBUDDY_RATE_LIMIT_RPM',
+  'WORKBUDDY_RATE_LIMIT_MIN_INTERVAL_MS',
+  'WORKBUDDY_RATE_LIMIT_MODE',
+  // 另外两条协议默认模型（其它客户端用）
+  'WORKBUDDY_ANTHROPIC_MODEL',
+  'WORKBUDDY_ANTHROPIC_FAST_MODEL',
+  'WORKBUDDY_RESPONSES_MODEL',
+  'WORKBUDDY_RESPONSES_FAST_MODEL',
+  // 原生网页搜索（/v1/web_search 与 /v1/messages 的 web_search_20250305）
+  'WORKBUDDY_SEARCH_BASE',
+  'WORKBUDDY_SEARCH_VERSION',
+  'WORKBUDDY_SEARCH_TIMEOUT_MS',
+  'WORKBUDDY_SEARCH_MAX_RESULTS',
+]);
+
+export function collectBridgeExtraEnv(projectEnv = {}, env = process.env) {
+  const out = {};
+  for (const key of BRIDGE_ENV_PASSTHROUGH) {
+    const value = projectEnv[key] ?? env[key];
+    if (value !== undefined && value !== '') out[key] = String(value);
+  }
+  return out;
+}
+
 /** dsh home / profile 目录（旧路由清理要用）。 */
 function resolveDshPaths() {  const home = process.env.DSH_HOME || join(homedir(), '.dsh');
   const profile = process.env.DSH_PROFILE || 'desktop';
@@ -519,20 +583,8 @@ export function apply(ctx, rawConfig = {}) {
     config.autoCheckin = asBool(projectEnv.WORKBUDDY_AUTO_CHECKIN ?? process.env.WORKBUDDY_AUTO_CHECKIN, true);
   }
 
-  // 桥的上游身份/登录端点逃生门：插件没有独立配置字段，但 .env 里写了要生效。
-  const bridgeExtraEnv = {};
-  for (const key of [
-    'WORKBUDDY_PLUGIN_IDENTITY',
-    'WORKBUDDY_PLUGIN_APP_VERSION_CN',
-    'WORKBUDDY_PLUGIN_APP_VERSION_GLOBAL',
-    'WORKBUDDY_CREDENTIAL_FAILOVER',
-    'WORKBUDDY_LOGIN_UA',
-    'WORKBUDDY_LOGIN_BASE',
-    'WORKBUDDY_LOGIN_ORIGIN',
-  ]) {
-    const value = projectEnv[key] ?? process.env[key];
-    if (value !== undefined && value !== '') bridgeExtraEnv[key] = value;
-  }
+  // 桥的上游身份/超时/11128/预校验等逃生门：`.env` 里写了必须真的到桥。
+  const bridgeExtraEnv = collectBridgeExtraEnv(projectEnv, process.env);
 
   const supervisor = new BridgeSupervisor({
     projectRoot: projectRoot || process.cwd(),
@@ -1032,8 +1084,8 @@ export function apply(ctx, rawConfig = {}) {
       try {
         commands.register({
           name: 'workbuddy',
-          description: 'WorkBuddy 中转：状态 / 登录 / 模型 / 用量 / 签到 / 启停桥 / 打开控制台 / 清理旧路由',
-          input: { hint: 'status | login | logout [uid前缀] | models | usage | checkin | console | start | stop | restart | cleanup' },
+          description: 'WorkBuddy 中转：状态 / 登录 / 模型 / 用量 / 签到 / 启停桥 / 网页搜索 / 打开控制台 / 清理旧路由',
+          input: { hint: 'status | login | logout [uid前缀] | models | usage | checkin | console | websearch | start | stop | restart | cleanup' },
           async handler({ rawInput, signal }) {
             const parts = String(rawInput || '').trim().split(/\s+/).filter(Boolean);
             const arg = parts[0] || 'status';
@@ -1066,6 +1118,17 @@ export function apply(ctx, rawConfig = {}) {
                 const result = cleanLegacyRoutes({ settingsPath: dshPaths.settingsPath, patchPath: dshPaths.patchPath, provider: config.provider });
                 const lines = result.files.map((f) => `${f.path}：${f.changed ? `已清理（备份 ${f.backup}）` : f.reason}`);
                 return { kind: 'success', text: `旧路由清理完成：\n${lines.join('\n')}` };
+              }
+              if (arg === 'websearch' || arg === 'web-search') {
+                const result = await enableWebSearch();
+                const base = `网页搜索已指向本地桥：${result.baseURL}（凭据 ${result.apiKeyRef}，不覆盖 DEEPSEEK_API_KEY）`;
+                if (result.verified === true) {
+                  return { kind: 'success', text: `${base}\n自检通过：dsh 的 web 服务已从桥拿到 ${result.sourceCount} 条结果。` };
+                }
+                if (result.verified === false) {
+                  return { kind: 'error', text: `${base}\n配置已保存，但自检失败：${result.verifyError}\n可直接重跑 /workbuddy websearch，或看桥日志里的 web_search (anthropic)。` };
+                }
+                return { kind: 'success', text: `${base}\n当前 dsh 没有可用的 web 服务，未能自检；请随手搜一次确认。` };
               }
               if (arg === 'login') {
                 /*
@@ -1174,6 +1237,30 @@ export function apply(ctx, rawConfig = {}) {
     state.checkinCache = { ...state.checkinCache, at: 0, value: null };
   }
 
+  /**
+   * 一键把 dsh 的网页搜索切到 WorkBuddy：
+   *   - 先确保桥在跑（拿当前 host/port/令牌）；
+   *   - 把令牌写进 dsh credentials 的**独立引用**，不覆盖 DEEPSEEK_API_KEY；
+   *   - 把 web-search-deepseek 的 baseURL 指到本地桥 /v1。
+   */
+  async function enableWebSearch() {
+    const ready = await supervisor.ensure({ readyTimeoutMs: config.autoStartTimeoutMs });
+    if (!ready.ok) throw new Error(ready.error || ready.state || 'bridge is not ready');
+    const result = await configureWorkBuddyWebSearch({
+      settings: ctx.get('settings'),
+      credentials: ctx.get('credentials'),
+      baseURL: `${supervisor.baseUrl}/v1`,
+      token: config.localToken,
+    });
+    // 用 dsh 自己的 web 服务跑一次，令牌/桥/热更任何一环不对都会在这里暴露。
+    const verification = await verifyWorkBuddyWebSearch({ web: ctx.get('web') });
+    log('web search configured -> bridge', result.baseURL,
+      verification.verified === true ? `verified sources=${verification.sourceCount}`
+        : verification.verified === false ? `verify failed: ${verification.verifyError}`
+          : 'verification skipped (no web service)');
+    return { ...result, ...verification };
+  }
+
   // ── 6. HTTP 数据面（入口页用） ─────────────────────────────────────────
   if (config.routes) {
     useService('webServer', (webServer) => {
@@ -1190,6 +1277,7 @@ export function apply(ctx, rawConfig = {}) {
         readPrefs: readModelPrefs,
         onWritePrefs: writeModelPrefs,
         notifyAdaptersUpdated,
+        enableWebSearch,
       });
       const disposeRoutes = mountRoutes(webServer, routes, log);
       ctx.effect(() => disposeRoutes, 'workbuddy.panel-routes');

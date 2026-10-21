@@ -243,7 +243,43 @@ npm run release:check      # = vendor:check + 单测 + 独立分发演练（发�
 ```
 
 认的键：`WORKBUDDY_HOST`、`WORKBUDDY_PORT`、`WORKBUDDY_LOCAL_TOKEN`、
-`WORKBUDDY_AUTH_FILE`、`WORKBUDDY_AUTO_CHECKIN`、`DASHBOARD_PORT`。
+`WORKBUDDY_AUTH_FILE`、`WORKBUDDY_AUTO_CHECKIN`、`DASHBOARD_PORT`；以及模型调用
+相关的非机密变量（版本指纹、`WORKBUDDY_11128_FALLBACK`、
+`WORKBUDDY_SKIP_MODEL_PREFLIGHT`、超时/连接池/重试/限流、`WORKBUDDY_SEARCH_*` 等，
+完整清单见 `lib/index.js` 的 `BRIDGE_ENV_PASSTHROUGH`）。凭据与 API key 不在此列。
+
+### 让 dsh 的网页搜索走 WorkBuddy（不消耗 DeepSeek 钱包）
+
+桥内置了 WorkBuddy 原生搜索：`POST /v1/web_search`，以及 `/v1/messages` 对
+`web_search_20250305` 的兼容分支。dsh 自带的搜索 provider 可以被指向桥。
+
+**一键配置（推荐）**：打开 **设置 → WorkBuddy → 概览 → 操作 → 一键接入 WorkBuddy 搜索**，
+或在输入框运行 `/workbuddy websearch`。插件会确保桥在跑，然后把 dsh 的
+`web-search-deepseek` 接口地址指到本地桥，并把桥本地令牌写进一个**独立的凭据引用**
+`WORKBUDDY_SEARCH_BRIDGE_KEY` —— **不会覆盖**你已有的 `DEEPSEEK_API_KEY`，也不会把
+令牌写进 settings/patch 文件。写完会用 dsh 自己的 web 服务真搜一次：面板/命令会明确显示
+“自检通过”或具体失败原因，不需要再去桥日志里猜。
+
+手动兜底步骤：
+
+1. 打开 dsh **设置 → 插件 → 内置插件设置 → 网页搜索**；
+2. 使用 **Messages API**（不要选 DeepSeek Search API）；
+3. **接口地址**填 `http://127.0.0.1:8790/v1`；
+4. **API Key** 填桥的本地令牌（`dsh-plugin/.bridge-token`，或控制台「客户端接入」里显示的值）；
+5. 保存后搜一次；桥日志会出现 `web_search (anthropic) results=...`，请求不会发往 DeepSeek。
+   也可以先单独验证桥链路：`node tools/dev/probe-web-search.mjs "DeepSeek latest news"`。
+
+也可以不用 UI，在启动 dsh 前设置：
+
+```ini
+DEEPSEEK_SEARCH_BASE_URL=http://127.0.0.1:8790/v1
+DEEPSEEK_API_KEY=<桥本地令牌>
+```
+
+搜索端点默认按账号区域选择 `https://www.workbuddy.ai` / `https://www.workbuddy.cn`；
+只有自建网关或 A/B 时才需要设置 `WORKBUDDY_SEARCH_BASE`。原生分支是**非流式**的
+（dsh provider 本来就不带 stream；带 `stream:true` 会得到明确 400）。WorkBuddy
+搜索自身有频率限制（上游 code `15001`，桥会映射成 429），这不是 DeepSeek 余额问题。
 
 ---
 

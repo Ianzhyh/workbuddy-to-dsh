@@ -73,6 +73,20 @@ const APP_VERSION = process.env.WORKBUDDY_APP_VERSION || '4.9.29177644';
 const IDE_VERSION = process.env.WORKBUDDY_IDE_VERSION || '1.119.0';
 const IDE_NAME = process.env.WORKBUDDY_IDE_NAME || 'VSCode';
 const CHAT_PATH = '/v2/chat/completions';
+/**
+ * WorkBuddy 的独立网页搜索端点（WorkBuddy 客户端 WebSearch 工具在用）。
+ *
+ * 它不是 chat/completions 的一部分：客户端用当前登录 token 直接 POST，
+ * 返回结构化 results。这里把它接进桥，供 dsh 的 web-search provider 使用，
+ * 从而不消耗 DeepSeek 钱包。
+ */
+const SEARCH_PATH = '/agenttool/v1/search';
+const SEARCH_BASE_OVERRIDE = String(process.env.WORKBUDDY_SEARCH_BASE || '').replace(/\/+$/, '');
+const SEARCH_VERSION_OVERRIDE = String(process.env.WORKBUDDY_SEARCH_VERSION || '').trim();
+const SEARCH_TIMEOUT_MS = numEnv('WORKBUDDY_SEARCH_TIMEOUT_MS', 20_000, { min: 1000 });
+const SEARCH_DEFAULT_MAX_RESULTS = numEnv('WORKBUDDY_SEARCH_MAX_RESULTS', 8, { min: 1, max: 10, integer: true });
+const SEARCH_MAX_RESULTS = 10;
+const SEARCH_FRESHNESS_RE = /^(?:d(?:[1-9]|[12]\d|30)?|m(?:[1-9]|1[0-2])?|y[1-5]?)$/;
 const REFRESH_SKEW_MS = 5 * 60 * 1000;
 const REFRESH_COOLDOWN_MS = 15 * 1000;
 /**
@@ -176,20 +190,46 @@ const TRANSIENT_400_RETRY_ENABLED = process.env.WORKBUDDY_TRANSIENT_400_RETRY !=
  * 上游 11128（通道模板校验）兜底。
  *
  * 已知模板句已在 `rewriteAuditTemplate` 里做最小改写；这里防的是**上游再新增
- * 一条 system 黑名单**。命中 11128 时优先去掉含 "DeepSeek Harness" 的 system
- * 行（保留其余 persona/instructions），再不行才把 system 整段换成中性身份，
- * 用户消息、工具定义/结果与 tools 都不动。默认开；设
- * `WORKBUDDY_11128_FALLBACK=0` 可关闭。
+ * 一条 system 黑名单**。命中 11128 时按“删品牌行 → 删第一条 system 首段
+ * （保留 skills/workspace/规则）→ 整段中性 system”渐进降级；用户消息、
+ * 工具定义/结果与 tools 都不动。成功时回 `X-WorkBuddy-11128-Fallback` 头并
+ * 记入账本。默认开；设 `WORKBUDDY_11128_FALLBACK=0` 可关闭。
  */
 const CHANNEL_FALLBACK_ENABLED = process.env.WORKBUDDY_11128_FALLBACK !== '0';
+const CHANNEL_FALLBACK_HEADER = 'X-WorkBuddy-11128-Fallback';
+const NEUTRAL_SYSTEM = 'You are a helpful AI assistant.';
 
-function channelFallbackPayload(payload) {
-  if (!CHANNEL_FALLBACK_ENABLED) return null;
+/** 上游函数名规则。与 OpenAI/Anthropic/Codex 实际接受的字符集一致。 */
+const TOOL_NAME_RE = /^[A-Za-z0-9_-]{1,64}$/;
+
+/**
+ * 11128 的渐进降级候选。
+ *
+ * 顺序刻意从“只动最小范围”到“牺牲 system”：
+ *   1. 删除含宿主品牌的整行（保留其余 instructions）；
+ *   2. 删除第一条 system 的首段（identity/persona 通常在第一段），保留后面的
+ *      skills/workspace/安全规则；
+ *   3. 整段换成中性 system（最后手段）。
+ *
+ * user / assistant / tool / tools 永远不动。返回**去重后的候选列表**；调用方
+ * 只在仍收到 11128 时才继续试下一个。
+ */
+function channelFallbackCandidates(payload) {
+  if (!CHANNEL_FALLBACK_ENABLED) return [];
   const messages = Array.isArray(payload?.messages) ? payload.messages : [];
   const isSystem = (m) => m && (m.role === 'system' || m.role === 'System');
-  if (!messages.some(isSystem)) return null;
+  if (!messages.some(isSystem)) return [];
 
-  // 先尝试最小手术：只删掉 system 里含宿主品牌的整行，其余 instructions 保留。
+  const out = [];
+  const seen = new Set();
+  const push = (strategy, nextMessages) => {
+    const key = JSON.stringify(nextMessages);
+    if (seen.has(key)) return;
+    seen.add(key);
+    out.push({ strategy, payload: { ...payload, messages: nextMessages } });
+  };
+
+  // 1) 只删品牌行，其余 system 原样保留。
   let changed = false;
   const trimmed = messages.map((m) => {
     if (!isSystem(m) || typeof m.content !== 'string') return m;
@@ -201,16 +241,29 @@ function channelFallbackPayload(payload) {
     if (next !== m.content) changed = true;
     return { ...m, content: next };
   }).filter((m) => !(isSystem(m) && !m.content));
-  if (changed && trimmed.some(isSystem)) return { ...payload, messages: trimmed };
+  if (changed && trimmed.some(isSystem)) push('remove-brand-lines', trimmed);
 
-  // 未知模板：牺牲 system 指令也要保住这次调用；user/tool/tools 原样保留。
-  return {
-    ...payload,
-    messages: [
-      { role: 'system', content: 'You are a helpful AI assistant.' },
-      ...messages.filter((m) => !isSystem(m)),
-    ],
-  };
+  // 2) 只删第一条 system 的首段；后面的段落（skills/workspace/规则）保留。
+  let dropped = false;
+  let firstSystemSeen = false;
+  const droppedMessages = messages.map((m) => {
+    if (!isSystem(m) || typeof m.content !== 'string' || firstSystemSeen) return m;
+    firstSystemSeen = true;
+    const parts = m.content.split(/\r?\n\s*\r?\n/);
+    if (parts.length < 2) return m;
+    const next = parts.slice(1).join('\n\n').trim();
+    if (!next) return m;
+    dropped = true;
+    return { ...m, content: next };
+  }).filter((m) => !(isSystem(m) && !m.content));
+  if (dropped && droppedMessages.some(isSystem)) push('drop-first-system-paragraph', droppedMessages);
+
+  // 3) 最后手段：整段中性 system，保住这次调用。
+  push('neutral-system', [
+    { role: 'system', content: NEUTRAL_SYSTEM },
+    ...messages.filter((m) => !isSystem(m)),
+  ]);
+  return out;
 }
 
 /**
@@ -303,6 +356,20 @@ function upstreamRetryAfterMs(res, bodyText) {
   return null;
 }
 const UPSTREAM_TIMEOUT_MS = numEnv('WORKBUDDY_TIMEOUT_MS', 0, { min: 0 }); // 0 = unlimited (long answers need it)
+/**
+ * 首字节超时：从拿到 socket 到收到上游**第一块响应体**。
+ *
+ * 不是总时长限制 —— 模型想多久都可以，只抓“连接建立了但一直不说话”的卡死。
+ * 默认 120s（远高于实测 TTFT 1–6s），设 0 关闭。
+ */
+const UPSTREAM_FIRST_BYTE_TIMEOUT_MS = numEnv('WORKBUDDY_FIRST_BYTE_TIMEOUT_MS', 120_000, { min: 0 });
+/**
+ * 连接池排队超时：长流把 socket 占满时，后续请求不能无限排队。
+ * 默认 120s，设 0 关闭。
+ */
+const UPSTREAM_QUEUE_TIMEOUT_MS = numEnv('WORKBUDDY_QUEUE_TIMEOUT_MS', 120_000, { min: 0 });
+/** 上游连接池上限。默认 32：dsh 多会话 + 子 agent + 外部客户端同时用时不至于互等。 */
+const MAX_UPSTREAM_SOCKETS = numEnv('WORKBUDDY_MAX_SOCKETS', 32, { min: 1, max: 1024, integer: true });
 
 /**
  * Codex 的「延迟工具检索闸门」。MCP 提供的工具（含 Codex 自带 computer-use 的
@@ -321,11 +388,11 @@ const TOOL_SEARCH_NAME = 'tool_search';
 // 用 http/https 的 keep-alive Agent：空闲连接保留 5 分钟，跨请求复用同一条
 // TLS 会话，「首 token 延迟」稳定砍掉一大截。测试桩走纯 HTTP，所以两套都要。
 const KEEPALIVE_MS = numEnv('WORKBUDDY_KEEPALIVE_MS', 300_000, { min: 0 }); // 5 min, 0 = off
-const httpAgent = new HttpAgent({ keepAlive: KEEPALIVE_MS > 0, keepAliveMsecs: Math.max(1000, KEEPALIVE_MS), maxSockets: 8, scheduling: 'lifo' });
+const httpAgent = new HttpAgent({ keepAlive: KEEPALIVE_MS > 0, keepAliveMsecs: Math.max(1000, KEEPALIVE_MS), maxSockets: MAX_UPSTREAM_SOCKETS, scheduling: 'lifo' });
 const httpsAgent = new HttpsAgent({
   keepAlive: KEEPALIVE_MS > 0,
   keepAliveMsecs: Math.max(1000, KEEPALIVE_MS),
-  maxSockets: 8,
+  maxSockets: MAX_UPSTREAM_SOCKETS,
   scheduling: 'lifo',
   // 刻意**不设** socket timeout：LLM 流式回答中间可能有几十秒的 reasoning 停顿，
   // 空闲超时会在流中间掐断长回答。死连接靠 sendWithRetry 的 reusedSocket 重试兜底。
@@ -1136,8 +1203,26 @@ function pickUpstream(domain) {
 let authFileCache = null;
 
 function readStoredAuth() {
-  // A token this process refreshed outlives the file until the desktop app catches up.
-  if (memoryAuth && Date.now() < memoryAuth.expiresAt - REFRESH_SKEW_MS) return memoryAuth;
+  /*
+   * 刷新出的内存令牌可以比文件新，但**不能越过文件里的账号切换**：
+   * 桌面端换号会原子替换 auth 文件，此时必须立刻丢掉旧 memoryAuth，
+   * 否则桥会继续用旧账号令牌（旧钱包）直到过期，甚至在全量 401 后才自愈。
+   */
+  if (memoryAuth) {
+    let fileChanged = false;
+    try {
+      const st = statSync(AUTH_PATH);
+      fileChanged = memoryAuth.authFileMtimeMs !== st.mtimeMs || memoryAuth.authFileSize !== st.size;
+    } catch {
+      fileChanged = true;
+    }
+    if (fileChanged) {
+      memoryAuth = null;
+      authFileCache = null;
+    } else if (Date.now() < memoryAuth.expiresAt - REFRESH_SKEW_MS) {
+      return memoryAuth;
+    }
+  }
   const stat = statSync(AUTH_PATH);
   if (authFileCache && authFileCache.mtimeMs === stat.mtimeMs && authFileCache.size === stat.size) {
     return authFileCache.auth;
@@ -2011,6 +2096,13 @@ async function doRefreshAuth(auth) {
       return null;
     }
     const now = Date.now();
+    let authFileMtimeMs = 0;
+    let authFileSize = 0;
+    try {
+      const st = statSync(AUTH_PATH);
+      authFileMtimeMs = st.mtimeMs;
+      authFileSize = st.size;
+    } catch { /* 文件暂时不可读：下次 readStoredAuth 会按变更处理 */ }
     memoryAuth = {
       source: 'desktop',
       access: body.data.accessToken,
@@ -2022,6 +2114,9 @@ async function doRefreshAuth(auth) {
       tenantId: auth.tenantId,
       endpoint: auth.endpoint,
       domain: auth.domain,
+      // 绑定当时登录文件的指纹：文件一换（换号/桌面端刷新）就丢弃内存令牌。
+      authFileMtimeMs,
+      authFileSize,
     };
     // 放在赋值**之后**：它只是「我们没回写登录文件」的一条说明性日志。
     // 名字原先叫 persistRefreshed —— 承诺「持久化」，行为却是明确不持久化，
@@ -2141,8 +2236,9 @@ const AUDIT_TEMPLATE_REWRITES = [
  * 品牌词单独出现（user 内容或后半段）不拦 —— 拦的是系统提示的这句身份模板。
  * 只改 system（rewriteAuditContent 只对 system 调用），不动用户/工具内容。
  */
-// 允许句尾带版本/附加词（上游/宿主升级后常见），只匹配这一句，不碰品牌词本身。
-const DSH_IDENTITY_RE = /You are an AI agent powered by DeepSeek\s+Harness[^\n.]*\.?/gi;
+// 只吃掉可选版本/build 后缀，不再用 `[^\n.]*` 吞到第一个句点 ——
+// 否则 `Harness v5.8.3. Keep this rule.` 会变成 `NEUTRAL8.3. Keep this rule.`。
+const DSH_IDENTITY_RE = /You are an AI agent powered by DeepSeek\s+Harness(?:\s+(?:version|build|v)?\s*\d+(?:\.\d+){0,3}(?:[-+][0-9A-Za-z.-]+)?)?\.?/gi;
 const DSH_IDENTITY_NEUTRAL = "You are an AI agent running inside the user's development environment.";
 
 /** system 文本的最小改写；无命中时返回原值（引用不变，便于命中计数）。 */
@@ -2174,6 +2270,30 @@ function rewriteAuditContent(content) {
     return changed ? nextParts : content;
   }
   return content;
+}
+
+/**
+ * 工具名是上游会**确定性拒绝**的字段：带 `.` / `/` / 空格或重名时，整条请求
+ * 400（实测 code 11152 / `invalid_request_error`），且不会重试。
+ *
+ * 在本地先拦：不花一次上游往返，错误里能直接指出是哪个工具。只校验 OpenAI
+ * 形状（`tools[].function.name`）；Anthropic/Responses 的翻译结果也先转成这个
+ * 形状再校验。
+ */
+function toolNameError(tools) {
+  if (!Array.isArray(tools)) return null;
+  const seen = new Set();
+  for (const tool of tools) {
+    const name = tool?.function?.name ?? tool?.name;
+    if (typeof name !== 'string' || !name) return 'tool name is missing';
+    if (!TOOL_NAME_RE.test(name)) {
+      return `tool name "${shortError(name, 60)}" is invalid`
+        + ' (allowed: letters, digits, "_" and "-", max 64 chars)';
+    }
+    if (seen.has(name)) return `tool name "${name}" is duplicated`;
+    seen.add(name);
+  }
+  return null;
 }
 
 function normalizePayload(payload) {
@@ -2346,6 +2466,277 @@ function buildCatalogHeaders(auth) {
   return h;
 }
 
+// ── WorkBuddy native web search ──────────────────────────────────────────
+/**
+ * 搜索网关与 chat 网关不一定是同一个主机：
+ *   国际版 chat = www.workbuddy.ai，产品端点也是 www.workbuddy.ai
+ *   国内版 chat = copilot.tencent.com，产品端点是 www.workbuddy.cn
+ * 因此不能直接复用 auth.endpoint；可用 WORKBUDDY_SEARCH_BASE 覆盖以便 A/B。
+ */
+function searchBaseFor(auth) {
+  if (SEARCH_BASE_OVERRIDE) return SEARCH_BASE_OVERRIDE;
+  /*
+   * 自建/诊断网关（CODEBUDDY_ENDPOINT）通常把 chat 和搜索放在同一 origin；
+   * 先按它推导，避免把 WorkBuddy 的 key 发到默认区域域名。
+   */
+  if (EXPLICIT_ENDPOINT) {
+    try {
+      const origin = new URL(EXPLICIT_ENDPOINT).origin;
+      /*
+       * copilot.tencent.com 是 **chat** 网关，国内版的搜索产品端点是
+       * www.workbuddy.cn；把搜索错发到 chat 网关会 404/401。
+       * 其它显式 origin（自建/桩/WorkBuddy 产品域）与搜索同源。
+       */
+      if (!origin.includes('copilot.tencent.com')) return origin;
+    } catch { /* 非法 URL：继续按账号区域 */ }
+  }
+  if (auth?.region === 'global') return 'https://www.workbuddy.ai';
+  if (auth?.region === 'cn') return 'https://www.workbuddy.cn';
+  const hint = `${auth?.endpoint || ''} ${auth?.domain || ''}`.toLowerCase();
+  if (hint.includes('workbuddy.ai')) return 'https://www.workbuddy.ai';
+  if (hint.includes('codebuddy.ai')) return 'https://www.codebuddy.ai';
+  return 'https://www.workbuddy.cn';
+}
+
+function searchVersionFor(auth) {
+  if (SEARCH_VERSION_OVERRIDE) return SEARCH_VERSION_OVERRIDE;
+  if (auth?.source === 'plugin') {
+    return pluginClientVersion(auth.region === 'global' ? 'global' : 'cn');
+  }
+  return APP_VERSION;
+}
+
+/**
+ * 搜索端的头与 chat 不同：WorkBuddy CLI 的 WebSearch 用的是 WorkBuddy 身份
+ * （X-IDE-Type/Name=WorkBuddy、X-Agent-Intent=craft、独立的 trace id）。
+ * 这里按同一形状构造，不带 CodeBuddy/VSCode 指纹。
+ */
+function buildSearchHeaders(auth, conversationId) {
+  const version = searchVersionFor(auth);
+  const messageId = trace();
+  const traceId = trace();
+  const h = {
+    Accept: 'application/json',
+    'Content-Type': 'application/json',
+    'X-Requested-With': 'XMLHttpRequest',
+    'User-Agent': `WorkBuddy/${version}`,
+    Authorization: `Bearer ${API_KEY || auth.access}`,
+    'X-Agent-Intent': 'craft',
+    'X-Conversation-ID': conversationId || trace(),
+    'X-Conversation-Request-ID': messageId,
+    'X-Conversation-Message-ID': messageId,
+    'X-Request-ID': messageId,
+    'X-Product': 'SaaS',
+    'X-IDE-Type': 'WorkBuddy',
+    'X-IDE-Name': 'WorkBuddy',
+    'X-IDE-Version': version,
+    'X-Request-Trace-Id': traceId,
+  };
+  const userId = auth.userId || auth.uid;
+  if (userId) h['X-User-Id'] = userId;
+  if (auth.enterpriseId) h['X-Enterprise-Id'] = auth.enterpriseId;
+  if (auth.domain) h['X-Domain'] = auth.domain;
+  return h;
+}
+
+/** 一次搜索请求；401/403 时刷新/接管凭据后重试一次（与 chat 路径一致）。 */
+async function searchUpstream(auth, requestBody, conversationId, clientSignal) {
+  const endpoint = `${searchBaseFor(auth)}${SEARCH_PATH}`;
+  const attempt = async (a) => {
+    const timeoutSignal = AbortSignal.timeout(SEARCH_TIMEOUT_MS);
+    const signal = clientSignal ? AbortSignal.any([clientSignal, timeoutSignal]) : timeoutSignal;
+    try {
+      const res = await fetch(endpoint, {
+        method: 'POST',
+        // 与 WorkBuddy 客户端一致：允许网关做同站重定向（例如区域入口跳转）。
+        redirect: 'follow',
+        headers: buildSearchHeaders(a, conversationId),
+        body: JSON.stringify(requestBody),
+        signal,
+      });
+      const text = await res.text().catch(() => '');
+      let parsed = null;
+      try { parsed = JSON.parse(text); } catch { /* 非 JSON 原文留给错误处理 */ }
+      return { res, text, parsed };
+    } catch (error) {
+      if (clientSignal?.aborted) throw error;
+      const timeout = error?.name === 'TimeoutError' || /timeout|timed out/i.test(String(error?.message || ''));
+      const err = /** @type {Error & { code?: string }} */ (new Error(
+        timeout ? `web search timed out after ${SEARCH_TIMEOUT_MS}ms` : `web search request failed: ${error?.message || error}`,
+      ));
+      err.code = timeout ? 'WEB_SEARCH_TIMEOUT' : 'WEB_SEARCH_TRANSPORT';
+      throw err;
+    }
+  };
+
+  let currentAuth = auth;
+  let result = await attempt(currentAuth);
+  if ((result.res.status === 401 || result.res.status === 403)
+    && currentAuth.source !== 'api-key' && currentAuth.refresh) {
+    const next = await refreshAuth(currentAuth).catch(() => null);
+    if (next) {
+      currentAuth = next;
+      result = await attempt(currentAuth);
+    }
+  }
+  if (result.res.status === 401 || result.res.status === 403) {
+    const alt = await resolveCredentialAlternative(currentAuth).catch(() => null);
+    if (alt) {
+      let fresh = alt;
+      if (fresh.refresh && fresh.expiresAt - REFRESH_SKEW_MS < Date.now()) {
+        const next = await refreshAuth(fresh).catch(() => null);
+        if (next) fresh = next;
+      }
+      currentAuth = fresh;
+      result = await attempt(currentAuth);
+    }
+  }
+  // 与 chat 路径一致：搜索网关的短时 5xx 也原样重试（只重试常见的四个状态码）。
+  for (let i = 0; UPSTREAM_5XX_RETRY_STATUSES.has(result.res.status) && i < UPSTREAM_5XX_RETRIES; i += 1) {
+    const wait = UPSTREAM_5XX_RETRY_DELAY_MS * (i + 1);
+    if (wait > 0) await sleep(wait);
+    result = await attempt(currentAuth);
+  }
+  return { ...result, endpoint };
+}
+
+/**
+ * 调 WorkBuddy 搜索并归一化。结果按 maxResults 截断；错误码区分凭据/限流/上游。
+ * 不记录 query 原文（用户内容），只记录结果数与耗时。
+ * @param {{ query: string, maxResults?: number, allowedDomains?: string[], freshness?: string }} request
+ * @param {{ conversationId?: string, signal?: AbortSignal }} [options]
+ */
+async function workbuddySearch({ query, maxResults = SEARCH_DEFAULT_MAX_RESULTS, allowedDomains, freshness }, { conversationId, signal } = {}) {
+  const auth = resolveAuth();
+  const requestBody = {
+    query,
+    type: 'text2text',
+    max_results: Math.min(Math.max(Number(maxResults) || 5, 1), SEARCH_MAX_RESULTS),
+    ...(Array.isArray(allowedDomains) && allowedDomains.length
+      ? { allowed_domains: allowedDomains.filter((d) => typeof d === 'string' && d.trim()).slice(0, 20) }
+      : {}),
+    ...(typeof freshness === 'string' && SEARCH_FRESHNESS_RE.test(freshness) ? { freshness } : {}),
+  };
+  const startedAt = Date.now();
+  const { res, text, parsed, endpoint } = await searchUpstream(auth, requestBody, conversationId, signal);
+  if (res.status === 401 || res.status === 403) {
+    const err = /** @type {Error & { code?: string, status?: number }} */ (new Error(
+      auth.source === 'api-key'
+        ? 'workbuddy search rejected the API key — check WORKBUDDY_SEARCH_BASE / credentials'
+        : 'workbuddy search login expired — re-login in the WorkBuddy desktop app',
+    ));
+    err.code = 'WEB_SEARCH_AUTH';
+    err.status = 502;
+    throw err;
+  }
+  if (!res.ok) {
+    const err = /** @type {Error & { code?: string, status?: number, retryAfterMs?: number }} */ (new Error(
+      String(parsed?.msg || parsed?.message || text || `workbuddy search HTTP ${res.status}`).slice(0, 300),
+    ));
+    err.code = res.status === 429 || Number(parsed?.code) === 15001 ? 'WEB_SEARCH_RATE_LIMITED' : 'WEB_SEARCH_UPSTREAM';
+    err.status = res.status === 429 || Number(parsed?.code) === 15001 ? 429 : 502;
+    err.retryAfterMs = upstreamRetryAfterMs(res, text) ?? 5000;
+    throw err;
+  }
+  if (parsed && parsed.code !== undefined && Number(parsed.code) !== 0) {
+    const code = Number(parsed.code);
+    const err = /** @type {Error & { code?: string, status?: number, retryAfterMs?: number }} */ (new Error(
+      String(parsed.msg || parsed.message || `workbuddy search error ${parsed.code}`).slice(0, 300),
+    ));
+    err.code = code === 15001 ? 'WEB_SEARCH_RATE_LIMITED' : 'WEB_SEARCH_UPSTREAM';
+    err.status = code === 15001 ? 429 : 502;
+    err.retryAfterMs = upstreamRetryAfterMs(res, text) ?? 5000;
+    throw err;
+  }
+  const data = parsed?.data && typeof parsed.data === 'object' ? parsed.data : (parsed || {});
+  const rawResults = Array.isArray(data.results) ? data.results : [];
+  const results = rawResults
+    .filter((r) => r && typeof r.url === 'string' && r.url)
+    .map((r) => ({
+      title: typeof r.title === 'string' && r.title ? r.title : r.url,
+      url: r.url,
+      snippet: typeof r.snippet === 'string' ? r.snippet : '',
+      ...(typeof r.site === 'string' && r.site ? { site: r.site } : {}),
+      ...(typeof r.favicon === 'string' && r.favicon ? { favicon: r.favicon } : {}),
+      // 不同搜索网关的日期字段名不一；有就带上，没有不影响 provider。
+      ...(typeof (r.publishedAt || r.published_at || r.page_age || r.date) === 'string'
+        ? { publishedAt: r.publishedAt || r.published_at || r.page_age || r.date }
+        : {}),
+    }));
+  const truncated = results.length > requestBody.max_results;
+  const capped = truncated ? results.slice(0, requestBody.max_results) : results;
+  return {
+    provider: typeof data.provider === 'string' ? data.provider : '',
+    results: capped,
+    total_results: Number(data.total_results) || capped.length,
+    response_time_ms: Number(data.response_time_ms) || (Date.now() - startedAt),
+    truncated,
+    endpoint,
+    status: res.status,
+  };
+}
+
+/**
+ * dsh 的 `dsh-web-search-deepseek` provider 通过 Anthropic Messages 发送
+ * `web_search_20250305`。桥在这里识别这种请求，直接返回 WorkBuddy 搜索结果
+ * 的 Anthropic 形状（web_search_tool_result + text citations），不再打 DeepSeek。
+ */
+function nativeSearchTool(body) {
+  const tools = Array.isArray(body?.tools) ? body.tools : [];
+  return tools.find((t) => t && (t.type === 'web_search_20250305'
+    || (t.type === 'web_search' && t.name === 'web_search')));
+}
+
+function extractNativeSearchQuery(body) {
+  const messages = Array.isArray(body?.messages) ? body.messages : [];
+  // 只取**最后一条 user**：最后一条是图片/空文本时不能回头搜更早的旧问题。
+  let message = null;
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    if (messages[i]?.role === 'user') { message = messages[i]; break; }
+  }
+  if (!message) return '';
+  const text = typeof message.content === 'string'
+    ? message.content
+    : Array.isArray(message.content)
+      ? message.content.map((part) => (part && part.type === 'text' ? part.text || '' : '')).join('\n')
+      : '';
+  return text.replace(/^\s*Perform a web search for the query:\s*/i, '').trim();
+}
+
+function anthropicSearchMessage(model, search) {
+  const toolUseId = `srvtoolu_${trace().slice(0, 24)}`;
+  /** @type {any[]} */
+  const blocks = [{
+    type: 'web_search_tool_result',
+    tool_use_id: toolUseId,
+    content: search.results.map((r) => ({
+      type: 'web_search_result',
+      title: r.title,
+      url: r.url,
+      ...(r.publishedAt ? { page_age: r.publishedAt } : {}),
+    })),
+  }];
+  const citations = search.results
+    .filter((r) => r.snippet)
+    .map((r) => ({
+      type: 'web_search_result_location',
+      url: r.url,
+      title: r.title,
+      cited_text: r.snippet,
+    }));
+  if (citations.length) blocks.push({ type: 'text', text: '', citations });
+  return {
+    id: `msg_${trace().slice(0, 24)}`,
+    type: 'message',
+    role: 'assistant',
+    model,
+    content: blocks,
+    stop_reason: 'end_turn',
+    stop_sequence: null,
+    usage: { input_tokens: 0, output_tokens: 0 },
+  };
+}
+
 // ── Upstream call (with refresh retry and transient-400 retry) ───────────
 /**
  * 用 node:http/https + keep-alive Agent 发一次上游请求，返回 IncomingMessage。
@@ -2365,6 +2756,16 @@ function upstreamRequest(endpointUrl, { headers, body, signal }) {
    */
   const payloadLength = body === undefined ? 0 : Buffer.byteLength(body);
   return new Promise((resolve, reject) => {
+    let settled = false;
+    let queueTimer = null;
+    let headerTimer = null;
+    const clearQueueTimer = () => {
+      if (queueTimer) { clearTimeout(queueTimer); queueTimer = null; }
+    };
+    const clearHeaderTimer = () => {
+      if (headerTimer) { clearTimeout(headerTimer); headerTimer = null; }
+    };
+
     const req = doRequest(
       {
         protocol: url.protocol,
@@ -2375,9 +2776,48 @@ function upstreamRequest(endpointUrl, { headers, body, signal }) {
         headers: { ...headers, 'Content-Length': String(payloadLength) },
         agent: agentFor(url.protocol),
       },
-      (res) => resolve(res),
+      (res) => {
+        clearQueueTimer();
+        clearHeaderTimer();
+        resolve(res);
+      },
     );
-    req.on('error', reject);
+    req.once('socket', () => {
+      if (settled) return;
+      clearQueueTimer();
+      // 连接建立后到响应头到达也不能无限等（DNS 卡住/TCP 半开/网关不响应）。
+      if (UPSTREAM_FIRST_BYTE_TIMEOUT_MS > 0) {
+        headerTimer = setTimeout(() => {
+          if (settled) return;
+          settled = true;
+          const error = /** @type {Error & { code?: string }} */ (new Error(
+            `upstream response-header timeout after ${UPSTREAM_FIRST_BYTE_TIMEOUT_MS}ms`,
+          ));
+          error.code = 'UPSTREAM_FIRST_BYTE_TIMEOUT';
+          req.destroy(error);
+          reject(error);
+        }, UPSTREAM_FIRST_BYTE_TIMEOUT_MS);
+      }
+    });
+    if (UPSTREAM_QUEUE_TIMEOUT_MS > 0) {
+      queueTimer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        const error = /** @type {Error & { code?: string }} */ (new Error(
+          `upstream socket queue timeout after ${UPSTREAM_QUEUE_TIMEOUT_MS}ms (maxSockets=${MAX_UPSTREAM_SOCKETS})`,
+        ));
+        error.code = 'UPSTREAM_QUEUE_TIMEOUT';
+        req.destroy(error);
+        reject(error);
+      }, UPSTREAM_QUEUE_TIMEOUT_MS);
+    }
+    req.on('error', (error) => {
+      if (settled) return;
+      settled = true;
+      clearQueueTimer();
+      clearHeaderTimer();
+      reject(error);
+    });
     if (signal) {
       if (signal.aborted) { req.destroy(new Error('aborted')); return; }
       const onAbort = () => req.destroy(new Error(signal.reason?.message || 'aborted'));
@@ -2415,6 +2855,33 @@ function shimResponse(res) {
     // 没等到 'end' 就 close = 连接被掐断：不能再等，否则永久挂起。
     if (!done) { failure = failure || new Error('upstream closed before response completed'); done = true; settle(); }
   });
+
+  /*
+   * 首字节超时放在这里，而不是 upstreamRequest：这里一进来就同步挂 data 监听，
+   * 不会和 shimResponse 的缓冲抢流。只收到响应头、迟迟没有第一块体时才触发。
+   */
+  if (UPSTREAM_FIRST_BYTE_TIMEOUT_MS > 0) {
+    let firstByteTimer = null;
+    const clearFirstByteTimer = () => {
+      if (firstByteTimer) { clearTimeout(firstByteTimer); firstByteTimer = null; }
+    };
+    firstByteTimer = setTimeout(() => {
+      if (done) return;
+      const error = /** @type {Error & { code?: string }} */ (new Error(
+        `upstream first-byte timeout after ${UPSTREAM_FIRST_BYTE_TIMEOUT_MS}ms`,
+      ));
+      error.code = 'UPSTREAM_FIRST_BYTE_TIMEOUT';
+      failure = failure || error;
+      done = true;
+      res.destroy(error);
+      settle();
+    }, UPSTREAM_FIRST_BYTE_TIMEOUT_MS);
+    res.once('data', clearFirstByteTimer);
+    res.once('end', clearFirstByteTimer);
+    res.once('aborted', clearFirstByteTimer);
+    res.once('error', clearFirstByteTimer);
+    res.once('close', clearFirstByteTimer);
+  }
 
   const bodyText = () => Buffer.concat(chunks).toString('utf8');
 
@@ -2586,10 +3053,11 @@ async function acquireRateSlot(clientSignal, scope = 'local') {
   }
 }
 
-async function callUpstream(bodyString, model, conversationId, clientSignal) {
+async function callUpstream(bodyString, model, conversationId, clientSignal, { skipRateLimit = false } = {}) {
   // 限流闸门（opt-in；默认关）。放在最前：超限的请求连凭据都不读、更不打上游。
   // 限流桶按调用方分（local / 各 client key）—— B2 凭据分层的一部分。
-  await acquireRateSlot(clientSignal, requestScope.getStore()?.client || 'local');
+  // 11128 的兜底重试是**同一次逻辑请求**，不能再占一个许可（RPM=1 时会白等 60s）。
+  if (!skipRateLimit) await acquireRateSlot(clientSignal, requestScope.getStore()?.client || 'local');
   // 上游开始前的时刻戳（供端点计算 `X-WorkBuddy-Overhead-Ms`：
   // overhead = 上游请求发出前，桥自身做的前置处理耗时 —— 鉴权、读凭据、
   // payload 归一化、Anthropic→OpenAI 翻译。**不含限流排队**（那是我们主动
@@ -2679,9 +3147,15 @@ async function callUpstream(bodyString, model, conversationId, clientSignal) {
         const next = await refreshAuth(fresh).catch(() => null);
         if (next) fresh = next;
       }
-      log(`credential failover: ${auth.source} -> ${fresh.source}`
+      const previous = auth;
+      log(`credential failover: ${previous.source} -> ${fresh.source}`
         + `${CREDENTIAL_FAILOVER === 'any' ? ' (any account)' : ' (same account)'}`);
       auth = fresh;
+      // 换到不同账号时旧目录不再可信；至少清掉预校验依据，避免误杀新账号模型。
+      if (previous.source !== auth.source
+        || String(previous.uid || previous.userId || '') !== String(auth.uid || auth.userId || '')) {
+        invalidateCatalogCache();
+      }
       res = await attemptWithStaleRetry(auth);
     }
   }
@@ -2772,6 +3246,99 @@ async function callUpstream(bodyString, model, conversationId, clientSignal) {
     }
   }
   return { res, bodyText: null, upstreamStartedAt: upEnter };
+}
+
+/** 11128 可能出现在顶层 code，也可能被网关塞进 extError；两种都认。 */
+function is11128Response(res, parsed) {
+  if (!res || res.status !== 400) return false;
+  const code = parsed?.code ?? parsed?.extError?.code ?? parsed?.ext_error?.code;
+  return Number(code) === 11128;
+}
+
+function upstreamAuthFailure(res) {
+  return res?.status === 401 || res?.status === 403;
+}
+
+function upstreamErrorCode(parsed) {
+  return parsed?.extError?.code || parsed?.ext_error?.code
+    || (typeof parsed?.code === 'number' ? parsed.code : null);
+}
+
+/** 账本仍优先记上游顶层数字 code（11128/11133/6004），便于统计；没有才退回 extError。 */
+function upstreamLedgerCode(parsed) {
+  return typeof parsed?.code === 'number' ? parsed.code : upstreamErrorCode(parsed);
+}
+
+function upstreamErrorText(parsed, text, res) {
+  return String(
+    parsed?.error?.message || parsed?.msg || parsed?.message || text || `upstream HTTP ${res?.status}`,
+  ).slice(0, 400);
+}
+
+/** 上面的错误原文里保留上游 msg，同时给出“是 WorkBuddy 登录过期”的可操作说明。 */
+function upstreamAuthMessage(parsed) {
+  const detail = String(parsed?.msg || parsed?.message || '').trim();
+  return 'workbuddy-bridge: upstream login expired — re-login in the WorkBuddy desktop app, then retry'
+    + (detail ? ` (${shortError(detail, 160)})` : '');
+}
+
+/**
+ * 三条协议共用的上游调用：11128 时按“删品牌行 → 删首段 → 中性 system”渐进
+ * 重试，并把成功/最后尝试的兜底策略带回去，供响应头与账本记录。
+ *
+ * 限流许可只取一次：兜底是同一逻辑请求的延续。
+ */
+async function callUpstreamWithChannelFallback(payload, model, conversationId, clientSignal) {
+  const readFailure = async (attempt) => {
+    const text = attempt.res.ok ? '' : (attempt.bodyText ?? await attempt.res.text().catch(() => ''));
+    let parsed;
+    try { parsed = JSON.parse(text); } catch { /* 非 JSON：保留原文 */ }
+    return { ...attempt, bodyText: text, parsed, fallback: null };
+  };
+
+  let attempt = await readFailure(
+    await callUpstream(JSON.stringify(payload), model, conversationId, clientSignal),
+  );
+  if (!is11128Response(attempt.res, attempt.parsed)) return attempt;
+
+  let lastFallback = null;
+  for (const candidate of channelFallbackCandidates(payload)) {
+    if (clientSignal?.aborted) break;
+    lastFallback = candidate.strategy;
+    log(`upstream 11128; retrying with ${candidate.strategy}`);
+    attempt = await readFailure(
+      await callUpstream(
+        JSON.stringify(candidate.payload),
+        model,
+        conversationId,
+        clientSignal,
+        { skipRateLimit: true },
+      ),
+    );
+    attempt.fallback = candidate.strategy;
+    if (attempt.res.ok) return attempt;
+    if (!is11128Response(attempt.res, attempt.parsed)) return attempt;
+  }
+  log('channel fallback exhausted', attempt.res.status, String(attempt.bodyText || '').slice(0, 300));
+  attempt.fallback = lastFallback;
+  return attempt;
+}
+
+/**
+ * 首包/排队超时的统一错误响应。返回 true 表示已处理（调用方直接 return）。
+ * 三条协议各自保留自己的错误形状，但状态码统一 504，客户端会按超时重试。
+ */
+function handleUpstreamTimeout(res, protocol, error) {
+  if (error?.code !== 'UPSTREAM_FIRST_BYTE_TIMEOUT' && error?.code !== 'UPSTREAM_QUEUE_TIMEOUT') return false;
+  const message = `workbuddy-bridge: ${error.message}`;
+  if (protocol === 'anthropic') {
+    json(res, 504, { type: 'error', error: { type: 'api_error', message } });
+  } else if (protocol === 'responses') {
+    json(res, 504, { error: { type: 'upstream_error', code: 'upstream_timeout', message } });
+  } else {
+    json(res, 504, { error: { type: 'upstream_timeout', message } });
+  }
+  return true;
 }
 
 // ── SSE parsing and aggregation (non-streaming clients only) ─────────────
@@ -5323,6 +5890,8 @@ function recentRequests(limit = 50) {
     // 面板/控制台用它回答"慢在桥还是慢在上游"，账本里可能没有（旧记录 / 非流式）。
     ...(typeof r.overheadMs === 'number' ? { overheadMs: r.overheadMs } : {}),
     ...(typeof r.ttfbMs === 'number' ? { ttfbMs: r.ttfbMs } : {}),
+    ...(typeof r.fallback === 'string' ? { fallback: r.fallback } : {}),
+    ...(typeof r.fallbackOk === 'boolean' ? { fallbackOk: r.fallbackOk } : {}),
   }));
 }
 
@@ -6654,7 +7223,9 @@ async function handleRequest(req, res) {
       } catch (e) {
         // 带上 pid：未登录/凭据异常时 stop() 也要能停掉自己的进程（否则用户点停止只会得到一个假错误）
         return json(res, 503, {
-          ok: false, error: e.message, authFile: AUTH_PATH, pid: process.pid, credential: credentialStatus(),
+          ok: false, error: e.message, authFile: AUTH_PATH, pid: process.pid,
+          startedAt: new Date(STARTED_AT).toISOString(),
+          credential: credentialStatus(),
         });
       }
       // 这里**绝不能等上游**：控制台的探测超时是 4 秒，冷缓存时抓目录要好几秒，
@@ -6907,6 +7478,99 @@ async function handleRequest(req, res) {
       }
     }
 
+    // ── WorkBuddy 原生网页搜索（不经过 DeepSeek）────────────────────────
+    if (url.pathname === '/v1/web_search' && req.method === 'POST') {
+      let raw;
+      try {
+        raw = await readBody(req, 64 * 1024);
+      } catch (e) {
+        if (e.code === 'BODY_TOO_LARGE') {
+          return json(res, 413, { error: { message: 'web_search body too large', type: 'payload_too_large' } });
+        }
+        throw e;
+      }
+      let body;
+      try { body = JSON.parse(raw); }
+      catch { return json(res, 400, { error: { message: 'invalid JSON body', type: 'invalid_request' } }); }
+      const query = typeof body?.query === 'string' ? body.query.trim() : '';
+      if (query.length < 2) {
+        return json(res, 400, { error: { message: 'workbuddy-bridge: "query" must be at least 2 characters', type: 'invalid_request' } });
+      }
+      if (query.length > 4000) {
+        return json(res, 400, { error: { message: 'workbuddy-bridge: "query" is too long (max 4000)', type: 'invalid_request' } });
+      }
+      if (body?.freshness !== undefined && !SEARCH_FRESHNESS_RE.test(String(body.freshness))) {
+        return json(res, 400, {
+          error: {
+            message: 'workbuddy-bridge: "freshness" must be d/d1..d30, m/m1..m12 or y/y1..y5',
+            type: 'invalid_request',
+          },
+        });
+      }
+      let maxResults = 5;
+      if (body?.max_results !== undefined) {
+        const n = Number(body.max_results);
+        if (!Number.isInteger(n) || n < 1 || n > SEARCH_MAX_RESULTS) {
+          return json(res, 400, {
+            error: {
+              message: `workbuddy-bridge: "max_results" must be an integer 1-${SEARCH_MAX_RESULTS}`,
+              type: 'invalid_request',
+            },
+          });
+        }
+        maxResults = n;
+      }
+      const startedAt = Date.now();
+      const ac = new AbortController();
+      req.on('aborted', () => ac.abort());
+      res.on('close', () => { if (!res.writableEnded) ac.abort(); });
+      try {
+        await acquireRateSlot(ac.signal, requestScope.getStore()?.client || 'local');
+        const search = await workbuddySearch(
+          {
+            query,
+            maxResults,
+            allowedDomains: body?.allowed_domains,
+            freshness: body?.freshness,
+          },
+          { conversationId: req.headers['x-conversation-id'] || trace(), signal: ac.signal },
+        );
+        recordRequest({
+          model: 'web-search', stream: false, ms: Date.now() - startedAt,
+          ok: true, status: 200, code: null,
+        });
+        log(`web_search results=${search.results.length} provider=${search.provider || '-'} ms=${Date.now() - startedAt}`);
+        return json(res, 200, {
+          object: 'web_search',
+          query,
+          provider: search.provider,
+          results: search.results,
+          total_results: search.total_results,
+          response_time_ms: search.response_time_ms,
+          truncated: search.truncated,
+        });
+      } catch (e) {
+        if (e?.code === 'RATE_LIMIT_ABORTED') return;
+        const rateLimited = e?.code === 'RATE_LIMITED';
+        const status = rateLimited ? 429 : (Number(e?.status) || (e?.code === 'WEB_SEARCH_TIMEOUT' ? 504 : 502));
+        recordRequest({
+          model: 'web-search', stream: false, ms: Date.now() - startedAt,
+          ok: false, status, code: e?.code || null, error: e?.message || String(e),
+        });
+        log('web_search failed', status, e?.code || '', shortError(e?.message || e, 200));
+        const retryAfter = (rateLimited || status === 429)
+          ? Math.max(1, Math.ceil((e?.retryAfterMs || (rateLimited ? 1000 : 5000)) / 1000))
+          : 0;
+        return json(res, status, {
+          error: {
+            message: `workbuddy-bridge: ${shortError(e?.message || e, 300)}`,
+            type: rateLimited ? 'rate_limit_error' : 'web_search_error',
+            code: e?.code || 'WEB_SEARCH_ERROR',
+          },
+        }, retryAfter ? { 'Retry-After': String(retryAfter) } : {});
+      }
+    }
+
     if (url.pathname === '/v1/chat/completions' && req.method === 'POST') {
       let raw;
       try {
@@ -6979,6 +7643,17 @@ async function handleRequest(req, res) {
       // 模型预校验：桥手里就有目录，拼错的 id 不该花一次上游往返（详见
       // preflightModelError 的注释）。放在 maybeAutoCheckin 之前是刻意的 ——
       // 一次注定失败的调用不该顺带触发签到。
+      // 工具名是上游确定性拒绝的字段：本地先拦，省一次上游往返并指出具体工具。
+      const toolError = toolNameError(payload.tools);
+      if (toolError) {
+        const message = `workbuddy-bridge: ${toolError}`;
+        log('rejected invalid tool name', toolError);
+        recordRequest({
+          model, stream: wantStream, ms: 0, ok: false, status: 400, code: null, error: message,
+        });
+        return json(res, 400, { error: { message, type: 'invalid_request' } });
+      }
+
       const modelError = preflightModelError(model);
       if (modelError) {
         log('rejected unknown model', model);
@@ -7066,29 +7741,15 @@ async function handleRequest(req, res) {
       // 从这一刻起的任何异常都要落账：否则「登录文件坏了 / 取密钥失败」这类故障
       // 在控制台上完全不可见（只有原始日志里有），用户只能看到一个 500。
       try {
-        let attempt = await callUpstream(JSON.stringify(upstream), model, conversationId, ac.signal);
-        let up = attempt.res;
-        let upstreamStartedAt = attempt.upstreamStartedAt;
-        let text = !up.ok ? (attempt.bodyText ?? await up.text().catch(() => '')) : '';
-        let parsed; try { parsed = JSON.parse(text); } catch {}
-        /*
-         * 11128 兜底：已知模板句已由 normalizePayload 改写；这里处理上游新加的
-         * system 黑名单。只重试一次，且只动 system；tools/user 不动。
-         * 11128 发生在生成前，重试不会产生两份回答或重复扣费。
-         */
-        if (!up.ok && up.status === 400 && parsed?.code === 11128) {
-          const fallback = channelFallbackPayload(upstream);
-          if (fallback) {
-            log('upstream 11128; retrying with a neutral system prompt');
-            attempt = await callUpstream(JSON.stringify(fallback), model, conversationId, ac.signal);
-            up = attempt.res;
-            upstreamStartedAt = attempt.upstreamStartedAt;
-            text = !up.ok ? (attempt.bodyText ?? await up.text().catch(() => '')) : '';
-            parsed = undefined;
-            try { parsed = JSON.parse(text); } catch {}
-            if (!up.ok) log('channel fallback also failed', up.status, text.slice(0, 300));
-          }
-        }
+        const attempt = await callUpstreamWithChannelFallback(upstream, model, conversationId, ac.signal);
+        const up = attempt.res;
+        const upstreamStartedAt = attempt.upstreamStartedAt;
+        const text = attempt.bodyText ?? (up.ok ? '' : await up.text().catch(() => ''));
+        const parsed = attempt.parsed;
+        const fallbackInfo = attempt.fallback
+          ? { fallback: attempt.fallback, fallbackOk: up.ok }
+          : {};
+        if (attempt.fallback) res.setHeader(CHANNEL_FALLBACK_HEADER, attempt.fallback);
         if (!up.ok) {
           log('upstream error', up.status, text.slice(0, 300));
           recordRequest({
@@ -7097,9 +7758,10 @@ async function handleRequest(req, res) {
             ms: Date.now() - startedAt,
             ok: false,
             status: up.status,
-            code: typeof parsed?.code === 'number' ? parsed.code : null,
-            error: parsed?.msg || parsed?.message || parsed?.error?.message || text,
+            code: upstreamLedgerCode(parsed),
+            error: upstreamErrorText(parsed, text, up),
             overheadMs: Math.max(0, upstreamStartedAt - startedAt),
+            ...fallbackInfo,
           });
           /*
            * 错误体必须包成 OpenAI 的 `{ error: { message, type, code } }`。
@@ -7112,18 +7774,16 @@ async function handleRequest(req, res) {
            * 实际是上游登录态失效。回 502 + 明确文案，修法只有一个 ——
            * 在 WorkBuddy 桌面端重新登录。
            */
-          const upstreamMessage = String(
-            parsed?.error?.message || parsed?.msg || parsed?.message || text || `upstream HTTP ${up.status}`,
-          ).slice(0, 400);
-          const extCode = parsed?.extError?.code || parsed?.ext_error?.code || null;
-          const authFailure = up.status === 401 || up.status === 403;
+          const upstreamMessage = upstreamErrorText(parsed, text, up);
+          const extCode = upstreamErrorCode(parsed);
+          const authFailure = upstreamAuthFailure(up);
           return json(res, up.status === 200 || authFailure ? 502 : up.status, {
             error: {
               message: authFailure
-                ? 'workbuddy-bridge: upstream login expired — re-login in the WorkBuddy desktop app, then retry'
+                ? upstreamAuthMessage(parsed)
                 : `workbuddy-bridge: upstream ${up.status}: ${upstreamMessage}`,
               type: authFailure ? 'upstream_auth_error' : (up.status === 429 ? 'rate_limit_error' : 'upstream_error'),
-              ...(extCode ? { code: extCode } : (typeof parsed?.code === 'number' ? { code: parsed.code } : {})),
+              ...(extCode ? { code: extCode } : {}),
             },
           });
         }
@@ -7233,6 +7893,7 @@ async function handleRequest(req, res) {
               error: streamError.message,
               overheadMs: Math.max(0, upstreamStartedAt - startedAt),
               ...(firstChunkAt ? { ttfbMs: firstChunkAt - startedAt } : {}),
+              ...fallbackInfo,
             });
             /*
              * ⚠️ **截断必须让客户端知道**，不能只记一笔账就 `res.end()`。
@@ -7275,6 +7936,7 @@ async function handleRequest(req, res) {
               overheadMs: Math.max(0, upstreamStartedAt - startedAt),
               ...(firstChunkAt ? { ttfbMs: firstChunkAt - startedAt } : {}),
               ...usageOf(usageSeen),
+              ...fallbackInfo,
             });
           }
           return res.end();
@@ -7309,6 +7971,7 @@ async function handleRequest(req, res) {
             code: null,
             error: reason,
             overheadMs: Math.max(0, upstreamStartedAt - startedAt),
+            ...fallbackInfo,
           });
           return json(res, 502, {
             error: {
@@ -7324,9 +7987,17 @@ async function handleRequest(req, res) {
           ms: Date.now() - startedAt,
           overheadMs: Math.max(0, upstreamStartedAt - startedAt),
           ...usageOf(aggregated.usage),
+          ...fallbackInfo,
         });
         return json(res, 200, aggregated);
       } catch (e) {
+        if (handleUpstreamTimeout(res, 'openai', e)) {
+          recordRequest({
+            model, stream: wantStream, ms: Date.now() - startedAt, ok: false,
+            status: 504, code: null, error: e.message,
+          });
+          return;
+        }
         if (e?.code === 'RATE_LIMITED') {
           const retryAfter = Math.max(1, Math.ceil((e.retryAfterMs || 1000) / 1000));
           recordRequest({ model, stream: wantStream, ms: Date.now() - startedAt, ok: false, status: 429, code: null, error: `rate_limited (retry in ${retryAfter}s)` });
@@ -7389,6 +8060,75 @@ async function handleRequest(req, res) {
       try { body = JSON.parse(raw); }
       catch { return json(res, 400, { type: 'error', error: { type: 'invalid_request_error', message: 'invalid JSON body' } }); }
 
+      /*
+       * DeepSeek 的网页搜索 provider 会向 Messages API 发 `web_search_20250305`
+       * 服务端工具。这里不转发给 chat 上游（那边没有这个能力），而是直接调用
+       * WorkBuddy 的原生搜索端点，并回 Anthropic 的 web_search_tool_result。
+       * dsh 的 provider 只解析这些结构化块，因此不需要伪造模型答案。
+       */
+      const nativeSearch = nativeSearchTool(body);
+      if (nativeSearch) {
+        /*
+         * 这条兼容分支只服务 dsh provider 的非流式搜索调用。流式请求不能返回
+         * JSON（客户端会把它当 SSE 解析），也不能伪造模型答案；明确 400 比
+         * “结构不对的 200”安全。
+         */
+        if (body.stream === true) {
+          return json(res, 400, {
+            type: 'error',
+            error: {
+              type: 'invalid_request_error',
+              message: 'workbuddy-bridge: native web search is non-streaming; send stream:false',
+            },
+          });
+        }
+        const query = extractNativeSearchQuery(body);
+        if (query.length < 2 || query.length > 4000) {
+          return json(res, 400, {
+            type: 'error',
+            error: { type: 'invalid_request_error', message: 'web search query must be 2-4000 characters' },
+          });
+        }
+        // `max_uses` 是服务端工具可执行次数，不是结果条数；结果上限独立配置。
+        const maxResults = SEARCH_DEFAULT_MAX_RESULTS;
+        const startedAt = Date.now();
+        const ac = new AbortController();
+        req.on('aborted', () => ac.abort());
+        res.on('close', () => { if (!res.writableEnded) ac.abort(); });
+        try {
+          await acquireRateSlot(ac.signal, requestScope.getStore()?.client || 'local');
+          const search = await workbuddySearch(
+            { query, maxResults },
+            { conversationId: req.headers['x-conversation-id'] || trace(), signal: ac.signal },
+          );
+          recordRequest({
+            model: 'web-search', stream: false, ms: Date.now() - startedAt,
+            ok: true, status: 200, code: null,
+          });
+          log(`web_search (anthropic) results=${search.results.length} provider=${search.provider || '-'} ms=${Date.now() - startedAt}`);
+          return json(res, 200, anthropicSearchMessage(body.model || 'workbuddy-web-search', search));
+        } catch (e) {
+          const rateLimited = e?.code === 'RATE_LIMITED';
+          const status = rateLimited ? 429 : (Number(e?.status) || (e?.code === 'WEB_SEARCH_TIMEOUT' ? 504 : 502));
+          recordRequest({
+            model: 'web-search', stream: false, ms: Date.now() - startedAt,
+            ok: false, status, code: e?.code || null, error: e?.message || String(e),
+          });
+          log('web_search (anthropic) failed', status, e?.code || '', shortError(e?.message || e, 200));
+          const retryAfter = rateLimited
+            ? Math.max(1, Math.ceil((e?.retryAfterMs || 1000) / 1000))
+            : (status === 429 ? Math.max(1, Math.ceil((e?.retryAfterMs || 5000) / 1000)) : 0);
+          return json(res, status, {
+            type: 'error',
+            error: {
+              type: rateLimited ? 'rate_limit_error' : 'api_error',
+              message: `workbuddy-bridge: ${shortError(e?.message || e, 300)}`,
+              ...(e?.code ? { code: e.code } : {}),
+            },
+          }, retryAfter ? { 'Retry-After': String(retryAfter) } : {});
+        }
+      }
+
       // Anthropic 的 `stream` 缺省是 false（与 OpenAI 相反）
       const wantStream = body.stream === true;
       const model = resolveAnthropicModel(body.model);
@@ -7404,6 +8144,19 @@ async function handleRequest(req, res) {
       if (typeof body.top_p === 'number') oai.top_p = body.top_p;
       if (Array.isArray(body.stop_sequences) && body.stop_sequences.length) oai.stop = body.stop_sequences;
 
+      const toolError = toolNameError(tools);
+      if (toolError) {
+        const message = `workbuddy-bridge: ${toolError}`;
+        log('rejected invalid tool name (anthropic)', toolError);
+        recordRequest({
+          model, stream: wantStream, ms: 0, ok: false, status: 400, code: null, error: message,
+        });
+        return json(res, 400, {
+          type: 'error',
+          error: { type: 'invalid_request_error', message },
+        });
+      }
+
       maybeAutoCheckin();
       log(`→ [anthropic] ${body.model || '(no model)'} => ${model} stream=${wantStream} msgs=${messages.length} tools=${tools?.length ?? 0}`);
 
@@ -7414,15 +8167,26 @@ async function handleRequest(req, res) {
       res.on('close', () => { if (!res.writableEnded) ac.abort(); });
 
       try {
-        const { res: up, bodyText, upstreamStartedAt } = await callUpstream(
-          JSON.stringify(normalizePayload(oai)),
+        const attempt = await callUpstreamWithChannelFallback(
+          normalizePayload(oai),
           model,
           req.headers['x-conversation-id'] || trace(),
           ac.signal,
         );
+        const up = attempt.res;
+        const upstreamStartedAt = attempt.upstreamStartedAt;
+        const text = attempt.bodyText ?? (up.ok ? '' : await up.text().catch(() => ''));
+        const parsed = attempt.parsed;
+        const fallbackInfo = attempt.fallback
+          ? { fallback: attempt.fallback, fallbackOk: up.ok }
+          : {};
+        if (attempt.fallback) res.setHeader(CHANNEL_FALLBACK_HEADER, attempt.fallback);
         if (!up.ok) {
-          const text = bodyText ?? await up.text().catch(() => '');
-          let parsed; try { parsed = JSON.parse(text); } catch {}
+          const authFailure = upstreamAuthFailure(up);
+          const message = authFailure
+            ? upstreamAuthMessage(parsed)
+            : upstreamErrorText(parsed, text, up);
+          const code = upstreamErrorCode(parsed);
           log('upstream error (anthropic)', up.status, text.slice(0, 300));
           recordRequest({
             model,
@@ -7430,15 +8194,17 @@ async function handleRequest(req, res) {
             ms: Date.now() - startedAt,
             ok: false,
             status: up.status,
-            code: typeof parsed?.code === 'number' ? parsed.code : null,
-            error: parsed?.msg || parsed?.message || text,
+            code: upstreamLedgerCode(parsed),
+            error: message,
+            ...fallbackInfo,
           });
           // 错误体也必须是 Anthropic 的形状，否则客户端只会显示「未知错误」
-          return json(res, up.status === 200 ? 502 : up.status, {
+          return json(res, up.status === 200 || authFailure ? 502 : up.status, {
             type: 'error',
             error: {
-              type: 'api_error',
-              message: parsed?.msg || parsed?.message || text || `upstream HTTP ${up.status}`,
+              type: authFailure ? 'authentication_error' : 'api_error',
+              message,
+              ...(code !== null ? { code } : {}),
             },
           });
         }
@@ -7447,9 +8213,9 @@ async function handleRequest(req, res) {
           res.__overheadMs = Math.max(0, upstreamStartedAt - startedAt);
           const r = await relayAnthropicStream(up, res, model, estimateRequestTokens(body));
           if (r.streamError && !ac.signal.aborted) {
-            recordRequest({ model, stream: true, ms: Date.now() - startedAt, ok: false, status: 0, code: null, error: r.streamError.message });
+            recordRequest({ model, stream: true, ms: Date.now() - startedAt, ok: false, status: 0, code: null, error: r.streamError.message, ...fallbackInfo });
           } else {
-            recordRequest({ model, stream: true, ok: true, ms: Date.now() - startedAt, ...usageOf(r.usage) });
+            recordRequest({ model, stream: true, ok: true, ms: Date.now() - startedAt, ...usageOf(r.usage), ...fallbackInfo });
           }
           return;
         }
@@ -7470,6 +8236,7 @@ async function handleRequest(req, res) {
             status: up.status,
             code: null,
             error: reason,
+            ...fallbackInfo,
           });
           return json(res, 502, {
             type: 'error',
@@ -7483,9 +8250,17 @@ async function handleRequest(req, res) {
           ms: Date.now() - startedAt,
           overheadMs: Math.max(0, upstreamStartedAt - startedAt),
           ...usageOf(aggregated.usage),
+          ...fallbackInfo,
         });
         return json(res, 200, openAIToAnthropicMessage(aggregated, model));
       } catch (e) {
+        if (handleUpstreamTimeout(res, 'anthropic', e)) {
+          recordRequest({
+            model, stream: wantStream, ms: Date.now() - startedAt, ok: false,
+            status: 504, code: null, error: e.message,
+          });
+          return;
+        }
         if (e?.code === 'RATE_LIMITED') {
           const retryAfter = Math.max(1, Math.ceil((e.retryAfterMs || 1000) / 1000));
           recordRequest({ model, stream: wantStream, ms: Date.now() - startedAt, ok: false, status: 429, code: null, error: `rate_limited (retry in ${retryAfter}s)` });
@@ -7553,6 +8328,18 @@ async function handleRequest(req, res) {
       if (typeof body.temperature === 'number') oai.temperature = body.temperature;
       if (typeof body.top_p === 'number') oai.top_p = body.top_p;
 
+      const toolError = toolNameError(tools);
+      if (toolError) {
+        const message = `workbuddy-bridge: ${toolError}`;
+        log('rejected invalid tool name (responses)', toolError);
+        recordRequest({
+          model, stream: wantStream, ms: 0, ok: false, status: 400, code: null, error: message,
+        });
+        return json(res, 400, {
+          error: { type: 'invalid_request', message },
+        });
+      }
+
       maybeAutoCheckin();
       /*
        * 工具**名字**也打出来：只记个数的话，「工具被静默丢掉」这类问题在日志里
@@ -7578,31 +8365,47 @@ async function handleRequest(req, res) {
       res.on('close', () => { if (!res.writableEnded) ac.abort(); });
 
       try {
-        const { res: up, bodyText, upstreamStartedAt } = await callUpstream(
-          JSON.stringify(normalizePayload(oai)),
+        const attempt = await callUpstreamWithChannelFallback(
+          normalizePayload(oai),
           model,
           req.headers['x-conversation-id'] || trace(),
           ac.signal,
         );
+        const up = attempt.res;
+        const upstreamStartedAt = attempt.upstreamStartedAt;
+        const text = attempt.bodyText ?? (up.ok ? '' : await up.text().catch(() => ''));
+        const parsed = attempt.parsed;
+        const fallbackInfo = attempt.fallback
+          ? { fallback: attempt.fallback, fallbackOk: up.ok }
+          : {};
+        if (attempt.fallback) res.setHeader(CHANNEL_FALLBACK_HEADER, attempt.fallback);
         if (!up.ok) {
-          const text = bodyText ?? await up.text().catch(() => '');
-          let parsed; try { parsed = JSON.parse(text); } catch {}
           log('upstream error (responses)', up.status, text.slice(0, 300));
-          const message = parsed?.msg || parsed?.message || parsed?.error?.message || text || `upstream HTTP ${up.status}`;
-          const errorCode = responsesErrorCode(up.status, message, parsed?.code ?? parsed?.error?.code);
+          const authFailure = upstreamAuthFailure(up);
+          const message = authFailure
+            ? upstreamAuthMessage(parsed)
+            : upstreamErrorText(parsed, text, up);
+          const errorCode = authFailure
+            ? 'upstream_auth_error'
+            : responsesErrorCode(up.status, message, parsed?.code ?? parsed?.error?.code);
           recordRequest({
             model,
             stream: wantStream,
             ms: Date.now() - startedAt,
             ok: false,
             status: up.status,
-            code: typeof parsed?.code === 'number' ? parsed.code : null,
+            code: upstreamLedgerCode(parsed),
             error: message,
+            ...fallbackInfo,
           });
           // 非流式：按 Responses 的错误形状回
           if (!wantStream) {
-            return json(res, up.status === 200 ? 502 : up.status, {
-              error: { type: 'upstream_error', code: errorCode, message },
+            return json(res, up.status === 200 || authFailure ? 502 : up.status, {
+              error: {
+                type: authFailure ? 'upstream_auth_error' : 'upstream_error',
+                code: errorCode,
+                message,
+              },
             });
           }
           // 已经答应过客户端「这是事件流」，就不能中途改回 JSON —— 用 SSE 发
@@ -7655,9 +8458,9 @@ async function handleRequest(req, res) {
           res.__overheadMs = Math.max(0, upstreamStartedAt - startedAt);
           const r = await relayResponsesStream(up, res, model, routes);
           if (r.streamError && !ac.signal.aborted) {
-            recordRequest({ model, stream: true, ms: Date.now() - startedAt, ok: false, status: 0, code: null, error: r.streamError.message });
+            recordRequest({ model, stream: true, ms: Date.now() - startedAt, ok: false, status: 0, code: null, error: r.streamError.message, ...fallbackInfo });
           } else {
-            recordRequest({ model, stream: true, ok: true, ms: Date.now() - startedAt, ...usageOf(r.usage) });
+            recordRequest({ model, stream: true, ok: true, ms: Date.now() - startedAt, ...usageOf(r.usage), ...fallbackInfo });
           }
           return;
         }
@@ -7678,6 +8481,7 @@ async function handleRequest(req, res) {
             status: up.status,
             code: null,
             error: reason,
+            ...fallbackInfo,
           });
           return json(res, 502, {
             error: { type: 'upstream_error', message: `workbuddy-bridge: ${reason}` },
@@ -7690,9 +8494,17 @@ async function handleRequest(req, res) {
           ms: Date.now() - startedAt,
           overheadMs: Math.max(0, upstreamStartedAt - startedAt),
           ...usageOf(aggregated.usage),
+          ...fallbackInfo,
         });
         return json(res, 200, openAIToResponsesResponse(aggregated, model, routes));
       } catch (e) {
+        if (handleUpstreamTimeout(res, 'responses', e)) {
+          recordRequest({
+            model, stream: wantStream, ms: Date.now() - startedAt, ok: false,
+            status: 504, code: null, error: e.message,
+          });
+          return;
+        }
         if (e?.code === 'RATE_LIMITED') {
           const retryAfter = Math.max(1, Math.ceil((e.retryAfterMs || 1000) / 1000));
           recordRequest({ model, stream: wantStream, ms: Date.now() - startedAt, ok: false, status: 429, code: null, error: `rate_limited (retry in ${retryAfter}s)` });

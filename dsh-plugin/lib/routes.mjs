@@ -59,7 +59,11 @@ function sanitizeModelParams(input) {
  * @param {(line: string, detail?: unknown) => void} deps.log
  */
 export function createRouteTable(deps) {
-  const { snapshot, supervisor, consoleSupervisor, client, adapter, paths, provider, log, onUpstreamMutation = () => {}, onWritePrefs = () => {}, notifyAdaptersUpdated = () => false } = deps;
+  const {
+    snapshot, supervisor, consoleSupervisor, client, adapter, paths, provider, log,
+    onUpstreamMutation = () => {}, onWritePrefs = () => {}, notifyAdaptersUpdated = () => false,
+    enableWebSearch = async () => { throw new Error('web search configuration is unavailable'); },
+  } = deps;
 
   /** 写操作的准入检查。 */
   const guard = (req) => req.headers['x-workbuddy-panel'] === '1';
@@ -102,6 +106,21 @@ export function createRouteTable(deps) {
           sendJson(res, 200, { ok: true, ...(await snapshot({ quota: forceQuota })) });
         } catch (error) {
           log('panel status failed', error);
+          sendJson(res, 500, { ok: false, error: String(error?.message || error) });
+        }
+      },
+    },
+    {
+      kind: 'exact',
+      path: '/workbuddy/web-search/enable',
+      async handler(req, res) {
+        if (req.method !== 'POST') return sendJson(res, 405, { ok: false, error: `${req.method} not allowed` });
+        if (!guard(req)) return sendJson(res, 403, { ok: false, error: 'missing x-workbuddy-panel header' });
+        try {
+          const result = await enableWebSearch();
+          sendJson(res, 200, { ok: true, ...result });
+        } catch (error) {
+          log('panel web-search configure failed', error);
           sendJson(res, 500, { ok: false, error: String(error?.message || error) });
         }
       },

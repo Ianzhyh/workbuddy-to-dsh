@@ -5,13 +5,17 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { locateProviderBlock, stripProviderBlock, cleanFile, detectInFile } from '../lib/legacy.mjs';
-import { resolveConfig, detectProjectRoot, apply, readProjectEnv, DEFAULTS } from '../lib/index.js';
+import {
+  resolveConfig, detectProjectRoot, apply, readProjectEnv, DEFAULTS,
+  collectBridgeExtraEnv, BRIDGE_ENV_PASSTHROUGH,
+} from '../lib/index.js';
 import { BridgeSupervisor } from '../lib/bridge.mjs';
 
 /** 真实插件目录（测试里要用它当"源"来造分发布的副本）。 */
@@ -39,6 +43,11 @@ test('数据面的方法 / 权限矩阵：只读路由拒绝写方法，写路�
     paths: { settingsPath: 'x', patchPath: 'y' },
     provider: 'workbuddy',
     log: () => {},
+    enableWebSearch: async () => ({
+      baseURL: 'http://127.0.0.1:8790/v1',
+      provider: 'deepseek-official',
+      apiKeyRef: 'WORKBUDDY_SEARCH_BRIDGE_KEY',
+    }),
   });
   const byPath = (p) => routes.find((r) => r.path === p);
 
@@ -91,6 +100,7 @@ test('数据面的方法 / 权限矩阵：只读路由拒绝写方法，写路�
     ['/workbuddy/login/active', 'POST'],
     ['/workbuddy/login/logout', 'POST'],
     ['/workbuddy/login/source', 'POST'],
+    ['/workbuddy/web-search/enable', 'POST'],
   ];
   for (const [path, method] of writes) {
     const blocked = await run(path, method);
@@ -108,6 +118,11 @@ test('数据面的方法 / 权限矩阵：只读路由拒绝写方法，写路�
   assert.equal(claimWithoutHeader.status, 403, '领取是写操作，缺面板头必须拒绝');
   const claimWithHeader = await run('/workbuddy/checkin?claim=1', 'POST', { 'x-workbuddy-panel': '1' });
   assert.equal(claimWithHeader.status, 200);
+
+  const webSearch = await run('/workbuddy/web-search/enable', 'POST', { 'x-workbuddy-panel': '1' });
+  assert.equal(webSearch.status, 200);
+  assert.equal(webSearch.body.baseURL, 'http://127.0.0.1:8790/v1');
+  assert.equal(webSearch.body.apiKeyRef, 'WORKBUDDY_SEARCH_BRIDGE_KEY');
 });
 
 test('readLog 只读日志尾部：大文件不吃满内存、截断的半行被丢掉', () => {
@@ -352,12 +367,13 @@ test('apply() 装配：注册 llm 路由、5 个工具、命令、HTTP 路由', 
     }
     assert.equal(calls.commands.length, 1);
     assert.equal(calls.commands[0].name, 'workbuddy');
-    assert.equal(calls.routes.length, 19, 'HTTP 数据面应有 19 条路由（18 条 exact + 1 条 console-api 前缀）');
+    assert.equal(calls.routes.length, 20, 'HTTP 数据面应有 20 条路由（19 条 exact + 1 条 console-api 前缀）');
     assert.deepEqual(calls.routes.map((r) => r.path).sort(), [
       '/workbuddy/bridge', '/workbuddy/checkin', '/workbuddy/console', '/workbuddy/console-api', '/workbuddy/log',
       '/workbuddy/login', '/workbuddy/login/active', '/workbuddy/login/cancel', '/workbuddy/login/logout',
       '/workbuddy/login/poll', '/workbuddy/login/source', '/workbuddy/login/start',
       '/workbuddy/migrate', '/workbuddy/model-visibility', '/workbuddy/models', '/workbuddy/quota', '/workbuddy/requests', '/workbuddy/status', '/workbuddy/usage',
+      '/workbuddy/web-search/enable',
     ]);
     const prefix = calls.routes.find((r) => r.path === '/workbuddy/console-api');
     assert.equal(prefix.kind, 'prefix', 'console-api 必须挂成前缀路由');
@@ -730,6 +746,8 @@ test('readProjectEnv 解析 .env，且只在 config 未显式指定时生效', (
       'WORKBUDDY_PORT=8899',
       'WORKBUDDY_LOCAL_TOKEN="tok-from-env"',
       'WORKBUDDY_AUTH_FILE=\'C:\\tmp\\custom.info\'',
+      'WORKBUDDY_APP_VERSION=5.8.3',
+      'WORKBUDDY_11128_FALLBACK=0',
       '',
     ].join('\n'), 'utf8');
 
@@ -744,12 +762,74 @@ test('readProjectEnv 解析 .env，且只在 config 未显式指定时生效', (
     assert.equal(fromEnv.state.config.bridgePort, 8899, '.env 里的端口必须被采纳');
     assert.equal(fromEnv.state.config.localToken, 'tok-from-env');
     assert.equal(fromEnv.supervisor.authFile, 'C:\\tmp\\custom.info');
+    assert.equal(fromEnv.supervisor.env.WORKBUDDY_APP_VERSION, '5.8.3',
+      '版本逃生门必须从 .env 一路进到 BridgeSupervisor.env');
+    assert.equal(fromEnv.supervisor.env.WORKBUDDY_11128_FALLBACK, '0');
 
     // 显式给了端口 → 以配置为准，不被 .env 覆盖
     const { ctx: ctx2 } = fakeCtx();
     const explicit = apply(ctx2, { projectRoot: dir, bridgePort: 9911, autoStart: false, tools: false, commands: false, routes: false, migrateLegacy: false });
     assert.equal(explicit.state.config.bridgePort, 9911, '显式配置优先于 .env');
   } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('probe-audit-template：桥不可达时必须退出码非 0（不能永远“通过”）', () => {
+  const r = spawnSync(process.execPath, [join(PLUGIN_ROOT, '..', 'tools', 'dev', 'probe-audit-template.mjs')], {
+    env: { ...process.env, WORKBUDDY_BRIDGE_URL: 'http://127.0.0.1:1' },
+    timeout: 30_000,
+    encoding: 'utf8',
+  });
+  assert.notEqual(r.status, 0, `桥不可达时探针仍返回 0：\n${r.stdout}\n${r.stderr}`);
+  assert.match(String(r.stdout), /退出码 1/);
+});
+
+test('默认值：插件把空闲看门狗默认开到 5 分钟，显式 0 仍可关闭', () => {
+  assert.equal(resolveConfig({}).streamIdleTimeoutMs, 300_000);
+  assert.equal(resolveConfig({ streamIdleTimeoutMs: 0 }).streamIdleTimeoutMs, 0);
+  assert.equal(resolveConfig({ streamIdleTimeoutMs: '120000' }).streamIdleTimeoutMs, 120_000);
+});
+
+test('collectBridgeExtraEnv：版本/11128/预检/超时真正透传给桥，且不泄露凭据', () => {
+  const projectEnv = {
+    WORKBUDDY_APP_VERSION: '5.8.3',
+    WORKBUDDY_IDE_NAME: 'WorkBuddy',
+    WORKBUDDY_11128_FALLBACK: '0',
+    WORKBUDDY_SKIP_MODEL_PREFLIGHT: '1',
+    WORKBUDDY_FIRST_BYTE_TIMEOUT_MS: '1000',
+    WORKBUDDY_QUEUE_TIMEOUT_MS: '0',
+    WORKBUDDY_MAX_SOCKETS: '64',
+    WORKBUDDY_SEARCH_BASE: 'https://search.example',
+    WORKBUDDY_SEARCH_TIMEOUT_MS: '5000',
+    WORKBUDDY_SEARCH_MAX_RESULTS: '8',
+    // 下面两个是机密/连接参数，绝不能进“非机密透传”清单
+    WORKBUDDY_LOCAL_TOKEN: 'must-not-leak',
+    CODEBUDDY_API_KEY: 'must-not-leak',
+    WORKBUDDY_CLIENT_KEYS: 'must-not-leak',
+  };
+  const out = collectBridgeExtraEnv(projectEnv, {});
+  assert.equal(out.WORKBUDDY_APP_VERSION, '5.8.3');
+  assert.equal(out.WORKBUDDY_IDE_NAME, 'WorkBuddy');
+  assert.equal(out.WORKBUDDY_11128_FALLBACK, '0');
+  assert.equal(out.WORKBUDDY_SKIP_MODEL_PREFLIGHT, '1');
+  assert.equal(out.WORKBUDDY_FIRST_BYTE_TIMEOUT_MS, '1000');
+  assert.equal(out.WORKBUDDY_QUEUE_TIMEOUT_MS, '0', '0 是合法值，不能被当成空值丢掉');
+  assert.equal(out.WORKBUDDY_MAX_SOCKETS, '64');
+  assert.equal(out.WORKBUDDY_SEARCH_BASE, 'https://search.example');
+  assert.equal(out.WORKBUDDY_SEARCH_TIMEOUT_MS, '5000');
+  assert.equal(out.WORKBUDDY_SEARCH_MAX_RESULTS, '8');
+  assert.equal(out.WORKBUDDY_LOCAL_TOKEN, undefined);
+  assert.equal(out.CODEBUDDY_API_KEY, undefined);
+  assert.equal(out.WORKBUDDY_CLIENT_KEYS, undefined);
+  assert.equal(BRIDGE_ENV_PASSTHROUGH.includes('WORKBUDDY_APP_VERSION'), true);
+  assert.equal(BRIDGE_ENV_PASSTHROUGH.includes('WORKBUDDY_11128_FALLBACK'), true);
+
+  // 进程环境是第二优先级；.env 的值优先
+  const out2 = collectBridgeExtraEnv({}, {
+    WORKBUDDY_IDE_NAME: 'FromProcess',
+    WORKBUDDY_APP_VERSION: '1.0.0',
+  });
+  assert.equal(out2.WORKBUDDY_IDE_NAME, 'FromProcess');
+  assert.equal(out2.WORKBUDDY_APP_VERSION, '1.0.0');
 });
 
 test('ConsoleSupervisor：靠首页结构标记识别控制台，认不出就报 foreign', async () => {
