@@ -19,6 +19,10 @@
 
 ## [Unreleased]
 
+（暂无）
+
+## [1.9.4] - 2026-10-22
+
 ### Added
 
 - **WorkBuddy 原生网页搜索（不消耗 DeepSeek 钱包）**：新增 `POST /v1/web_search`
@@ -61,7 +65,7 @@
 
 ### Fixed
 
-- **dsh 系统身份句被上游 11128 拦截（2026-10-21 上游变更）**：system 开头是
+- **dsh 系统身份句被上游 11128 拦截（2026-10-21 上游变更，issue #4）**：system 开头是
   `You are an AI agent powered by DeepSeek Harness.` 时，上游对**所有模型**直接回
   400 code 11128；同一凭据发最小消息（中性 system）是 200。桥现在只对 **system**
   做最小改写，把这一句换成中性身份句；用户消息、工具定义/结果与 system 其余内容
