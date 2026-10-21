@@ -438,7 +438,7 @@ node tools\connect.mjs apply codex --model glm-5.3
 ## 作为 DeepSeek Harness 插件使用
 
 <img src="docs/plugin-panel.png" width="100%"
-     alt="装进 DeepSeek Harness 后的设置页：左侧是 dsh 自己的设置导航，右侧 WorkBuddy 一栏有概览 / 账号 / 用量 / 请求 / 签到 / 诊断 / 模型 / 对话测试 / 日志 九个标签页，概览页显示积分余额、需要你动手的事项、桥状态与操作按钮">
+     alt="装进 DeepSeek Harness 后的设置页：左侧是 dsh 自己的设置导航，右侧 WorkBuddy 一栏有概览 / 账号 / 用量 / 请求 / 签到 / 诊断 / 模型 / 对话测试 / 日志 九个标签页，概览页显示积分余额、网页搜索接入状态、需要你动手的事项、桥状态与操作按钮">
 
 本仓库同时提供 **DeepSeek Harness 原生插件**（[`dsh-plugin/`](dsh-plugin/README.md)）。
 **插件和「桥 + 网页控制台」是一套东西的两个前端，不是二选一** ——
@@ -450,7 +450,7 @@ node tools\connect.mjs apply codex --model glm-5.3
 （与控制台同一套词条思路；上游数据保持原样不翻）：
 
 <img src="docs/plugin-panel-en.png" width="100%"
-     alt="同一个设置页切到英文：Overview / Account / Usage / Requests / Check-in / Diagnose / Model / Chat test / Log 九个标签页，概览页显示 Credit balance、Needs your attention、Status 与 Actions">
+     alt="同一个设置页切到英文：Overview / Account / Usage / Requests / Check-in / Diagnose / Model / Chat test / Log 九个标签页，概览页显示 Credit balance、Web search、Needs your attention、Status 与 Actions">
 > 插件在 dsh 里注册原生模型路由、把**桥和控制台都管起来**（已在跑就复用，没跑就拉起）；
 > **设置 → WorkBuddy** 里有 9 个标签页：概览 / 账号 / 用量 / 请求 / 签到 / 诊断 / 模型 / 对话测试 / 日志，
 > 功能与控制台网页**完全等价**：读同一个桥、写同一份 `.state.json`（账号切换等写操作由
@@ -462,7 +462,13 @@ node tools\connect.mjs apply codex --model glm-5.3
 | 模型增删 | 动态跟随上游目录，改完即生效 | 需要重新勾选并保存 |
 | 桥的启停 | 插件自动复用/拉起 | 控制台按钮，或 `启动.cmd` |
 | 数据界面 | **dsh 设置页（9 个标签页）** + 控制台网页，两边同步 | 只有控制台网页 |
+| 网页搜索 | 概览顶部独立状态卡，**未接入主动提醒 + 一键接入**；令牌写独立引用，不覆盖 DeepSeek key | 需手动改 dsh 的 `web-search-deepseek` 配置 |
 | agent 侧 | 5 个工具 + `/workbuddy` 命令 | 无 |
+
+概览顶部的「网页搜索」卡会显示是否已接入；未接入时「需要你动手」里会提醒，点
+「接入搜索」即可。插件会把桥令牌写进独立凭据引用、用 dsh 自己的 web 服务真搜一次做
+自检，并把结果直接显示出来。详见
+[`dsh-plugin/README.md`](dsh-plugin/README.md#让-dsh-的网页搜索走-workbuddy不消耗-deepseek-钱包)。
 
 ```sh
 dsh plugin --profile desktop add <本仓库路径>/dsh-plugin
@@ -530,7 +536,9 @@ copilot.tencent.com/v2/chat/completions   ← 上游只说 OpenAI 协议，且�
 网页搜索另走 WorkBuddy 的原生 `POST /agenttool/v1/search`：桥暴露
 `POST /v1/web_search`，并在 `/v1/messages` 识别 `web_search_20250305`。dsh 的
 Web search provider 把接口地址指到桥后，搜索走 WorkBuddy 账号、**不消耗 DeepSeek
-钱包**；配置步骤见 [`dsh-plugin/README.md`](dsh-plugin/README.md#让-dsh-的网页搜索走-workbuddy不消耗-deepseek-钱包)。
+钱包**。插件概览顶部提供**一键接入**（未接入会主动提醒），桥令牌写进独立凭据引用、
+不覆盖 `DEEPSEEK_API_KEY`，写完还会用 dsh 自己的 web 服务真搜一次做自检；配置与
+验证提示词见 [`dsh-plugin/README.md`](dsh-plugin/README.md#让-dsh-的网页搜索走-workbuddy不消耗-deepseek-钱包)。
 
 上游比 OpenAI 规范更严的地方（`developer` 角色、`tool_choice` 只认字符串、首条必须
 是 `system`）都在同一次归一化里处理；缺的能力（embedding）明确返回 501 而不是伪造。

@@ -104,7 +104,8 @@ request ledger when the host exposes them, otherwise a clearly-labelled estimate
 3. Open the **Client Access** tab for Base URL & token:
    - OpenAI-compatible: `http://127.0.0.1:8790/v1`
    - Anthropic: `http://127.0.0.1:8790` (no `/v1`)
-   - API key: `wb-local-bridge` (or your `WORKBUDDY_LOCAL_TOKEN`)
+   - API key: the random local token shown in the console's **Client Access** tab
+     (also stored in `dsh-plugin/.bridge-token`, or set `WORKBUDDY_LOCAL_TOKEN`)
 
 No WorkBuddy desktop app? Install the dsh plugin, open its **Account** tab and use
 **Plugin sign-in** — no desktop download is required.
@@ -115,7 +116,14 @@ the `EN` / `中` toggle in its top-right corner switches all nine tabs
 (upstream data such as model descriptions and chat content is left as-is):
 
 <img src="docs/plugin-panel-en.png" width="100%"
-     alt="The plugin settings page in English: Overview / Account / Usage / Requests / Check-in / Diagnose / Model / Chat test / Log tabs, with the overview showing Credit balance, Needs your attention, Status and Actions">
+     alt="The plugin settings page in English: Overview / Account / Usage / Requests / Check-in / Diagnose / Model / Chat test / Log tabs, with the overview showing Credit balance, Web search, Needs your attention, Status and Actions">
+
+The plugin also puts a dedicated **Web search** card at the top of the overview. When
+dsh search is not yet pointed at the local bridge, the card and the **Needs your
+attention** list show a prominent reminder with a one-click **Connect search** button.
+The bridge token is stored under a dedicated credential reference (never overwriting
+`DEEPSEEK_API_KEY`), and the setup self-tests through dsh's own web service. Search then
+uses WorkBuddy quota instead of the DeepSeek wallet.
 
 ## Highlights
 
@@ -124,6 +132,9 @@ the `EN` / `中` toggle in its top-right corner switches all nine tabs
 - **No plaintext credentials on disk** — desktop AtRest keys are fetched via
   `ELECTRON_RUN_AS_NODE` on demand; plugin-sign-in credentials are stored as
   DPAPI-protected AES-GCM envelopes. Plaintext tokens stay in memory only.
+- **Native web search, one-click** — dsh search can run through WorkBuddy instead of
+  the DeepSeek wallet; the plugin stores the bridge token in a separate credential
+  reference, self-tests the full chain, and reminds you when it is not connected.
 - **Three protocols**, streaming, tool calls, multi-turn tool results.
   Codex speaks the OpenAI **Responses** protocol, which is *not* chat/completions —
   the bridge contains a real conversion layer (`/v1/responses`), so there is no
