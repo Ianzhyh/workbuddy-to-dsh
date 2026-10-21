@@ -121,71 +121,6 @@ try {
   if (result.harness.applyError) problems.push(`apply 抛错：${result.harness.applyError}`);
   if (result.errors.length) problems.push(`页面有错误：${result.errors.join(' | ')}`);
 
-  // 对话页顶部的积分胶囊：能渲染、显示余额、点击会强制刷新
-  {
-    const quota = await page.cdp.evaluate(`(async () => {
-      const host = document.createElement('div');
-      host.id = 'quota-probe';
-      document.body.appendChild(host);
-      const root = ReactDOM.createRoot(host);
-      root.render(React.createElement(window.__module.ChatQuotaPill));
-      await new Promise((r) => setTimeout(r, 800));
-      const btn = host.querySelector('[data-workbuddy-quota]');
-      if (!btn) { host.remove(); return { found: false }; }
-      const text = btn.textContent;
-      btn.click();
-      await new Promise((r) => setTimeout(r, 400));
-      const posts = window.__calls.filter((c) => c[0] === '/workbuddy/quota' && c[1] === 'POST').length;
-      host.remove();
-      return { found: true, text, posts };
-    })()`);
-    if (!quota.found) problems.push('对话页积分胶囊没有渲染出来');
-    else {
-      if (!/积分/.test(quota.text)) problems.push(`积分胶囊文案不对：${quota.text}`);
-      if (quota.posts < 1) problems.push('点击积分胶囊没有强制刷新');
-    }
-  }
-
-  // 空会话登录入口 + 每轮积分：直接挂载两个聊天页组件验证（不依赖宿主 DOM）
-  {
-    const chatBits = await page.cdp.evaluate(`(async () => {
-      const origStatus = window.__routes['/workbuddy/status'];
-      const origRequests = window.__routes['/workbuddy/requests'];
-      window.__setRoute('/workbuddy/status', {
-        bridge: { state: 'unauthenticated', health: { credential: { loginRegion: 'global' } } },
-      });
-      const loginHost = document.createElement('div');
-      document.body.appendChild(loginHost);
-      const loginRoot = ReactDOM.createRoot(loginHost);
-      loginRoot.render(React.createElement(window.__module.ChatLoginButton));
-      await new Promise((r) => setTimeout(r, 500));
-      const loginBtn = [...loginHost.querySelectorAll('button')].find((b) => b.textContent === '连接 WorkBuddy');
-      if (!loginBtn) { loginRoot.unmount(); loginHost.remove(); return { login: 'missing' }; }
-      loginBtn.click();
-      await new Promise((r) => setTimeout(r, 500));
-      const waiting = !!loginHost.querySelector('.wb-chat-login-link');
-      loginRoot.unmount(); loginHost.remove();
-
-      window.__setRoute('/workbuddy/requests', {
-        ok: true,
-        requests: [{ t: Date.now() - 1000, model: 'stub-model', ok: true, credit: 0.03, ms: 1200 }],
-      });
-      const turnHost = document.createElement('div');
-      turnHost.setAttribute('data-turn-tail', '1');
-      document.body.appendChild(turnHost);
-      const turnRoot = ReactDOM.createRoot(turnHost);
-      turnRoot.render(React.createElement(window.__module.ChatTurnCost, { seq: 1 }));
-      await new Promise((r) => setTimeout(r, 900));
-      const cost = turnHost.textContent;
-      turnRoot.unmount(); turnHost.remove();
-      window.__setRoute('/workbuddy/status', origStatus);
-      window.__setRoute('/workbuddy/requests', origRequests);
-      return { login: waiting ? 'ok' : 'no-link', cost };
-    })()`);
-    if (chatBits.login !== 'ok') problems.push('空会话「连接 WorkBuddy」没有进入等待授权/没给授权链接');
-    if (!/0\.03/.test(chatBits.cost || '')) problems.push(`每轮积分没有显示：${chatBits.cost || '空'}`);
-  }
-
   // 逐个标签页走一遍：每个面板都要真的渲染出内容（不是只挂个空壳）
   const EXPECT = {
     概览: ['本地桥', 'dsh 原生路由', '积分余额', '启动桥', '复制诊断报告'],
@@ -345,19 +280,34 @@ try {
     setter.call(ta, '说一句话');
     ta.dispatchEvent(new Event('input', { bubbles: true }));
     await new Promise((r) => setTimeout(r, 150));
+    const chatCalls = () => window.__calls.filter((c) => String(c[0]).includes('/chat')).length;
+    // 中文输入法确认候选词时的 Enter（isComposing=true）不能发消息
+    const beforeIme = chatCalls();
+    ta.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true, cancelable: true, isComposing: true }));
+    await new Promise((r) => setTimeout(r, 250));
+    const imeDelta = chatCalls() - beforeIme;
+    const stillTyped = ta.value;
     const sendBtn = [...document.querySelectorAll('.wb-btn')].find((b) => b.textContent === '发送');
     if (!sendBtn) return { error: '找不到发送按钮' };
     sendBtn.click();
     await new Promise((r) => setTimeout(r, 900));
     const bubbles = [...document.querySelectorAll('.wb-msg')].map((el) => el.innerText);
     const metas = [...document.querySelectorAll('.wb-msg-meta')].map((el) => el.innerText);
-    return { bubbles, metas, calls: window.__calls.filter((c) => String(c[0]).includes('/chat')).length };
+    return {
+      bubbles,
+      metas,
+      imeDelta,
+      stillTyped,
+      calls: window.__calls.filter((c) => String(c[0]).includes('/chat')).length,
+    };
   })()`);
   if (chatRun.error) problems.push(`对话测试无法运行：${chatRun.error}`);
   else {
     const joined = (chatRun.bubbles || []).join(' | ');
     if (!joined.includes('桥已接通。')) problems.push(`流式回答没渲染出来（实际：${joined.slice(0, 120)}）`);
     if (!joined.includes('说一句话')) problems.push('用户消息没渲染');
+    if (chatRun.imeDelta !== 0) problems.push('输入法确认候选词的 Enter 被当成发送（isComposing 没挡住）');
+    if (chatRun.stillTyped !== '说一句话') problems.push(`输入法回车后输入框被清空/发送了（值：${chatRun.stillTyped}）`);
     if (!chatRun.metas.length) problems.push('回答下方没有逐轮元数据（耗时/tokens/扣分）');
     else if (!/tokens 12 → 5/.test(chatRun.metas[0]) || !/扣分 0.004/.test(chatRun.metas[0])) {
       problems.push(`逐轮元数据不对：${chatRun.metas[0]}`);
@@ -393,6 +343,28 @@ try {
     await sleep(400);
     const valueAfterRoundTrip = await page.cdp.evaluate(`(() => { const sel=[...document.querySelectorAll('select.wb-select')].find((s)=>[...s.options].some((o)=>o.value===window.__chatTarget)); return sel ? sel.value : ''; })()`);
     if (valueAfterRoundTrip !== chatSelect.target) problems.push(`切标签页后模型选择被重置（期望 ${chatSelect.target}，实际 ${valueAfterRoundTrip}）`);
+    // 打了一半的草稿也要跨标签保留（输入状态由容器持有）
+    await page.cdp.evaluate(`(() => {
+      const ta = document.querySelector('.wb-textarea');
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set;
+      setter.call(ta, '未发送草稿');
+      ta.dispatchEvent(new Event('input', { bubbles: true }));
+    })()`);
+    await sleep(200);
+    await page.cdp.evaluate(`(() => { const b=[...document.querySelectorAll('.wb-tab')].find(x=>x.textContent==='概览'); b && b.click(); })()`);
+    await sleep(300);
+    await page.cdp.evaluate(`(() => { const b=[...document.querySelectorAll('.wb-tab')].find(x=>x.textContent==='对话测试'); b && b.click(); })()`);
+    await sleep(400);
+    const draft = await page.cdp.evaluate("(document.querySelector('.wb-textarea') || {}).value || ''");
+    if (draft !== '未发送草稿') problems.push(`切标签页后输入草稿丢失（实际：${draft}）`);
+    // 清掉草稿，别把它带进截图和后面的真实对话
+    await page.cdp.evaluate(`(() => {
+      const ta = document.querySelector('.wb-textarea');
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set;
+      setter.call(ta, '');
+      ta.dispatchEvent(new Event('input', { bubbles: true }));
+    })()`);
+    await sleep(150);
     console.log(`对话模型下拉：${chatSelect.count} 个选项，选择 ${chatSelect.target} 生效并保持`);
   }
   shot = await page.cdp.send('Page.captureScreenshot', { format: 'png', captureBeyondViewport: true });
@@ -458,7 +430,11 @@ try {
   const declinedDialogs = JSON.parse(declined || '[]');
   if (!declinedDialogs.length) problems.push('「清空账本」没有二次确认');
   const afterDecline = await inspect(page.cdp);
-  if (afterDecline.calls.length !== beforeClear.calls.length) problems.push('在确认框里点了「取消」，却仍然发出了请求');
+  // 只看"清空账本"对应的 DELETE：后台状态/用量轮询也会增加 __calls，
+  // 按总请求数比较会在轮询恰好落在这 400ms 里时误报。
+  const deletesBefore = beforeClear.calls.filter((c) => String(c[0]).includes('/workbuddy/usage') && c[1] === 'DELETE').length;
+  const deletesAfter = afterDecline.calls.filter((c) => String(c[0]).includes('/workbuddy/usage') && c[1] === 'DELETE').length;
+  if (deletesAfter !== deletesBefore) problems.push('在确认框里点了「取消」，却仍然发出了 DELETE /workbuddy/usage');
   // 这次点「确定」，应当真的发出 DELETE
   await page.cdp.evaluate("window.__confirmAnswer = true;");
   await page.cdp.evaluate(`(() => { const b=[...document.querySelectorAll('.wb-btn')].find(x=>x.textContent.includes('清空账本')); b && b.click(); })()`);
@@ -725,6 +701,279 @@ try {
     } else {
       console.warn('找不到语言开关 .wb-lang，跳过英文截图');
     }
+  }
+
+  // 对话页顶部的积分胶囊：能渲染、显示余额、点击会强制刷新；
+  // 刷新失败后不能把按钮永久禁掉，也不能把上一次的有效余额丢掉。
+  {
+    const quota = await page.cdp.evaluate(`(async () => {
+      const origQuota = window.__routes['/workbuddy/quota'];
+      const host = document.createElement('div');
+      host.id = 'quota-probe';
+      document.body.appendChild(host);
+      const root = ReactDOM.createRoot(host);
+      root.render(React.createElement(window.__module.ChatQuotaPill));
+      await new Promise((r) => setTimeout(r, 800));
+      const btn = host.querySelector('[data-workbuddy-quota]');
+      if (!btn) { root.unmount(); host.remove(); return { found: false }; }
+      const text = btn.textContent;
+      const title = btn.getAttribute('title') || '';
+      const className = btn.className;
+      const beforePosts = window.__calls.filter((c) => c[0] === '/workbuddy/quota' && c[1] === 'POST').length;
+      btn.click();
+      await new Promise((r) => setTimeout(r, 450));
+      const posts = window.__calls.filter((c) => c[0] === '/workbuddy/quota' && c[1] === 'POST').length - beforePosts;
+      window.__setRoute('/workbuddy/quota', { ok: false, error: 'fixture quota failure' });
+      const btn2 = host.querySelector('[data-workbuddy-quota]');
+      if (btn2) btn2.click();
+      await new Promise((r) => setTimeout(r, 700));
+      const after = host.querySelector('[data-workbuddy-quota]');
+      const failed = after ? {
+        present: true,
+        disabled: after.disabled,
+        text: after.textContent,
+        title: after.getAttribute('title') || '',
+      } : { present: false };
+      // 换号过渡态：缓存积分还是旧账号的 —— 必须显式标出来，不能静默展示。
+      window.__setRoute('/workbuddy/quota', {
+        ok: true,
+        quota: { total: 1427, packages: [] },
+        quotaAccount: 'uid-old',
+        bridgeAccount: 'uid-new',
+        bridgeState: 'running',
+        at: new Date().toISOString(),
+      });
+      const btn3 = host.querySelector('[data-workbuddy-quota]');
+      if (btn3) btn3.click();
+      await new Promise((r) => setTimeout(r, 800));
+      const mismatchEl = host.querySelector('[data-workbuddy-quota]');
+      const mismatch = mismatchEl ? {
+        title: mismatchEl.getAttribute('title') || '',
+        className: mismatchEl.className,
+      } : null;
+      // 首次读取就失败（没有上次数可退）：必须给可点击的错误占位，不能消失。
+      window.__setRoute('/workbuddy/quota', { ok: false, error: 'fixture first-read failure', bridgeState: 'running' });
+      const failHost = document.createElement('div');
+      document.body.appendChild(failHost);
+      const failRoot = ReactDOM.createRoot(failHost);
+      failRoot.render(React.createElement(window.__module.ChatQuotaPill));
+      await new Promise((r) => setTimeout(r, 800));
+      const errEl = failHost.querySelector('[data-workbuddy-quota-error]');
+      const firstReadFailure = errEl ? {
+        present: true,
+        text: errEl.textContent,
+        title: errEl.getAttribute('title') || '',
+        disabled: errEl.disabled,
+      } : { present: false };
+      failRoot.unmount(); failHost.remove();
+      window.__setRoute('/workbuddy/quota', origQuota);
+      root.unmount(); host.remove();
+      return { found: true, text, title, className, posts, failed, mismatch, firstReadFailure };
+    })()`);
+    if (!quota.found) problems.push('对话页积分胶囊没有渲染出来');
+    else {
+      if (!/积分/.test(quota.text)) problems.push(`积分胶囊文案不对：${quota.text}`);
+      if (quota.posts < 1) problems.push('点击积分胶囊没有强制刷新');
+      if (!/最近一次请求失败/.test(quota.title)) problems.push(`最近一次请求失败没有写进胶囊 title：${quota.title}`);
+      if (!/bad/.test(quota.className)) problems.push('最近一次请求失败没有把胶囊标红');
+      if (!quota.failed.present) problems.push('积分刷新失败后胶囊消失了（应当保留上次余额并标注错误）');
+      else {
+        if (quota.failed.disabled) problems.push('积分刷新失败后按钮仍是禁用态（busy 卡死）');
+        if (!/fixture quota failure/.test(quota.failed.title)) problems.push(`积分刷新失败没有把错误写进 title：${quota.failed.title}`);
+        if (!/1,?427/.test(quota.failed.text)) problems.push(`积分刷新失败后丢了上次余额：${quota.failed.text}`);
+      }
+      if (!quota.mismatch) problems.push('换号过渡态下积分胶囊消失了');
+      else {
+        if (!/上一个账号/.test(quota.mismatch.title)) problems.push(`换号过渡态没有标注积分归属：${quota.mismatch.title}`);
+        if (!/bad/.test(quota.mismatch.className)) problems.push('换号过渡态没有把胶囊标红');
+      }
+      if (!quota.firstReadFailure.present) problems.push('首次读取积分失败时胶囊直接消失了（应当给可重试的错误占位）');
+      else {
+        if (!/积分 —/.test(quota.firstReadFailure.text)) problems.push(`首次读取失败的占位文案不对：${quota.firstReadFailure.text}`);
+        if (!/first-read failure/.test(quota.firstReadFailure.title)) problems.push('首次读取失败没有把原因写进 title');
+        if (quota.firstReadFailure.disabled) problems.push('首次读取失败的占位按钮不可点（无法重试）');
+      }
+    }
+  }
+
+  // 已有对话 + 未登录：即使 quota 里还有上一个账号的缓存余额，顶部也必须让位给
+  // 登录入口；空会话不能重复出现登录入口（hero 已有）。
+  {
+    const headerLogin = await page.cdp.evaluate(`(async () => {
+      const origQuota = window.__routes['/workbuddy/quota'];
+      const origStatus = window.__routes['/workbuddy/status'];
+      window.__setRoute('/workbuddy/quota', {
+        ok: true,
+        quota: { total: 1427, packages: [] },
+        quotaError: '',
+        bridgeState: 'unauthenticated',
+        at: new Date().toISOString(),
+      });
+      window.__setRoute('/workbuddy/status', { bridge: { state: 'unauthenticated', health: {} } });
+      const mount = async (turnOrder) => {
+        const host = document.createElement('div');
+        document.body.appendChild(host);
+        const root = ReactDOM.createRoot(host);
+        const useChat = (selector) => selector({ timeline: { turnOrder } });
+        root.render(React.createElement(window.__module.ChatQuotaPill, { useChat }));
+        await new Promise((r) => setTimeout(r, 700));
+        const login = [...host.querySelectorAll('button')].some((b) => /连接 WorkBuddy|重新登录/.test(b.textContent));
+        const quota = !!host.querySelector('[data-workbuddy-quota]');
+        root.unmount(); host.remove();
+        return { login, quota };
+      };
+      const withMessages = await mount([1]);
+      const empty = await mount([]);
+      window.__setRoute('/workbuddy/quota', origQuota);
+      window.__setRoute('/workbuddy/status', origStatus);
+      return { withMessages, empty };
+    })()`);
+    if (!headerLogin.withMessages.login) problems.push('已有对话且未登录时，顶部没有登录入口');
+    if (headerLogin.withMessages.quota) problems.push('未登录时顶部仍显示积分胶囊');
+    if (headerLogin.empty.login) problems.push('空会话顶部重复出现登录入口（hero 已有）');
+    console.log(`顶部登录入口：已有对话=${headerLogin.withMessages.login ? '有' : '无'}，空会话=${headerLogin.empty.login ? '有' : '无'}`);
+  }
+
+  // 空会话登录入口 + 每轮积分：直接挂载两个聊天页组件验证（不依赖宿主 DOM）
+  {
+    const chatBits = await page.cdp.evaluate(`(async () => {
+      const origStatus = window.__routes['/workbuddy/status'];
+      const origRequests = window.__routes['/workbuddy/requests'];
+      window.__setRoute('/workbuddy/status', {
+        bridge: { state: 'unauthenticated', health: { credential: { loginRegion: 'global' } } },
+      });
+      const loginHost = document.createElement('div');
+      document.body.appendChild(loginHost);
+      const loginRoot = ReactDOM.createRoot(loginHost);
+      loginRoot.render(React.createElement(window.__module.ChatLoginButton));
+      await new Promise((r) => setTimeout(r, 500));
+      const loginBtn = [...loginHost.querySelectorAll('button')].find((b) => b.textContent === '连接 WorkBuddy');
+      if (!loginBtn) { loginRoot.unmount(); loginHost.remove(); return { login: 'missing' }; }
+      loginBtn.click();
+      await new Promise((r) => setTimeout(r, 500));
+      const waiting = !!loginHost.querySelector('.wb-chat-login-link');
+      const cancelBtn = loginHost.querySelector('.wb-chat-login-cancel');
+      const beforeCancel = window.__calls.filter((c) => c[0] === '/workbuddy/login/cancel' && c[1] === 'POST').length;
+      if (cancelBtn) cancelBtn.click();
+      await new Promise((r) => setTimeout(r, 350));
+      const cancelled = !loginHost.querySelector('.wb-chat-login-link')
+        && !!([...loginHost.querySelectorAll('button')].find((b) => b.textContent === '连接 WorkBuddy'));
+      const cancelCalls = window.__calls.filter((c) => c[0] === '/workbuddy/login/cancel' && c[1] === 'POST').length - beforeCancel;
+      loginRoot.unmount(); loginHost.remove();
+
+      /*
+       * 每轮积分：宿主 useChat 给出本轮 tokenUsage 与 turnTimings 时，
+       * 必须与账本里的请求核对（prompt 150 / completion 20 → 0.05），
+       * 而不是拿列表里第一条（0.03）凑数。非最后一轮必须不渲染。
+       */
+      const now = Date.now();
+      const snapshot = {
+        timeline: { turnOrder: [1] },
+        locations: { getTurn: (t) => (String(t) === '1' ? ['turn-node-1'] : []) },
+        nodes: {
+          get: (k) => (k === 'turn-node-1' ? {
+            kind: 'turn-tail',
+            data: { tokenUsage: { uncachedInputTokens: 100, cacheReadTokens: 50, cacheWriteTokens: 0, outputTokens: 20, routes: [{ model: 'stub-model' }] } },
+          } : undefined),
+        },
+        legacy: { turnTimings: new Map([[1, { startTime: new Date(now - 20000).toISOString(), endTime: new Date(now - 1000).toISOString() }]]) },
+      };
+      const useChat = (selector) => selector(snapshot);
+      window.__setRoute('/workbuddy/requests', {
+        ok: true,
+        requests: [
+          { t: now - 1500, model: 'stub-model', ok: true, credit: 0.05, ms: 900, promptTokens: 150, completionTokens: 20 },
+          { t: now - 60000, model: 'other-model', ok: true, credit: 9.99, ms: 100, promptTokens: 999, completionTokens: 99 },
+        ],
+      });
+      const sessionHost = document.createElement('div');
+      sessionHost.setAttribute('data-conversation-session', 's1');
+      const turnHost = document.createElement('div');
+      turnHost.setAttribute('data-turn-tail', '1');
+      sessionHost.appendChild(turnHost);
+      document.body.appendChild(sessionHost);
+      const turnRoot = ReactDOM.createRoot(turnHost);
+      turnRoot.render(React.createElement(window.__module.ChatTurnCost, { turn: 1, seq: 1, useChat }));
+      await new Promise((r) => setTimeout(r, 900));
+      const costEl = turnHost.querySelector('[data-workbuddy-turn-cost]');
+      const exact = costEl ? {
+        text: costEl.textContent,
+        title: costEl.getAttribute('title') || '',
+        exact: costEl.getAttribute('data-exact'),
+      } : null;
+      turnRoot.unmount(); sessionHost.remove();
+
+      // 同一回合，但会话已经推进到第 2 轮：旧 tail 不能再显示"本轮"。
+      const staleSnapshot = { ...snapshot, timeline: { turnOrder: [1, 2] } };
+      const staleHost = document.createElement('div');
+      staleHost.setAttribute('data-turn-tail', '1');
+      document.body.appendChild(staleHost);
+      const staleRoot = ReactDOM.createRoot(staleHost);
+      staleRoot.render(React.createElement(window.__module.ChatTurnCost, { turn: 1, seq: 1, useChat: (selector) => selector(staleSnapshot) }));
+      await new Promise((r) => setTimeout(r, 300));
+      const staleText = staleHost.textContent;
+      staleRoot.unmount(); staleHost.remove();
+
+      // 旧宿主没有 useChat：必须还能退回"最近一次请求"估算，不能什么都不显示。
+      window.__setRoute('/workbuddy/requests', {
+        ok: true,
+        requests: [{ t: Date.now() - 1000, model: 'stub-model', ok: true, credit: 0.03, ms: 1200 }],
+      });
+      const oldHost = document.createElement('div');
+      oldHost.setAttribute('data-turn-tail', '1');
+      document.body.appendChild(oldHost);
+      const oldRoot = ReactDOM.createRoot(oldHost);
+      oldRoot.render(React.createElement(window.__module.ChatTurnCost, { seq: 1 }));
+      await new Promise((r) => setTimeout(r, 900));
+      const oldEl = oldHost.querySelector('[data-workbuddy-turn-cost]');
+      const fallback = oldEl ? {
+        text: oldEl.textContent,
+        title: oldEl.getAttribute('title') || '',
+        exact: oldEl.getAttribute('data-exact'),
+      } : null;
+      oldRoot.unmount(); oldHost.remove();
+
+      // 旧宿主没有 useChat：新 tail 追加后，靠 DOM 观察也要把旧标签收掉。
+      const oldSession = document.createElement('div');
+      oldSession.setAttribute('data-conversation-session', 's-old');
+      const oldTail1 = document.createElement('div');
+      oldTail1.setAttribute('data-turn-tail', '1');
+      oldSession.appendChild(oldTail1);
+      document.body.appendChild(oldSession);
+      const oldRoot1 = ReactDOM.createRoot(oldTail1);
+      oldRoot1.render(React.createElement(window.__module.ChatTurnCost, { seq: 1 }));
+      await new Promise((r) => setTimeout(r, 900));
+      const oldStaleBefore = oldTail1.textContent;
+      const oldTail2 = document.createElement('div');
+      oldTail2.setAttribute('data-turn-tail', '2');
+      oldSession.appendChild(oldTail2);
+      await new Promise((r) => setTimeout(r, 500));
+      const oldStaleAfter = oldTail1.textContent;
+      oldRoot1.unmount(); oldSession.remove();
+
+      window.__setRoute('/workbuddy/status', origStatus);
+      window.__setRoute('/workbuddy/requests', origRequests);
+      return { login: waiting ? 'ok' : 'no-link', cancelled, cancelCalls, exact, staleText, fallback, oldStaleBefore, oldStaleAfter };
+    })()`);
+    if (chatBits.login !== 'ok') problems.push('空会话「连接 WorkBuddy」没有进入等待授权/没给授权链接');
+    if (chatBits.login === 'ok' && (!chatBits.cancelled || chatBits.cancelCalls < 1)) {
+      problems.push(`登录取消不可用（按钮回来=${chatBits.cancelled}，cancel 调用=${chatBits.cancelCalls}）`);
+    }
+    if (!chatBits.exact) problems.push('每轮积分没有渲染');
+    else {
+      if (!/0\.05/.test(chatBits.exact.text)) problems.push(`本轮积分没有按 token 对到正确请求：${chatBits.exact.text}`);
+      if (chatBits.exact.exact !== '1') problems.push('本轮积分没有标记为账本核对结果');
+      if (!/核对/.test(chatBits.exact.title)) problems.push(`本轮积分的 title 没说明核对：${chatBits.exact.title}`);
+    }
+    if (chatBits.staleText) problems.push(`非最后一轮仍在显示每轮积分：${chatBits.staleText}`);
+    if (!chatBits.fallback) problems.push('旧宿主（没有 useChat）下每轮积分不显示');
+    else {
+      if (!/0\.03/.test(chatBits.fallback.text)) problems.push(`旧宿主每轮积分回退取值不对：${chatBits.fallback.text}`);
+      if (chatBits.fallback.exact !== '0') problems.push('旧宿主回退值被误标成账本核对结果');
+      if (!/估算/.test(chatBits.fallback.title)) problems.push(`旧宿主回退没有标注估算：${chatBits.fallback.title}`);
+    }
+    if (!/0\.03/.test(chatBits.oldStaleBefore || '')) problems.push(`旧宿主下每轮积分初始没显示：${chatBits.oldStaleBefore || '空'}`);
+    if (chatBits.oldStaleAfter) problems.push(`旧宿主追加新回合后旧标签仍残留：${chatBits.oldStaleAfter}`);
   }
 
   if (problems.length) {

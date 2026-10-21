@@ -52,16 +52,18 @@ pre-selected from the existing account or desktop domain, and the model picker r
 after sign-in, account switches or bridge restarts — no extra dsh restart.
 Model names carry their credit multiplier (`DeepSeek-V4.1-Flash · ×0.11`; free models
 are marked too). The chat header keeps a click-to-refresh credit pill (hover for today's
-spend and the last call), an empty chat offers a one-click "Connect WorkBuddy" button,
-and the latest turn shows its estimated credit cost.
+spend and the last call) and turns into a sign-in entry when an existing conversation
+loses its credentials. An empty chat offers a one-click "Connect WorkBuddy" button, and
+the latest turn shows its credit cost — matched against the turn's tokens and the local
+request ledger when the host exposes them, otherwise a clearly-labelled estimate.
 
 #### In the chat view
 
 | Where | What you see | Notes |
 |---|---|---|
 | Model name | `DeepSeek-V4.1-Flash · ×0.11` / `· Free` | The multiplier comes from the model catalog; no need to open details |
-| Chat header | `Credits 715` | Hover for package remaining, today's spend and the last call; turns amber at ≤30%, red at ≤10%; click to refresh |
-| End of the latest turn | `This turn: 0.03 credits` | Estimated from the latest completed model request; concurrent windows may attribute it to another session (the tooltip says so) |
+| Chat header | `Credits 715` | Hover for package remaining, today's spend and the last call; turns amber at ≤30%, red at ≤10%; click to refresh. A failed read keeps the last balance with an error mark; with an existing conversation and no valid sign-in, this seat becomes the sign-in entry |
+| End of the latest turn | `This turn: 0.03 credits` | Matched against the turn's tokens and the local request ledger when available; falls back to the latest completed request (the tooltip says so) on older hosts or when no match is provable |
 | Empty chat | `Connect WorkBuddy` | Starts browser authorization without opening Settings; the model picker refreshes automatically |
 
 `×0.11` is a **credit multiplier**, not a CNY price; free models are labelled as such.

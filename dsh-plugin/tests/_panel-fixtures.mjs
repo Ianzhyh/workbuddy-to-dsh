@@ -428,13 +428,14 @@ export function buildRoutes(data) {
     },
     '/workbuddy/login/start': { ok: true, state: 'state-fixture', url: 'https://example.invalid/login?state=state-fixture', region: 'cn' },
     '/workbuddy/login/poll': { ok: true, status: 'pending' },
+    '/workbuddy/login/cancel': { ok: true },
     '/workbuddy/login/active': { ok: true },
     '/workbuddy/login/logout': { ok: true },
     '/workbuddy/bridge': { ok: true, action: 'restart', result: { ok: true, health: { pid: 4242 } } },
     '/workbuddy/console': { ok: true, action: 'start', url: 'http://127.0.0.1:8792', result: { ok: true, reused: true } },
     '/workbuddy/migrate': { ok: true, found: false, files: [], changed: false },
     // 积分刷新（POST）的桩：返回一份"刷新后"的形状
-    '/workbuddy/quota': { ok: true, quota: FIXTURES.status.quota, quotaError: '', at: new Date().toISOString(), refreshed: true },
+    '/workbuddy/quota': { ok: true, quota: FIXTURES.status.quota, quotaError: '', at: new Date().toISOString(), refreshed: true, bridgeState: 'running' },
     // 控制台域功能（插件透传）。这些**不依赖**实时抓取，始终用内置样例，
     // 形状与控制台一致。
     '/workbuddy/console-api/overview': FIXTURES.consoleOverview,

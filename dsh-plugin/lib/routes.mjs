@@ -115,11 +115,33 @@ export function createRouteTable(deps) {
           if (req.method === 'POST') {
             if (!guard(req)) return sendJson(res, 403, { ok: false, error: 'missing x-workbuddy-panel header' });
             const snap = await snapshot({ quota: true });
-            return sendJson(res, 200, { ok: snap.quota?.ok !== false, quota: snap.quota, quotaError: snap.quotaError, at: snap.quotaAt, refreshed: true });
+            return sendJson(res, 200, {
+              ok: snap.quota?.ok !== false,
+              quota: snap.quota,
+              quotaError: snap.quotaError,
+              at: snap.quotaAt,
+              refreshed: true,
+              /*
+               * 桥状态随积分一起返回：桥掉登录态时 quota 可能还是上一个账号的
+               * 缓存，光看 `ok/quotaError` 分辨不出来。客户端据此决定要不要
+               * 把胶囊换成登录入口，不必再单独轮询 /workbuddy/status。
+               */
+              bridgeState: snap.bridge?.state || '',
+              bridgeAccount: snap.bridgeAccount || null,
+              quotaAccount: snap.quotaAccount || null,
+            });
           }
           if (readOnly(req, res)) return;
           const snap = await snapshot({});
-          sendJson(res, 200, { ok: snap.quota?.ok !== false, quota: snap.quota, quotaError: snap.quotaError, at: snap.quotaAt });
+          sendJson(res, 200, {
+            ok: snap.quota?.ok !== false,
+            quota: snap.quota,
+            quotaError: snap.quotaError,
+            at: snap.quotaAt,
+            bridgeState: snap.bridge?.state || '',
+            bridgeAccount: snap.bridgeAccount || null,
+            quotaAccount: snap.quotaAccount || null,
+          });
         } catch (error) {
           sendJson(res, 200, { ok: false, error: String(error?.message || error) });
         }

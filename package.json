@@ -1,6 +1,6 @@
 {
   "name": "workbuddy-to-dsh",
-  "version": "1.8.2",
+  "version": "1.9.0",
   "private": true,
   "description": "把 WorkBuddy 的模型（桌面端登录或插件内浏览器授权）经本地桥暴露为 OpenAI 兼容接口，供 DeepSeek Harness 或任意 OpenAI 客户端调用。根包即 dsh bundle：dsh plugin add github:Ianzhyh/workbuddy-to-dsh 可直装。",
   "type": "module",
@@ -40,9 +40,9 @@
     }
   },
   "scripts": {
-  "start": "node dashboard/server.mjs",
-  "bridge": "node bridge/workbuddy-bridge.mjs",
-  "connect": "node tools/connect.mjs",
+    "start": "node dashboard/server.mjs",
+    "bridge": "node bridge/workbuddy-bridge.mjs",
+    "connect": "node tools/connect.mjs",
     "doctor": "node tools/doctor.mjs",
     "verify": "node tools/verify-atrest.mjs",
     "test:lib": "node --test lib/find-workbuddy.test.mjs lib/find-dsh.test.mjs lib/dsh.test.mjs lib/state.test.mjs lib/atrest.test.mjs lib/config.test.mjs lib/diagnostics.quota.test.mjs lib/diagnostics.auth.test.mjs lib/diagnostics.fold.test.mjs lib/diagnostics.install.test.mjs lib/config.token-perm.test.mjs lib/client-connect.test.mjs",

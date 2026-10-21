@@ -69,6 +69,13 @@ test('数据面的方法 / 权限矩阵：只读路由拒绝写方法，写路�
       assert.equal(res.status, 405, `${path} ${method} 应当是 405（只读路由不接受写方法）`);
     }
   }
+  // 积分接口必须带上桥状态：否则桥掉登录态、quota 还是旧缓存时，客户端分辨不出来
+  {
+    const quota = await run('/workbuddy/quota', 'GET');
+    assert.equal(quota.body.bridgeState, 'running');
+    assert.equal(quota.body.quotaAccount, null);
+    assert.equal(quota.body.bridgeAccount, null);
+  }
 
   // 写路由：没有面板头一律 403；带上正确头才放行
   const writes = [

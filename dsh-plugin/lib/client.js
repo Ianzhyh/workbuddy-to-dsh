@@ -144,11 +144,18 @@ body.dark .wb-root,
 .wb-chat-quota-dot{width:6px;height:6px;border-radius:50%;background:var(--dsw-alias-brand-primary,light-dark(#0f1115,#f9fafb));flex:none}
 .wb-chat-quota.warn .wb-chat-quota-dot{background:#d29922}
 .wb-chat-quota.bad .wb-chat-quota-dot{background:#e5534b}
+/* 刷新中：只让状态点呼吸，不换文案 —— 胶囊在顶部工具区，改字宽会顶着邻居抖 */
+@keyframes wb-quota-blink{0%,100%{opacity:1}50%{opacity:.25}}
+.wb-chat-quota.busy .wb-chat-quota-dot{animation:wb-quota-blink 1s ease-in-out infinite}
+@media (prefers-reduced-motion: reduce){.wb-chat-quota.busy .wb-chat-quota-dot{animation:none}}
 .wb-turn-cost{font-size:11px;line-height:18px;color:var(--dsw-alias-label-secondary,light-dark(#61666b,#cfd3d6));margin-right:8px;white-space:nowrap}
 .wb-chat-login-inline{display:inline-flex;align-items:center;gap:6px;flex-wrap:wrap;min-width:0}
 .wb-chat-login-link{font-size:11.5px;line-height:18px;color:var(--dsw-alias-brand-primary,#6366f1);text-decoration:none;white-space:nowrap;margin-left:0}
 .wb-chat-login-link:hover{text-decoration:underline}
-.wb-chat-login-error{font-size:11.5px;line-height:18px;color:#e5534b;white-space:nowrap;margin-left:6px}
+.wb-chat-login-cancel{appearance:none;border:0;background:transparent;padding:0;font:inherit;font-size:11.5px;line-height:18px;color:var(--dsw-alias-label-tertiary,light-dark(#81858c,#adb2b8));cursor:pointer;white-space:nowrap}
+.wb-chat-login-cancel:hover{color:var(--dsw-alias-label-secondary,light-dark(#61666b,#cfd3d6));text-decoration:underline}
+.wb-chat-login-cancel:focus-visible{outline:2px solid var(--dsw-alias-brand-primary,#6366f1);outline-offset:1px}
+.wb-chat-login-error{font-size:11.5px;line-height:18px;color:#e5534b;white-space:nowrap;margin-left:6px;max-width:220px;overflow:hidden;text-overflow:ellipsis;display:inline-block;vertical-align:middle}
 .wb-dot{width:7px;height:7px;border-radius:50%;background:var(--dsw-alias-label-tertiary,#adb2b8);flex:none;transition:transform var(--wb-anim-fast)}
 @keyframes wb-pulse{0%{box-shadow:0 0 0 0 rgba(46,160,67,0.45)}70%{box-shadow:0 0 0 5px rgba(46,160,67,0)}100%{box-shadow:0 0 0 0 rgba(46,160,67,0)}}
 .wb-dot.ok{background:#2ea043;animation:wb-pulse 2.2s infinite ease-out}
@@ -497,6 +504,10 @@ body.dark .wb-root,
       '还没有登录 WorkBuddy': 'WorkBuddy is not signed in yet',
       '登录后显示积分余额': 'Credit balance will appear after sign-in',
       '连接 WorkBuddy': 'Connect WorkBuddy',
+      '重新登录': 'Sign in again',
+      '打开授权页': 'Open page',
+      '登录已超时，请重试': 'Sign-in timed out. Try again.',
+      '登录失败：': 'Sign-in failed: ',
       '浏览器授权一次，WorkBuddy 的模型和积分就会自动出现。不需要安装 WorkBuddy 桌面端，也不用填 API Key。':
         'Authorize once in your browser and WorkBuddy models and credits appear automatically. No desktop app and no API key required.',
       '① 点「去登录」': '1. Click "Go to sign-in"',
@@ -940,6 +951,9 @@ body.dark .wb-root,
         'The chat test is sent through the console (it owns the streaming passthrough). Start the console first.',
       '已中断': 'Interrupted',
       '已停止': 'Stopped',
+      '空回答': 'empty answer',
+      '上游返回了空回答（既没有正文也没有思考内容）。':
+        'The upstream returned an empty answer (no text and no reasoning).',
       '会消耗你账号的额度（与控制器里的对话测试同一回事）。多轮对话带上下文，流式输出可随时停止。这里的模型与参数只作用于本页测试。':
         'This consumes your account quota (the same as the chat test in the controller). Multi-turn chats keep context and streaming output can be stopped at any time. The model and parameters here affect only this page\'s test.',
       '筛选模型…': 'Filter models…',
@@ -1076,7 +1090,11 @@ body.dark .wb-root,
       /*
        * 对话页模型下拉的选项：`m.id + ' · 多模态'`。
        * **下拉不打开就扫不到** —— 验收脚本里补了「先点开再扫」。
+       * 1.8.2 起选项还带倍率后缀（`· 免费` / `· ×0.11`），免费的要单独翻；
+       * 组合后缀（免费 + 多模态）必须排在单后缀规则前面。
        */
+      [/^(.+) · 免费 · 多模态$/, '$1 · free · multimodal'],
+      [/^(.+) · 免费$/, '$1 · free'],
       [/^(.+) · 多模态$/, '$1 · multimodal'],
       /* 「上次尝试」那行的 `时间（auto）`：全角括号是界面文案，里面是数据 */
       [/^(.+)（(auto|manual|\?)）$/, '$1 ($2)'],
@@ -3893,7 +3911,7 @@ body.dark .wb-root,
      * 模型选择由容器持有（`model` / `setModel`）—— 这样切标签页回来不会被重置，
      * 也就不会给人"模型是写死的"错觉。未选时回落到推荐模型（sampleModel）。
      */
-    function ChatPanel({ sampleModel, model, setModel, messages, setMessages, params, setParams, accountKey }) {
+    function ChatPanel({ sampleModel, model, setModel, messages, setMessages, params, setParams, input, setInput, accountKey }) {
       /**
        * 模型目录用 `refreshKey` 跟着**桥的登录账号**走。
        *
@@ -3909,13 +3927,16 @@ body.dark .wb-root,
         refreshKey: accountKey || undefined,
       });
       const models = modelsData?.models || [];
-      const [input, setInput] = useState('');
       const [streaming, setStreaming] = useState(false);
       const [meta, setMeta] = useState(null);
       const [error, setError] = useState('');
       const [filter, setFilter] = useState('');
       const abortRef = useRef(null);
       const boxRef = useRef(null);
+      // 发送闸门与滚动跟随都要用 ref：前者要在 setState 生效前就挡住重复回车，
+      // 后者要在每个 token 到达时读取"用户是否正在往回看"，不能等重渲染。
+      const sendingRef = useRef(false);
+      const stickRef = useRef(true);
       const activeModel = model || sampleModel || models[0]?.id || '';
       const shown = filter.trim()
         ? models.filter((m) => (m.id + ' ' + (m.name || '')).toLowerCase().includes(filter.trim().toLowerCase()))
@@ -3959,16 +3980,24 @@ body.dark .wb-root,
         if (cap > 0 && Number.isFinite(current) && current > cap) setMaxTokens(String(cap));
       }, [activeModel]);
 
-      useEffect(() => { if (boxRef.current) boxRef.current.scrollTop = boxRef.current.scrollHeight; }, [messages, streaming]);
+      useEffect(() => {
+        const el = boxRef.current;
+        // 只在用户本来就贴着底部时跟随流式输出。旧实现每个 token 都强制
+        // 滚到底，用户往上翻看前文时会被立刻拽回来。
+        if (el && stickRef.current) el.scrollTop = el.scrollHeight;
+      }, [messages, streaming]);
 
       const send = async () => {
         const text = input.trim();
-        if (!text || streaming || !activeModel) return;
+        if (!text || streaming || sendingRef.current || !activeModel) return;
         if (!modelValid) { setError(`模型 ${activeModel} 不在当前账号的目录里（可能刚切换过账号）—— 请重新选择。`); return; }
         setError('');
         setInput('');
+        sendingRef.current = true;
+        stickRef.current = true;
         // 历史里丢掉"空的助手消息"（上一次失败/中断留下的占位），否则会被当成
-        // 一条真正的空回复回灌给模型。
+        // 一条真正的空回复回灌给模型。**只按 content 判空**：reasoning 不随历史
+        // 发送，只有思考内容的消息在 API 里仍然是空助手消息。
         const history = [
           ...messages.filter((m) => !(m.role === 'assistant' && !m.content)),
           { role: 'user', content: text },
@@ -3981,6 +4010,8 @@ body.dark .wb-root,
         let usage = null;
         let finish = '';
         let streamFailure = '';
+        let gotContent = false;
+        let gotReasoning = false;
         /** 把本轮的耗时/tokens/扣分贴到最后一条助手消息上（逐轮可查，不只看最后一轮）。 */
         const attachMeta = (extra) => {
           const turnMeta = {
@@ -3998,6 +4029,28 @@ body.dark .wb-root,
             return next;
           });
         };
+        /**
+         * 请求在拿到任何内容之前就失败时，把那条空的助手占位删掉 ——
+         * 否则界面上会留一个空白气泡，看起来像"模型回了个空"。
+         * 已经流出一部分内容的不删：那是真实的部分回答，配合 meta 里的
+         * 「错误 / 已停止」一起看。
+         */
+        const dropEmptyAssistant = () => {
+          setMessages((prev) => {
+            const last = prev[prev.length - 1];
+            return last && last.role === 'assistant' && !last.content && !last.reasoning
+              ? prev.slice(0, -1)
+              : prev;
+          });
+        };
+        /** 失败收尾：错误条 + 本轮元数据 + 清掉空占位，三条路都走同一套。 */
+        const failTurn = (message, label) => {
+          if (message) setError(message);
+          attachMeta(label || '错误');
+          dropEmptyAssistant();
+          // 一个字都没收到就把原文还回输入框；已经有回答/思考内容时不要覆盖用户的新输入。
+          if (!gotContent) setInput((current) => current || text);
+        };
         // 请求参数：空字符串 = 用户没设 = 不发该字段（不猜默认值，交给上游）。
         // reasoning_effort 选"默认"时同样不发 —— 这是刻意的不猜：不同上游模型
         // 对未知参数的容忍度不同，发了反而可能 400。
@@ -4014,12 +4067,11 @@ body.dark .wb-root,
             body: JSON.stringify({ model: activeModel, stream: true, messages: history, ...overrides }),
             signal: ac.signal,
           });
-          if (res.status === 503) { setError('对话测试由控制台代发（它管着流式透传）。先启动控制台。'); setStreaming(false); return; }
-          if (res.status === 404) { setError('宿主端还是旧构建：重启一次 dsh 后对话测试才可用（完全退出托盘再打开）。'); setStreaming(false); return; }
+          if (res.status === 503) { failTurn('对话测试由控制台代发（它管着流式透传）。先启动控制台。'); return; }
+          if (res.status === 404) { failTurn('宿主端还是旧构建：重启一次 dsh 后对话测试才可用（完全退出托盘再打开）。'); return; }
           if (!res.ok || !res.body) {
             const raw = await res.text().catch(() => '');
-            setError(`HTTP ${res.status}：${raw.slice(0, 200)}`);
-            setStreaming(false);
+            failTurn(`HTTP ${res.status}：${raw.slice(0, 200)}`);
             return;
           }
           const reader = res.body.getReader();
@@ -4054,33 +4106,48 @@ body.dark .wb-root,
               const delta = choice.delta || {};
               // 思考内容单独累积并展示：旧实现把它静默丢掉，面板里看不到 CoT
               const reasoningPiece = typeof delta.reasoning_content === 'string' ? delta.reasoning_content : '';
-              if (reasoningPiece) setMessages((prev) => {
-                const next = prev.slice();
-                const last = next[next.length - 1];
-                next[next.length - 1] = { ...(last || { role: 'assistant' }), role: 'assistant', reasoning: (last?.reasoning || '') + reasoningPiece };
-                return next;
-              });
+              if (reasoningPiece) {
+                gotReasoning = true;
+                setMessages((prev) => {
+                  const next = prev.slice();
+                  const last = next[next.length - 1];
+                  next[next.length - 1] = { ...(last || { role: 'assistant' }), role: 'assistant', reasoning: (last?.reasoning || '') + reasoningPiece };
+                  return next;
+                });
+              }
               const piece = typeof delta.content === 'string' ? delta.content : '';
-              if (piece) setMessages((prev) => {
-                const next = prev.slice();
-                const last = next[next.length - 1];
-                next[next.length - 1] = { ...(last || { role: 'assistant' }), role: 'assistant', content: (last?.content || '') + piece };
-                return next;
-              });
+              if (piece) {
+                gotContent = true;
+                setMessages((prev) => {
+                  const next = prev.slice();
+                  const last = next[next.length - 1];
+                  next[next.length - 1] = { ...(last || { role: 'assistant' }), role: 'assistant', content: (last?.content || '') + piece };
+                  return next;
+                });
+              }
+            }
+            // 流内错误已经定性：不要再把后续字节读完，直接收尾。
+            if (streamFailure) {
+              try { await reader.cancel(); } catch (e) { /* 上游可能已经关了 */ }
+              break;
             }
           }
           if (streamFailure) {
-            setError(`上游报错：${streamFailure}`);
-            attachMeta('错误');
+            failTurn(`上游报错：${streamFailure}`);
+            return;
+          }
+          if (!gotContent && !gotReasoning) {
+            failTurn('上游返回了空回答（既没有正文也没有思考内容）。', '空回答');
             return;
           }
           attachMeta();
         } catch (e2) {
-          if (e2?.name !== 'AbortError') { setError(String(e2?.message || e2)); attachMeta('已中断'); }
-          else attachMeta('已停止');
+          if (e2?.name !== 'AbortError') failTurn(String(e2?.message || e2), '已中断');
+          else { attachMeta('已停止'); dropEmptyAssistant(); }
         } finally {
           setStreaming(false);
           abortRef.current = null;
+          sendingRef.current = false;
         }
       };
 
@@ -4094,10 +4161,16 @@ body.dark .wb-root,
             h(DropdownSelect, {
               value: activeModel,
               onChange: (e) => setModel(e.target.value),
-              options: shown.map((m) => ({
-                value: m.id,
-                label: m.id + (m.images ? ' · 多模态' : ''),
-              })),
+              options: shown.map((m) => {
+                // 与 dsh 模型选择器同一口径：倍率直接跟名字走，免费模型标「免费」。
+                const credits = Number(m.credits);
+                const cost = m.free === true || credits === 0 ? '免费'
+                  : (Number.isFinite(credits) && credits > 0 ? '×' + credits : '');
+                return {
+                  value: m.id,
+                  label: m.id + (cost ? ' · ' + cost : '') + (m.images ? ' · 多模态' : ''),
+                };
+              }),
             }),
             h('span', { className: 'wb-note', style: { margin: 0 } }, `共 ${shown.length} 个可选`)),
           h('div', { className: 'wb-actions-group' },
@@ -4132,7 +4205,15 @@ body.dark .wb-root,
         !models.length ? h(Alert, null, '模型目录还没读到（桥没跑或目录为空）—— 稍后会自动重试。') : null,
         h('p', { className: 'wb-note' }, '要让 agent 本身用某个模型，用 dsh 输入框旁的模型选择器（provider 选 WorkBuddy）；这里只影响本页的对话测试。'),
         error ? h(Alert, { bad: true }, error) : null,
-        h('div', { className: 'wb-chat', ref: boxRef },
+        h('div', {
+          className: 'wb-chat',
+          ref: boxRef,
+          onScroll: () => {
+            const el = boxRef.current;
+            if (!el) return;
+            stickRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 48;
+          },
+        },
           messages.length
             ? messages.map((m, i) => h('div', { key: i, className: 'wb-msg ' + m.role },
               m.reasoning ? h('div', { className: 'wb-note', style: { whiteSpace: 'pre-wrap', margin: '0 0 4px' } }, `思考：${m.reasoning}`) : null,
@@ -4143,7 +4224,23 @@ body.dark .wb-root,
                 (m.meta.credit !== null ? ` · 扣分 ${m.meta.credit}` : '')) : null))
             : h('p', { className: 'wb-note', style: { margin: 0 } }, '还没有对话。')),
         meta ? h('p', { className: 'wb-note' }, `最近一轮：${meta.ms} ms · ${meta.finish || '?'} · tokens ${meta.prompt ?? '?'} → ${meta.completion ?? '?'}` + (meta.credit !== null ? ` · 扣分 ${meta.credit}` : '')) : null,
-        h('textarea', { className: 'wb-textarea', value: input, placeholder: '输入消息，Enter 发送（Shift+Enter 换行）', onChange: (e) => setInput(e.target.value), onKeyDown: (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } } }),
+        h('textarea', {
+          className: 'wb-textarea',
+          value: input,
+          placeholder: '输入消息，Enter 发送（Shift+Enter 换行）',
+          onChange: (e) => setInput(e.target.value),
+          onKeyDown: (e) => {
+            if (e.key !== 'Enter' || e.shiftKey) return;
+            /*
+             * 中文/日文输入法用 Enter 确认候选词时也会派发 keydown。
+             * 不挡这一步，用户刚打完拼音就会被当成“发送”，半截拼音直接进了对话。
+             * `keyCode === 229` 是老浏览器/部分输入法的兜底信号。
+             */
+            if (e.nativeEvent?.isComposing || e.isComposing || e.keyCode === 229) return;
+            e.preventDefault();
+            send();
+          },
+        }),
         h('div', { className: 'wb-actions', style: { marginTop: '8px' } },
           h(Btn, { primary: true, disabled: streaming || !input.trim() || !activeModel, onClick: send }, streaming ? '生成中…' : '发送')));
     }
@@ -4227,26 +4324,131 @@ body.dark .wb-root,
      * 设置页里的积分卡要开面板才能看到；这个位置让用户聊天时一眼能看到余额，
      * 点一下刷新（POST 会强制重读上游，GET 只读缓存）。数据来自插件自己的路由，
      * 不经过控制台，也不额外要求登录。
+     *
+     * 已有消息的会话里，如果未登录/凭据异常，胶囊会变成登录入口 ——
+     * 否则用户只能看着模型调用失败，没有任何就地恢复的入口。
      */
-    function ChatQuotaPill() {
-      const { data, reload } = useJson('/workbuddy/quota', { interval: 60000 });
+    /** 没有宿主 `useChat`（旧 dsh / 独立渲染）时的占位选择器：只跑选择器的默认分支。 */
+    const NO_CHAT_SELECT = (selector) => {
+      try { return selector(null); } catch (e) { return null; }
+    };
+    /** 登录成功后通知所有聊天页组件刷新（顶部胶囊不必等下一个 60 秒轮询）。 */
+    const authChangedSubs = new Set();
+    function notifyAuthChanged() {
+      for (const fn of [...authChangedSubs]) {
+        try { fn(); } catch (e) { /* 单个订阅者出错不影响其它组件 */ }
+      }
+    }
+    function useAuthChanged(fn) {
+      useEffect(() => {
+        authChangedSubs.add(fn);
+        return () => { authChangedSubs.delete(fn); };
+      }, [fn]);
+    }
+
+    function ChatQuotaPill({ useChat } = {}) {
+      const { data, reload, loading } = useJson('/workbuddy/quota', { interval: 60000 });
       const { data: requestData, reload: reloadRequests } = useJson('/workbuddy/requests?limit=1', { interval: 15000 });
       const { data: usageData, reload: reloadUsage } = useJson('/workbuddy/usage?days=1', { interval: 120000 });
       const [busy, setBusy] = useState(false);
-      const total = typeof data?.quota?.total === 'number' ? data.quota.total : null;
-      if (total === null) return null;
-      const error = data?.quotaError || (data?.quota && data.quota.ok === false ? String(data.quota.error || '') : '');
+      const [refreshError, setRefreshError] = useState('');
+      /*
+       * 积分读失败时不能把胶囊整个抽走 —— 用户正在对话，胶囊突然消失比
+       * 显示一份"上次读到的数 + 错误提示"更像故障。只在拿到过一次有效数后
+       * 才记住它；第一帧就失败（未登录/桥没起）仍然不显示，避免凭空造数。
+       */
+      const lastGood = useRef(null);
+      useEffect(() => {
+        const q = data?.quota;
+        if (q && typeof q.total === 'number') lastGood.current = { quota: q, at: data?.at || null };
+        // 后续轮询已经读到新数：上一次手动刷新的错误提示不能永远挂着。
+        if (q && typeof q.total === 'number' && q.ok !== false) setRefreshError('');
+      }, [data]);
+      const quota = (data?.quota && typeof data.quota.total === 'number') ? data.quota : lastGood.current?.quota;
+      const total = quota && typeof quota.total === 'number' ? quota.total : null;
+      const stale = !(data?.quota && typeof data.quota.total === 'number');
+      // 与面板同一口径：缓存里的积分属于哪个账号，必须能看出来（换号后的过渡态）。
+      const accountMismatch = Boolean(
+        data?.quotaAccount && data?.bridgeAccount && data.quotaAccount !== data.bridgeAccount,
+      );
+      const updatedAt = (data?.quota && typeof data.quota.total === 'number' ? data.at : lastGood.current?.at) || null;
+      const error = refreshError
+        || data?.quotaError
+        || (data?.quota && data.quota.ok === false ? String(data.quota.error || '') : '')
+        || (stale ? String(data?.error || '') : '');
+      const selectChat = typeof useChat === 'function' ? useChat : NO_CHAT_SELECT;
+      const hasMessages = selectChat((snapshot) => {
+        if (typeof useChat !== 'function') return false;
+        try { return (snapshot?.timeline?.turnOrder?.length || 0) > 0; } catch (e) { return false; }
+      });
+      /*
+       * 桥状态由 /workbuddy/quota 一起带回（见 routes.mjs）。不能只靠
+       * quotaError 判断：桥掉登录态时，积分可能还是上一个账号的缓存，
+       * ok/quotaError 都可能是“正常”的。
+       */
+      const bridgeState = data?.bridgeState || '';
+      const needsLogin = bridgeState === 'unauthenticated' || bridgeState === 'degraded';
+      const reloadAll = useCallback(() => {
+        reload(); reloadRequests(); reloadUsage();
+      }, [reload, reloadRequests, reloadUsage]);
+      useAuthChanged(reloadAll);
+      // 换号过渡态：缓存积分属于上一个账号时立刻重读，别让红色数字挂一分钟。
+      useEffect(() => {
+        if (accountMismatch) reload();
+      }, [accountMismatch, reload]);
+      const en = typeof document !== 'undefined'
+        && String(document.documentElement.lang || '').toLowerCase().startsWith('en');
       const refresh = async () => {
         if (busy) return;
         setBusy(true);
-        await postJson('/workbuddy/quota', {});
-        setBusy(false);
-        reload(); reloadRequests(); reloadUsage();
+        setRefreshError('');
+        try {
+          const res = await postJson('/workbuddy/quota', {});
+          if (!res.data?.ok) {
+            setRefreshError(String(res.data?.quotaError || res.data?.error || ('HTTP ' + res.status)));
+          }
+        } catch (e) {
+          // 网络断/桥刚退出时 fetch 会直接 reject：旧实现没有 catch，
+          // 这个 async onClick 会留下未处理的 rejection，busy 也永远回不到 false。
+          setRefreshError(String(e?.message || e));
+        } finally {
+          setBusy(false);
+          reload(); reloadRequests(); reloadUsage();
+        }
       };
-      const en = typeof document !== 'undefined'
-        && String(document.documentElement.lang || '').toLowerCase().startsWith('en');
+      // 未登录/凭据异常：已有对话时把胶囊位让给登录入口；空会话交给 hero 的按钮。
+      if (needsLogin) return hasMessages ? h(ChatLoginButton) : null;
+      if (total === null) {
+        // 首帧还在读：别先闪一个"登录/读取失败"，等结果回来再决定。
+        if (loading) return null;
+        /*
+         * 第一次就读不到积分（没有上次数可退）：不能直接消失。桥在跑但计费端点
+         * 暂时失败时，给一个明确的红色「积分 — / 点击重试」占位。
+         * 没有 bridgeState（旧宿主/快照异常）时不抢占登录入口的判断。
+         */
+        if (error && bridgeState) {
+          const unavailableTitle = [
+            en ? 'WorkBuddy credits: unavailable' : 'WorkBuddy 积分：读取失败',
+            error,
+            busy ? (en ? 'Refreshing…' : '正在刷新…') : (en ? 'Click to retry' : '点击重试'),
+          ].filter(Boolean).join('\n');
+          return h('button', {
+            type: 'button',
+            className: 'wb-chat-quota bad' + (busy ? ' busy' : ''),
+            title: unavailableTitle,
+            'aria-label': unavailableTitle,
+            'aria-busy': busy ? 'true' : 'false',
+            'data-workbuddy-quota-error': String(error),
+            disabled: busy,
+            onClick: refresh,
+          },
+          h('span', { className: 'wb-chat-quota-dot', 'aria-hidden': 'true' }),
+          en ? 'Credits —' : '积分 —');
+        }
+        return hasMessages ? h(ChatLoginButton) : null;
+      }
       // 套餐余量低时胶囊变色：<=10% 红，<=30% 黄；没有套餐数据就不猜。
-      const packages = data?.quota?.packages || [];
+      const packages = quota?.packages || [];
       let remain = 0;
       let size = 0;
       for (const p of packages) {
@@ -4254,27 +4456,44 @@ body.dark .wb-root,
         size += Number(p.size) || 0;
       }
       const ratio = size > 0 ? remain / size : null;
-      const tone = ratio !== null && ratio <= 0.1 ? 'bad' : ratio !== null && ratio <= 0.3 ? 'warn' : '';
+      const ratioTone = ratio !== null && ratio <= 0.1 ? 'bad' : ratio !== null && ratio <= 0.3 ? 'warn' : '';
       const last = requestData?.requests?.[0];
+      const lastAt = Number(last?.t) || 0;
+      const lastRecent = lastAt > 0 && Date.now() - lastAt <= 5 * 60 * 1000;
+      const lastFailed = last && last.ok === false && lastRecent;
       const lastCredit = last && last.ok !== false && typeof last.credit === 'number' ? last.credit : null;
-      const today = typeof usageData?.total?.credit === 'number' ? usageData.total.credit : null;
+      const today = usageData?.ok !== false && typeof usageData?.total?.credit === 'number'
+        ? usageData.total.credit
+        : null;
+      // 读取/刷新失败、最近一次请求失败或积分仍属上一个账号 → 红点；其余按套餐余量分级。
+      const tone = error || lastFailed || accountMismatch ? 'bad' : ratioTone;
       const titleLines = [
-        (en ? 'WorkBuddy credits: ' : 'WorkBuddy 积分余额：') + fmtInt(total),
-        ratio !== null ? (en ? 'Package remaining: ' : '套餐余量：') + Math.round(ratio * 100) + '%' : '',
-        today !== null ? (en ? 'Used today: ' : '今日已用：') + today.toFixed(2) + (en ? ' credits' : ' 积分') : '',
-        lastCredit !== null
-          ? (en ? 'Last call: ' : '最近一次：') + (last.model || '—') + ' · '
-            + (lastCredit === 0 ? (en ? 'free' : '免费') : fmtCreditShort(lastCredit) + (en ? ' credits' : ' 积分'))
+        (en ? 'WorkBuddy credits: ' : 'WorkBuddy 积分余额：') + fmtInt(total)
+          + (stale && !error ? (en ? ' (cached)' : '（缓存）') : ''),
+        accountMismatch
+          ? (en ? 'These credits still belong to the previous account; refreshing…' : '积分还是上一个账号的，正在自动重读…')
           : '',
+        ratio !== null ? (en ? 'Package remaining: ' : '套餐余量：') + Math.round(ratio * 100) + '%' : '',
+        today !== null ? (en ? 'Used today: ' : '今日已用：') + fmtCreditShort(today) + (en ? ' credits' : ' 积分') : '',
+        lastFailed
+          ? (en ? 'Last request failed: ' : '最近一次请求失败：')
+            + 'HTTP ' + (last.status || '—') + (last.error ? ' · ' + String(last.error).slice(0, 120) : '')
+          : lastCredit !== null
+            ? (en ? 'Last call: ' : '最近一次：') + (lastAt ? fmtClock(lastAt) + ' · ' : '')
+              + (last.model || '—') + ' · '
+              + (lastCredit === 0 ? (en ? 'free' : '免费') : fmtCreditShort(lastCredit) + (en ? ' credits' : ' 积分'))
+            : '',
         error ? (en ? 'Last read failed: ' : '最近一次读取失败：') + error : '',
-        en ? 'Click to refresh' : '点击刷新',
+        updatedAt ? (en ? 'Updated: ' : '更新于：') + fmtClock(updatedAt) : '',
+        busy ? (en ? 'Refreshing…' : '正在刷新…') : (en ? 'Click to refresh' : '点击刷新'),
       ].filter(Boolean);
       const title = titleLines.join('\n');
       return h('button', {
         type: 'button',
-        className: 'wb-chat-quota' + (tone ? ' ' + tone : ''),
+        className: 'wb-chat-quota' + (tone ? ' ' + tone : '') + (busy ? ' busy' : ''),
         title,
         'aria-label': title,
+        'aria-busy': busy ? 'true' : 'false',
         'data-workbuddy-quota': String(total),
         disabled: busy,
         onClick: refresh,
@@ -4284,47 +4503,228 @@ body.dark .wb-root,
     }
 
     /**
+     * 把账本里的请求对到某一轮。
+     *
+     * 优先级：
+     *   1. **按本轮 tokenUsage 精确匹配**（宿主通过标准 prop `useChat` 给出）——
+     *      dsh 的 uncachedInput + cacheRead + cacheWrite 正好等于上游的
+     *      prompt_tokens，outputTokens 等于 completion_tokens；同一轮里多次请求
+     *      （工具调用/重试）则按 routes 过滤后求和，和能对上才认；
+     *   2. 对不上就退回**最近一次已完成请求**（旧口径），只在最后一轮显示，
+     *      title 明确标注"估算"。
+     *
+     * 账本请求按完成时刻 `t` 记账；turnTimings.endTime 是回合结束时刻，
+     * 给 90 秒收尾余量，避免长回答落账稍晚时被误判成上一轮。
+     */
+    function pickTurnCost(rows, usage, timing, mountAt) {
+      const n = (v) => { const x = Number(v); return Number.isFinite(x) ? x : 0; };
+      const pool = (Array.isArray(rows) ? rows : []).filter((r) => r && r.ok !== false && typeof r.credit === 'number');
+      if (!pool.length) return null;
+      const startMs = (() => {
+        const d = timing ? parseDate(timing.startTime) : null;
+        return d ? d.getTime() : NaN;
+      })();
+      const endMs = (() => {
+        const d = timing ? parseDate(timing.endTime) : null;
+        return d ? d.getTime() : NaN;
+      })();
+      const inWindow = (r) => {
+        const t = Number(r.t) || 0;
+        if (!Number.isFinite(startMs) || !Number.isFinite(endMs)) {
+          // 没有回合时间（旧宿主）时，至少不能拿十几分钟前的同 token 请求来对。
+          return t > 0 && mountAt - t <= 10 * 60 * 1000;
+        }
+        return t >= startMs - 2000 && t <= endMs + 90000;
+      };
+      if (usage) {
+        const input = n(usage.uncachedInputTokens) + n(usage.cacheReadTokens) + n(usage.cacheWriteTokens);
+        const output = n(usage.outputTokens);
+        if (input > 0 || output > 0) {
+          const exact = pool.filter((r) => inWindow(r)
+            && n(r.promptTokens) === input && n(r.completionTokens) === output);
+          if (exact.length === 1) return { ...exact[0], exact: true, calls: 1 };
+          if (exact.length > 1) {
+            // 同样 token 数的请求不止一条：有时间窗就取离回合结束最近的，
+            // 没有就按账本顺序（新的在前）取第一条。
+            const best = Number.isFinite(endMs)
+              ? [...exact].sort((a, b) => Math.abs((Number(a.t) || 0) - endMs) - Math.abs((Number(b.t) || 0) - endMs))[0]
+              : exact[0];
+            return { ...best, exact: true, calls: 1 };
+          }
+          // 一轮多次请求：按 routes 里的模型过滤，看窗口内的记录能否加总对上
+          const modelOf = (x) => (typeof x === 'string' ? x : (x && (x.model || x.id)) || '');
+          const models = new Set((Array.isArray(usage.routes) ? usage.routes : []).map(modelOf).filter(Boolean));
+          if (models.size) {
+            const windowRows = pool.filter((r) => inWindow(r) && models.has(String(r.model)));
+            if (windowRows.length) {
+              const promptSum = windowRows.reduce((a, r) => a + n(r.promptTokens), 0);
+              const completionSum = windowRows.reduce((a, r) => a + n(r.completionTokens), 0);
+              if (promptSum === input && completionSum === output) {
+                return {
+                  t: Math.max(...windowRows.map((r) => Number(r.t) || 0)),
+                  model: windowRows[windowRows.length - 1].model || '',
+                  ms: windowRows.reduce((a, r) => a + (Number(r.ms) || 0), 0),
+                  credit: Math.round(windowRows.reduce((a, r) => a + n(r.credit), 0) * 10000) / 10000,
+                  prompt: promptSum,
+                  completion: completionSum,
+                  exact: true,
+                  calls: windowRows.length,
+                };
+              }
+            }
+          }
+        }
+      }
+      // 退路：只认"回合开始之后"的最近一条，不能把上一轮的账贴到这一轮。
+      const floor = Number.isFinite(startMs) ? startMs - 5000 : mountAt - 120000;
+      const latest = pool.find((r) => (Number(r.t) || 0) >= floor);
+      if (!latest) return null;
+      if (mountAt - (Number(latest.t) || 0) > 120000) return null;
+      return { ...latest, exact: false, calls: 1 };
+    }
+
+    /** 宿主说"这是最后一个回合"、但当前 snapshot 里找不到 tail 节点时的哨兵。 */
+    const LAST_TURN_ONLY = Object.freeze({ lastTurnOnly: true });
+
+    /**
      * 每轮回复末尾的积分消耗。
      *
-     * dsh 的 turnTail 槽位只给 turn/seq，不提供这一轮的 usage；这里按
-     * **最近一次已完成的模型请求**估算，并且只渲染在最后一个 turn tail 上 ——
-     * 并发多个会话时可能对到另一窗口，title 会明确标注"估算"。
+     * 旧实现只按"最近一次请求"估算，而且判断完"是不是最后一个 tail"之后
+     * 不再更新 —— 新回合出现时，上一轮的标签会一直留在页面上。现在用宿主的
+     * `useChat` 标准 prop 订阅回合顺序：不是最后一个回合就返回 null；同时能
+     * 拿到本轮 tokenUsage / turnTimings，与本地账本核对后给出实际扣费。
      */
-    function ChatTurnCost({ seq } = {}) {
+    function ChatTurnCost({ turn, seq, useChat } = {}) {
       const holder = useRef(null);
       const [info, setInfo] = useState(null);
+      // 旧宿主没有 useChat：只能靠 DOM 观察"后面是不是又长出一条 tail"。
+      const [domLast, setDomLast] = useState(true);
       const en = typeof document !== 'undefined'
         && String(document.documentElement.lang || '').toLowerCase().startsWith('en');
+      const hasHostChat = typeof useChat === 'function';
+      const selectChat = hasHostChat ? useChat : NO_CHAT_SELECT;
+      // 契约里 turn 是 TurnLocation；当前宿主实际传的是 number。两种都兜住。
+      const turnId = turn && typeof turn === 'object' ? (turn.turn ?? turn.id ?? null) : (turn ?? null);
+      const canAskHost = hasHostChat && turnId !== null;
+      /*
+       * 一次选择同时拿"是不是最后一轮"和 tail 节点：每轮 tail 都会挂一个本组件，
+       * 长会话里不能为每个旧回合再多订两个 useChat。返回节点对象（稳定引用），
+       * 不是最后一轮时返回 null。
+       */
+      const tailNode = selectChat((snapshot) => {
+        if (!canAskHost) return null;
+        try {
+          const order = snapshot?.timeline?.turnOrder;
+          // 宿主形状对不上（旧版/字段改名）：别直接隐藏，退回 DOM 判断 + 估算。
+          if (!Array.isArray(order) || order.length === 0) return LAST_TURN_ONLY;
+          if (String(order[order.length - 1]) !== String(turnId)) return null;
+          const keys = snapshot?.locations?.getTurn?.(turnId) || [];
+          for (const key of keys) {
+            const node = snapshot?.nodes?.get?.(key);
+            if (node && node.kind === 'turn-tail') return node;
+          }
+          // 知道是最后一轮，但找不到 tail 节点：同样退回 DOM 判断 + 估算。
+          return LAST_TURN_ONLY;
+        } catch (e) { return LAST_TURN_ONLY; }
+      });
+      const isLast = canAskHost ? tailNode !== null : true;
+      const turnUsage = tailNode && tailNode !== LAST_TURN_ONLY ? (tailNode.data?.tokenUsage || null) : null;
+      const timing = selectChat((snapshot) => {
+        if (!canAskHost) return null;
+        try { return snapshot?.legacy?.turnTimings?.get?.(turnId) || null; } catch (e) { return null; }
+      });
+      // 对象每次 snapshot 更新可能是同一引用；用标量 key 做 effect 依赖更稳。
+      const usageKey = turnUsage
+        ? [turnUsage.uncachedInputTokens, turnUsage.cacheReadTokens, turnUsage.cacheWriteTokens, turnUsage.outputTokens].join('|')
+        : '';
+      const timingKey = timing ? String(timing.startTime) + '|' + String(timing.endTime) : '';
+
       useEffect(() => {
         setInfo(null);
+        setDomLast(true);
+        if (!isLast) return undefined;
         const el = holder.current;
-        if (!el) return undefined;
-        const tail = el.closest('[data-turn-tail]');
-        if (!tail) return undefined;
-        const tails = document.querySelectorAll('[data-turn-tail]');
-        if (tails[tails.length - 1] !== tail) return undefined;
+        const tail = el ? el.closest('[data-turn-tail]') : null;
+        /*
+         * 宿主有时会同时挂多个会话视图（分栏/历史预览）。只和**同一会话**
+         * 的 tail 比位置，避免被另一栏的回合误判成"不是最后一条"。
+         */
+        const scope = tail ? (tail.closest('[data-conversation-session]') || document) : null;
+        const tails = scope ? scope.querySelectorAll('[data-turn-tail]') : [];
+        if (tail && tails.length && tails[tails.length - 1] !== tail) return undefined;
         let alive = true;
-        const timer = setTimeout(async () => {
+        let timer = null;
+        let observer = null;
+        /*
+         * 旧 dsh 没有 useChat，isLast 永远是 true；新回合追加时组件不会重渲染，
+         * 旧标签就会一直留着。这里只在没有 useChat 的宿主上观察同一会话的
+         * childList：一旦后面又出现一条 tail，就把自己收掉并断开观察。
+         * 当前宿主走 useChat 响应式判断，不会创建这个 observer。
+         */
+        if (!hasHostChat && tail && typeof MutationObserver === 'function') {
+          let pending = false;
+          observer = new MutationObserver(() => {
+            if (pending || !alive) return;
+            pending = true;
+            setTimeout(() => {
+              pending = false;
+              if (!alive || !tail.isConnected) return;
+              const current = scope ? scope.querySelectorAll('[data-turn-tail]') : [];
+              if (current.length && current[current.length - 1] !== tail) {
+                setDomLast(false);
+                if (observer) observer.disconnect();
+              }
+            }, 120);
+          });
+          try { observer.observe(scope === document ? document.body : scope, { childList: true, subtree: true }); } catch (e) { observer = null; }
+        }
+        const mountAt = Date.now();
+        const attempt = async (tries) => {
+          if (!alive) return;
           try {
-            const { data } = await getJson('/workbuddy/requests?limit=1');
-            const r = data?.requests?.[0];
-            if (!alive || !r || r.ok === false) return;
-            if (Date.now() - Number(r.t || 0) > 120000) return;
-            if (typeof r.credit !== 'number') return;
-            setInfo(r);
-          } catch { /* 账本读不到就不显示，不影响对话 */ }
-        }, 500);
-        return () => { alive = false; clearTimeout(timer); };
-      }, [seq, en]);
+            const { data } = await getJson('/workbuddy/requests?limit=20');
+            if (!alive) return;
+            const hit = pickTurnCost(data?.requests, turnUsage, timing, mountAt);
+            /*
+             * 有本轮 usage 时，账本里的精确记录可能比 turn/end 晚一两秒落盘：
+             * 先别急着用"最近一次请求"顶上，给三次机会；都没有精确匹配才退回估算。
+             * 没有 usage（旧宿主）时估算就是唯一口径，第一轮就展示。
+             */
+            if (hit && (hit.exact || !turnUsage || tries >= 2)) { setInfo(hit); return; }
+          } catch (e) { /* 账本读不到就不显示，不影响对话 */ }
+          // 账本落盘/上游 usage 偶尔比 turn/end 晚一两秒：再等两轮。
+          if (alive && tries < 2) timer = setTimeout(() => attempt(tries + 1), tries === 0 ? 1200 : 2400);
+        };
+        timer = setTimeout(() => attempt(0), 400);
+        return () => {
+          alive = false;
+          if (timer) clearTimeout(timer);
+          if (observer) observer.disconnect();
+        };
+      }, [seq, turnId, isLast, usageKey, timingKey]);
+
+      if (!isLast || !domLast) return null;
       if (!info) return h('span', { ref: holder, className: 'wb-turn-cost', style: { display: 'none' } });
+      const creditText = info.credit === 0
+        ? (en ? 'free' : '免费')
+        : fmtCreditShort(info.credit) + (en ? ' credits' : ' 积分');
       const text = info.credit === 0
         ? (en ? 'Free this turn' : '本轮免费')
         : (en ? 'This turn: ' : '本轮 ') + fmtCreditShort(info.credit) + (en ? ' credits' : ' 积分');
-      const title = (en ? 'Estimated from the latest model request: ' : '按最近一次模型请求估算：')
-        + (info.model || '—') + ' · '
-        + (info.credit === 0 ? (en ? 'free' : '免费') : fmtCreditShort(info.credit) + (en ? ' credits' : ' 积分'))
-        + (info.ms ? ' · ' + info.ms + ' ms' : '');
-      return h('span', { ref: holder, className: 'wb-turn-cost', title }, text);
+      const title = (info.exact
+        ? (en ? 'Matched against this turn’s tokens and the local request ledger: ' : '按本轮 tokens 与本地账本核对：')
+        : (en ? 'Estimated from the latest model request (may belong to another session): ' : '按最近一次模型请求估算（并发时可能对到另一会话）：'))
+        + (info.model || '—') + ' · ' + creditText
+        + (info.prompt != null && info.completion != null ? ' · tokens ' + info.prompt + ' → ' + info.completion : '')
+        + (info.ms ? ' · ' + info.ms + ' ms' : '')
+        + (info.calls > 1 ? (en ? ' · ' + info.calls + ' calls' : ' · ' + info.calls + ' 次请求') : '');
+      return h('span', {
+        ref: holder,
+        className: 'wb-turn-cost',
+        title,
+        'data-workbuddy-turn-cost': String(info.credit),
+        'data-exact': info.exact ? '1' : '0',
+      }, text);
     }
 
     /**
@@ -4337,55 +4737,153 @@ body.dark .wb-root,
       const [busy, setBusy] = useState(false);
       const [error, setError] = useState('');
       const alive = useRef(true);
-      useEffect(() => () => { alive.current = false; }, []);
-      useEffect(() => {
-        if (!pending) return undefined;
-        const timer = setInterval(async () => {
-          const res = await postJson('/workbuddy/login/poll', { state: pending.state });
-          if (!alive.current) return;
-          const d = res.data || {};
-          if (d.status === 'ready') {
-            setPending(null);
-            setBusy(false);
-            reload();
-          } else if (d.ok === false || res.status >= 400) {
-            setPending(null);
-            setBusy(false);
-            setError(String(d.error || '登录未完成'));
-          }
-        }, 3500);
-        return () => clearInterval(timer);
-      }, [pending, reload]);
-      if (status?.bridge?.state !== 'unauthenticated') return null;
+      const pollFailures = useRef(0);
+      const cancelRef = useRef(false);
       const en = typeof document !== 'undefined'
         && String(document.documentElement.lang || '').toLowerCase().startsWith('en');
+      useEffect(() => () => { alive.current = false; }, []);
+      // 状态已经在别处变成"已登录"：立刻停掉轮询，别让后台一直问。
+      useEffect(() => {
+        const state = status?.bridge?.state;
+        if (pending && status && state !== 'unauthenticated' && state !== 'degraded') {
+          setPending(null);
+          setBusy(false);
+        }
+      }, [pending, status?.bridge?.state]);
+      // 设备码 10 分钟过期。没有这个定时器，用户关掉浏览器后这里会一直轮询。
+      useEffect(() => {
+        if (!pending) return undefined;
+        const exp = pending.expiresAt ? parseDate(pending.expiresAt) : null;
+        const remain = exp ? exp.getTime() - Date.now() : 10 * 60 * 1000;
+        const timer = setTimeout(() => {
+          if (!alive.current) return;
+          setPending(null);
+          setBusy(false);
+          setError(en ? 'Sign-in timed out. Try again.' : '登录已超时，请重试');
+        }, Math.max(1000, Math.min(remain + 1000, 10 * 60 * 1000 + 1000)));
+        return () => clearTimeout(timer);
+      }, [pending, en]);
+      useEffect(() => {
+        if (!pending) return undefined;
+        let stopped = false;
+        let timer = null;
+        let inFlight = false;
+        const tick = async () => {
+          if (stopped || inFlight) return;
+          inFlight = true;
+          try {
+            const res = await postJson('/workbuddy/login/poll', { state: pending.state });
+            if (stopped || !alive.current) return;
+            const d = res.data || {};
+            if (d.status === 'ready') {
+              pollFailures.current = 0;
+              setPending(null);
+              setBusy(false);
+              setError('');
+              // 顶部积分胶囊不必等自己的 60 秒轮询：登录完成就让它立刻重读。
+              notifyAuthChanged();
+              reload();
+              return;
+            }
+            if (d.ok === false || res.status >= 400) {
+              /*
+               * 上游偶发 5xx / 网络抖动不等于"登录失败"：先给两次机会，
+               * 连续失败才收掉这次授权，避免一次打嗝就把用户赶回起点。
+               */
+              pollFailures.current += 1;
+              if (pollFailures.current >= 2) {
+                setPending(null);
+                setBusy(false);
+                setError(String(d.error || ('HTTP ' + res.status)));
+                return;
+              }
+            } else {
+              pollFailures.current = 0;
+            }
+          } catch (e) {
+            if (!stopped) {
+              pollFailures.current += 1;
+              if (pollFailures.current >= 2) {
+                setPending(null);
+                setBusy(false);
+                setError(String(e?.message || e));
+                return;
+              }
+            }
+          } finally {
+            inFlight = false;
+          }
+          if (!stopped) timer = setTimeout(tick, 3500);
+        };
+        timer = setTimeout(tick, 3500);
+        return () => { stopped = true; if (timer) clearTimeout(timer); };
+      }, [pending, reload]);
+      const authState = status?.bridge?.state;
+      if (authState !== 'unauthenticated' && authState !== 'degraded') return null;
+      const reLogin = authState === 'degraded';
       const region = status?.bridge?.health?.credential?.loginRegion === 'global' ? 'global' : 'cn';
       const start = async () => {
-        setBusy(true); setError('');
-        const res = await postJson('/workbuddy/login/start', { region, open: true });
-        if (!alive.current) return;
-        setBusy(false);
-        if (res.data?.ok && res.data?.state && res.data?.url) {
-          setPending({ state: res.data.state, url: res.data.url });
-        } else {
-          setError(String(res.data?.error || ('HTTP ' + res.status)));
+        if (busy || pending) return;
+        setBusy(true);
+        setError('');
+        cancelRef.current = false;
+        pollFailures.current = 0;
+        try {
+          const res = await postJson('/workbuddy/login/start', { region, open: true });
+          if (!alive.current || cancelRef.current) return;
+          if (res.data?.ok && res.data?.state && res.data?.url) {
+            pollFailures.current = 0;
+            setPending({
+              state: res.data.state,
+              url: res.data.url,
+              expiresAt: res.data.expiresAt || null,
+            });
+          } else {
+            setError(String(res.data?.error || ('HTTP ' + res.status)));
+          }
+        } catch (e) {
+          if (alive.current && !cancelRef.current) setError(String(e?.message || e));
+        } finally {
+          if (alive.current) setBusy(false);
         }
       };
-      return h('span', { className: 'wb-chat-login-inline' },
+      const cancel = async () => {
+        const state = pending?.state;
+        cancelRef.current = true;
+        setPending(null);
+        setBusy(false);
+        setError('');
+        if (!state) return;
+        try { await postJson('/workbuddy/login/cancel', { state }); } catch (e) { /* 本地已经取消，桥侧过期会自动清理 */ }
+      };
+      return h('span', { className: 'wb-chat-login-inline', 'data-workbuddy-login': pending ? 'pending' : 'idle', 'aria-live': 'polite' },
         h(Btn, {
           primary: true,
           sm: true,
           disabled: busy || !!pending,
           onClick: pending ? undefined : start,
-          title: pending ? (en ? 'Waiting for browser approval' : '等待浏览器授权') : (en ? 'Sign in to WorkBuddy in your browser' : '在浏览器里登录 WorkBuddy'),
-        }, pending ? (en ? 'Waiting for approval…' : '等待授权…') : (error ? (en ? 'Retry sign-in' : '重试登录') : (en ? 'Connect WorkBuddy' : '连接 WorkBuddy'))),
+          title: pending ? (en ? 'Waiting for browser approval' : '等待浏览器授权')
+            : reLogin ? (en ? 'Sign in to WorkBuddy again in your browser' : '在浏览器里重新登录 WorkBuddy')
+              : (en ? 'Sign in to WorkBuddy in your browser' : '在浏览器里登录 WorkBuddy'),
+        }, pending ? (en ? 'Waiting for approval…' : '等待授权…')
+          : error ? (en ? 'Retry sign-in' : '重试登录')
+            : reLogin ? (en ? 'Sign in again' : '重新登录')
+              : (en ? 'Connect WorkBuddy' : '连接 WorkBuddy')),
         pending ? h('a', {
           className: 'wb-chat-login-link',
           href: pending.url,
           target: '_blank',
           rel: 'noreferrer',
         }, en ? 'Open page' : '打开授权页') : null,
-        error ? h('span', { className: 'wb-chat-login-error', title: error }, en ? 'Sign-in failed' : '登录失败') : null);
+        pending ? h('button', {
+          type: 'button',
+          className: 'wb-chat-login-cancel',
+          onClick: cancel,
+        }, en ? 'Cancel' : '取消') : null,
+        error ? h('span', {
+          className: 'wb-chat-login-error',
+          title: error,
+        }, (en ? 'Sign-in failed: ' : '登录失败：') + (error.length > 48 ? error.slice(0, 48) + '…' : error)) : null);
     }
 
     function WorkBuddyPanel() {
@@ -4453,6 +4951,8 @@ body.dark .wb-root,
       const [chatModel, setChatModel] = useState('');
       const [chatMessages, setChatMessages] = useState([]);
       const [chatParams, setChatParams] = useState({ maxTokens: '', temperature: '', effort: '' });
+      // 打了一半的消息也由容器持有：切去「模型」页看一眼再回来，输入不能丢。
+      const [chatInput, setChatInput] = useState('');
       const { data: status, reload: reloadStatus } = useJson('/workbuddy/status', { interval: 8000 });
       /**
        * 桥当前登录账号 —— 作为模型目录的 refreshKey（见 ChatPanel 内的说明）。
@@ -4600,6 +5100,8 @@ body.dark .wb-root,
             setMessages: setChatMessages,
             params: chatParams,
             setParams: setChatParams,
+            input: chatInput,
+            setInput: setChatInput,
             accountKey,
           }) : null,
           tab === 'log' ? h(LogPanel, { status }) : null) : null);
