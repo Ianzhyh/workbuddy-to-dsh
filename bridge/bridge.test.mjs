@@ -3489,3 +3489,46 @@ test('账本明细只解析尾部：大量历史 + 坏行仍返回最新 N 条',
     rmSync(bridge.dir, { recursive: true, force: true });
   }
 });
+
+test('桥：dsh 宿主身份句被上游 11128 拉黑，出站 system 必须中和', { timeout: 90_000 }, async () => {
+  // 2026-10-21 实测：system 开头是 "You are an AI agent powered by DeepSeek Harness."
+  // 时上游直接 400 code 11128；换成中性表述后同样的 messages/tools 全部 200。
+  // 品牌词单独出现不拦，所以只改这一句，system 的其余内容必须原样保留。
+  const stub = await startStubUpstream(['identity-model']);
+  const bridge = await startBridge({ CODEBUDDY_ENDPOINT: stub.base }, { auth: READABLE_FAKE_AUTH });
+  try {
+    await fetch(bridge.baseUrl + '/v1/models?all=1'); // 预热目录，避免预校验拦住测试模型
+    const res = await fetch(bridge.baseUrl + '/v1/chat/completions', {
+      method: 'POST',
+      headers: { ...auth, 'content-type': 'application/json' },
+      body: JSON.stringify({
+        model: 'identity-model',
+        stream: false,
+        messages: [
+          { role: 'system', content: 'You are an AI agent powered by DeepSeek Harness.\n\nExtra instructions.' },
+          { role: 'user', content: 'hi' },
+        ],
+      }),
+      signal: AbortSignal.timeout(15000),
+    });
+    assert.equal(res.status, 200);
+    await res.text();
+
+    assert.equal(stub.seen.length, 1, '桥应向上游发出恰好一条聊天请求');
+    const outbound = JSON.parse(stub.seen[0].body);
+    const sysText = outbound.messages
+      .filter((m) => m.role === 'system')
+      .map((m) => (typeof m.content === 'string' ? m.content : JSON.stringify(m.content)))
+      .join('\n');
+    assert.ok(!sysText.includes('powered by DeepSeek Harness'),
+      '出站 system 不得含被 11128 拦截的 dsh 身份句');
+    assert.ok(sysText.includes("running inside the user's development environment"),
+      '应替换成中性身份句');
+    assert.ok(sysText.includes('Extra instructions'),
+      '只改身份句，system 其余内容必须原样保留');
+  } finally {
+    await bridge.stop();
+    try { await stub.close(); } catch { /* 忽略 */ }
+    rmSync(bridge.dir, { recursive: true, force: true });
+  }
+});

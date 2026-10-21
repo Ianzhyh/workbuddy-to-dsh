@@ -55,12 +55,6 @@ jobs:
       - name: GitHub 直装形态演练（根包 pack + 安装 + 客户端 id 契约）
         run: npm run verify:github
 
-      # 面板渲染 + 英文残留扫描：需要 Chrome/Edge。GitHub windows-latest 预装 Edge，
-      # ui-harness 会自己找到；固定端口在一次性 runner 上不冲突。截图只留在工作区，
-      # 与提交的基线无关（不跑像素比对，避免字体差异假红）。
-      - name: 面板渲染 + i18n
-        run: npm run panel:check
-
   cross-platform:
     # B4：README 承认 macOS/Linux「已实现未实测」—— 矩阵 CI 是唯一低成本的
     # 兑现方式。跑除 verify-standalone 之外的跨平台子集（独立演练的跨平台

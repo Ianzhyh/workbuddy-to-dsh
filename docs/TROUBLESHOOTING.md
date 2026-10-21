@@ -134,7 +134,7 @@ refreshToken : envelope keyId=9127dea1b44020a7 -> DECRYPTED len=698 jws-like=tru
 |---|---|---|
 | `11101` | `Non-stream chat request is currently not supported` | 上游只接受流式。桥已自动转换；若仍出现，说明请求绕过了桥 |
 | `11101` | `cannot unmarshal object into Go struct field Request.tool_choice of type string` | 客户端发了 **OpenAI 对象形式**的 `tool_choice`（`{"type":"function",...}`），而上游的 Go 结构体只收字符串。桥已在 `normalizePayload` 里归一化，正常不会出现；若出现，说明请求绕过了桥 |
-| `11128` | `Illegal API invocation from an unapproved channel` | 请求结构或调用方身份不被认可。常见于 `system` 提示词被放在 `developer` 角色、User-Agent 不匹配，或 **Claude Code 的固定 system 模板被逐字拉黑**（2026-10-08 实测：带原文 `…official CLI for Claude.` 即被拒、按最小改写后放行 —— 桥已内置出站改写 `CLI`→`CLI tool`、`Main branch`→`Default branch`，正常不会再出现）。若再现：用 `node tools/dev/probe-audit-template.mjs` 复核（脚本内附三态判定与处置），改写表在桥内 `AUDIT_TEMPLATE_REWRITES` |
+| `11128` | `Illegal API invocation from an unapproved channel` | 请求结构或调用方身份不被认可。常见于 `system` 提示词被放在 `developer` 角色、User-Agent 不匹配、**Claude Code 的固定 system 模板被逐字拉黑**（2026-10-08），或 **dsh 身份句 `You are an AI agent powered by DeepSeek Harness.`**（2026-10-21）。桥已内置对这两类 system 模板的最小改写；正常不会再出现。若再现：看桥日志 `normalize:` 行与「2026-10-21」小节，确认是否出现新的模板句 |
 | `11133` | 网关包装的上游故障 —— **但真因在 `extError.code` 里** | 桥会看 `extError.code` 分流（见下）：**确定性**的（`model_param_invalid` / `invalid_reasoning_effort` …）立刻返回，**瞬时**的才退避重试 |
 
 > **`11133` 为什么要分流（2026-10-13 修）**：`11133` 只是网关的**包装码**，
@@ -162,6 +162,20 @@ refreshToken : envelope keyId=9127dea1b44020a7 -> DECRYPTED len=698 jws-like=tru
 > Cursor / Trae / opencode 这类基于 AI SDK 的 Agent 客户端会发对象形式。
 > 桥的处理是：`{type:'function'}` → `required`（语义最接近），认不出来的对象丢弃
 > 而不是原样转发（留着必然 400，丢掉最多退化成 `auto`）。
+
+### 2026-10-21：dsh 身份句被 11128 拦截
+
+**症状**：dsh 里**所有**请求（包括刚发的「你是?」）都回
+`upstream 400: Illegal API invocation from an unapproved channel (code 11128)`，
+但同一把凭据发一条最小消息（system 只有 `You are a helpful assistant.`）是 200。
+
+**原因**：上游把 **system 开头的 dsh 身份句**
+`You are an AI agent powered by DeepSeek Harness.` 当成未授权通道模板；
+品牌词单独出现在 user 内容或 system 后半段不拦，拦的是这句身份模板。
+
+**处置**：桥已内置**只对 system 消息**的最小改写，把这一句换成中性身份句；
+用户消息、工具定义/结果与 system 其余内容保持原样。重启桥（或升级到包含该修复的
+版本）即可。若仍复现，检查日志里是否出现了**新的** system 模板句。
 
 ### 上游版本漂移（身份指纹整体被拒）
 

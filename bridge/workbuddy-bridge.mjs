@@ -2091,6 +2091,18 @@ const AUDIT_TEMPLATE_REWRITES = [
     'Default branch (you will usually use this for PRs)'],
 ];
 
+/**
+ * dsh 的宿主身份句。
+ *
+ * 2026-10-21 实测：上游对 system 开头的
+ * `You are an AI agent powered by DeepSeek Harness.` 直接回 400 code 11128；
+ * 把这一句换成中性表述后，同样的 system / messages / tools 全部 200。
+ * 品牌词单独出现（user 内容或后半段）不拦 —— 拦的是系统提示的这句身份模板。
+ * 只改 system（rewriteAuditContent 只对 system 调用），不动用户/工具内容。
+ */
+const DSH_IDENTITY_RE = /You are an AI agent powered by DeepSeek Harness\.?/g;
+const DSH_IDENTITY_NEUTRAL = "You are an AI agent running inside the user's development environment.";
+
 /** system 文本的最小改写；无命中时返回原值（引用不变，便于命中计数）。 */
 function rewriteAuditTemplate(text) {
   if (typeof text !== 'string' || text === '') return text;
@@ -2098,6 +2110,7 @@ function rewriteAuditTemplate(text) {
   for (const [from, to] of AUDIT_TEMPLATE_REWRITES) {
     if (out.includes(from)) out = out.split(from).join(to);
   }
+  out = out.replace(DSH_IDENTITY_RE, DSH_IDENTITY_NEUTRAL);
   return out;
 }
 

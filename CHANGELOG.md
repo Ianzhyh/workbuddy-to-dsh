@@ -41,6 +41,11 @@
 
 ### Fixed
 
+- **dsh 系统身份句被上游 11128 拦截（2026-10-21 上游变更）**：system 开头是
+  `You are an AI agent powered by DeepSeek Harness.` 时，上游对**所有模型**直接回
+  400 code 11128；同一凭据发最小消息（中性 system）是 200。桥现在只对 **system**
+  做最小改写，把这一句换成中性身份句；用户消息、工具定义/结果与 system 其余内容
+  原样保留。新增桥端回归用例。
 - **换号 / 换凭据来源时的模型目录竞态**：换号前已经在飞的目录请求无法取消，
   晚到的**旧账号**结果会写进新缓存，最长 5 分钟内模型选择器仍显示旧目录。
   现在目录带代次：`invalidateCatalogCache()` 立即开启新一代并作废旧结果；
@@ -75,8 +80,8 @@
   操作反馈同步进 liveRegion。
 - **`verify:release` 改为 fail-closed**：本地没有 tgz 不再「跳过即绿」；mirrors
   增加 `package.json` / README / patch，包内缺文件直接失败。
-- **Windows CI 增加 `panel:check`**（9 页渲染 + 英文残留），并补 `concurrency`、
-  任务超时与 npm 缓存；面板/i18n 回归不再只靠本地手跑。
+- Windows CI 补 `concurrency`、任务超时与 npm 缓存；`panel:check` 仍留在本地
+  （runner 的浏览器/CDP 组合会挂起，需要单独修，先把门禁让给稳定步骤）。
 
 ## [1.9.3] - 2026-10-21
 
