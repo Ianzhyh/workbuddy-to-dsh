@@ -10,17 +10,23 @@ on:
   pull_request:
   workflow_dispatch:
 
+concurrency:
+  group: release-check-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   check:
     # 凭据解密的密钥来自 WorkBuddy 客户端自己的 Electron 原生绑定（**不是 DPAPI**，
     # 包里不含任何密钥）；这条路只有 Windows 上实测过。测试本身跨平台，
     # 但独立演练会真的起桥，所以主门禁固定 Windows 更贴近真实使用环境。
     runs-on: windows-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
+          cache: npm
 
       - name: vendor 与仓库是否同步
         run: node dsh-plugin/scripts/vendor.mjs --check
@@ -49,6 +55,12 @@ jobs:
       - name: GitHub 直装形态演练（根包 pack + 安装 + 客户端 id 契约）
         run: npm run verify:github
 
+      # 面板渲染 + 英文残留扫描：需要 Chrome/Edge。GitHub windows-latest 预装 Edge，
+      # ui-harness 会自己找到；固定端口在一次性 runner 上不冲突。截图只留在工作区，
+      # 与提交的基线无关（不跑像素比对，避免字体差异假红）。
+      - name: 面板渲染 + i18n
+        run: npm run panel:check
+
   cross-platform:
     # B4：README 承认 macOS/Linux「已实现未实测」—— 矩阵 CI 是唯一低成本的
     # 兑现方式。跑除 verify-standalone 之外的跨平台子集（独立演练的跨平台
@@ -58,11 +70,13 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
+          cache: npm
 
       - name: vendor 与仓库是否同步
         run: node dsh-plugin/scripts/vendor.mjs --check

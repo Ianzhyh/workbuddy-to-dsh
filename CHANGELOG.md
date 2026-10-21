@@ -75,6 +75,8 @@
   操作反馈同步进 liveRegion。
 - **`verify:release` 改为 fail-closed**：本地没有 tgz 不再「跳过即绿」；mirrors
   增加 `package.json` / README / patch，包内缺文件直接失败。
+- **Windows CI 增加 `panel:check`**（9 页渲染 + 英文残留），并补 `concurrency`、
+  任务超时与 npm 缓存；面板/i18n 回归不再只靠本地手跑。
 
 ## [1.9.3] - 2026-10-21
 
