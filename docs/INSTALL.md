@@ -92,12 +92,12 @@ dsh plugin --profile desktop add workbuddy-to-dsh
 > `dsh-plugin-workbuddy` 这个 npm 名**已被他人占用**（0.0.1，非本项目），不要填它；
 > npm 分发请使用根包名 `workbuddy-to-dsh`。
 
-> ⚠️ **关于 `os` 字段（实测结论）**：根包与 `dsh-plugin/package.json` 都声明了
-> `"os": ["win32"]`。这个字段**只对 npm 生效**（`npm install` 会报
-> `EBADPLATFORM: wanted {"os":"win32"}`）；而 **dsh 的插件安装走它自带的 pnpm**
-> ——**pnpm 不检查 `os`**。所以 macOS / Linux 上三条路线都装得上。
-> 真正拦住非 Windows 的不是安装，而是**凭据解密没有实测**（见第一节）：
-> 装上去大概率卡在「读不出登录凭据」。要试请按实验对待。
+> ⚠️ **关于 `os` 字段（实测结论）**：只有 `dsh-plugin/package.json` 声明了
+> `"os": ["win32"]`；根包**不能**声明它 —— 否则 Linux / macOS 上的 `npm ci` 会直接
+> 失败（CI 实测）。这个字段**只对 npm 生效**；而 **dsh 的插件安装走它自带的 pnpm**，
+> pnpm 不检查 `os`。所以 macOS / Linux 上三条路线都装得上；真正拦住非 Windows 的
+> 不是安装，而是**凭据解密没有实测**（见第一节）：装上去大概率卡在「读不出登录凭据」。
+> 要试请按实验对待。
 
 ---
 
