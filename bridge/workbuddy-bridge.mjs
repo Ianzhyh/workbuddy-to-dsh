@@ -6532,6 +6532,26 @@ async function handleRequest(req, res) {
       return json(res, 401, unauthorizedBody());
     }
 
+    /*
+     * 管理面只认 local（LOCAL_TOKEN）。
+     *
+     * client key 是给普通 OpenAI 客户端用的：能聊天、列模型就够了。旧实现里
+     * 它同样能切凭据来源、切换 active 账号、删插件凭据、发起设备码登录、
+     * 清空账本 —— 只要客户端配置泄漏一把 key，就能切走别人的钱包或清掉历史。
+     */
+    const managementRequest = url.pathname.startsWith('/v1/auth/')
+      || (url.pathname === '/v1/usage' && req.method === 'DELETE')
+      || (url.pathname === '/v1/checkin' && req.method === 'POST');
+    if (managementRequest && requestScope.getStore()?.client !== 'local') {
+      return json(res, 403, {
+        error: {
+          message: 'workbuddy-bridge: management endpoint requires the local token '
+            + '(client keys are chat-only)',
+          type: 'management_forbidden',
+        },
+      });
+    }
+
     if (url.pathname === '/health') {
       let auth = null;
       let region = '';

@@ -19,12 +19,12 @@ components:
     bearerAuth:
       type: http
       scheme: bearer
-      description: WORKBUDDY_LOCAL_TOKEN（管理面 / 默认钥匙），或 WORKBUDDY_CLIENT_KEYS 中登记的客户端 key
+      description: WORKBUDDY_LOCAL_TOKEN（管理面 / 默认钥匙），或 WORKBUDDY_CLIENT_KEYS 中登记的客户端 key（仅聊天 / 模型 / 用量读取；管理端点只接受 local）
     apiKeyHeader:
       type: apiKey
       in: header
       name: x-api-key
-      description: 同上（Anthropic 系客户端的惯例写法）
+      description: 同上（Anthropic 系客户端的惯例写法）；管理端点不接受 client key
   schemas:
     Error:
       type: object

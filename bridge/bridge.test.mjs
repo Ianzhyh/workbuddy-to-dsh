@@ -1864,6 +1864,27 @@ test('桥：客户端凭据分层 —— key 鉴权、账本归因、独立限�
     assert.ok(ledger.some((l) => l.client === expected), 'key-aaa 的记录必须带哈希前 8 位归因');
     assert.ok(ledger.some((l) => l.client === 'local'), 'LOCAL_TOKEN 的记录归因为 local');
     assert.ok(!ledger.some((l) => String(l.client || '').includes('key-aaa')), '明文 key 不得出现在账本');
+
+    // ⑤ client key 只能聊天：管理面（切号 / 删凭据 / 清账本 / 登录 / 签到）必须 403
+    const mgmt = (path, method, token) => fetch(bridge.baseUrl + path, {
+      method,
+      headers: { authorization: `Bearer ${token}` },
+      signal: AbortSignal.timeout(10000),
+    });
+    for (const [path, method] of [
+      ['/v1/auth/source', 'GET'],
+      ['/v1/auth/credentials', 'GET'],
+      ['/v1/auth/source', 'POST'],
+      ['/v1/usage', 'DELETE'],
+      ['/v1/checkin', 'POST'],
+    ]) {
+      const res = await mgmt(path, method, 'key-bbb');
+      assert.equal(res.status, 403, `${method} ${path} 不应接受 client key`);
+      await res.text();
+    }
+    const localSource = await mgmt('/v1/auth/source', 'GET', TOKEN);
+    assert.equal(localSource.status, 200, 'LOCAL_TOKEN 仍必须能访问管理面');
+    await localSource.text();
   } finally {
     await bridge.stop();
     try { await stub.close(); } catch { /* 忽略 */ }

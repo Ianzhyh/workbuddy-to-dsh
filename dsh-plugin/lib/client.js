@@ -1396,6 +1396,25 @@ body.dark .wb-root,
 
     // ─────────────────────────── 基础请求 ───────────────────────────
     const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    /**
+     * 面板请求的超时预算。
+     *
+     * 没有超时的 fetch 在宿主半死 / 桥卡住时**永不返回**：`useJson` 的 3 次重试
+     * 永远等不到第一次失败，按钮也会一直 busy。20 秒足够覆盖目录刷新这类慢接口，
+     * 又不会让用户对着转圈等几分钟。
+     */
+    const REQUEST_TIMEOUT_MS = 20_000;
+    const requestSignal = () => (
+      typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function'
+        ? AbortSignal.timeout(REQUEST_TIMEOUT_MS)
+        : undefined
+    );
+    const requestErrorMessage = (error) => {
+      if (error && (error.name === 'TimeoutError' || error.name === 'AbortError')) {
+        return `请求超时（${Math.round(REQUEST_TIMEOUT_MS / 1000)} 秒），请重试`;
+      }
+      return String((error && error.message) || error);
+    };
 
     /**
      * GET 一个 JSON 接口。
@@ -1409,7 +1428,7 @@ body.dark .wb-root,
       const opts = options || {};
       const retries = opts.retries === undefined ? 3 : opts.retries;
       for (let attempt = 0; ; attempt += 1) {
-        const res = await fetch(path, { cache: 'no-store' });
+        const res = await fetch(path, { cache: 'no-store', signal: requestSignal() });
         const text = await res.text();
         let data;
         try { data = JSON.parse(text); } catch (e) { data = { ok: false, error: text.slice(0, 200) }; }
@@ -1428,13 +1447,19 @@ body.dark .wb-root,
        * 统一返回 `{status:0, data:{ok:false,error}}`，调用方按普通失败分支处理。
        */
       try {
-        const res = await fetch(path, { method: method || 'POST', headers: PANEL_HEADERS, body: body === undefined ? undefined : JSON.stringify(body), cache: 'no-store' });
+        const res = await fetch(path, {
+          method: method || 'POST',
+          headers: PANEL_HEADERS,
+          body: body === undefined ? undefined : JSON.stringify(body),
+          cache: 'no-store',
+          signal: requestSignal(),
+        });
         const text = await res.text();
         let data;
         try { data = JSON.parse(text); } catch (e) { data = { ok: false, error: text.slice(0, 200) }; }
         return { status: res.status, data };
       } catch (error) {
-        return { status: 0, data: { ok: false, error: String(error?.message || error) } };
+        return { status: 0, data: { ok: false, error: requestErrorMessage(error) } };
       }
     }
 
@@ -1454,6 +1479,12 @@ body.dark .wb-root,
       const alive = useRef(true);
       const retryTimer = useRef(null);
       /**
+       * 在途去重：轮询间隔比接口响应还短时（桥慢 / 目录刷新），旧实现会让
+       * 多个请求叠着飞，晚到的旧响应还可能盖掉新响应。同一时刻只允许一次；
+       * 在途时的手动/定时刷新直接跳过，等这一次回来再按下一个周期走。
+       */
+      const inFlight = useRef(false);
+      /**
        * 失败后的自动重试次数（上限 3，指数退避 4s→8s→16s）。
        *
        * 旧实现失败即排一次 4 秒重试、没有上限：桥没起 / 宿主旧构建 / 控制台停掉时，
@@ -1469,6 +1500,8 @@ body.dark .wb-root,
         retryTimer.current = setTimeout(() => { retryTimer.current = null; reload(); }, delay);
       };
       const reload = useCallback(async (overridePath) => {
+        if (inFlight.current) return;
+        inFlight.current = true;
         try {
           const { status, data } = await getJson(overridePath || path);
           if (!alive.current) return;
@@ -1480,8 +1513,10 @@ body.dark .wb-root,
           if (!failed) { retryCount.current = 0; return; }
           scheduleRetry();
         } catch (error) {
-          if (alive.current) setState({ data: null, status: 0, error: String(error?.message || error), loading: false });
+          if (alive.current) setState({ data: null, status: 0, error: requestErrorMessage(error), loading: false });
           scheduleRetry();
+        } finally {
+          inFlight.current = false;
         }
       }, [path]);
       useEffect(() => {
@@ -1657,7 +1692,7 @@ body.dark .wb-root,
       }, [first.status, first.error]);
       const probeConsole = useCallback(async () => {
         try {
-          const res = await fetch('/workbuddy/console', { cache: 'no-store' });
+          const res = await fetch('/workbuddy/console', { cache: 'no-store', signal: requestSignal() });
           const data = await res.json().catch(() => ({}));
           setAvailability(data.state === 'running' ? { state: 'ok' } : { state: 'console-down' });
         } catch (e) { setAvailability({ state: 'error', error: String(e && e.message ? e.message : e) }); }
@@ -2548,6 +2583,15 @@ body.dark .wb-root,
       const [copied, setCopied] = useState(false);
       const alive = useRef(true);
       useEffect(() => () => { alive.current = false; }, []);
+      /**
+       * 登录轮询的两个竞态守卫：
+       *   - 一次只允许一个 poll 在飞（上游慢时 3.5s 定时器会叠加请求）；
+       *   - 响应回来时 pending 必须还是发起时那个 state —— 用户取消/成功后，
+       *     晚到的失败响应不能再把界面改成「登录未完成」。
+       */
+      const pollInFlight = useRef(false);
+      const pendingRef = useRef(pending);
+      useEffect(() => { pendingRef.current = pending; }, [pending]);
       // 把完整数据上报父级：桌面账号行要据此加“插件端同账号”标记。
       useEffect(() => {
         if (data && typeof onData === 'function') onData(data);
@@ -2566,32 +2610,42 @@ body.dark .wb-root,
         if (!alive.current) return;
         setBusy('');
         if (res.data?.ok && res.data?.state && res.data?.url) {
-          setPending({ state: res.data.state, url: res.data.url });
+          const next = { state: res.data.state, url: res.data.url };
+          pendingRef.current = next;
+          setPending(next);
         } else {
           setMessage('发起登录失败：' + (res.data?.error || res.status));
         }
       };
 
       const pollOnce = async () => {
-        if (!pending) return;
+        if (!pending || pollInFlight.current) return;
+        const state = pending.state;
+        pollInFlight.current = true;
         setBusy('poll');
-        const res = await postJson('/workbuddy/login/poll', { state: pending.state });
-        if (!alive.current) return;
-        setBusy('');
-        const d = res.data || {};
-        if (d.status === 'ready') {
-          setPending(null);
-          const eff = d.effectiveSource || (d.sourceSwitched === true ? 'plugin' : '');
-          setMessage(eff === 'plugin'
-            ? '登录成功，当前使用插件账号。'
-            : '登录成功；当前凭据来源未切换（被环境变量锁定），插件账号尚未生效。');
-          refreshAll();
-          notifyAuthChanged();
-          return;
-        }
-        if (d.status === 'pending') return;
-        if (d.ok === false || res.status >= 400) {
-          setMessage('登录未完成：' + (d.error || ('HTTP ' + res.status)));
+        try {
+          const res = await postJson('/workbuddy/login/poll', { state });
+          if (!alive.current || pendingRef.current?.state !== state) return;
+          const d = res.data || {};
+          if (d.status === 'ready') {
+            pendingRef.current = null;
+            setBusy('');
+            setPending(null);
+            const eff = d.effectiveSource || (d.sourceSwitched === true ? 'plugin' : '');
+            setMessage(eff === 'plugin'
+              ? '登录成功，当前使用插件账号。'
+              : '登录成功；当前凭据来源未切换（被环境变量锁定），插件账号尚未生效。');
+            refreshAll();
+            notifyAuthChanged();
+            return;
+          }
+          if (d.status === 'pending') return;
+          if (d.ok === false || res.status >= 400) {
+            setMessage('登录未完成：' + (d.error || ('HTTP ' + res.status)));
+          }
+        } finally {
+          pollInFlight.current = false;
+          if (alive.current && pendingRef.current?.state === state) setBusy('');
         }
       };
 
@@ -2604,7 +2658,9 @@ body.dark .wb-root,
 
       const cancelLogin = async () => {
         const state = pending && pending.state;
+        pendingRef.current = null; // 立刻作废在飞 poll 的晚到响应
         setPending(null);
+        setBusy('');
         setMessage('');
         if (state) await postJson('/workbuddy/login/cancel', { state });
       };
@@ -5264,8 +5320,10 @@ body.dark .wb-root,
     exports.ChatQuotaPill = ChatQuotaPill;
     exports.ChatLoginButton = ChatLoginButton;
     exports.ChatTurnCost = ChatTurnCost;
-    // 供安全回归用例直接验证，不参与界面渲染
+    // 供回归用例直接验证，不参与界面渲染
     exports.csvCell = csvCell;
+    exports.getJson = getJson;
+    exports.postJson = postJson;
     return module.exports;
   }
 
