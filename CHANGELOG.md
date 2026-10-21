@@ -19,6 +19,10 @@
 
 ## [Unreleased]
 
+（暂无）
+
+## [1.9.3] - 2026-10-21
+
 ### Fixed
 
 - **GitHub 直装时 dsh 无法启动（issue #3）**：dsh 用 Loader 条目的**包名**当
