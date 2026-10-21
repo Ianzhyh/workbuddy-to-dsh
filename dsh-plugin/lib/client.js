@@ -137,6 +137,8 @@ body.dark .wb-root,
 .wb-value{flex:1 1 auto;min-width:0;font-variant-numeric:tabular-nums;text-align:right;overflow-wrap:anywhere;word-break:break-word}
 /* 胶囊：**不换行**。table-layout:auto 下列宽不会小于 nowrap 内容的宽度 */
 .wb-pill{display:inline-flex;align-items:center;gap:6px;padding:2px 10px;border-radius:999px;font-size:12px;background:var(--dsw-alias-interactive-bg-hover,light-dark(#2631480f,#ffffff14));box-shadow:inset 0 0 0 .5px var(--dsw-alias-border-l1,light-dark(#0000000a,#ffffff0f));max-width:100%;white-space:nowrap;transition:background-color var(--wb-anim-fast)}
+/* 对话页组件不在 .wb-root 里：动画变量必须自己声明，否则 transition 引用未定义变量会整条失效 */
+.wb-chat-quota,.wb-chat-login-inline,.wb-turn-cost{--wb-ease:cubic-bezier(0.16,1,0.3,1);--wb-anim-fast:.16s var(--wb-ease);--wb-anim-normal:.24s var(--wb-ease)}
 .wb-chat-quota{appearance:none;display:inline-flex;align-items:center;gap:6px;border:.5px solid var(--dsw-alias-border-l2,light-dark(#0000001f,#ffffff2e));border-radius:999px;background:transparent;color:var(--dsw-alias-label-secondary,light-dark(#61666b,#cfd3d6));font:inherit;font-size:12px;line-height:20px;padding:1px 9px;cursor:pointer;white-space:nowrap;transition:background-color var(--wb-anim-fast),color var(--wb-anim-fast),border-color var(--wb-anim-fast)}
 .wb-chat-quota:hover{background:var(--dsw-alias-interactive-bg-hover,light-dark(#2631480f,#ffffff14));color:var(--dsw-alias-label-primary,light-dark(#0f1115,#f9fafb));border-color:var(--dsw-alias-border-l3,light-dark(#00000033,#ffffff42))}
 .wb-chat-quota:focus-visible{outline:2px solid var(--dsw-alias-brand-primary,#6366f1);outline-offset:1px}
@@ -1368,7 +1370,12 @@ body.dark .wb-root,
 
     const styleId = 'dsh-plugin-workbuddy-style';
     function insertStyles() {
-      if (document.getElementById(styleId)) return () => {};
+      // 插件热重载/禁用再启用时，旧 <style> 可能还挂在 head 上：必须用新 CSS
+      // 替换它，而不是看到同 id 就直接返回 —— 否则新版本的样式永远不会生效。
+      const previous = document.getElementById(styleId);
+      if (previous) {
+        try { previous.remove(); } catch (e) { /* ignore */ }
+      }
       const el = document.createElement('style');
       el.id = styleId;
       el.textContent = CSS;
@@ -1692,6 +1699,8 @@ body.dark .wb-root,
     }
     function Btn(props) {
       return h('button', {
+        // 聊天页的 hero/header 可能被宿主包在 form 里：没有 type 的按钮默认 submit。
+        type: 'button',
         className: 'wb-btn' + (props.primary ? ' primary' : '') + (props.sm ? ' is-sm' : ''),
         disabled: props.disabled,
         onClick: props.onClick,
@@ -2557,6 +2566,7 @@ body.dark .wb-root,
             ? '登录成功，当前使用插件账号。'
             : '登录成功；当前凭据来源未切换（被环境变量锁定），插件账号尚未生效。');
           refreshAll();
+          notifyAuthChanged();
           return;
         }
         if (d.status === 'pending') return;
@@ -2584,7 +2594,7 @@ body.dark .wb-root,
         const res = await postJson('/workbuddy/login/source', { source });
         setBusy('');
         setMessage(res.data?.ok ? '凭据来源已切换。' : '切换失败：' + (res.data?.error || res.status));
-        if (res.data?.ok) refreshAll();
+        if (res.data?.ok) { refreshAll(); notifyAuthChanged(); }
       };
 
       const creds = data?.credentials || [];
@@ -2793,6 +2803,7 @@ body.dark .wb-root,
         }
         reload();
         reloadStatus();
+        notifyAuthChanged();
       };
       /**
        * 把某个账号切到它的插件凭据：先设插件 active，再把来源切到 plugin。
@@ -2811,6 +2822,7 @@ body.dark .wb-root,
             setPluginRefreshKey((k) => k + 1);
             if (reloadStatus) reloadStatus();
             reload();
+            notifyAuthChanged();
           } else {
             setMessage('切换失败：' + (active.data?.error || source?.data?.error || '未知错误'));
           }
@@ -2832,6 +2844,7 @@ body.dark .wb-root,
           setPluginRefreshKey((k) => k + 1);
           if (reloadStatus) reloadStatus();
           reload();
+          notifyAuthChanged();
         }
       };
       const startEdit = (a) => { setEditing(a.name); setDraft(a.alias || ''); setMessage(''); };
@@ -3929,7 +3942,7 @@ body.dark .wb-root,
      * 模型选择由容器持有（`model` / `setModel`）—— 这样切标签页回来不会被重置，
      * 也就不会给人"模型是写死的"错觉。未选时回落到推荐模型（sampleModel）。
      */
-    function ChatPanel({ sampleModel, model, setModel, messages, setMessages, params, setParams, input, setInput, accountKey }) {
+    function ChatPanel({ sampleModel, model, setModel, messages, setMessages, params, setParams, input, setInput, streaming, setStreaming, error, setError, abortRef, accountKey }) {
       /**
        * 模型目录用 `refreshKey` 跟着**桥的登录账号**走。
        *
@@ -3945,11 +3958,8 @@ body.dark .wb-root,
         refreshKey: accountKey || undefined,
       });
       const models = modelsData?.models || [];
-      const [streaming, setStreaming] = useState(false);
       const [meta, setMeta] = useState(null);
-      const [error, setError] = useState('');
       const [filter, setFilter] = useState('');
-      const abortRef = useRef(null);
       const boxRef = useRef(null);
       // 发送闸门与滚动跟随都要用 ref：前者要在 setState 生效前就挡住重复回车，
       // 后者要在每个 token 到达时读取"用户是否正在往回看"，不能等重渲染。
@@ -4483,17 +4493,19 @@ body.dark .wb-root,
       /*
        * 「今日已用」必须取本地当天的日桶。直接读 total.credit 是**滚动 24h**，
        * 凌晨会把昨天下午的用量算进今天。旧宿主没有 days 时才退回 24h 并改标签。
+       * 同时兼容早期宿主把结果套在 `{usage:{…}}` 里的形状（与用量页同一口径）。
        */
-      const usageBuckets = Array.isArray(usageData?.days) ? usageData.days : null;
+      const usageFlat = usageData && usageData.usage ? usageData.usage : usageData;
+      const usageBuckets = Array.isArray(usageFlat?.days) ? usageFlat.days : null;
       const todayKey = localDayKey();
       const todayBucket = usageBuckets
         ? usageBuckets.find((d) => d && (d.day || d.key) === todayKey)
         : null;
-      const today = usageData?.ok === false
+      const today = usageData?.ok === false || usageFlat?.ok === false
         ? null
         : (usageBuckets
           ? (todayBucket && typeof todayBucket.credit === 'number' ? todayBucket.credit : 0)
-          : (typeof usageData?.total?.credit === 'number' ? usageData.total.credit : null));
+          : (typeof usageFlat?.total?.credit === 'number' ? usageFlat.total.credit : null));
       // 读取/刷新失败、最近一次请求失败或积分仍属上一个账号 → 红点；其余按套餐余量分级。
       const tone = error || lastFailed || accountMismatch ? 'bad' : ratioTone;
       const titleLines = [
@@ -4668,8 +4680,12 @@ body.dark .wb-root,
         try { return snapshot?.legacy?.turnTimings?.get?.(turnId) || null; } catch (e) { return null; }
       });
       // 对象每次 snapshot 更新可能是同一引用；用标量 key 做 effect 依赖更稳。
+      // routes 也要进 key：多请求合计依赖它，晚到的 routes 必须触发重新匹配。
+      const routeKey = turnUsage && Array.isArray(turnUsage.routes)
+        ? turnUsage.routes.map((r) => (r && (r.model || r.id)) || r || '').join(',')
+        : '';
       const usageKey = turnUsage
-        ? [turnUsage.uncachedInputTokens, turnUsage.cacheReadTokens, turnUsage.cacheWriteTokens, turnUsage.outputTokens].join('|')
+        ? [turnUsage.uncachedInputTokens, turnUsage.cacheReadTokens, turnUsage.cacheWriteTokens, turnUsage.outputTokens, routeKey].join('|')
         : '';
       const timingKey = timing ? String(timing.startTime) + '|' + String(timing.endTime) : '';
 
@@ -4993,6 +5009,16 @@ body.dark .wb-root,
       const [chatParams, setChatParams] = useState({ maxTokens: '', temperature: '', effort: '' });
       // 打了一半的消息也由容器持有：切去「模型」页看一眼再回来，输入不能丢。
       const [chatInput, setChatInput] = useState('');
+      // 流式状态、错误与 AbortController 也提到容器：切标签页时请求继续，回来仍显示
+      // 「生成中…」/错误并能停止；关闭整个面板时由 cleanup 中止，避免后台偷跑扣额度。
+      const [chatStreaming, setChatStreaming] = useState(false);
+      const [chatError, setChatError] = useState('');
+      const chatAbortRef = useRef(null);
+      useEffect(() => () => {
+        if (chatAbortRef.current) {
+          try { chatAbortRef.current.abort(); } catch (e) { /* 已经结束 */ }
+        }
+      }, []);
       const { data: status, reload: reloadStatus } = useJson('/workbuddy/status', { interval: 8000 });
       /**
        * 桥当前登录账号 —— 作为模型目录的 refreshKey（见 ChatPanel 内的说明）。
@@ -5142,6 +5168,11 @@ body.dark .wb-root,
             setParams: setChatParams,
             input: chatInput,
             setInput: setChatInput,
+            streaming: chatStreaming,
+            setStreaming: setChatStreaming,
+            error: chatError,
+            setError: setChatError,
+            abortRef: chatAbortRef,
             accountKey,
           }) : null,
           tab === 'log' ? h(LogPanel, { status }) : null) : null);

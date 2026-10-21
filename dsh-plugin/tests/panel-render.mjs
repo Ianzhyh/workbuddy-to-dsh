@@ -807,6 +807,35 @@ try {
     }
   }
 
+  // 插件热重载/禁用再启用：同 id 的旧 <style> 必须被新 CSS 替换，不能静默保留旧样式
+  {
+    const styleReload = await page.cdp.evaluate(`(() => {
+      const el = document.getElementById('dsh-plugin-workbuddy-style');
+      if (!el) return { found: false };
+      el.textContent = 'stale-marker';
+      const service = {
+        inject(_key, cb) { try { cb(); } catch (e) { window.__styleReloadError = String(e); } return () => {}; },
+        register() { return () => {}; },
+      };
+      const ctx = {
+        slots: service,
+        get(name) { return name === 'slots' ? service : undefined; },
+        effect(fn) { try { return fn(); } catch (e) { window.__styleReloadError = String(e); return undefined; } },
+      };
+      try { window.__module.apply(ctx); } catch (e) { return { found: true, error: String(e) }; }
+      const after = document.getElementById('dsh-plugin-workbuddy-style');
+      return {
+        found: true,
+        error: window.__styleReloadError || '',
+        stale: after ? after.textContent.includes('stale-marker') : null,
+        css: after ? after.textContent.includes('.wb-chat-quota') : null,
+      };
+    })()`);
+    if (!styleReload.found) problems.push('找不到插件样式元素');
+    else if (styleReload.error) problems.push(`插件重载 apply 失败：${styleReload.error}`);
+    else if (styleReload.stale || !styleReload.css) problems.push('插件重载后样式没有替换（旧 CSS 仍生效）');
+  }
+
   // 对话页顶部的积分胶囊：能渲染、显示余额、点击会强制刷新；
   // 刷新失败后不能把按钮永久禁掉，也不能把上一次的有效余额丢掉。
   {
@@ -880,10 +909,24 @@ try {
         disabled: errEl.disabled,
       } : { present: false };
       failRoot.unmount(); failHost.remove();
+      // 早期宿主把 usage 结果套在 {usage:{…}} 里：胶囊也要能读到今天的桶。
+      window.__setRoute('/workbuddy/quota', origQuota);
+      window.__setRoute('/workbuddy/usage', {
+        ok: true,
+        usage: { total: { credit: 2.5 }, days: [{ day: todayKey, credit: 0.43 }] },
+      });
+      const nestedHost = document.createElement('div');
+      document.body.appendChild(nestedHost);
+      const nestedRoot = ReactDOM.createRoot(nestedHost);
+      nestedRoot.render(React.createElement(window.__module.ChatQuotaPill));
+      await new Promise((r) => setTimeout(r, 800));
+      const nestedEl = nestedHost.querySelector('[data-workbuddy-quota]');
+      const nestedUsage = nestedEl ? { title: nestedEl.getAttribute('title') || '' } : null;
+      nestedRoot.unmount(); nestedHost.remove();
       window.__setRoute('/workbuddy/quota', origQuota);
       window.__setRoute('/workbuddy/usage', origUsage);
       root.unmount(); host.remove();
-      return { found: true, text, title, className, posts, failed, mismatch, firstReadFailure };
+      return { found: true, text, title, className, posts, failed, mismatch, firstReadFailure, nestedUsage };
     })()`);
     if (!quota.found) problems.push('对话页积分胶囊没有渲染出来');
     else {
@@ -909,6 +952,10 @@ try {
         if (!/积分 —/.test(quota.firstReadFailure.text)) problems.push(`首次读取失败的占位文案不对：${quota.firstReadFailure.text}`);
         if (!/first-read failure/.test(quota.firstReadFailure.title)) problems.push('首次读取失败没有把原因写进 title');
         if (quota.firstReadFailure.disabled) problems.push('首次读取失败的占位按钮不可点（无法重试）');
+      }
+      if (!quota.nestedUsage) problems.push('旧宿主嵌套 usage 形状下积分胶囊没有渲染');
+      else if (!/今日已用：0\.43 积分/.test(quota.nestedUsage.title)) {
+        problems.push(`嵌套 usage 形状没有取到当天桶：${quota.nestedUsage.title}`);
       }
     }
   }
@@ -966,6 +1013,7 @@ try {
       await new Promise((r) => setTimeout(r, 500));
       const loginBtn = [...loginHost.querySelectorAll('button')].find((b) => b.textContent === '连接 WorkBuddy');
       if (!loginBtn) { loginRoot.unmount(); loginHost.remove(); return { login: 'missing' }; }
+      const loginType = loginBtn.getAttribute('type');
       loginBtn.click();
       await new Promise((r) => setTimeout(r, 500));
       const waiting = !!loginHost.querySelector('.wb-chat-login-link');
@@ -1104,9 +1152,12 @@ try {
 
       window.__setRoute('/workbuddy/status', origStatus);
       window.__setRoute('/workbuddy/requests', origRequests);
-      return { login: waiting ? 'ok' : 'no-link', cancelled, cancelCalls, exact, multi, staleText, fallback, oldStaleBefore, oldStaleAfter };
+      return { login: waiting ? 'ok' : 'no-link', loginType, cancelled, cancelCalls, exact, multi, staleText, fallback, oldStaleBefore, oldStaleAfter };
     })()`);
     if (chatBits.login !== 'ok') problems.push('空会话「连接 WorkBuddy」没有进入等待授权/没给授权链接');
+    if (chatBits.login === 'ok' && chatBits.loginType !== 'button') {
+      problems.push(`登录按钮缺少 type=button（宿主 form 里可能触发提交）：${chatBits.loginType}`);
+    }
     if (chatBits.login === 'ok' && (!chatBits.cancelled || chatBits.cancelCalls < 1)) {
       problems.push(`登录取消不可用（按钮回来=${chatBits.cancelled}，cancel 调用=${chatBits.cancelCalls}）`);
     }
@@ -1199,7 +1250,7 @@ async function verifyNarrow() {
   try {
     await waitFor(page3.cdp, 'window.__harness && window.__harness.rendered === true', 15000, '面板挂载');
     await sleep(900);
-    for (const label of ['账号', '用量', '请求', '模型', '诊断', '概览']) {
+    for (const label of ['账号', '用量', '请求', '模型', '诊断', '对话测试', '概览']) {
       await page3.cdp.evaluate(`(() => { const b=[...document.querySelectorAll('.wb-tab')].find(x=>x.textContent===${JSON.stringify(label)}); if(b) b.click(); return !!b; })()`);
       await sleep(700);
       const issues = await page3.cdp.evaluate(`(() => {
