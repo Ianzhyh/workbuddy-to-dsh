@@ -158,7 +158,12 @@ test('可见性门控：没有 document 时（SSR）加载 client.js 不抛，�
   // 这正是非浏览器环境的形状：没有 document
   const ctx = makeSandbox({ doc: null });
   assert.doesNotThrow(() => loadClientFactory(ctx), 'client.js 在没有 document 的环境里加载时抛了');
-  assert.equal(ctx.__registered.length, 1, 'bundle 应该照常注册（不能因为门控而整个不注册）');
+  // 同一份 bundle 要覆盖两种安装形态的包名（issue #3），所以是两次注册
+  assert.deepEqual(
+    ctx.__registered.map((r) => r.id).sort(),
+    ['dsh-plugin-workbuddy', 'workbuddy-to-dsh'],
+    'bundle 应该照常注册（不能因为门控而整个不注册）',
+  );
 });
 
 test('可见性门控：watchPageVisibility 真跑一遍（有 document / 无 document）', () => {

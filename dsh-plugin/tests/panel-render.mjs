@@ -106,6 +106,11 @@ try {
 
   const problems = [];
   if (result.harness.bundleId !== 'dsh-plugin-workbuddy') problems.push(`bundle id 不对：${result.harness.bundleId}`);
+  // issue #3：dsh 用 Loader 条目的包名当客户端模块 id。同一份 bundle 要同时覆盖
+  // 单文件夹分发（dsh-plugin-workbuddy）和 github 直装（workbuddy-to-dsh）。
+  for (const id of ['dsh-plugin-workbuddy', 'workbuddy-to-dsh']) {
+    if (!(result.harness.bundleIds || []).includes(id)) problems.push(`客户端模块没有注册 ${id}（实际 ${JSON.stringify(result.harness.bundleIds)}）`);
+  }
   if (result.harness.hasApply !== true) problems.push('没有导出 apply');
   if (!Array.isArray(result.harness.moduleInject) || !result.harness.moduleInject.includes('slots')) {
     problems.push(`模块级 inject 导出必须包含 slots（现在是 ${JSON.stringify(result.harness.moduleInject)}）`);

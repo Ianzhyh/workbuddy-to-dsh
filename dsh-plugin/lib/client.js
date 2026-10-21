@@ -10,9 +10,20 @@
 //     lib/state.mjs 带进程内缓存，插件另写会让它的缓存过期）——因此一律走
 //     /workbuddy/console-api/* 透传给控制台，由它写；
 //   - 控制台的进程与文件插件一个字都不改。
-window.__ModuleLoader__.load({
-  id: 'dsh-plugin-workbuddy',
-  factory: function (require) {
+(function () {
+  /**
+   * dsh 用 **Loader 条目的包名** 作为客户端模块 id：
+   *   - 单文件夹分发（dsh-plugin/）→ `dsh-plugin-workbuddy`
+   *   - github 直装（仓库根）      → `workbuddy-to-dsh`
+   *
+   * 两种形态用的是同一份 bundle，但 id 必须和实际包名对上。只写死其中一个，
+   * 另一种安装方式会在 web boot 时被判成
+   * `bundle ... loaded without registering "<id>"` → `import failed`（issue #3）。
+   *
+   * 因此这里按「已知两个包名 + 当前 <script> URL 里的真实 id」逐个注册。
+   * 同一页面只装了其中一种时，多注册的那个 id 没有引导行引用，不会执行。
+   */
+  function factory(require) {
     'use strict';
     var module = { exports: {} };
     var exports = module.exports;
@@ -5245,5 +5256,30 @@ body.dark .wb-root,
     exports.ChatLoginButton = ChatLoginButton;
     exports.ChatTurnCost = ChatTurnCost;
     return module.exports;
-  },
-});
+  }
+
+  const ids = new Set(['dsh-plugin-workbuddy', 'workbuddy-to-dsh']);
+  try {
+    // `document.currentScript` 只在 classic script 执行期间有值（dsh 默认就是
+    // 往 head 插 <script src>），`src` 是绝对地址。旧版 dsh 把多个 bundle 合并成
+    // `/plugins/??<id>/client.js&rev=…`，新版是 `/plugins/<id>/client.js?rev=…`；
+    // 直接对原串匹配，避免非 http(s) scheme 下 `?` 被解析成 query 的差异。
+    const src = document.currentScript && document.currentScript.src;
+    if (src) {
+      const match = /\/plugins\/(?:\?\?)?([^/]+)\/client\.js(?:[?&#]|$)/.exec(String(src));
+      if (match) ids.add(decodeURIComponent(match[1]));
+    }
+  } catch { /* 非浏览器 / 内联加载 / URL 形状变化：退回上面两份固定包名 */ }
+
+  for (const id of ids) {
+    try {
+      window.__ModuleLoader__.load({ id, factory });
+    } catch (error) {
+      /*
+       * 两种安装形态同时存在时，两份 bundle 都会注册同一组 id —— 第二次注册
+       * 必然重复。factory 是同一份代码，已有注册就够了，不能因此让 boot 失败。
+       */
+      if (!/duplicate factory registration/.test(String((error && error.message) || error))) throw error;
+    }
+  }
+})();

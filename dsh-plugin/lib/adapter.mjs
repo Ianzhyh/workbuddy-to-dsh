@@ -66,6 +66,21 @@ export const ERROR_HINTS = {
   [CODE.TRANSPORT]: '本地桥连接异常：运行 /workbuddy restart 或确认桥进程还活着。',
 };
 
+/**
+ * 给用户的一句"下一步做什么"。
+ *
+ * code 11128 是上游的**来源/模板校验**拦截（"Illegal API invocation from an
+ * unapproved channel" / "first message is not system"），不是 `model_param_invalid`
+ * 那类参数拒绝。按 INVALID 的通用文案提示"换思考档位 / 调输出上限"只会让人
+ * 白折腾 —— 这类错误先重试，仍失败要看桥日志里的出站请求。
+ */
+export function errorHint(code, detail = '') {
+  if (code === CODE.INVALID && /illegal API invocation|unapproved channel|first message is not system/i.test(String(detail))) {
+    return '上游拦截了这次调用的来源或模板（code 11128）—— 先原样重试一次；仍失败请到「设置 → WorkBuddy → 日志」查看桥记录，并把该行反馈到 issue。';
+  }
+  return ERROR_HINTS[code] || '';
+}
+
 /** 把上游错误文本 / HTTP 状态分类成 dsh 错误码。 */
 export function classifyError(message, status) {
   const text = String(message || '');
@@ -1036,7 +1051,7 @@ export class WorkBuddyAdapter {
        * 错误消息要给**下一步动作**，不能只有上游原文：dsh 的界面只展示 message，
        * 用户看到 "upstream 400: the request parameters were rejected" 时无从下手。
        */
-      const hint = ERROR_HINTS[failureCode];
+      const hint = errorHint(failureCode, detail);
       const message = `上游 ${res.status}：${String(detail || '').slice(0, 400)}`
         + `${codeLabel ? `（code ${codeLabel}）` : ''}`
         + `${hint ? ` —— ${hint}` : ''}`;

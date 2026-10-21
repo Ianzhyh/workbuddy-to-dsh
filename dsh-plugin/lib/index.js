@@ -448,7 +448,7 @@ function resolveDshPaths() {  const home = process.env.DSH_HOME || join(homedir(
  * 这是「面板为什么没出现」最关键的一条诊断：宿主端把每个声明了 `dsh.client`
  * 的 Loader 条目组装成一条引导行，`ctx.clientModules.graph()` 就是那张表。
  */
-export function clientGraphSummary(clientModules, packageName = 'dsh-plugin-workbuddy') {
+export function clientGraphSummary(clientModules, packageName = ['dsh-plugin-workbuddy', 'workbuddy-to-dsh']) {
   if (!clientModules || typeof clientModules.graph !== 'function') {
     return { available: false, reason: 'clientModules 服务不可用（当前不是 Web 组合）' };
   }
@@ -469,9 +469,15 @@ export function clientGraphSummary(clientModules, packageName = 'dsh-plugin-work
     for (const value of Object.values(node)) if (value && typeof value === 'object') visit(value, depth + 1);
   };
   visit(graph, 0);
-  let composed = ids.has(packageName);
+  // 包名不是一个固定值：单文件夹分发是 dsh-plugin-workbuddy，github 直装是
+  // workbuddy-to-dsh。只认其中一个会让另一种形态的诊断永远显示「未组装」。
+  const wanted = (Array.isArray(packageName) ? packageName : [packageName]).filter(Boolean);
+  let composed = wanted.some((name) => ids.has(name));
   if (!composed) {
-    try { composed = JSON.stringify(graph).includes(packageName); } catch { /* 循环引用等，忽略 */ }
+    try {
+      const text = JSON.stringify(graph);
+      composed = wanted.some((name) => text.includes(name));
+    } catch { /* 循环引用等，忽略 */ }
   }
   return { available: true, composed, ids: [...ids].slice(0, 300) };
 }

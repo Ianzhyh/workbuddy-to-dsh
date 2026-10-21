@@ -12,7 +12,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 
-import { WorkBuddyAdapter, mapUsage } from '../lib/adapter.mjs';
+import { WorkBuddyAdapter, mapUsage, errorHint, CODE } from '../lib/adapter.mjs';
 import { BridgeClient } from '../lib/bridge.mjs';
 
 /** 起一个假桥：/health、/v1/models、/v1/chat/completions（SSE 回放）。 */
@@ -981,4 +981,15 @@ test('图片：同一附件跨轮次只读一次、并发只读一次，多图�
     await drain();
     assert.deepEqual([...reads.values()], [1, 1, 1], '跨轮次必须命中缓存');
   } finally { await stub.close(); }
+});
+
+test('错误提示：11128 是来源/模板拦截，不能暗示用户去换思考档位', () => {
+  const hint = errorHint(CODE.INVALID,
+    'workbuddy-bridge: upstream 400: Illegal API invocation from an unapproved channel');
+  assert.match(hint, /11128/);
+  assert.doesNotMatch(hint, /思考强度|输出上限/, '11128 不是参数问题，通用文案会误导');
+  // 真正的参数拒绝仍然给参数提示
+  assert.match(errorHint(CODE.INVALID, 'model_param_invalid'), /思考强度|输出上限/);
+  // 其他分类不受影响
+  assert.match(errorHint(CODE.AUTH, ''), /重新登录/);
 });

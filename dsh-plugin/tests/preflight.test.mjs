@@ -25,7 +25,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -176,4 +176,23 @@ test('preflight：--json 模式下上述两种情况也必须产出合法 JSON�
   assert.doesNotThrow(() => { parsed = JSON.parse(stdout); },
     `--json 的 stdout 必须是合法 JSON，实际：\n${stdout.slice(0, 400)}`);
   assert.ok(Array.isArray(parsed) || typeof parsed === 'object', 'JSON 应当是数组或对象');
+});
+
+test('preflight：github 直装的包名（workbuddy-to-dsh）也要认出来', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'wb-preflight-home-'));
+  const profile = join(home, 'profiles', 'desktop');
+  mkdirSync(profile, { recursive: true });
+  writeFileSync(join(profile, 'package.json'), JSON.stringify({
+    name: 'dsh-profile-desktop',
+    dependencies: { 'workbuddy-to-dsh': 'github:Ianzhyh/workbuddy-to-dsh' },
+    dsh: { profile: { bundles: ['workbuddy-to-dsh'] } },
+  }));
+  try {
+    const r = runPreflight({ DSH_HOME: home });
+    assertNoCrash(r, 'github 直装');
+    assert.match(r.stdout, /已装进：desktop（github:Ianzhyh\/workbuddy-to-dsh）/,
+      'preflight 应该把 github 直装的依赖名报告出来，而不是说“没有 profile 依赖”');
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
 });

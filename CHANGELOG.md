@@ -19,7 +19,28 @@
 
 ## [Unreleased]
 
-（暂无）
+### Fixed
+
+- **GitHub 直装时 dsh 无法启动（issue #3）**：dsh 用 Loader 条目的**包名**当
+  客户端模块 id，而 `client.js` 原先只注册 `dsh-plugin-workbuddy`。仓库根直装
+  的包名是 `workbuddy-to-dsh`，web boot 找不到对应 factory，直接报
+  `workbuddy-to-dsh: import failed` 并中止启动。现在同一份 bundle 会按
+  「两个已知包名 + `<script src>` 里的实际 id」注册；两种安装形态同时存在时
+  重复注册会被忽略，不再连累 boot。
+- 面板诊断里的「客户端半边是否组装」同时认两种包名，GitHub 直装不再误报
+  「未组装」；`preflight` 的「插件装进了哪个 profile」也同时认
+  `dsh-plugin-workbuddy` 与 `workbuddy-to-dsh`。
+- **11128 的错误提示不再误导**：上游的来源/模板校验拦截
+  （`Illegal API invocation from an unapproved channel`）以前会提示用户
+  「换思考档位 / 调输出上限」，实际是另一类问题。现在单独提示「先原样重试，
+  仍失败看桥日志」，参数类 400 的提示保持不变。
+
+### Tests
+
+- 新增 `client-bundle.test.mjs`：真实执行 `client.js`，按 dsh 的
+  `arrive → 查找 factory` 语义验证两种包名、别名、旧版合并 URL 与重复注册。
+- `panel-render` 断言 bundle 同时注册两个 id；`visibility` 用例同步更新；
+  `preflight` 新增 GitHub 直装包名识别用例。
 
 ## [1.9.2] - 2026-10-21
 

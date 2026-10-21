@@ -294,8 +294,12 @@ window.confirm = function (message) { window.__dialogs.push(String(message)); re
   window.__routes = ROUTES;
   window.__setRoute = (path, route) => { ROUTES[path] = route; };
 })();
+window.__registrations = [];
 window.__ModuleLoader__ = {
   load(registration) {
+    window.__registrations.push({ id: registration.id });
+    // 同一份 bundle 会按安装形态注册两个 id；渲染只 materialize 第一次。
+    if (window.__registration) return;
     window.__registration = registration;
     try {
       window.__module = registration.factory(function (specifier) {
@@ -329,6 +333,7 @@ window.__ModuleLoader__ = {
   const first = slots[0] || {};
   window.__harness = {
     bundleId: registration.id,
+    bundleIds: (window.__registrations || []).map((r) => r.id),
     exportsName: mod.name,
     hasApply: typeof mod.apply === 'function',
     /** 模块级 inject 导出 = cordis 服务依赖；核心插件都是这么写的 */

@@ -345,6 +345,11 @@ npm run release:check      # = vendor:check + 单测 + 独立分发演练（发�
   由 dsh 的引导图加载，`react` 来自平台模块表。`dsh.client.inject` 是**引导图上的
   行依赖**（写包名），不是 cordis 服务名 —— 写错会让整行不激活；本插件因此不声明它，
   改在运行时用 `ctx.inject(['slots'], …)` 等槽服务。
+- **客户端模块的 `id` 必须等于 Loader 条目的包名**。同一份 `lib/client.js`
+  要同时服务单文件夹分发（`dsh-plugin-workbuddy`）与 github 直装
+  （`workbuddy-to-dsh`），所以它会按两个已知包名 + `<script src>` 里的实际 id
+  各注册一次；只写死一个，另一种安装方式会在 web boot 时报 `import failed`
+  （issue #3）。两份 bundle 同时存在时，重复注册会被忽略。
 - **桥与控制台都是独立进程**：插件停用/卸载只会摘掉路由、工具与入口页，
   **不会杀掉桥**，也不会去停别人（双击 `启动.cmd`）起的控制台 ——
   只停自己拉起来的那个。
