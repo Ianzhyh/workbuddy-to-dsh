@@ -35,6 +35,12 @@
   报错。概览顶部新增独立的「网页搜索」状态卡；未接入或缺少桥令牌时在「需要你动手」
   里高亮提醒，并直接给出「接入搜索」按钮。状态检查只读配置，不消耗搜索额度。
 
+- **dsh「添加插件」直装**：根包 `workbuddy-to-dsh` 改为可发布形态
+  （`private: false` + `publishConfig`），在 dsh 设置 → 插件 → 添加插件里填
+  `github:Ianzhyh/workbuddy-to-dsh` 即可安装（已用真实 `dsh plugin add` 实测）；
+  发布到 npm 后也可直接填裸包名 `workbuddy-to-dsh`。npm 名
+  `dsh-plugin-workbuddy` 已被他人占用，子包因此改为 `private`，npm 分发统一走根包。
+
 - **GitHub 直装形态的发布门禁**：新增 `npm run verify:github`（已接入
   `release:check`），真实执行根包 `npm pack` → 安装到临时 profile 的
   `node_modules/workbuddy-to-dsh` → 校验 Loader 名、客户端注册 id、运行时文件与
@@ -94,6 +100,9 @@
 - **插件拉起桥时日志不滚动**：文档承诺每次启动检查 2MB 并滚成 `bridge.log.1`，
   实际只有控制台路径做了，dsh 插件长期运行会让 `bridge.log` 无限增长。现在
   插件 supervisor 在 spawn 前走同一套滚动逻辑。
+- **Windows CI 偶发红**：消费方提前 break 的“连接被立刻收掉”用例原先要求帧数严格
+  相等，门禁并行负载下会把已在途的 1 帧误判成泄漏；现在与 signal 取消用例同口径，
+  允许 ≤2 帧在途，仍能钉死“继续写完整条流”的真实泄漏。
 
 - **面板请求可能永久卡住**：`getJson` / `postJson` 没有超时，宿主半死时
   `useJson` 的重试等不到第一次失败，按钮也永远 busy；轮询还没有在途锁，

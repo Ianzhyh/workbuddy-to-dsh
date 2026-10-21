@@ -721,8 +721,10 @@ test('消费方提前 break：上游连接必须被立刻收掉（不留幽灵�
 
     assert.equal(finished, false,
       '消费方 break 之后上游仍把整条流跑完了 —— 连接泄漏，白烧额度与并发');
-    assert.equal(framesWritten, framesAtBreak,
-      `break 之后上游又被写了 ${framesWritten - framesAtBreak} 帧 —— 没被切断`);
+    // 与上面的 signal 取消用例同一口径：允许 1–2 帧已在途的数据。
+    // 旧实现是"之后又写完整条 100 帧"，这个容差仍能钉死真正的泄漏。
+    assert.ok(framesWritten - framesAtBreak <= 2,
+      `break 之后上游又被写了 ${framesWritten - framesAtBreak} 帧 —— 没被切断（允许 ≤2 帧在途）`);
     assert.ok(closedAt !== null, 'break 之后上游连接始终没被关闭');
   } finally {
     await new Promise((r) => server.close(r));

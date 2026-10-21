@@ -110,8 +110,12 @@ request ledger when the host exposes them, otherwise a clearly-labelled estimate
 No WorkBuddy desktop app? Install the dsh plugin, open its **Account** tab and use
 **Plugin sign-in** — no desktop download is required.
 
-DeepSeek Harness users: `dsh plugin add github:Ianzhyh/workbuddy-to-dsh`, then
-register models in the plugin's settings page. That page is **bilingual** —
+DeepSeek Harness users: in dsh open **Settings → Plugins → Add plugin** and enter
+`github:Ianzhyh/workbuddy-to-dsh` (or run
+`dsh plugin add github:Ianzhyh/workbuddy-to-dsh`), then register models in the plugin's
+settings page. The npm name `workbuddy-to-dsh` is prepared for publishing; once published
+you can enter that bare name instead. (The npm name `dsh-plugin-workbuddy` belongs to
+another author — don't use it.) That page is **bilingual** —
 the `EN` / `中` toggle in its top-right corner switches all nine tabs
 (upstream data such as model descriptions and chat content is left as-is):
 

@@ -97,8 +97,8 @@ dsh 设置页与控制台网页是**两个前端、一个后端**，所以天然
 | **桥的生命周期** | 启动时复用已在跑的桥，没跑就按配置拉起；桥仍是**独立进程**，控制台、`start-bridge.cmd`、其它 OpenAI 客户端照旧可用 |
 | **控制台的生命周期** | 同样复用/拉起 `dashboard/server.mjs`，让它常驻；dsh 里一个链接就进完整控制台（不会自动弹浏览器窗口） |
 | **5 个工具** | `workbuddy_status` / `workbuddy_models` / `workbuddy_usage` / `workbuddy_checkin` / `workbuddy_bridge`（后者 `action=console` 可确保控制台在跑） |
-| **斜杠命令** | `/workbuddy status\|models\|usage\|checkin\|console\|start\|stop\|restart\|cleanup` |
-| **dsh 里的设置页** | 设置 → **WorkBuddy**，9 个标签页 = 控制台的全部功能：概览（含待办提醒与诊断报告）/ 账号（切换）/ 用量（趋势图 + 积分排行 + CSV）/ 请求（筛选 + CSV）/ 签到（领取 + 自动开关）/ 诊断 / 模型（体检 + 详情）/ 对话测试（多轮流式）/ 日志（过滤 + 清空） |
+| **斜杠命令** | `/workbuddy status\|models\|usage\|checkin\|console\|websearch\|start\|stop\|restart\|cleanup` |
+| **dsh 里的设置页** | 设置 → **WorkBuddy**，9 个标签页 = 控制台的全部功能：概览（含网页搜索状态 / 一键接入、待办提醒与诊断报告）/ 账号（切换）/ 用量（趋势图 + 积分排行 + CSV）/ 请求（筛选 + CSV）/ 签到（领取 + 自动开关）/ 诊断 / 模型（体检 + 详情）/ 对话测试（多轮流式）/ 日志（过滤 + 清空） |
 | **旧路由迁移** | 首次加载自动清掉 `llm-pi-ai.providers.workbuddy` 手写路由（**先备份**），否则两条同名路由会撞名 |
 
 ---
@@ -108,11 +108,17 @@ dsh 设置页与控制台网页是**两个前端、一个后端**，所以天然
 插件就在本仓库的 `dsh-plugin/` 里，安装到某个 dsh profile：
 
 ```sh
-# 方式一：用 dsh 自带的插件管理（推荐）
-dsh plugin --profile desktop add <本仓库路径>/dsh-plugin
+# 方式零：在 dsh 设置 → 插件 → 添加插件，填 GitHub 地址（推荐给最终用户）
+github:Ianzhyh/workbuddy-to-dsh
 
-# 方式二：在 dsh 界面里装 —— 设置 → 插件 → 安装，填 dsh-plugin 目录的绝对路径
+# 方式一：用 dsh 自带的插件管理（等价命令行）
+dsh plugin --profile desktop add github:Ianzhyh/workbuddy-to-dsh
+
+# 方式二：本机开发 —— 设置 → 插件 → 添加插件，填本仓库 dsh-plugin 目录的绝对路径
 ```
+
+> npm 名 `dsh-plugin-workbuddy` 已被他人占用（不是本项目），不要填；npm 分发使用
+> 根包 `workbuddy-to-dsh`（已准备发布，发布后可直接填这个裸包名）。
 
 装完 **重启一次 DeepSeek Harness**。原因：插件模块会被 ESM 缓存，客户端半个
 插件的引导行也只在应用启动时组装一次 —— 热更新看不到新面板。
@@ -525,17 +531,23 @@ npm run panel:check                    # 上面两个一起跑
 
 ## 通过 npm 分发（维护者备忘）
 
-包定义已就绪（`files` 覆盖 lib/scripts/vendor、`publishConfig.access=public`），
-仓库侧 `private` 已置 false。发布动作（需要 npm 账号与包名确认）：
+`dsh-plugin-workbuddy` 这个 npm 名**已被他人占用**（0.0.1，非本项目），不要发布它；
+该子包的 `private` 已置 true，只用于文件夹 / tgz 分发。
+
+npm 分发使用**仓库根包** `workbuddy-to-dsh`（名字可用，`private: false` 与
+`publishConfig` 已就绪）。发布：
 
 ```cmd
-cd dsh-plugin
-npm publish
+cd <仓库根>
+npm run release:check
+npm login
+npm run publish:npm
 ```
 
-发布前先跑根目录 `npm run release:check`（vendor 快照必须与仓库一致）。
-GitHub 直装（`dsh plugin add github:Ianzhyh/workbuddy-to-dsh`）始终可用，npm 只是
-降低"没有 git 环境的用户"的门槛。
+发布后，dsh **设置 → 插件 → 添加插件**里可直接填 `workbuddy-to-dsh`；未发布时
+填 `github:Ianzhyh/workbuddy-to-dsh`（已实测可装）。GitHub 直装始终可用，npm 只是
+降低"没有 git 环境的用户"的门槛。发布前先跑根目录 `npm run release:check`
+（vendor 快照必须与仓库一致）。
 
 ---
 

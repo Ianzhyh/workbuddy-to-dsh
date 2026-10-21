@@ -1,12 +1,19 @@
 {
   "name": "workbuddy-to-dsh",
   "version": "1.9.3",
-  "private": true,
-  "description": "把 WorkBuddy 的模型（桌面端登录或插件内浏览器授权）经本地桥暴露为 OpenAI 兼容接口，供 DeepSeek Harness 或任意 OpenAI 客户端调用。根包即 dsh bundle：dsh plugin add github:Ianzhyh/workbuddy-to-dsh 可直装。",
+  "private": false,
+  "description": "把 WorkBuddy 的模型（桌面端登录或插件内浏览器授权）经本地桥暴露为 OpenAI 兼容接口，供 DeepSeek Harness 或任意 OpenAI 客户端调用。根包即 dsh bundle：dsh「添加插件」填 github:Ianzhyh/workbuddy-to-dsh 可直装；发布到 npm 后也可填 workbuddy-to-dsh。",
   "type": "module",
   "license": "MIT",
+  "os": [
+    "win32"
+  ],
   "engines": {
     "node": ">=18"
+  },
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org/",
+    "access": "public"
   },
   "main": "./dsh-plugin/lib/index.js",
   "exports": {
@@ -73,6 +80,7 @@
     "panel:i18n": "node dsh-plugin/tests/panel-i18n.mjs",
     "panel:check": "node dsh-plugin/tests/panel-render.mjs && node dsh-plugin/tests/panel-i18n.mjs",
     "verify:release": "node tools/dev/verify-release.mjs",
+    "publish:npm": "npm run release:check && npm publish --access public",
     "check:i18n": "node tools/dev/check-i18n-coverage.mjs",
     "check:opencode": "node tools/check-opencode-config.mjs"
   },

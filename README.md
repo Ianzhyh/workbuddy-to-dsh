@@ -43,7 +43,7 @@ dsh 的模型选择器里，日常需要的接入、管理、监控、运维能�
 
 | 步骤 | 操作 | 需要配置 |
 |---|---|---|
-| 1 | 安装插件（dsh 市场 / `dsh plugin add ...` / tgz） | **无** |
+| 1 | 安装插件（dsh「添加插件」填 GitHub 地址 / `dsh plugin add ...` / tgz） | **无** |
 | 2 | 设置 → WorkBuddy → 「账号」→「开始登录」（授权页自动打开） | **无** |
 | 3 | 浏览器授权完成，回模型选择器选一个模型 | **无** |
 
@@ -87,11 +87,21 @@ dsh 的模型选择器里，日常需要的接入、管理、监控、运维能�
 | 同时服务其它客户端 | 桥讲 OpenAI / Anthropic / Responses 三套协议 —— Claude Code、Codex、opencode、Cherry Studio 等直接接入 |
 | 中英双语 | 控制台与 dsh 设置页（9 个标签页）全部双语，右上角 `EN` / `中` 切换 |
 
-一个命令装进 dsh（安装路线、验收清单与故障排查见 [docs/INSTALL.md](docs/INSTALL.md)）：
+**在 dsh 里直接装**：设置 → 插件 → 添加插件，填
+
+```text
+github:Ianzhyh/workbuddy-to-dsh
+```
+
+安装源保持默认即可（GitHub 地址由 pnpm 直接拉取，国内镜像只影响 npm 依赖）。
+也可以走命令行（安装路线、验收清单与故障排查见 [docs/INSTALL.md](docs/INSTALL.md)）：
 
 ```sh
 dsh plugin --profile desktop add github:Ianzhyh/workbuddy-to-dsh
 ```
+
+> npm 包名 `workbuddy-to-dsh` 已按可发布形态准备好；发布后「添加插件」里直接填
+> `workbuddy-to-dsh` 即可（npm 名 `dsh-plugin-workbuddy` 已被他人占用，不要填它）。
 
 装完**重启一次 dsh**，模型选择器里直接多出 WorkBuddy。
 

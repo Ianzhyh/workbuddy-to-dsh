@@ -65,17 +65,37 @@ dsh plugin --profile desktop add D:\path\to\dsh-plugin-workbuddy-1.0.0.tgz
 > `package.json` 里是 `"private": true`，这是有意的：防止误发到公共 npm。
 > 本项目按非公开分发的定位维护，直接用 tgz 或文件夹拷贝即可。
 
-### 路线 C：从 GitHub 直装（一条命令，仓库根已声明 `dsh.bundle`）
+### 路线 C：从 GitHub 直装（推荐，仓库根已声明 `dsh.bundle`）
+
+**界面安装（就是「添加插件」对话框）**：dsh → 设置 → 插件 → 添加插件，填
+
+```text
+github:Ianzhyh/workbuddy-to-dsh
+```
+
+安装源保持默认即可；GitHub 地址由 pnpm 直接拉取，国内镜像只影响 npm 依赖。
+或走命令行：
 
 ```sh
 dsh plugin --profile desktop add github:Ianzhyh/workbuddy-to-dsh
 ```
 
-> ⚠️ **关于 `os` 字段（实测结论）**：只有 `dsh-plugin/package.json` 声明了 `"os": ["win32"]`，
-> 仓库根的 `package.json` 没有。这个字段**只对 npm 生效**（`npm install` 会报
+### 路线 D：npm 包名（发布后可用）
+
+根包 `workbuddy-to-dsh` 已按可发布形态准备好（`private: false` + `publishConfig`）。
+维护者发布一次后，对方在「添加插件」里直接填 `workbuddy-to-dsh`，或：
+
+```sh
+dsh plugin --profile desktop add workbuddy-to-dsh
+```
+
+> `dsh-plugin-workbuddy` 这个 npm 名**已被他人占用**（0.0.1，非本项目），不要填它；
+> npm 分发请使用根包名 `workbuddy-to-dsh`。
+
+> ⚠️ **关于 `os` 字段（实测结论）**：根包与 `dsh-plugin/package.json` 都声明了
+> `"os": ["win32"]`。这个字段**只对 npm 生效**（`npm install` 会报
 > `EBADPLATFORM: wanted {"os":"win32"}`）；而 **dsh 的插件安装走它自带的 pnpm**
-> （`<dsh>/pnpm/bin/pnpm.mjs`，实测 11.7.0）——**pnpm 不检查 `os`**，在 win32 上装
-> `os: ["darwin"]` 的包也不报错。所以 macOS / Linux 上**三条路线都装得上**。
+> ——**pnpm 不检查 `os`**。所以 macOS / Linux 上三条路线都装得上。
 > 真正拦住非 Windows 的不是安装，而是**凭据解密没有实测**（见第一节）：
 > 装上去大概率卡在「读不出登录凭据」。要试请按实验对待。
 
