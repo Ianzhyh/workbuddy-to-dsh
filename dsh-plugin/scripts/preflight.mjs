@@ -12,7 +12,7 @@
  *   5. 桥是否在跑、能列出多少模型、积分多少
  *   6. 插件装进了哪些 dsh profile
  */
-import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, openSync, readSync, closeSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -26,9 +26,28 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const PLUGIN_DIR = dirname(HERE);
 const JSON_OUT = process.argv.includes('--json');
 const DEFAULT_TOKEN = 'wb-local-bridge';
+/** 插件首次运行会生成随机令牌并落盘；探针必须优先用它，旧默认值只作最后兜底。 */
+const FILE_TOKEN = (() => {
+  try { return readFileSync(join(PLUGIN_DIR, '.bridge-token'), 'utf8').trim(); } catch { return ''; }
+})();
 
 const results = [];
 const record = (level, title, detail, fix) => results.push({ level, title, detail, fix });
+
+/** 只读日志尾部：自检经常在日志 1-2MB 时运行，没必要整文件读进内存。 */
+function readLogTail(file, maxBytes = 256 * 1024) {
+  try {
+    const st = statSync(file);
+    const len = Math.min(maxBytes, st.size);
+    if (!len) return '';
+    const fd = openSync(file, 'r');
+    try {
+      const buf = Buffer.alloc(len);
+      readSync(fd, buf, 0, len, st.size - len);
+      return buf.toString('utf8');
+    } finally { closeSync(fd); }
+  } catch { return ''; }
+}
 
 /** 1. Node */
 const nodeMajor = Number(process.versions.node.split('.')[0]);
@@ -130,7 +149,7 @@ if (!authDir) {
  */
 const bridgePort = Number(pick('WORKBUDDY_PORT', 8790));
 const consolePort = Number(pick('DASHBOARD_PORT', 8792));
-const token = pick('WORKBUDDY_LOCAL_TOKEN', DEFAULT_TOKEN);
+const token = pick('WORKBUDDY_LOCAL_TOKEN', FILE_TOKEN || DEFAULT_TOKEN);
 
 const probeBridge = async (port) => {
   try {
@@ -193,6 +212,23 @@ if (bridgePortState.state === 'ours' || bridgePortState.state === 'degraded') {
   }
 } else {
   record('info', '桥未运行', '这不是错误：插件加载时会自动拉起（已在跑就复用）', '也可以手动 `node bridge/workbuddy-bridge.mjs`');
+}
+
+/** 5b. 本次桥运行是否被上游 11128 拦截过（2026-10-21 dsh 身份句就是这类） */
+if (projectRoot) {
+  const tail = readLogTail(join(projectRoot, 'bridge', 'bridge.log'));
+  if (tail) {
+    const lines = tail.split(/\r?\n/);
+    let start = 0;
+    for (let i = lines.length - 1; i >= 0; i -= 1) {
+      if (lines[i].includes('workbuddy-bridge listening')) { start = i; break; }
+    }
+    const hits = lines.slice(start).filter((line) => line.includes('11128'));
+    if (hits.length) {
+      record('warn', '上游 11128', `本次桥运行出现 ${hits.length} 次来源/模板拦截`,
+        '重启桥（新版本会对 system 身份句做最小改写）；若仍出现，运行 `node tools/dev/probe-audit-template.mjs` 并把日志最后几行发到 issue');
+    }
+  }
 }
 
 /** 6. 装进了哪些 dsh profile */

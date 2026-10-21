@@ -3532,3 +3532,58 @@ test('桥：dsh 宿主身份句被上游 11128 拉黑，出站 system 必须中�
     rmSync(bridge.dir, { recursive: true, force: true });
   }
 });
+
+test('桥：未知 system 模板触发 11128 时，用中性 system 重试一次', { timeout: 90_000 }, async () => {
+  const stub = await startStubUpstream(['fallback-model'], {
+    chatSequence: [
+      {
+        status: 400,
+        type: 'application/json',
+        raw: JSON.stringify({ code: 11128, msg: 'Illegal API invocation from an unapproved channel' }),
+      },
+      {
+        status: 200,
+        type: 'text/event-stream',
+        raw: 'data: {"choices":[{"delta":{"content":"ok"}}]}\n\ndata: {"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":1,"total_tokens":4}}\n\ndata: [DONE]\n\n',
+      },
+    ],
+  });
+  const bridge = await startBridge({ CODEBUDDY_ENDPOINT: stub.base }, { auth: READABLE_FAKE_AUTH });
+  try {
+    await fetch(bridge.baseUrl + '/v1/models?all=1'); // 预热目录
+    const tool = { type: 'function', function: { name: 'foo', description: 'foo', parameters: { type: 'object', properties: {} } } };
+    const res = await fetch(bridge.baseUrl + '/v1/chat/completions', {
+      method: 'POST',
+      headers: { ...auth, 'content-type': 'application/json' },
+      body: JSON.stringify({
+        model: 'fallback-model',
+        stream: false,
+        tools: [tool],
+        messages: [
+          { role: 'system', content: 'You are a quirky host agent.\nKeep this extra instruction.' },
+          { role: 'user', content: 'hi' },
+        ],
+      }),
+      signal: AbortSignal.timeout(15000),
+    });
+    assert.equal(res.status, 200);
+    await res.text();
+
+    assert.equal(stub.seen.length, 2, '11128 后应只重试一次');
+    const first = JSON.parse(stub.seen[0].body);
+    const second = JSON.parse(stub.seen[1].body);
+    assert.ok(first.messages.some((m) => m.role === 'system' && m.content.includes('quirky')),
+      '第一次应保留原始 system');
+    assert.ok(!second.messages.some((m) => m.role === 'system' && m.content.includes('quirky')),
+      '重试必须去掉触发黑名单的 system 指令');
+    assert.ok(second.messages.some((m) => m.role === 'system' && m.content.includes('helpful AI assistant')),
+      '重试应带中性 system');
+    assert.ok(second.messages.some((m) => m.role === 'user' && m.content === 'hi'),
+      'user 消息必须原样保留');
+    assert.deepEqual(second.tools, first.tools, 'tools 必须原样保留');
+  } finally {
+    await bridge.stop();
+    try { await stub.close(); } catch { /* 忽略 */ }
+    rmSync(bridge.dir, { recursive: true, force: true });
+  }
+});

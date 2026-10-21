@@ -173,6 +173,47 @@ function deterministic400Reason(text) {
 const TRANSIENT_400_RETRY_ENABLED = process.env.WORKBUDDY_TRANSIENT_400_RETRY !== '0';
 
 /**
+ * 上游 11128（通道模板校验）兜底。
+ *
+ * 已知模板句已在 `rewriteAuditTemplate` 里做最小改写；这里防的是**上游再新增
+ * 一条 system 黑名单**。命中 11128 时优先去掉含 "DeepSeek Harness" 的 system
+ * 行（保留其余 persona/instructions），再不行才把 system 整段换成中性身份，
+ * 用户消息、工具定义/结果与 tools 都不动。默认开；设
+ * `WORKBUDDY_11128_FALLBACK=0` 可关闭。
+ */
+const CHANNEL_FALLBACK_ENABLED = process.env.WORKBUDDY_11128_FALLBACK !== '0';
+
+function channelFallbackPayload(payload) {
+  if (!CHANNEL_FALLBACK_ENABLED) return null;
+  const messages = Array.isArray(payload?.messages) ? payload.messages : [];
+  const isSystem = (m) => m && (m.role === 'system' || m.role === 'System');
+  if (!messages.some(isSystem)) return null;
+
+  // 先尝试最小手术：只删掉 system 里含宿主品牌的整行，其余 instructions 保留。
+  let changed = false;
+  const trimmed = messages.map((m) => {
+    if (!isSystem(m) || typeof m.content !== 'string') return m;
+    const next = m.content
+      .split(/\r?\n/)
+      .filter((line) => !/deepseek\s+harness/i.test(line))
+      .join('\n')
+      .trim();
+    if (next !== m.content) changed = true;
+    return { ...m, content: next };
+  }).filter((m) => !(isSystem(m) && !m.content));
+  if (changed && trimmed.some(isSystem)) return { ...payload, messages: trimmed };
+
+  // 未知模板：牺牲 system 指令也要保住这次调用；user/tool/tools 原样保留。
+  return {
+    ...payload,
+    messages: [
+      { role: 'system', content: 'You are a helpful AI assistant.' },
+      ...messages.filter((m) => !isSystem(m)),
+    ],
+  };
+}
+
+/**
  * 传输层（DNS / 建连）瞬时失败后、重试前的等待（毫秒）。默认 250ms。
  *
  * 只在失败路径上花这个时间；成功请求完全不受影响。`WORKBUDDY_TRANSPORT_RETRY_MS`
@@ -2100,7 +2141,8 @@ const AUDIT_TEMPLATE_REWRITES = [
  * 品牌词单独出现（user 内容或后半段）不拦 —— 拦的是系统提示的这句身份模板。
  * 只改 system（rewriteAuditContent 只对 system 调用），不动用户/工具内容。
  */
-const DSH_IDENTITY_RE = /You are an AI agent powered by DeepSeek Harness\.?/g;
+// 允许句尾带版本/附加词（上游/宿主升级后常见），只匹配这一句，不碰品牌词本身。
+const DSH_IDENTITY_RE = /You are an AI agent powered by DeepSeek\s+Harness[^\n.]*\.?/gi;
 const DSH_IDENTITY_NEUTRAL = "You are an AI agent running inside the user's development environment.";
 
 /** system 文本的最小改写；无命中时返回原值（引用不变，便于命中计数）。 */
@@ -7024,10 +7066,30 @@ async function handleRequest(req, res) {
       // 从这一刻起的任何异常都要落账：否则「登录文件坏了 / 取密钥失败」这类故障
       // 在控制台上完全不可见（只有原始日志里有），用户只能看到一个 500。
       try {
-        const { res: up, bodyText, upstreamStartedAt } = await callUpstream(JSON.stringify(upstream), model, conversationId, ac.signal);
+        let attempt = await callUpstream(JSON.stringify(upstream), model, conversationId, ac.signal);
+        let up = attempt.res;
+        let upstreamStartedAt = attempt.upstreamStartedAt;
+        let text = !up.ok ? (attempt.bodyText ?? await up.text().catch(() => '')) : '';
+        let parsed; try { parsed = JSON.parse(text); } catch {}
+        /*
+         * 11128 兜底：已知模板句已由 normalizePayload 改写；这里处理上游新加的
+         * system 黑名单。只重试一次，且只动 system；tools/user 不动。
+         * 11128 发生在生成前，重试不会产生两份回答或重复扣费。
+         */
+        if (!up.ok && up.status === 400 && parsed?.code === 11128) {
+          const fallback = channelFallbackPayload(upstream);
+          if (fallback) {
+            log('upstream 11128; retrying with a neutral system prompt');
+            attempt = await callUpstream(JSON.stringify(fallback), model, conversationId, ac.signal);
+            up = attempt.res;
+            upstreamStartedAt = attempt.upstreamStartedAt;
+            text = !up.ok ? (attempt.bodyText ?? await up.text().catch(() => '')) : '';
+            parsed = undefined;
+            try { parsed = JSON.parse(text); } catch {}
+            if (!up.ok) log('channel fallback also failed', up.status, text.slice(0, 300));
+          }
+        }
         if (!up.ok) {
-          const text = bodyText ?? await up.text().catch(() => '');
-          let parsed; try { parsed = JSON.parse(text); } catch {}
           log('upstream error', up.status, text.slice(0, 300));
           recordRequest({
             model,

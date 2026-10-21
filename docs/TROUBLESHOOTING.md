@@ -175,7 +175,13 @@ refreshToken : envelope keyId=9127dea1b44020a7 -> DECRYPTED len=698 jws-like=tru
 
 **处置**：桥已内置**只对 system 消息**的最小改写，把这一句换成中性身份句；
 用户消息、工具定义/结果与 system 其余内容保持原样。重启桥（或升级到包含该修复的
-版本）即可。若仍复现，检查日志里是否出现了**新的** system 模板句。
+版本）即可。
+
+- 复核：`node tools/dev/probe-audit-template.mjs` 会分别发“dsh 身份句”和
+  “中性身份句”两条最小请求；前者也应 200（说明改写层生效）。
+- 若上游再新增 system 黑名单：桥会先去掉含 `DeepSeek Harness` 的 system 行重试一次，
+  仍失败再退回中性 system；`preflight` 的「上游 11128」项会直接指出本次桥日志里
+  出现过拦截。若仍复现，检查日志里是否出现了**新的** system 模板句。
 
 ### 上游版本漂移（身份指纹整体被拒）
 
