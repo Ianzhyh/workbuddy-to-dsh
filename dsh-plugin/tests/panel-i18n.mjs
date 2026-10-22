@@ -132,6 +132,33 @@ function routesFor(variant) {
       },
     ],
   };
+  /*
+   * 数据位回归：这三条数据**故意保留中文和全角冒号**。
+   * 英文模式下它们必须逐字不变；被 i18n 规则改写时下面的断言会红。
+   */
+  routes['/workbuddy/requests'] = {
+    ...routes['/workbuddy/requests'],
+    payload: {
+      ...routes['/workbuddy/requests'].payload,
+      requests: [
+        {
+          t: Date.now(), model: '数据：模型甲', stream: false, ok: true, ms: 12,
+          promptTokens: 3, completionTokens: 2, credit: 0.001,
+        },
+        ...routes['/workbuddy/requests'].payload.requests,
+      ],
+    },
+  };
+  routes['/workbuddy/log'] = {
+    ...routes['/workbuddy/log'],
+    lines: [...(routes['/workbuddy/log'].lines || []), '数据行：日志里的全角冒号不能被改写'],
+  };
+  routes['/workbuddy/console-api/chat'] = {
+    sse: [
+      JSON.stringify({ choices: [{ delta: { content: '这是一段模型回答：里面包含全角冒号' } }] }),
+      JSON.stringify({ choices: [{ delta: {}, finish_reason: 'stop' }], usage: { prompt_tokens: 12, completion_tokens: 5, credit: 0.004 } }),
+    ],
+  };
   return routes;
 }
 
@@ -344,6 +371,69 @@ async function runPass(variant, port, cdpPort) {
         if (dzh.length) { leftovers.push([`${name} › 详情抽屉`, dzh]); fail(`「${name}」展开详情抽屉后仍有 ${dzh.length} 条中文`); }
       }
     }
+    // ── 数据位回归：英文模式不能改写数据 ───────────────────────────────
+    await q(`(() => { const b = document.querySelectorAll('.wb-tab')[3]; if (b) b.click(); })()`);
+    await sleep(450);
+    const modelCell = await q(`(() => {
+      const td = [...document.querySelectorAll('#root td')].find((x) => x.textContent.includes('数据：模型甲'));
+      return td ? td.textContent : '';
+    })()`);
+    if (modelCell === '数据：模型甲') pass('英文模式下请求表模型名保持原文');
+    else fail(`请求表模型名被改写：${JSON.stringify(modelCell)}`);
+
+    await q(`(() => { const b = document.querySelectorAll('.wb-tab')[8]; if (b) b.click(); })()`);
+    await sleep(450);
+    const logText = await q(`(() => { const p = document.querySelector('#root pre.wb-log'); return p ? p.textContent : ''; })()`);
+    if (logText.includes('数据行：日志里的全角冒号不能被改写')) pass('英文模式下日志数据保持原文');
+    else fail(`日志数据被改写：${JSON.stringify(logText.slice(0, 200))}`);
+
+    await q(`(() => { const b = document.querySelectorAll('.wb-tab')[7]; if (b) b.click(); })()`);
+    await sleep(500);
+    const chatData = await q(`(async () => {
+      const ta = document.querySelector('.wb-textarea');
+      if (!ta) return { error: '找不到输入框' };
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set;
+      setter.call(ta, 'i18n-data-probe');
+      ta.dispatchEvent(new Event('input', { bubbles: true }));
+      await new Promise((r) => setTimeout(r, 120));
+      const send = [...document.querySelectorAll('.wb-btn')].find((b) => /^(发送|Send)$/.test(b.textContent.trim()));
+      if (!send) return { error: '找不到发送按钮' };
+      send.click();
+      await new Promise((r) => setTimeout(r, 1000));
+      return { bubble: [...document.querySelectorAll('.wb-msg.assistant')].map((el) => el.innerText).join('\\n') };
+    })()`);
+    if (chatData.error) fail(`对话数据回归无法运行：${chatData.error}`);
+    else if (chatData.bubble.includes('这是一段模型回答：里面包含全角冒号')) pass('英文模式下模型回答保持原文（全角冒号未被改写）');
+    else fail(`模型回答被改写：${JSON.stringify(chatData.bubble.slice(0, 200))}`);
+
+    const slots = await q(`(async () => {
+      const quotaHost = document.createElement('div');
+      document.body.appendChild(quotaHost);
+      const quotaRoot = ReactDOM.createRoot(quotaHost);
+      quotaRoot.render(React.createElement(window.__module.ChatQuotaPill));
+      await new Promise((r) => setTimeout(r, 700));
+      const quotaText = (quotaHost.querySelector('[data-workbuddy-quota]') || {}).textContent || '';
+      quotaRoot.unmount();
+      quotaHost.remove();
+
+      const orig = window.__routes['/workbuddy/status'];
+      window.__setRoute('/workbuddy/status', { bridge: { state: 'unauthenticated', health: { credential: { loginRegion: 'global' } } } });
+      const loginHost = document.createElement('div');
+      document.body.appendChild(loginHost);
+      const loginRoot = ReactDOM.createRoot(loginHost);
+      loginRoot.render(React.createElement(window.__module.ChatLoginButton));
+      await new Promise((r) => setTimeout(r, 650));
+      const loginText = (loginHost.querySelector('.wb-chat-login-inline') || {}).textContent || '';
+      loginRoot.unmount();
+      loginHost.remove();
+      window.__setRoute('/workbuddy/status', orig);
+      return { quotaText, loginText };
+    })()`);
+    if (/^Credits\b/.test(slots.quotaText.trim())) pass('英文模式下积分胶囊显示 Credits');
+    else fail(`积分胶囊未跟随语言：${JSON.stringify(slots.quotaText)}`);
+    if (slots.loginText.includes('Connect WorkBuddy')) pass('英文模式下登录按钮显示 Connect WorkBuddy');
+    else fail(`登录按钮未跟随语言：${JSON.stringify(slots.loginText)}`);
+
     if (thin.length) fail(`这些标签页内容过少，可能是没渲染（0 残留不可信）：${thin.join(', ')}`);
     else pass('9 个标签页内容都足够厚（防「没渲染 = 0 残留」的假绿）');
 

@@ -59,6 +59,8 @@
     }
     function trProps(p) {
       if (!p || typeof p !== 'object') return p;
+      // 显式标记为数据：连 title / aria-label 一起原样保留（账号名、模型名下拉）。
+      if (Object.prototype.hasOwnProperty.call(p, 'data-wb-raw')) return p;
       let out = p;
       for (let i = 0; i < I18N_PROPS.length; i += 1) {
         const k = I18N_PROPS[i];
@@ -1171,6 +1173,7 @@ body.dark .wb-root,
      */
     const I18N_RULES_EN = [
       // 动态前缀：思考内容 / 流内错误（整串规则，保留后半段）
+      [/^思考：$/, 'Thinking:'],
       [/^思考：([\s\S]+)$/, 'Thinking: $1'],
       [/^上游报错：([\s\S]+)$/, 'Upstream error: $1'],
       /* 凭据异常提示：前缀 + 桥侧原始原因（动态串，整串查词条查不到） */
@@ -1993,6 +1996,7 @@ body.dark .wb-root,
 
       const currentOpt = (options || []).find((o) => String(o.value) === String(value));
       const currentLabel = currentOpt ? (currentOpt.label || currentOpt.text || currentOpt.value) : (placeholder || value || '请选择');
+      const currentRaw = Boolean(currentOpt && currentOpt.raw);
 
       return h('div', { ref: wrapRef, className: 'wb-dropdown' + (open ? ' open' : '') + (dropUp ? ' drop-up' : '') + (className ? ' ' + className : ''), style },
         h('select', {
@@ -2002,29 +2006,40 @@ body.dark .wb-root,
           onChange: (e) => {
             if (onChange) onChange(e);
           },
-        }, (options || []).map((opt) => h('option', { key: String(opt.value), value: String(opt.value) }, opt.label || opt.text || opt.value))),
+        }, (options || []).map((opt) => {
+          const label = opt.label || opt.text || opt.value;
+          return opt.raw
+            // 数据项（如模型名）不能过 h()，否则全角冒号等会被 i18n 规则改写。
+            ? h0('option', { key: String(opt.value), value: String(opt.value), 'data-wb-raw': '' }, label)
+            : h('option', { key: String(opt.value), value: String(opt.value) }, label);
+        })),
         h('button', {
           type: 'button',
           className: 'wb-dropdown-trigger',
           onClick: toggle,
           title: currentLabel,
+          ...(currentRaw ? { 'data-wb-raw': '' } : {}),
         },
-          h('span', { style: { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, currentLabel),
+          h('span', { style: { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } },
+            currentRaw ? h(Raw, { text: currentLabel }) : currentLabel),
           h('span', { className: 'wb-dropdown-arrow' }, '▼')),
         open ? h('div', { className: 'wb-dropdown-menu' },
           (options || []).map((opt) => {
             const active = String(opt.value) === String(value);
+            const label = opt.label || opt.text || opt.value;
             return h('button', {
               type: 'button',
               key: String(opt.value),
               className: 'wb-dropdown-item' + (active ? ' on' : ''),
+              ...(opt.raw ? { 'data-wb-raw': '' } : {}),
               onClick: () => {
                 setOpen(false);
                 if (selectRef.current) selectRef.current.value = String(opt.value);
                 if (onChange) onChange({ target: { value: opt.value } });
               },
             },
-              h('span', { style: { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, opt.label || opt.text || opt.value),
+              h('span', { style: { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } },
+                opt.raw ? h(Raw, { text: label }) : label),
               active ? h('span', { style: { fontSize: '11px', opacity: 0.7 } }, '✓') : null);
           })) : null);
     }
@@ -3422,7 +3437,7 @@ body.dark .wb-root,
                   onDragEnd,
                 }, '⋮⋮'),
                 h('div', { className: 'wb-account-title' },
-                  h('b', { title: a.path || a.name }, a.alias || a.name),
+                  h('b', { title: a.path || a.name, 'data-wb-raw': '' }, h(Raw, { text: a.alias || a.name })),
                   (pluginEffective || desktopEffective)
                     ? h(Pill, { tone: 'ok', text: '使用中' })
                     : a.active
@@ -3759,7 +3774,7 @@ body.dark .wb-root,
               onChange: (e) => setModelFilter(e.target.value),
               options: [
                 { value: '', label: `全部模型（${models.length}）` },
-                ...models.map((m) => ({ value: m, label: m })),
+                ...models.map((m) => ({ value: m, label: m, raw: true })),
               ],
             }),
             h('label', { className: 'wb-check' }, h('input', { type: 'checkbox', checked: onlyFailed, onChange: (e) => setOnlyFailed(e.target.checked) }), `仅看失败（${all.filter((r) => !r.ok).length}）`),
@@ -3785,7 +3800,7 @@ body.dark .wb-root,
               h('th', { className: 'num' }, 'in'), h('th', { className: 'num' }, 'out'), h('th', { className: 'num' }, '积分'), h('th', null, '结果'))),
             h('tbody', null, rows.map((r, i) => h('tr', { key: i, className: r.ok ? '' : 'bad' },
               h('td', { title: fmtTime(r.t) }, fmtClock(r.t)),
-              h('td', null, r.model),
+              h('td', null, h(Raw, { text: String(r.model ?? '') })),
               h('td', null, r.stream ? '是' : '否'),
               // 悬停看时延拆分：总耗时里有多少是等上游首字、多少是桥自身前置处理。
               h('td', {
@@ -4289,7 +4304,7 @@ body.dark .wb-root,
                     : (isVisible(m.id) ? '已显示在 dsh 选择器' : '已隐藏（保存后 dsh 选择器不再出现）'),
                 })),
                 h('td', null, m.id + (m.id === sampleModel ? ' ★' : '')),
-                h('td', null, (m.name || ''),
+                h('td', null, m.name ? h(Raw, { text: String(m.name) }) : '',
                   denied.includes(m.id) ? h('span', { className: 'wb-badge', title: '配置的 modelDeny 排除了它' }, '配置排除') : null,
                   m.images ? h('span', { className: 'wb-badge', title: '支持图片输入（多模态）' }, '图片') : null,
                   // 「推理」徽章与「图片」并列：有推理能力就标（档位细节在详情里，
@@ -4702,8 +4717,8 @@ body.dark .wb-root,
         },
           messages.length
             ? messages.map((m, i) => h('div', { key: i, className: 'wb-msg ' + m.role },
-              m.reasoning ? h('div', { className: 'wb-note', style: { whiteSpace: 'pre-wrap', margin: '0 0 4px' } }, `思考：${m.reasoning}`) : null,
-              m.content || (streaming && i === messages.length - 1 ? '…' : ''),
+              m.reasoning ? h('div', { className: 'wb-note', style: { whiteSpace: 'pre-wrap', margin: '0 0 4px' } }, h(Raw, { text: t('思考：') + m.reasoning })) : null,
+              m.content ? h(Raw, { text: String(m.content) }) : (streaming && i === messages.length - 1 ? '…' : ''),
               m.meta ? h('span', { className: 'wb-msg-meta' },
                 `${m.meta.ms} ms · ${m.meta.finish || '?'}` +
                 (m.meta.prompt !== null || m.meta.completion !== null ? ` · tokens ${m.meta.prompt ?? '?'} → ${m.meta.completion ?? '?'}` : '') +
@@ -4787,7 +4802,7 @@ body.dark .wb-root,
             h(Btn, { disabled: clearing, onClick: clearLog }, clearing ? '清空中…' : '清空日志'))),
         h('p', { className: 'wb-note', style: { marginTop: 0 } },
           `显示 ${all.length} / ${totalLines} 行${data?.path ? ' · ' + data.path : ''}${data?.mtime ? '（更新于 ' + fmtTime(data.mtime) + '）' : ''}`),
-        h('pre', { className: 'wb-log' }, all.length ? all.join('\n') : '（没有匹配的日志行）'),
+        h('pre', { className: 'wb-log' }, all.length ? h(Raw, { text: all.join('\n') }) : '（没有匹配的日志行）'),
         status?.bridge?.state !== 'running' ? h('p', { className: 'wb-note' }, '桥当前没在运行：日志里最后那几行通常就是它退出的原因。') : null);
     }
 
@@ -4882,8 +4897,7 @@ body.dark .wb-root,
       useEffect(() => {
         if (accountMismatch) reload();
       }, [accountMismatch, reload]);
-      const en = typeof document !== 'undefined'
-        && String(document.documentElement.lang || '').toLowerCase().startsWith('en');
+      const en = useLang() === 'en';
       const refresh = async () => {
         if (busy) return;
         setBusy(true);
@@ -5103,8 +5117,7 @@ body.dark .wb-root,
       const [info, setInfo] = useState(null);
       // 旧宿主没有 useChat：只能靠 DOM 观察"后面是不是又长出一条 tail"。
       const [domLast, setDomLast] = useState(true);
-      const en = typeof document !== 'undefined'
-        && String(document.documentElement.lang || '').toLowerCase().startsWith('en');
+      const en = useLang() === 'en';
       const hasHostChat = typeof useChat === 'function';
       const selectChat = hasHostChat ? useChat : NO_CHAT_SELECT;
       // 契约里 turn 是 TurnLocation；当前宿主实际传的是 number。两种都兜住。
@@ -5253,8 +5266,7 @@ body.dark .wb-root,
       const alive = useRef(true);
       const pollFailures = useRef(0);
       const cancelRef = useRef(false);
-      const en = typeof document !== 'undefined'
-        && String(document.documentElement.lang || '').toLowerCase().startsWith('en');
+      const en = useLang() === 'en';
       useEffect(() => () => { alive.current = false; }, []);
       // 状态已经在别处变成"已登录"：立刻停掉轮询，别让后台一直问。
       useEffect(() => {

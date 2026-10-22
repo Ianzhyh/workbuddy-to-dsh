@@ -49,6 +49,11 @@ jobs:
       - name: 桥测试（合约 + 启动参数）
         run: npm run test:bridge
 
+      # 面板 i18n 要真实浏览器（findChrome 会找本机 Chrome/Edge）。
+      # 只在 Windows 主门禁跑：这是实际使用环境，也避免给跨平台矩阵加浏览器依赖。
+      - name: 面板 i18n 验收（真实浏览器）
+        run: npm run panel:i18n
+
       - name: 独立分发包演练（没有仓库时也能跑起来）
         run: node dsh-plugin/scripts/verify-standalone.mjs
 

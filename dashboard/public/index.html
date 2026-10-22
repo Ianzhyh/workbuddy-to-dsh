@@ -4470,7 +4470,7 @@ function renderRequests() {
       : '';
     return '<tr' + (r.ok ? '' : ' class="rowfail"') + '>' +
       '<td class="mono">' + fmtTime(r.t) + '</td>' +
-      '<td class="mono">' + escapeAttr(r.model) + '</td>' +
+      '<td class="mono" data-i18n-skip>' + escapeAttr(r.model) + '</td>' +
       '<td>' + (r.stream ? '流式' : '非流式') + '</td>' +
       '<td class="mono num"' + timingTitle + '>' + fmtNum(r.ms) + ' ms</td>' +
       '<td class="mono num">' + tokens + '</td>' +
@@ -4853,7 +4853,7 @@ async function loadAccounts() {
       '<div class="acct-head">' +
         '<span class="acct-grip" draggable="true" data-grip="' + escapeAttr(a.name) + '"' +
           ' title="拖动排序" aria-label="拖动排序">⋮⋮</span>' +
-        '<div class="acct-name">' + escapeAttr(label) + activeTag + dualTag +
+        '<div class="acct-name"><span data-i18n-skip>' + escapeAttr(label) + '</span>' + activeTag + dualTag +
           (a.hidden ? ' <span class="tag">已隐藏</span>' : '') + '</div>' +
         '<div class="acct-act">' + status +
           '<button class="mini" data-alias="' + escapeAttr(a.name) + '"' +
@@ -5888,7 +5888,7 @@ function renderModelTable(models, registered) {
           + '<button type="button" class="idcopy" title="点击复制">' + escapeAttr(m.id) + COPY_ICON + '</button>' +
           '<button type="button" class="infobtn" data-info="' + escapeAttr(m.id)
           + '" aria-expanded="false" title="查看模型详情">ⓘ</button></td>' +
-        '<td class="name">' + escapeAttr(m.name || '—') + '</td>' +
+        '<td class="name" data-i18n-skip>' + escapeAttr(m.name || '—') + '</td>' +
         '<td class="mono num" title="' + escapeAttr(fmtNum(m.context_window || 0)) + '">' + escapeAttr(fmtCompact(m.context_window)) + '</td>' +
         '<td class="mono num" title="' + escapeAttr(fmtNum(m.max_output_tokens || 0)) + '">' + escapeAttr(fmtCompact(m.max_output_tokens)) + '</td>' +
         '<td class="mono num">' + rateCell + '</td>' +
