@@ -312,6 +312,53 @@ try {
   if (!/本地账本只覆盖本桥请求/.test(usageText)) problems.push('用量页没有说明本地账本与上游余额的口径差异');
   let shot = await page.cdp.send('Page.captureScreenshot', { format: 'png', captureBeyondViewport: true });
   writeFileSync(join(OUT_DIR, 'plugin-panel-usage.png'), Buffer.from(shot.result.data, 'base64'));
+
+  // 空账本：不能显示一屏 0，必须给空状态 + 刷新入口
+  const emptyUsage = await page.cdp.evaluate(`(async () => {
+    const orig = window.__routes['/workbuddy/usage'];
+    try {
+      window.__setRoute('/workbuddy/usage', {
+        ok: true, total: { calls: 0, failed: 0, searches: 0, searchFailed: 0 },
+        models: [], days: [], hours: [], failures: [],
+      });
+      const open = (label) => {
+        const b = [...document.querySelectorAll('.wb-tab')].find((x) => x.textContent === label);
+        b && b.click();
+      };
+      open('模型');
+      await new Promise((r) => setTimeout(r, 150));
+      open('用量');
+      await new Promise((r) => setTimeout(r, 700));
+      return { text: document.querySelector('#wb-panel-usage')?.innerText || '' };
+    } finally {
+      window.__setRoute('/workbuddy/usage', orig);
+    }
+  })()`);
+  if (!/还没有用量数据/.test(emptyUsage.text)) problems.push('用量为空时没有空状态');
+
+  // 旧桥没有 searches 字段：不能按新口径假装拆分，必须提示重启桥
+  const oldUsage = await page.cdp.evaluate(`(async () => {
+    const orig = window.__routes['/workbuddy/usage'];
+    try {
+      const old = JSON.parse(JSON.stringify(orig));
+      if (old.total) { delete old.total.searches; delete old.total.searchFailed; }
+      for (const d of (Array.isArray(old.days) ? old.days : [])) { delete d.searches; delete d.searchFailed; }
+      window.__setRoute('/workbuddy/usage', old);
+      const open = (label) => {
+        const b = [...document.querySelectorAll('.wb-tab')].find((x) => x.textContent === label);
+        b && b.click();
+      };
+      open('模型');
+      await new Promise((r) => setTimeout(r, 150));
+      open('用量');
+      await new Promise((r) => setTimeout(r, 700));
+      return { text: document.querySelector('#wb-panel-usage')?.innerText || '' };
+    } finally {
+      window.__setRoute('/workbuddy/usage', orig);
+    }
+  })()`);
+  if (!/当前桥版本较旧/.test(oldUsage.text)) problems.push('旧桥用量没有提示重启桥');
+
   await page.cdp.evaluate(`(() => { const b=[...document.querySelectorAll('.wb-tab')].find(x=>x.textContent==='模型'); b && b.click(); })()`);
   await sleep(500);
   const modelRows = await page.cdp.evaluate("document.querySelectorAll('.wb-table tbody tr').length");

@@ -333,7 +333,10 @@ body.dark .wb-root,
 .wb-textarea{display:block;width:100%;max-width:100%;min-height:64px;resize:vertical;background:var(--dsw-alias-interactive-bg-hover,light-dark(#2631480f,#ffffff14));border:.5px solid var(--dsw-alias-border-l1,light-dark(#00000010,#ffffff14));border-radius:10px;color:inherit;font:inherit;font-size:12.5px;padding:8px 10px;margin:0;transition:border-color var(--wb-anim-fast),box-shadow var(--wb-anim-fast)}
 .wb-textarea:focus{outline:none;border-color:var(--dsw-alias-brand-primary,light-dark(#0f1115,#f9fafb));box-shadow:0 0 0 2px light-dark(rgba(0,0,0,0.06),rgba(255,255,255,0.1))}
 .wb-grid{display:grid;grid-template-columns:repeat(6,1fr);gap:10px}
+/* 用量页指标更多（模型/搜索/失败/积分），单独用 4 列，避免 3 列时最后一行空一格 */
+.wb-usage-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}
 @media (max-width: 920px){.wb-grid{grid-template-columns:repeat(3,1fr)}}
+@media (max-width: 700px){.wb-usage-grid{grid-template-columns:repeat(2,1fr)}}
 @media (max-width: 540px){.wb-grid{grid-template-columns:repeat(2,1fr)}}
 .wb-metric{background:var(--dsw-alias-interactive-bg-hover,light-dark(#2631480c,#ffffff10));border:.5px solid var(--dsw-alias-border-l1,light-dark(#0000000d,#ffffff14));border-radius:12px;padding:10px 12px;min-width:0;transition:transform var(--wb-anim-fast),background-color var(--wb-anim-fast),box-shadow var(--wb-anim-fast),border-color var(--wb-anim-fast)}
 .wb-metric:hover{transform:translateY(-2px);background:var(--dsw-alias-interactive-bg-active,light-dark(#26314814,#ffffff18));box-shadow:0 3px 10px light-dark(rgba(0,0,0,0.04),rgba(0,0,0,0.25))}
@@ -829,6 +832,10 @@ body.dark .wb-root,
         'The local ledger covers only this bridge; it is not the same scope as the upstream balance or other clients.',
       '当前桥版本较旧，搜索调用仍计入模型调用；重启桥后可按新口径拆分。':
         'The running bridge is older, so search calls are still counted as model calls. Restart the bridge to split them.',
+      '（搜索）': ' (search)',
+      '还没有用量数据（桥未运行或还没有请求过）。':
+        'No usage data yet (the bridge is not running, or no requests have been made).',
+      '读取用量失败；请稍后重试。': 'Failed to read usage; try again later.',
       '未回报': 'not reported',
       '未回报扣分的模型：': 'Models without reported credit: ',
       '失败': 'Failed',
@@ -2205,7 +2212,7 @@ body.dark .wb-root,
       const total = list.reduce((acc, cur) => acc + cur.val, 0);
       if (!list.length || total <= 0) return null;
 
-      const metricLabel = metric === 'calls' ? '调用次数' : metric === 'tokens' ? 'tokens' : '消耗积分';
+      const metricLabel = metric === 'calls' ? '模型调用' : metric === 'tokens' ? 'tokens' : '消耗积分';
 
       return h('div', { style: { marginTop: '14px', marginBottom: '8px' } },
         h('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontSize: '12px', marginBottom: '6px' } },
@@ -3546,6 +3553,10 @@ body.dark .wb-root,
       const models = usage?.models || [];
       const noCreditModels = models.filter((m) => (Number(m.calls) || 0) > 0
         && !(Number(m.creditCalls) || 0));
+      const noteLine1 = [creditNote, searchNote].filter(Boolean).join(' · ');
+      const noteLine2 = [searchVersionNote, scopeNote].filter(Boolean).join(' · ');
+      const hasAnyData = totalCalls > 0 || Number(total.failed) > 0
+        || (hasSearchMetric && (searches > 0 || searchFailed > 0));
       const series = hours ? (usage?.hours || []) : (usage?.days || []);
       const points = series.map((d) => ({
         label: hours ? String(d.key).slice(-2) + '时' : String(d.day || d.key).slice(5),
@@ -3554,6 +3565,14 @@ body.dark .wb-root,
       const [clearing, setClearing] = useState(false);
       const [message, setMessage] = useState('');
       if (isInitialLoading(loading, data, error)) return h(Card, { title: '用量统计' }, h(Loading, { text: '正在读取用量账本…' }));
+      if (!hasAnyData) {
+        return h(Card, { title: '用量统计' },
+          error ? h(Alert, { bad: true }, error) : null,
+          h('p', { className: 'wb-note', style: { margin: 0 } },
+            error ? t('读取用量失败；请稍后重试。') : t('还没有用量数据（桥未运行或还没有请求过）。')),
+          h('div', { className: 'wb-actions', style: { marginTop: '10px' } },
+            h(Btn, { onClick: reload }, '刷新')));
+      }
       const clearLedger = async () => {
         // 破坏性操作，二次确认（与控制台一致）；并且必须把结果说出来，
         // 不能点了没反应（旧实现就是发完请求不检查响应）。
@@ -3583,7 +3602,7 @@ body.dark .wb-root,
                 value: metric,
                 onChange: (e) => setMetric(e.target.value),
                 options: [
-                  { value: 'calls', label: '调用次数' },
+                  { value: 'calls', label: '模型调用' },
                   { value: 'tokens', label: 'tokens' },
                   { value: 'credit', label: '消耗积分' },
                 ],
@@ -3605,7 +3624,7 @@ body.dark .wb-root,
               h(Btn, { disabled: clearing, onClick: clearLedger }, clearing ? '清空中…' : '清空账本'))),
           error ? h(Alert, { bad: true }, error) : null,
           message ? h(Alert, null, message) : null,
-          h('div', { className: 'wb-grid' },
+          h('div', { className: 'wb-usage-grid' },
             h('div', { className: 'wb-metric' }, h('span', null, '模型调用'), h('b', null, fmtInt(totalCalls))),
             h('div', { className: 'wb-metric' + ((total.failed || 0) > 0 ? ' warn' : '') }, h('span', null, '失败'), h('b', null, fmtInt(total.failed))),
             hasSearchMetric
@@ -3618,7 +3637,8 @@ body.dark .wb-root,
             h('div', { className: 'wb-metric' }, h('span', null, '输出 tokens'), h('b', null, fmtTokens(total.completionTokens))),
             h('div', { className: 'wb-metric brand' }, h('span', null, '消耗积分'), h('b', null, typeof total.credit === 'number' ? total.credit.toFixed(2) : '0')),
             h('div', { className: 'wb-metric' }, h('span', null, '平均耗时'), h('b', null, totalCalls ? Math.round((total.ms || 0) / totalCalls) + ' ms' : '—'))),
-          h('p', { className: 'wb-note' }, [creditNote, searchNote, searchVersionNote, scopeNote].filter(Boolean).join(' · ')),
+          noteLine1 ? h('p', { className: 'wb-note' }, noteLine1) : null,
+          noteLine2 ? h('p', { className: 'wb-note' }, noteLine2) : null,
           h(ModelProportionBar, { models: usage?.models || [], metric }),
           h('div', {
             key: chartView,
@@ -3669,7 +3689,7 @@ body.dark .wb-root,
                   h('thead', null, h('tr', null, h('th', null, '时间'), h('th', null, '模型'), h('th', null, '错误'))),
                   h('tbody', null, usage.failures.map((f, i) => h('tr', { key: i, className: 'bad' },
                     h('td', null, fmtClock(f.t)),
-                    h('td', null, f.model),
+                    h('td', null, f.model + (f.kind === 'search' ? t('（搜索）') : '')),
                     h('td', { title: '点击复制', className: 'click wrap', onClick: () => copyText(String(f.error || '')) }, String(f.error || '').slice(0, 160))))))))
             : null));
     }
