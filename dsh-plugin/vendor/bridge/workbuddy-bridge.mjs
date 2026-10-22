@@ -35,6 +35,7 @@ import { fileURLToPath } from 'node:url';
 import { createCipheriv, createDecipheriv, createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { spawn, spawnSync } from 'node:child_process';
+import { waitDrain } from './wait-drain.mjs';
 
 // ── Static constants (values match the desktop app / official extension) ──
 /**
@@ -3074,31 +3075,6 @@ function bucketFor(scope) {
 }
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-
-/**
- * 等 `res` 的发送缓冲排空 —— 流式转发要的**背压**。
- *
- * `res.write()` 返回 `false` 表示已超过高水位线：数据还在 Node 的内存里排队。
- * 客户端读得慢、或者干脆停顿但不 disconnect 时，若继续从上游读多少写多少，
- * 内存就会随「停顿时长 × 上游速度」增长。停顿这种情况 `res.on('close')` 是
- * 覆盖不到的（它只处理断开），所以必须在每次写入后看返回值。
- *
- * 同时监听 `close`：客户端中途断开时 `drain` 永远不会来，只等 drain 会把
- * 转发协程挂在这里 —— 那正是「客户端关了页面，桥却卡住」的成因。
- */
-/**
- * @param {import('node:http').ServerResponse} res
- * @returns {Promise<void>} 排空（或客户端断开）后兑现
- */
-const waitDrain = (res) => new Promise((resolve) => {
-  const done = () => {
-    res.off('drain', done);
-    res.off('close', done);
-    resolve();
-  };
-  res.once('drain', done);
-  res.once('close', done);
-});
 
 /** 现在能不能放行？不能则返回还需等待的毫秒数。 */
 function rateWaitMs(now, bucket) {
@@ -7026,6 +7002,23 @@ const json = (res, status, obj, extraHeaders = {}) => {
 };
 
 /**
+ * 统一的「请求体超限」出口。
+ *
+ * 两条协议的错误形状不同，但**收尾动作必须一致**：`readBody` 超限时只
+ * `pause()`、不丢字节；413 写完后必须 `resume()` 把剩余字节读掉，否则
+ * keep-alive 连接会停在暂停状态，下一条请求要么挂住、要么 ECONNRESET。
+ * 这个动作曾在两个端点漏掉（`/v1/responses`、`/v1/messages/count_tokens`），
+ * 所以收敛成一个函数，避免再靠手写复制。
+ */
+function rejectTooLarge(req, res, protocol, message = `request body too large (limit ${MAX_BODY_BYTES} bytes)`) {
+  const body = protocol === 'anthropic'
+    ? { type: 'error', error: { type: 'request_too_large', message } }
+    : { error: { type: 'payload_too_large', message } };
+  json(res, 413, body);
+  req.resume();
+}
+
+/**
  * 这个请求的 Origin 是否可以放行。
  *
  * **为什么必须校验：绑定 127.0.0.1 挡不住浏览器。** 恶意网页可以把域名解析到
@@ -7641,9 +7634,7 @@ async function handleRequest(req, res) {
         raw = await readBody(req, 64 * 1024);
       } catch (e) {
         if (e.code === 'BODY_TOO_LARGE') {
-          // readBody 只 pause、不丢字节；413 写完后必须 resume，否则 keep-alive 连接会挂住。
-          req.resume();
-          return json(res, 413, { error: { message: 'web_search body too large', type: 'payload_too_large' } });
+          return rejectTooLarge(req, res, 'openai', 'web_search body too large');
         }
         throw e;
       }
@@ -7740,23 +7731,17 @@ async function handleRequest(req, res) {
           // 连 body 都没读全，没有 model / 耗时可言，记一条全是 0 的账只会污染
           // 控制台的失败列表。
           log('rejected oversized body', e.message);
-          const body = JSON.stringify({
-            error: {
-              message: `workbuddy-bridge: request body too large (limit ${MAX_BODY_BYTES} bytes);`
-                + ' raise WORKBUDDY_MAX_BODY_BYTES if this is a legitimate multi-modal request',
-              type: 'payload_too_large',
-            },
-          });
-          res.writeHead(413, { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body), ...SECURITY_HEADERS });
-          // 413 写完后 `resume()` 把剩余字节读掉丢弃。
-          //
-          // **不要改成 destroy()**：实测这样会让客户端在读到 413 之前就吃 RST
-          // （8MB 下丢失率可达 10/10，详见 readBody 的注释）。resume() 之后
-          // 没有任何东西被累计进内存，D2 的内存上限目标依然成立，而契约
-          // （"明确的 413 JSON"）才真的兑现了。
-          res.end(body);
-          req.resume();
-          return;
+          /*
+           * 413 写完后 `resume()` 把剩余字节读掉丢弃（helper 内统一做）。
+           *
+           * **不要改成 destroy()**：实测这样会让客户端在读到 413 之前就吃 RST
+           * （8MB 下丢失率可达 10/10，详见 readBody 的注释）。resume() 之后
+           * 没有任何东西被累计进内存，D2 的内存上限目标依然成立，而契约
+           * （"明确的 413 JSON"）才真的兑现了。
+           */
+          return rejectTooLarge(req, res, 'openai',
+            `workbuddy-bridge: request body too large (limit ${MAX_BODY_BYTES} bytes);`
+              + ' raise WORKBUDDY_MAX_BODY_BYTES if this is a legitimate multi-modal request');
         }
         throw e;
       }
@@ -8187,10 +8172,7 @@ async function handleRequest(req, res) {
         raw = await readBody(req);
       } catch (e) {
         if (e.code === 'BODY_TOO_LARGE') {
-          return json(res, 413, {
-            type: 'error',
-            error: { type: 'request_too_large', message: `request body too large (limit ${MAX_BODY_BYTES} bytes)` },
-          });
+          return rejectTooLarge(req, res, 'anthropic');
         }
         throw e;
       }
@@ -8208,11 +8190,7 @@ async function handleRequest(req, res) {
       } catch (e) {
         if (e.code === 'BODY_TOO_LARGE') {
           // 同 /v1/web_search：先把剩余字节读掉，保证 413 后连接仍可复用。
-          req.resume();
-          return json(res, 413, {
-            type: 'error',
-            error: { type: 'request_too_large', message: `request body too large (limit ${MAX_BODY_BYTES} bytes)` },
-          });
+          return rejectTooLarge(req, res, 'anthropic');
         }
         throw e;
       }
@@ -8444,9 +8422,7 @@ async function handleRequest(req, res) {
         raw = await readBody(req);
       } catch (e) {
         if (e.code === 'BODY_TOO_LARGE') {
-          return json(res, 413, {
-            error: { type: 'payload_too_large', message: `request body too large (limit ${MAX_BODY_BYTES} bytes)` },
-          });
+          return rejectTooLarge(req, res, 'openai');
         }
         throw e;
       }

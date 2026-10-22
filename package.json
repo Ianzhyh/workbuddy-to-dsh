@@ -21,6 +21,7 @@
   },
   "files": [
     "bridge/workbuddy-bridge.mjs",
+    "bridge/wait-drain.mjs",
     "bridge/launch.mjs",
     "bridge/start-bridge.cmd",
     "dashboard/server.mjs",

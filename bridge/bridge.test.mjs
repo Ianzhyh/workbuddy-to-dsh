@@ -19,7 +19,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
-import { createServer, request as httpRequest } from 'node:http';
+import { createServer, request as httpRequest, Agent as HttpAgent } from 'node:http';
 import { mkdtempSync, rmSync, writeFileSync, existsSync, readFileSync, readdirSync, utimesSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -140,6 +140,35 @@ function rawStatus(port, path, headers = {}) {
     );
     req.on('error', reject);
     req.end();
+  });
+}
+
+/**
+ * 用 keep-alive agent 发一个请求，返回状态、正文与「是否复用了已有 socket」。
+ *
+ * `fetch` 走 undici 连接池，无法稳定断言「下一条请求落在同一条 socket 上」；
+ * 而 413 漏 `req.resume()` 的故障恰恰只在这条路径上出现。
+ */
+function agentRequest(agent, port, path, { method = 'POST', body = '' } = {}) {
+  return new Promise((resolve, reject) => {
+    const req = httpRequest({
+      host: '127.0.0.1',
+      port,
+      path,
+      method,
+      agent,
+      headers: {
+        authorization: `Bearer ${TOKEN}`,
+        ...(body ? { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) } : {}),
+      },
+    }, (res) => {
+      let text = '';
+      res.setEncoding('utf8');
+      res.on('data', (chunk) => { text += chunk; });
+      res.on('end', () => resolve({ status: res.statusCode, body: text, reusedSocket: req.reusedSocket }));
+    });
+    req.on('error', reject);
+    req.end(body);
   });
 }
 
@@ -426,6 +455,41 @@ test('桥：超大请求体必须是 413 JSON，且桥仍然可用（D2）', { t
       assert.equal(bigStatus, 413, `第 ${i + 1} 次 8MB 请求必须是 413（不能被 RST 吞掉）`);
     }
   } finally {
+    await bridge.stop();
+    rmSync(bridge.dir, { recursive: true, force: true });
+  }
+});
+
+test('桥：413 后同一条 keep-alive 连接仍可复用（count_tokens / responses）', { timeout: 60_000 }, async () => {
+  /*
+   * 回归背景：`readBody` 超限时只 pause、不丢字节；413 写完后漏掉
+   * `req.resume()` 的端点会让 socket 停在暂停状态。下一条复用同一连接的
+   * 请求要么挂住、要么 ECONNRESET。`/v1/responses` 与
+   * `/v1/messages/count_tokens` 都曾漏过这一行。
+   */
+  const bridge = await startBridge({ WORKBUDDY_MAX_BODY_BYTES: String(64 * 1024) });
+  const agent = new HttpAgent({ keepAlive: true, maxSockets: 1 });
+  try {
+    const port = Number(new URL(bridge.baseUrl).port);
+    const big = JSON.stringify({
+      model: 'x',
+      messages: [{ role: 'user', content: 'z'.repeat(256 * 1024) }],
+    });
+    const cases = [
+      ['/v1/messages/count_tokens', 'request_too_large'],
+      ['/v1/responses', 'payload_too_large'],
+    ];
+    for (const [path, errorType] of cases) {
+      const first = await agentRequest(agent, port, path, { body: big });
+      assert.equal(first.status, 413, `${path} 超限必须是 413`);
+      const payload = JSON.parse(first.body);
+      assert.equal(payload?.error?.type, errorType, `${path} 的错误形状必须符合协议`);
+      const second = await agentRequest(agent, port, '/', { method: 'GET' });
+      assert.equal(second.status, 200, `${path} 拒绝后桥必须仍可用`);
+      assert.equal(second.reusedSocket, true, `${path} 的 413 必须让同一条 socket 可复用`);
+    }
+  } finally {
+    agent.destroy();
     await bridge.stop();
     rmSync(bridge.dir, { recursive: true, force: true });
   }
@@ -1775,14 +1839,24 @@ test('桥：在途请求可见 —— 成功 / 失败 / 客户端断开三条路
     assert.equal(r2.status, 500);
     await waitFor((d) => d.active.length === 0, '失败后被释放');
 
-    // ③ 客户端断开：abort → 同样释放（注册表不得泄漏）
+    // ③ 客户端断开：abort → 同样释放（注册表不得泄漏），且必须留下账本记录
     mode = 'ok'; resetGate();
+    const usageFile = join(bridge.dir, 'usage.jsonl');
+    const usageCount = () => {
+      try { return readFileSync(usageFile, 'utf8').split('\n').filter(Boolean).length; } catch { return 0; }
+    };
+    const usageBefore = usageCount();
     const ac = new AbortController();
     const p3 = chat(ac.signal).catch(() => null);
     await waitFor((d) => d.active.length === 1, '断开场景出现进行中条目');
     ac.abort();
     await p3;
     await waitFor((d) => d.active.length === 0, '客户端断开后被释放');
+    const usageDeadline = Date.now() + 8000;
+    while (usageCount() <= usageBefore && Date.now() < usageDeadline) {
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    assert.ok(usageCount() > usageBefore, '客户端断开后该请求仍必须记账（账本上不能静默消失）');
   } finally {
     try { releaseHold(); } catch { /* 忽略 */ }
     await bridge.stop();
