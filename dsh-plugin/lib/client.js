@@ -475,6 +475,57 @@ body.dark .wb-root,
       '已切换：网页搜索 → ': 'Switched: web search → ',
       '（自检通过）': ' (self-test passed)',
       '（自检失败：': ' (self-test failed: ',
+      '）': ')',
+      '，来源数：': ', sources: ',
+      '；来源数：': '; sources: ',
+      ' 个来源': ' sources',
+      '重新检测': 'Test again',
+      '检测中…': 'Testing…',
+      '只跑一次真实搜索，不改配置': 'Run one real search without changing settings',
+      '自检通过：': 'Self-test passed: ',
+      '自检失败：': 'Self-test failed: ',
+      '当前 dsh 没有 web 服务，已跳过自检': 'This dsh build has no web service; self-test skipped',
+      '已接入，但上次自检失败：': 'Connected, but the last self-test failed: ',
+      '未知错误': 'unknown error',
+      '上次自检：': 'Last self-test: ',
+      '配置已变化，上次自检已失效；建议重新检测。':
+        'The configuration changed after the last self-test; run the test again.',
+      '上次自检被跳过：当前 dsh 没有 web 服务。':
+        'The last self-test was skipped: this dsh build has no web service.',
+      '尚未自检；点「重新检测」验证整条链路。':
+        'Not tested yet; click Test again to verify the whole path.',
+      'dsh 未加载搜索 provider': 'dsh did not load the web search provider',
+      '本地桥未运行': 'Local bridge is not running',
+      '桥令牌已变化': 'Bridge token changed',
+      '搜索 provider 不对': 'Wrong search provider',
+      '地址未指向本地桥': 'Endpoint does not point to the local bridge',
+      '缺少桥令牌': 'Bridge token is missing',
+      '读取搜索配置失败': 'Failed to read search settings',
+      '未接入': 'Not connected',
+      '网页搜索未接入：本地桥没在运行': 'Web search is not connected: the local bridge is not running',
+      '本地桥未登录': 'Local bridge is not signed in',
+      '本地桥不可用': 'Local bridge is unavailable',
+      '网页搜索暂不可用：本地桥还没有登录 WorkBuddy':
+        'Web search is unavailable: the local bridge is not signed in to WorkBuddy',
+      '网页搜索暂不可用：本地桥令牌或端口异常':
+        'Web search is unavailable: the bridge token or port is misconfigured',
+      '当前 dsh 没有加载网页搜索 provider；升级 dsh 或启用该插件后再试。':
+        'This dsh build has not loaded the web search provider; upgrade dsh or enable the plugin first.',
+      '本地桥还没有登录 WorkBuddy；先在「账号」页完成登录。':
+        'The local bridge is not signed in to WorkBuddy; sign in on the Account tab first.',
+      '本地桥令牌或端口异常；先重启桥或检查端口。':
+        'The bridge token or port is misconfigured; restart the bridge or check the port first.',
+      '读取 dsh 的网页搜索配置失败；请到「诊断」页查看详情。':
+        'Failed to read dsh web search settings; check the Diagnose tab for details.',
+      '网页搜索需要重新接入：桥令牌已变化':
+        'Web search needs reconnecting: the bridge token changed',
+      '网页搜索需要重新接入：provider 不是 deepseek-official':
+        'Web search needs reconnecting: the provider is not deepseek-official',
+      '网页搜索需要重新接入：地址没有指向当前本地桥':
+        'Web search needs reconnecting: the endpoint does not point to the current local bridge',
+      '网页搜索需要重新接入：dsh 里没有保存桥令牌':
+        'Web search needs reconnecting: dsh has no saved bridge token',
+      '读取 dsh 的网页搜索配置失败': 'Failed to read dsh web search settings',
       '去诊断 →': 'Go to diagnose →',
       '看用量': 'View usage',
 
@@ -1426,9 +1477,14 @@ body.dark .wb-root,
      * 又不会让用户对着转圈等几分钟。
      */
     const REQUEST_TIMEOUT_MS = 20_000;
-    const requestSignal = () => (
+    /*
+     * 一键接入可能包含「冷启动桥 30s + 真实搜索自检 20s」，必须给足预算；
+     * 用默认 20s 会出现“前端已超时、服务端其实已经写好了配置”的撕裂状态。
+     */
+    const LONG_REQUEST_TIMEOUT_MS = 90_000;
+    const requestSignal = (timeoutMs = REQUEST_TIMEOUT_MS) => (
       typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function'
-        ? AbortSignal.timeout(REQUEST_TIMEOUT_MS)
+        ? AbortSignal.timeout(timeoutMs)
         : undefined
     );
     const requestErrorMessage = (error) => {
@@ -1461,7 +1517,7 @@ body.dark .wb-root,
         return { status: res.status, data };
       }
     }
-    async function postJson(path, body, method) {
+    async function postJson(path, body, method, options = {}) {
       /*
        * 网络断/桥刚退出时 fetch 会直接 reject。**这里统一吞成失败响应**：
        * 面板里有几十个 `const res = await postJson(...); setBusy(false)` 的写法，
@@ -1474,7 +1530,7 @@ body.dark .wb-root,
           headers: PANEL_HEADERS,
           body: body === undefined ? undefined : JSON.stringify(body),
           cache: 'no-store',
-          signal: requestSignal(),
+          signal: requestSignal(options.timeoutMs),
         });
         const text = await res.text();
         let data;
@@ -2324,19 +2380,113 @@ body.dark .wb-root,
       const pluginCount = Number(credential.plugin?.count ?? credential.pluginCount ?? 0);
       const alerts = [];
       const [searchBusy, setSearchBusy] = useState(false);
+      const [searchAction, setSearchAction] = useState('');
       const [searchMsg, setSearchMsg] = useState('');
       const search = status?.webSearch;
       const searchKnown = search?.available === true;
-      const searchReady = searchKnown && search.configured === true;
+      /*
+       * 不能只看 `configured`：那只是“settings 写对了”。桥没跑、令牌被轮换、
+       * 地址指向旧端口时 configured 仍为 true，面板却会显示绿色。
+       */
+      // 旧宿主没有 ready 字段（客户端可能先于宿主热更）；此时退回 configured，
+      // 保持旧行为，不让面板在升级窗口里突然报“未接入”。
+      const searchReady = searchKnown && (search.ready === undefined
+        ? search.configured === true
+        : search.ready === true);
+      const searchIssue = (() => {
+        switch (search?.reason) {
+          case 'namespace-missing': return {
+            pill: 'dsh 未加载搜索 provider',
+            alert: 'dsh 没有加载网页搜索 provider，无法一键接入',
+            action: '',
+          };
+          case 'bridge': return {
+            pill: '本地桥未运行',
+            alert: '网页搜索未接入：本地桥没在运行',
+            action: 'websearch',
+          };
+          case 'bridge-auth': return {
+            pill: '本地桥未登录',
+            alert: '网页搜索暂不可用：本地桥还没有登录 WorkBuddy',
+            action: 'account',
+          };
+          case 'bridge-conflict': return {
+            pill: '本地桥不可用',
+            alert: '网页搜索暂不可用：本地桥令牌或端口异常',
+            action: 'restart',
+          };
+          case 'token': return {
+            pill: '桥令牌已变化',
+            alert: '网页搜索需要重新接入：桥令牌已变化',
+            action: 'websearch',
+          };
+          case 'provider': return {
+            pill: '搜索 provider 不对',
+            alert: '网页搜索需要重新接入：provider 不是 deepseek-official',
+            action: 'websearch',
+          };
+          case 'endpoint': return {
+            pill: '地址未指向本地桥',
+            alert: '网页搜索需要重新接入：地址没有指向当前本地桥',
+            action: 'websearch',
+          };
+          case 'key': return {
+            pill: '缺少桥令牌',
+            alert: '网页搜索需要重新接入：dsh 里没有保存桥令牌',
+            action: 'websearch',
+          };
+          case 'error': return {
+            pill: '读取搜索配置失败',
+            alert: '读取 dsh 的网页搜索配置失败',
+            action: '',
+          };
+          default: return {
+            pill: '未接入',
+            alert: '网页搜索还没接入 WorkBuddy：现在仍走 DeepSeek，会消耗 DeepSeek 钱包',
+            action: 'websearch',
+          };
+        }
+      })();
+      const searchNote = searchReady
+        ? (search?.lastVerifyFailed
+          ? t('已接入，但上次自检失败：') + (search.lastVerifyError || t('未知错误'))
+          : t('搜索走 WorkBuddy 额度，不消耗 DeepSeek。'))
+        : search.reason === 'namespace-missing'
+          ? t('当前 dsh 没有加载网页搜索 provider；升级 dsh 或启用该插件后再试。')
+          : search.reason === 'bridge-auth'
+            ? t('本地桥还没有登录 WorkBuddy；先在「账号」页完成登录。')
+            : search.reason === 'bridge-conflict'
+              ? t('本地桥令牌或端口异常；先重启桥或检查端口。')
+              : search.reason === 'error'
+                ? t('读取 dsh 的网页搜索配置失败；请到「诊断」页查看详情。')
+                : t('接入后搜索走 WorkBuddy 额度，不消耗 DeepSeek 钱包；点下面的按钮即可。');
+      const searchVerifyNote = searchReady
+        ? (search?.lastVerifiedAt
+          ? (search.lastVerifyStale
+            ? t('配置已变化，上次自检已失效；建议重新检测。')
+            : search.lastVerifyFailed
+              ? ''
+              : search.lastVerifyVerified === null
+                ? t('上次自检被跳过：当前 dsh 没有 web 服务。')
+                : t('上次自检：') + fmtTime(Date.parse(search.lastVerifiedAt))
+                  + t('，来源数：') + (search.lastVerifySourceCount ?? 0))
+          : t('尚未自检；点「重新检测」验证整条链路。'))
+        : '';
       async function enableSearch() {
         setSearchBusy(true);
+        setSearchAction('enable');
         setSearchMsg('');
         try {
-          const res = await postJson('/workbuddy/web-search/enable', {});
+          const res = await postJson('/workbuddy/web-search/enable', {}, undefined, {
+            timeoutMs: LONG_REQUEST_TIMEOUT_MS,
+          });
           if (res.status >= 200 && res.status < 300 && res.data?.ok) {
             let msg = t('已切换：网页搜索 → ') + (res.data.baseURL || '');
-            if (res.data.verified === true) msg += t('（自检通过）');
-            else if (res.data.verified === false) msg += t('（自检失败：') + (res.data.verifyError || '') + '）';
+            if (res.data.verified === true) {
+              msg += t('（自检通过）') + t('；来源数：') + (res.data.sourceCount ?? 0);
+            } else if (res.data.verified === false) {
+              msg += t('（自检失败：') + (res.data.verifyError || '') + t('）');
+            }
             setSearchMsg(msg);
             reload();
           } else {
@@ -2344,6 +2494,32 @@ body.dark .wb-root,
           }
         } finally {
           setSearchBusy(false);
+          setSearchAction('');
+        }
+      }
+      async function verifySearch() {
+        setSearchBusy(true);
+        setSearchAction('verify');
+        setSearchMsg('');
+        try {
+          const res = await postJson('/workbuddy/web-search/verify', {}, undefined, {
+            timeoutMs: LONG_REQUEST_TIMEOUT_MS,
+          });
+          if (res.status >= 200 && res.status < 300 && res.data?.ok) {
+            if (res.data.verified === true) {
+              setSearchMsg(t('自检通过：') + (res.data.sourceCount ?? 0) + t(' 个来源'));
+            } else if (res.data.verified === false) {
+              setSearchMsg(t('自检失败：') + (res.data.verifyError || ''));
+            } else {
+              setSearchMsg(t('当前 dsh 没有 web 服务，已跳过自检'));
+            }
+            reload();
+          } else {
+            setSearchMsg(t('自检失败：') + (res.data?.error || ('HTTP ' + res.status)));
+          }
+        } finally {
+          setSearchBusy(false);
+          setSearchAction('');
         }
       }
       if (state === 'degraded') {
@@ -2393,10 +2569,13 @@ body.dark .wb-root,
         alerts.push({ tone: 'warn', text: '今日还没签到', action: 'checkin' });
       }
       if (status?.legacy?.found) alerts.push({ tone: 'warn', text: '检测到旧的 llm-pi-ai 路由，与插件撞名，建议清理', action: 'cleanup' });
-      if (searchKnown && !searchReady) {
-        alerts.push(search.reason === 'namespace-missing'
-          ? { tone: 'warn', text: 'dsh 没有加载网页搜索 provider，无法一键接入' }
-          : { tone: 'warn', text: '网页搜索还没接入 WorkBuddy：现在仍走 DeepSeek，会消耗 DeepSeek 钱包', action: 'websearch' });
+      // 未登录时欢迎卡已经接管引导；再催“接入搜索”只会让用户点一个必然失败的按钮。
+      if (searchKnown && !searchReady && state !== 'unauthenticated') {
+        alerts.push({
+          tone: 'warn',
+          text: searchIssue.alert,
+          action: searchIssue.action || undefined,
+        });
       }
       // 控制台 /api/overview 的 routeLive 同样是迁移前口径（只认 settings.yaml /
       // profile patch），原生路由它看不见 —— 原生路由已注册时不作为问题提示。
@@ -2452,21 +2631,34 @@ body.dark .wb-root,
         unauthenticated ? null : (searchKnown
           ? h(Card, { title: '网页搜索' },
             h(Row, { label: '状态' }, h(Pill, {
-              tone: searchReady ? 'ok' : 'warn',
-              text: searchReady ? '已接入本地桥' : '未接入（走 DeepSeek）',
+              tone: searchReady ? (search?.lastVerifyFailed ? 'warn' : 'ok') : 'warn',
+              text: searchReady ? '已接入本地桥' : searchIssue.pill,
             })),
-            h('p', { className: 'wb-note', style: { margin: '6px 0 0' } },
-              searchReady
-                ? '搜索走 WorkBuddy 额度，不消耗 DeepSeek。'
-                : '接入后搜索走 WorkBuddy 额度，不消耗 DeepSeek 钱包；点下面的按钮即可。'),
+            h('p', { className: 'wb-note', style: { margin: '6px 0 0' } }, searchNote),
+            searchVerifyNote ? h('p', { className: 'wb-note', style: { margin: '4px 0 0' } }, searchVerifyNote) : null,
             h('div', { className: 'wb-actions', style: { marginTop: '10px' } },
               h(Btn, {
                 primary: !searchReady,
-                disabled: busy || searchBusy,
+                disabled: busy || searchBusy
+                  || search.reason === 'namespace-missing'
+                  || search.reason === 'error'
+                  || search.reason === 'bridge-auth'
+                  || search.reason === 'bridge-conflict',
                 onClick: enableSearch,
                 title: '把 dsh 的网页搜索指向本地桥（使用 WorkBuddy 搜索额度，不消耗 DeepSeek）',
-              }, searchBusy ? '配置中…' : (searchReady ? '重新接入 WorkBuddy 搜索' : '一键接入 WorkBuddy 搜索'))),
-            searchMsg ? h('p', { className: 'wb-note', style: { margin: '8px 0 0' } }, searchMsg) : null)
+              }, searchBusy
+                ? (searchAction === 'verify' ? '检测中…' : '配置中…')
+                : (searchReady ? '重新接入 WorkBuddy 搜索' : '一键接入 WorkBuddy 搜索')),
+              searchReady
+                ? h(Btn, {
+                  disabled: busy || searchBusy,
+                  onClick: verifySearch,
+                  title: '只跑一次真实搜索，不改配置',
+                }, searchBusy && searchAction === 'verify' ? '检测中…' : '重新检测')
+                : null),
+            searchMsg
+              ? h('p', { className: 'wb-note', role: 'status', 'aria-live': 'polite', style: { margin: '8px 0 0' } }, searchMsg)
+              : null)
           : null),
 
         alerts.length

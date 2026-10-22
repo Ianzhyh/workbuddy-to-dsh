@@ -48,6 +48,7 @@ test('数据面的方法 / 权限矩阵：只读路由拒绝写方法，写路�
       provider: 'deepseek-official',
       apiKeyRef: 'WORKBUDDY_SEARCH_BRIDGE_KEY',
     }),
+    verifyWebSearch: async () => ({ verified: true, sourceCount: 2 }),
   });
   const byPath = (p) => routes.find((r) => r.path === p);
 
@@ -101,6 +102,7 @@ test('数据面的方法 / 权限矩阵：只读路由拒绝写方法，写路�
     ['/workbuddy/login/logout', 'POST'],
     ['/workbuddy/login/source', 'POST'],
     ['/workbuddy/web-search/enable', 'POST'],
+    ['/workbuddy/web-search/verify', 'POST'],
   ];
   for (const [path, method] of writes) {
     const blocked = await run(path, method);
@@ -123,6 +125,11 @@ test('数据面的方法 / 权限矩阵：只读路由拒绝写方法，写路�
   assert.equal(webSearch.status, 200);
   assert.equal(webSearch.body.baseURL, 'http://127.0.0.1:8790/v1');
   assert.equal(webSearch.body.apiKeyRef, 'WORKBUDDY_SEARCH_BRIDGE_KEY');
+
+  const verify = await run('/workbuddy/web-search/verify', 'POST', { 'x-workbuddy-panel': '1' });
+  assert.equal(verify.status, 200);
+  assert.equal(verify.body.verified, true);
+  assert.equal(verify.body.sourceCount, 2);
 });
 
 test('readLog 只读日志尾部：大文件不吃满内存、截断的半行被丢掉', () => {
@@ -367,13 +374,13 @@ test('apply() 装配：注册 llm 路由、5 个工具、命令、HTTP 路由', 
     }
     assert.equal(calls.commands.length, 1);
     assert.equal(calls.commands[0].name, 'workbuddy');
-    assert.equal(calls.routes.length, 20, 'HTTP 数据面应有 20 条路由（19 条 exact + 1 条 console-api 前缀）');
+    assert.equal(calls.routes.length, 21, 'HTTP 数据面应有 21 条路由（20 条 exact + 1 条 console-api 前缀）');
     assert.deepEqual(calls.routes.map((r) => r.path).sort(), [
       '/workbuddy/bridge', '/workbuddy/checkin', '/workbuddy/console', '/workbuddy/console-api', '/workbuddy/log',
       '/workbuddy/login', '/workbuddy/login/active', '/workbuddy/login/cancel', '/workbuddy/login/logout',
       '/workbuddy/login/poll', '/workbuddy/login/source', '/workbuddy/login/start',
       '/workbuddy/migrate', '/workbuddy/model-visibility', '/workbuddy/models', '/workbuddy/quota', '/workbuddy/requests', '/workbuddy/status', '/workbuddy/usage',
-      '/workbuddy/web-search/enable',
+      '/workbuddy/web-search/enable', '/workbuddy/web-search/verify',
     ]);
     const prefix = calls.routes.find((r) => r.path === '/workbuddy/console-api');
     assert.equal(prefix.kind, 'prefix', 'console-api 必须挂成前缀路由');

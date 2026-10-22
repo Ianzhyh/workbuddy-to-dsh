@@ -40,6 +40,7 @@ import { createTools } from './tools.mjs';
 import { createRouteTable, mountRoutes } from './routes.mjs';
 import {
   configureWorkBuddyWebSearch,
+  deriveWebSearchReadiness,
   deriveWebSearchStatus,
   verifyWorkBuddyWebSearch,
 } from './web-search-config.mjs';
@@ -643,6 +644,8 @@ export function apply(ctx, rawConfig = {}) {
     bridgeAccount: null,
     /** 桥最近一次确认「活着」的时刻；ensureReady 的短 TTL 缓存用。 */
     bridgeAliveAt: 0,
+    /** 最近一次网页搜索自检，只存元数据（不存 query/令牌）。 */
+    webSearchVerify: { at: 0, verified: null, sourceCount: null, error: '', baseURL: '' },
   };
 
   /**
@@ -973,7 +976,7 @@ export function apply(ctx, rawConfig = {}) {
    * 只读 settings/credentials，不发搜索请求（status 每 8 秒轮询，不能顺带
    * 消耗搜索额度）。真正的一键配置会再跑一次 verifyWorkBuddyWebSearch。
    */
-  async function webSearchStatus() {
+  async function webSearchStatus({ bridgeState = 'stopped' } = {}) {
     const expectedBaseURL = `${supervisor.baseUrl}/v1`;
     const settings = ctx.get('settings');
     const credentials = ctx.get('credentials');
@@ -988,7 +991,17 @@ export function apply(ctx, rawConfig = {}) {
       expectedBaseURL,
       reason: 'unavailable',
     };
-    if (!settings || typeof settings.get !== 'function') return unavailable;
+    if (!settings || typeof settings.get !== 'function') {
+      return {
+        ...unavailable,
+        ...deriveWebSearchReadiness({
+          status: unavailable,
+          bridgeState,
+          verification: state.webSearchVerify,
+          expectedBaseURL,
+        }),
+      };
+    }
 
     let section;
     let webSection;
@@ -996,28 +1009,75 @@ export function apply(ctx, rawConfig = {}) {
       section = settings.get('web-search-deepseek');
       webSection = settings.get('web');
     } catch (error) {
-      return { ...unavailable, available: true, reason: 'error', error: String(error?.message || error) };
+      const base = { ...unavailable, available: true, reason: 'error', error: String(error?.message || error) };
+      return {
+        ...base,
+        ...deriveWebSearchReadiness({
+          status: base,
+          bridgeState,
+          verification: state.webSearchVerify,
+          expectedBaseURL,
+        }),
+      };
     }
-    if (section === undefined) return { ...unavailable, available: true, reason: 'namespace-missing' };
+    if (section === undefined) {
+      const base = { ...unavailable, available: true, reason: 'namespace-missing' };
+      return {
+        ...base,
+        ...deriveWebSearchReadiness({
+          status: base,
+          bridgeState,
+          verification: state.webSearchVerify,
+          expectedBaseURL,
+        }),
+      };
+    }
 
     const apiKeyRef = typeof section?.apiKeyEnv === 'string' ? section.apiKeyEnv : '';
     const literalKey = typeof section?.apiKey === 'string' && section.apiKey.length > 0;
     let keyConfigured = literalKey;
-    if (!keyConfigured && credentials && typeof credentials.describe === 'function') {
+    if (!keyConfigured && apiKeyRef && credentials && typeof credentials.describe === 'function') {
       try {
-        keyConfigured = (await credentials.describe(apiKeyRef || 'DEEPSEEK_API_KEY'))?.configured === true;
+        keyConfigured = (await credentials.describe(apiKeyRef))?.configured === true;
       } catch { /* 凭据服务读不到就按未配置处理，让面板提醒用户 */ }
     }
 
+    /*
+     * 只比对**实际引用**：不再回退 DEEPSEEK_API_KEY。否则用户只配了 DeepSeek
+     * key 时，面板会把“搜索指向桥”误判成已接入，实际搜索 401。
+     * resolve 只用于比较，不写日志、不回传客户端。
+     */
+    let tokenMatches = null;
+    if (config.localToken) {
+      if (literalKey) {
+        tokenMatches = section.apiKey === config.localToken;
+      } else if (apiKeyRef && credentials && typeof credentials.resolve === 'function') {
+        try {
+          const resolved = await credentials.resolve(apiKeyRef);
+          if (resolved && typeof resolved.value === 'string') {
+            tokenMatches = resolved.value === config.localToken;
+          }
+        } catch { tokenMatches = null; }
+      }
+    }
+
+    const status = deriveWebSearchStatus({
+      section,
+      webSection,
+      expectedBaseURL,
+      keyConfigured,
+    });
     return {
       available: true,
       expectedBaseURL,
       keyConfigured,
-      ...deriveWebSearchStatus({
-        section,
-        webSection,
+      ...status,
+      ...deriveWebSearchReadiness({
+        status,
+        bridgeState,
+        tokenMatches,
+        verification: state.webSearchVerify,
         expectedBaseURL,
-        keyConfigured,
       }),
     };
   }
@@ -1102,7 +1162,7 @@ export function apply(ctx, rawConfig = {}) {
       catalogError: adapter.catalogError || '',
       legacy: { found: state.legacy.found, files: state.legacy.files, cleaned: state.legacy.cleaned },
       /** 网页搜索是否已指向本地桥（面板据此高亮提醒并给一键接入按钮） */
-      webSearch: await webSearchStatus(),
+      webSearch: await webSearchStatus({ bridgeState: probe.state }),
       quota: quotaValue,
       quotaError,
       /** 上次成功读到积分的时刻（ISO）；面板用它显示"更新于" */
@@ -1298,28 +1358,52 @@ export function apply(ctx, rawConfig = {}) {
     state.checkinCache = { ...state.checkinCache, at: 0, value: null };
   }
 
+  /** 最近一次自检的写入口；只持久化在内存里，面板轮询时读取。 */
+  async function runWebSearchVerify() {
+    const verification = await verifyWorkBuddyWebSearch({ web: ctx.get('web') });
+    state.webSearchVerify = {
+      at: Date.now(),
+      verified: verification.verified,
+      sourceCount: verification.sourceCount ?? null,
+      error: verification.verifyError || '',
+      baseURL: `${supervisor.baseUrl}/v1`,
+    };
+    return verification;
+  }
+
+  let webSearchEnableInflight = null;
+
   /**
    * 一键把 dsh 的网页搜索切到 WorkBuddy：
    *   - 先确保桥在跑（拿当前 host/port/令牌）；
    *   - 把令牌写进 dsh credentials 的**独立引用**，不覆盖 DEEPSEEK_API_KEY；
    *   - 把 web-search-deepseek 的 baseURL 指到本地桥 /v1。
+   *
+   * 多个窗口同时点按钮时复用同一个在途任务：重复写配置没有意义，还会重复
+   * 触发真实搜索自检、消耗搜索额度。
    */
-  async function enableWebSearch() {
-    const ready = await supervisor.ensure({ readyTimeoutMs: config.autoStartTimeoutMs });
-    if (!ready.ok) throw new Error(ready.error || ready.state || 'bridge is not ready');
-    const result = await configureWorkBuddyWebSearch({
-      settings: ctx.get('settings'),
-      credentials: ctx.get('credentials'),
-      baseURL: `${supervisor.baseUrl}/v1`,
-      token: config.localToken,
-    });
-    // 用 dsh 自己的 web 服务跑一次，令牌/桥/热更任何一环不对都会在这里暴露。
-    const verification = await verifyWorkBuddyWebSearch({ web: ctx.get('web') });
-    log('web search configured -> bridge', result.baseURL,
-      verification.verified === true ? `verified sources=${verification.sourceCount}`
-        : verification.verified === false ? `verify failed: ${verification.verifyError}`
-          : 'verification skipped (no web service)');
-    return { ...result, ...verification };
+  function enableWebSearch() {
+    if (webSearchEnableInflight) return webSearchEnableInflight;
+    webSearchEnableInflight = (async () => {
+      const ready = await supervisor.ensure({ readyTimeoutMs: config.autoStartTimeoutMs });
+      if (!ready.ok) throw new Error(ready.error || ready.state || 'bridge is not ready');
+      // 配置即将变化：旧的自检结果不再代表当前链路。
+      state.webSearchVerify = { at: 0, verified: null, sourceCount: null, error: '', baseURL: '' };
+      const result = await configureWorkBuddyWebSearch({
+        settings: ctx.get('settings'),
+        credentials: ctx.get('credentials'),
+        baseURL: `${supervisor.baseUrl}/v1`,
+        token: config.localToken,
+      });
+      // 用 dsh 自己的 web 服务跑一次，令牌/桥/热更任何一环不对都会在这里暴露。
+      const verification = await runWebSearchVerify();
+      log('web search configured -> bridge', result.baseURL,
+        verification.verified === true ? `verified sources=${verification.sourceCount}`
+          : verification.verified === false ? `verify failed: ${verification.verifyError}`
+            : 'verification skipped (no web service)');
+      return { ...result, ...verification };
+    })().finally(() => { webSearchEnableInflight = null; });
+    return webSearchEnableInflight;
   }
 
   // ── 6. HTTP 数据面（入口页用） ─────────────────────────────────────────
@@ -1339,6 +1423,7 @@ export function apply(ctx, rawConfig = {}) {
         onWritePrefs: writeModelPrefs,
         notifyAdaptersUpdated,
         enableWebSearch,
+        verifyWebSearch: runWebSearchVerify,
       });
       const disposeRoutes = mountRoutes(webServer, routes, log);
       ctx.effect(() => disposeRoutes, 'workbuddy.panel-routes');

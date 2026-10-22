@@ -612,7 +612,8 @@ try {
       window.__setRoute('/workbuddy/status', {
         ...orig,
         webSearch: {
-          available: true, configured: false, reason: 'endpoint',
+          available: true, configured: false, ready: false, reason: 'endpoint',
+          bridgeState: 'running', tokenMatches: true,
           expectedBaseURL: 'http://127.0.0.1:8790/v1', baseURL: '', apiKeyRef: 'WORKBUDDY_SEARCH_BRIDGE_KEY',
         },
       });
@@ -626,8 +627,12 @@ try {
       await new Promise((r) => setTimeout(r, 300));
       return { text, hasAction };
     })()`);
-    if (!/网页搜索还没接入 WorkBuddy/.test(searchAlert.text)) {
+    if (!/网页搜索需要重新接入：地址没有指向当前本地桥/.test(searchAlert.text)
+      && !/网页搜索还没接入 WorkBuddy/.test(searchAlert.text)) {
       problems.push('网页搜索未接入时没有出现提醒');
+    }
+    if (!/地址未指向本地桥/.test(searchAlert.text)) {
+      problems.push('网页搜索未接入时状态卡没有给出具体原因');
     }
     if (!searchAlert.hasAction) problems.push('网页搜索未接入时没有「接入搜索」按钮');
   } else {
@@ -1538,19 +1543,24 @@ async function verifyDegradedBridge() {
       },
     },
   };
-  const port = PORT + 4;
-  const page4 = await openPage(`http://127.0.0.1:${port}/harness.html`, {}, { width: 900, height: 1100, injectStub: false, cdpPort: 9336 });
+  /*
+   * 用系统分配的临时端口，而不是 PORT+4：本机代理/加速器经常占用固定端口，
+   * 之前 8814 被 Steam++ 占用，整个验收直接 EACCES 中断（与被测代码无关）。
+   */
   const extra4 = createServer((req, res) => {
-    const path = new URL(req.url, `http://127.0.0.1:${port}`).pathname;
+    const path = new URL(req.url, 'http://127.0.0.1').pathname;
     if (path === '/harness.html') { res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }); return res.end(harnessHtml(degradedRoutes)); }
     if (path === '/client.js') { res.writeHead(200, { 'content-type': 'text/javascript; charset=utf-8' }); return res.end(clientSource); }
     if (path === '/vendor/react.js') { res.writeHead(200, { 'content-type': 'text/javascript; charset=utf-8' }); return res.end(react); }
     if (path === '/vendor/react-dom.js') { res.writeHead(200, { 'content-type': 'text/javascript; charset=utf-8' }); return res.end(reactDom); }
     res.writeHead(404); res.end('not found');
   });
-  await new Promise((resolve) => extra4.listen(port, '127.0.0.1', resolve));
+  await new Promise((resolve) => extra4.listen(0, '127.0.0.1', resolve));
+  const port = extra4.address().port;
   const problems = [];
+  let page4;
   try {
+    page4 = await openPage(`http://127.0.0.1:${port}/harness.html`, {}, { width: 900, height: 1100, injectStub: false, cdpPort: 9336 });
     await waitFor(page4.cdp, 'window.__harness && window.__harness.rendered === true', 15000, '面板挂载');
     await sleep(1000);
     const text = await page4.cdp.evaluate("document.querySelector('.wb-root') ? document.querySelector('.wb-root').innerText : ''");
@@ -1569,7 +1579,7 @@ async function verifyDegradedBridge() {
   } catch (error) {
     problems.push(`场景 4 失败：${error.message}`);
   } finally {
-    page4.close();
+    if (page4) page4.close();
     await new Promise((r) => extra4.close(r));
   }
   if (problems.length) {
@@ -1656,6 +1666,7 @@ async function verifyFirstRun() {
     if (!/模型和积分/.test(text)) problems.push('引导没有说明登录后模型/积分会出现');
     if (!/不需要安装 WorkBuddy 桌面端/.test(text)) problems.push('没有说明插件登录不依赖桌面端');
     if (!/去登录|开始登录/.test(text)) problems.push('没有给出登录入口');
+    if (/接入搜索/.test(text)) problems.push('首次安装未登录时仍催促接入搜索（点击必然失败）');
     const shot = await page.cdp.send('Page.captureScreenshot', { format: 'png', captureBeyondViewport: true });
     writeFileSync(join(OUT_DIR, 'plugin-panel-first-run.png'), Buffer.from(shot.result.data, 'base64'));
     // 首次安装的引导文案也必须能翻成英文（这些分支平时渲染扫描扫不到）

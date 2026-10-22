@@ -74,6 +74,9 @@ export const FIXTURES = {
     webSearch: {
       available: true,
       configured: true,
+      ready: true,
+      bridgeState: 'running',
+      tokenMatches: true,
       pointsToBridge: true,
       providerSelected: true,
       provider: '',
@@ -82,6 +85,12 @@ export const FIXTURES = {
       apiKeyRef: 'WORKBUDDY_SEARCH_BRIDGE_KEY',
       keyConfigured: true,
       reason: '',
+      lastVerifiedAt: new Date(now - 60_000).toISOString(),
+      lastVerifySourceCount: 2,
+      lastVerifyError: '',
+      lastVerifyStale: false,
+      lastVerifyFailed: false,
+      lastVerifyVerified: true,
     },
     /*
      * 权益包：**必须带 monthly / expiresAt** —— 不带就渲染不出

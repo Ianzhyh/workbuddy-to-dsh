@@ -72,6 +72,23 @@ const stub = createServer((req, res) => {
         res.end(JSON.stringify({ provider: 'stub-search', results: [], total_results: 0, response_time_ms: 5 }));
         return;
       }
+      if (query.includes('malformed')) {
+        // 头部已在上面统一写成 json；这里只要 body 不是 JSON 即可复现网关错误页。
+        res.end('<html><body>gateway error page</body></html>');
+        return;
+      }
+      if (query.includes('bad-url')) {
+        res.end(JSON.stringify({
+          provider: 'stub-search',
+          results: [
+            { title: 'Bad', url: 'javascript:alert(1)', snippet: 'bad' },
+            { title: 'Good', url: 'https://good.example/g', snippet: 'good' },
+          ],
+          total_results: 2,
+          response_time_ms: 5,
+        }));
+        return;
+      }
       const results = [
         { title: 'Alpha', url: 'https://alpha.example/a', snippet: 'alpha snippet' },
         { title: 'Beta', url: 'https://beta.example/b', snippet: 'beta snippet' },
@@ -267,6 +284,42 @@ test('workbuddy search：流式原生搜索明确 400，最后一条 user 无文
     tools: [{ type: 'web_search_20250305', name: 'web_search' }],
   });
   assert.equal(imageOnly.status, 400, '不能回头搜索更早的 user 文本');
+});
+
+test('workbuddy search：非 JSON 200 不能伪装成空结果，非 http(s) URL 被丢弃', async () => {
+  const malformed = await post('/v1/web_search', { query: 'malformed query' });
+  assert.equal(malformed.status, 502, 'HTML/空体必须报上游错误，而不是 0 结果成功');
+  const malformedBody = await malformed.json();
+  assert.equal(malformedBody.error.code, 'WEB_SEARCH_UPSTREAM');
+
+  const bad = await post('/v1/web_search', { query: 'bad-url query' });
+  assert.equal(bad.status, 200);
+  const body = await bad.json();
+  assert.equal(body.results.length, 1);
+  assert.equal(body.results[0].url, 'https://good.example/g');
+});
+
+test('workbuddy search：/v1/messages 的上游 429 也映射成 rate_limit_error', async () => {
+  const res = await post('/v1/messages', {
+    model: 'm',
+    messages: [{
+      role: 'user',
+      content: [{ type: 'text', text: 'Perform a web search for the query: rate-limit test' }],
+    }],
+    tools: [{ type: 'web_search_20250305', name: 'web_search' }],
+  });
+  assert.equal(res.status, 429);
+  const body = await res.json();
+  assert.equal(body.error.type, 'rate_limit_error');
+  assert.equal(body.error.code, 'WEB_SEARCH_RATE_LIMITED');
+  assert.ok(res.headers.get('retry-after'), '限流必须带 Retry-After');
+});
+
+test('workbuddy search：超大 body 回 413，后续请求仍可用', async () => {
+  const huge = await post('/v1/web_search', { query: 'x'.repeat(70 * 1024) });
+  assert.equal(huge.status, 413);
+  const after = await post('/v1/web_search', { query: 'after big body' });
+  assert.equal(after.status, 200);
 });
 
 test('workbuddy search：max_results 非法本地 400，wrapped/empty 正常', async () => {

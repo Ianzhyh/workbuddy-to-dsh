@@ -69,6 +69,36 @@ function numEnv(name, fallback, range = {}) {
   return range.integer ? Math.trunc(value) : value;
 }
 
+/**
+ * 合并取消信号。`AbortSignal.any` 是 Node 20.3 才有的 API，而包声明的是
+ * Node >=18；在旧运行时上用等价的监听实现，避免搜索/聊天在 Node 18 直接抛错。
+ */
+function combineAbortSignals(signals) {
+  const list = signals.filter((signal) => signal instanceof AbortSignal);
+  if (list.length === 0) return undefined;
+  if (list.length === 1) return list[0];
+  if (typeof AbortSignal.any === 'function') return AbortSignal.any(list);
+
+  const controller = new AbortController();
+  let cleanup = () => {};
+  const onAbort = (event) => {
+    cleanup();
+    controller.abort(event.target.reason);
+  };
+  cleanup = () => {
+    for (const signal of list) signal.removeEventListener('abort', onAbort);
+  };
+  for (const signal of list) {
+    if (signal.aborted) {
+      cleanup();
+      controller.abort(signal.reason);
+      return controller.signal;
+    }
+    signal.addEventListener('abort', onAbort, { once: true });
+  }
+  return controller.signal;
+}
+
 const APP_VERSION = process.env.WORKBUDDY_APP_VERSION || '4.9.29177644';
 const IDE_VERSION = process.env.WORKBUDDY_IDE_VERSION || '1.119.0';
 const IDE_NAME = process.env.WORKBUDDY_IDE_NAME || 'VSCode';
@@ -2542,9 +2572,28 @@ function buildSearchHeaders(auth, conversationId) {
 /** 一次搜索请求；401/403 时刷新/接管凭据后重试一次（与 chat 路径一致）。 */
 async function searchUpstream(auth, requestBody, conversationId, clientSignal) {
   const endpoint = `${searchBaseFor(auth)}${SEARCH_PATH}`;
+  /*
+   * 整个搜索（含 401 刷新、换凭据、5xx 重试）共享一个预算。原先每个 attempt
+   * 各算一次 20s，最坏会把一次搜索拖到 ~80s；dsh 早就放弃了，桥却还在扣额度。
+   */
+  const deadline = Date.now() + SEARCH_TIMEOUT_MS;
+  const timeoutError = () => {
+    const err = /** @type {Error & { code?: string }} */ (new Error(
+      `web search timed out after ${SEARCH_TIMEOUT_MS}ms`,
+    ));
+    err.code = 'WEB_SEARCH_TIMEOUT';
+    return err;
+  };
+  const abortedError = () => {
+    const err = /** @type {Error & { code?: string }} */ (new Error('web search aborted'));
+    err.code = 'WEB_SEARCH_ABORTED';
+    return err;
+  };
   const attempt = async (a) => {
-    const timeoutSignal = AbortSignal.timeout(SEARCH_TIMEOUT_MS);
-    const signal = clientSignal ? AbortSignal.any([clientSignal, timeoutSignal]) : timeoutSignal;
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) throw timeoutError();
+    const timeoutSignal = AbortSignal.timeout(remaining);
+    const signal = combineAbortSignals([clientSignal, timeoutSignal]);
     try {
       const res = await fetch(endpoint, {
         method: 'POST',
@@ -2554,12 +2603,27 @@ async function searchUpstream(auth, requestBody, conversationId, clientSignal) {
         body: JSON.stringify(requestBody),
         signal,
       });
-      const text = await res.text().catch(() => '');
+      let text;
+      try {
+        text = await res.text();
+      } catch (error) {
+        if (clientSignal?.aborted) throw abortedError();
+        const readError = /** @type {Error & { code?: string }} */ (new Error(
+          `web search response read failed: ${error?.message || error}`,
+        ));
+        readError.code = 'WEB_SEARCH_TRANSPORT';
+        throw readError;
+      }
       let parsed = null;
       try { parsed = JSON.parse(text); } catch { /* 非 JSON 原文留给错误处理 */ }
       return { res, text, parsed };
     } catch (error) {
-      if (clientSignal?.aborted) throw error;
+      // 先看调用方取消：fetch/undici 的 abort 错误也可能自带 code（如 ABORT_ERR），
+      // 不能因为“有 code”就把取消误报成上游 502。
+      if (clientSignal?.aborted) throw abortedError();
+      if (error?.code === 'WEB_SEARCH_TRANSPORT'
+        || error?.code === 'WEB_SEARCH_ABORTED'
+        || error?.code === 'WEB_SEARCH_TIMEOUT') throw error;
       const timeout = error?.name === 'TimeoutError' || /timeout|timed out/i.test(String(error?.message || ''));
       const err = /** @type {Error & { code?: string }} */ (new Error(
         timeout ? `web search timed out after ${SEARCH_TIMEOUT_MS}ms` : `web search request failed: ${error?.message || error}`,
@@ -2594,7 +2658,12 @@ async function searchUpstream(auth, requestBody, conversationId, clientSignal) {
   // 与 chat 路径一致：搜索网关的短时 5xx 也原样重试（只重试常见的四个状态码）。
   for (let i = 0; UPSTREAM_5XX_RETRY_STATUSES.has(result.res.status) && i < UPSTREAM_5XX_RETRIES; i += 1) {
     const wait = UPSTREAM_5XX_RETRY_DELAY_MS * (i + 1);
-    if (wait > 0) await sleep(wait);
+    if (wait > 0) {
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) throw timeoutError();
+      await sleep(Math.min(wait, remaining));
+      if (Date.now() >= deadline) throw timeoutError();
+    }
     result = await attempt(currentAuth);
   }
   return { ...result, endpoint };
@@ -2638,7 +2707,20 @@ async function workbuddySearch({ query, maxResults = SEARCH_DEFAULT_MAX_RESULTS,
     err.retryAfterMs = upstreamRetryAfterMs(res, text) ?? 5000;
     throw err;
   }
-  if (parsed && parsed.code !== undefined && Number(parsed.code) !== 0) {
+  /*
+   * 上游 200 但返回 HTML / 空体时，JSON.parse 会得到 null；旧逻辑把它当成
+   * “0 条结果”回 200，面板自检也会通过 —— 故障被伪装成成功。这里把
+   * “不是对象 / 没有 results 数组”明确归为上游错误。
+   */
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    const err = /** @type {Error & { code?: string, status?: number }} */ (new Error(
+      'workbuddy search returned a non-JSON response',
+    ));
+    err.code = 'WEB_SEARCH_UPSTREAM';
+    err.status = 502;
+    throw err;
+  }
+  if (parsed.code !== undefined && Number(parsed.code) !== 0) {
     const code = Number(parsed.code);
     const err = /** @type {Error & { code?: string, status?: number, retryAfterMs?: number }} */ (new Error(
       String(parsed.msg || parsed.message || `workbuddy search error ${parsed.code}`).slice(0, 300),
@@ -2648,10 +2730,21 @@ async function workbuddySearch({ query, maxResults = SEARCH_DEFAULT_MAX_RESULTS,
     err.retryAfterMs = upstreamRetryAfterMs(res, text) ?? 5000;
     throw err;
   }
-  const data = parsed?.data && typeof parsed.data === 'object' ? parsed.data : (parsed || {});
-  const rawResults = Array.isArray(data.results) ? data.results : [];
+  const data = parsed.data && typeof parsed.data === 'object' && !Array.isArray(parsed.data)
+    ? parsed.data
+    : parsed;
+  if (!Array.isArray(data.results)) {
+    const err = /** @type {Error & { code?: string, status?: number }} */ (new Error(
+      'workbuddy search response is missing a results array',
+    ));
+    err.code = 'WEB_SEARCH_UPSTREAM';
+    err.status = 502;
+    throw err;
+  }
+  const rawResults = data.results;
   const results = rawResults
-    .filter((r) => r && typeof r.url === 'string' && r.url)
+    // 只接受 http(s) 绝对地址：避免把 javascript:/file: 之类的结果交给下游渲染。
+    .filter((r) => r && typeof r.url === 'string' && /^https?:\/\//i.test(r.url))
     .map((r) => ({
       title: typeof r.title === 'string' && r.title ? r.title : r.url,
       url: r.url,
@@ -3075,8 +3168,7 @@ async function callUpstream(bodyString, model, conversationId, clientSignal, { s
     // WORKBUDDY_TIMEOUT_MS > 0 时给整个上游往返加超时（0/未设 = 不限，
     // LLM 长回答需要）；与客户端取消信号合并。
     const timeoutSignal = UPSTREAM_TIMEOUT_MS > 0 ? AbortSignal.timeout(UPSTREAM_TIMEOUT_MS) : null;
-    const signal = clientSignal && timeoutSignal ? AbortSignal.any([clientSignal, timeoutSignal])
-      : (clientSignal || timeoutSignal || undefined);
+    const signal = combineAbortSignals([clientSignal, timeoutSignal]);
     return upstreamRequest(`${a.endpoint}${CHAT_PATH}`, {
       headers: buildChatHeaders(a, model, conversationId),
       body: bodyString,
@@ -7485,6 +7577,8 @@ async function handleRequest(req, res) {
         raw = await readBody(req, 64 * 1024);
       } catch (e) {
         if (e.code === 'BODY_TOO_LARGE') {
+          // readBody 只 pause、不丢字节；413 写完后必须 resume，否则 keep-alive 连接会挂住。
+          req.resume();
           return json(res, 413, { error: { message: 'web_search body too large', type: 'payload_too_large' } });
         }
         throw e;
@@ -7550,8 +7644,8 @@ async function handleRequest(req, res) {
           truncated: search.truncated,
         });
       } catch (e) {
-        if (e?.code === 'RATE_LIMIT_ABORTED') return;
-        const rateLimited = e?.code === 'RATE_LIMITED';
+        if (e?.code === 'RATE_LIMIT_ABORTED' || e?.code === 'WEB_SEARCH_ABORTED' || ac.signal.aborted) return;
+        const rateLimited = e?.code === 'RATE_LIMITED' || e?.code === 'WEB_SEARCH_RATE_LIMITED';
         const status = rateLimited ? 429 : (Number(e?.status) || (e?.code === 'WEB_SEARCH_TIMEOUT' ? 504 : 502));
         recordRequest({
           model: 'web-search', stream: false, ms: Date.now() - startedAt,
@@ -8049,6 +8143,8 @@ async function handleRequest(req, res) {
         raw = await readBody(req);
       } catch (e) {
         if (e.code === 'BODY_TOO_LARGE') {
+          // 同 /v1/web_search：先把剩余字节读掉，保证 413 后连接仍可复用。
+          req.resume();
           return json(res, 413, {
             type: 'error',
             error: { type: 'request_too_large', message: `request body too large (limit ${MAX_BODY_BYTES} bytes)` },
@@ -8108,7 +8204,8 @@ async function handleRequest(req, res) {
           log(`web_search (anthropic) results=${search.results.length} provider=${search.provider || '-'} ms=${Date.now() - startedAt}`);
           return json(res, 200, anthropicSearchMessage(body.model || 'workbuddy-web-search', search));
         } catch (e) {
-          const rateLimited = e?.code === 'RATE_LIMITED';
+          if (e?.code === 'RATE_LIMIT_ABORTED' || e?.code === 'WEB_SEARCH_ABORTED' || ac.signal.aborted) return;
+          const rateLimited = e?.code === 'RATE_LIMITED' || e?.code === 'WEB_SEARCH_RATE_LIMITED';
           const status = rateLimited ? 429 : (Number(e?.status) || (e?.code === 'WEB_SEARCH_TIMEOUT' ? 504 : 502));
           recordRequest({
             model: 'web-search', stream: false, ms: Date.now() - startedAt,

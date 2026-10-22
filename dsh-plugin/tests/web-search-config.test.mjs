@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   configureWorkBuddyWebSearch,
+  deriveWebSearchReadiness,
   deriveWebSearchStatus,
   verifyWorkBuddyWebSearch,
   SEARCH_KEY_REF,
@@ -154,6 +155,72 @@ test('状态判断：只有接口地址、凭据、provider 三者都对才算�
   assert.equal(noWebSection.providerSelected, true);
 });
 
+test('状态合并：配置对了但桥没跑/令牌变了，不能算 ready', () => {
+  const expected = 'http://127.0.0.1:8790/v1';
+  const status = deriveWebSearchStatus({
+    section: { baseURL: expected, apiKeyEnv: SEARCH_KEY_REF },
+    expectedBaseURL: expected,
+    keyConfigured: true,
+  });
+  assert.equal(status.configured, true);
+
+  const bridgeDown = deriveWebSearchReadiness({ status, bridgeState: 'stopped', tokenMatches: true });
+  assert.equal(bridgeDown.ready, false);
+  assert.equal(bridgeDown.reason, 'bridge');
+
+  const staleToken = deriveWebSearchReadiness({ status, bridgeState: 'running', tokenMatches: false });
+  assert.equal(staleToken.ready, false);
+  assert.equal(staleToken.reason, 'token');
+
+  const authIssue = deriveWebSearchReadiness({ status, bridgeState: 'degraded', tokenMatches: true });
+  assert.equal(authIssue.ready, false);
+  assert.equal(authIssue.reason, 'bridge-auth', '桥在跑但登录坏了，不能说成桥未运行');
+
+  const conflict = deriveWebSearchReadiness({ status, bridgeState: 'unauthorized', tokenMatches: true });
+  assert.equal(conflict.ready, false);
+  assert.equal(conflict.reason, 'bridge-conflict');
+
+  const ready = deriveWebSearchReadiness({ status, bridgeState: 'running', tokenMatches: true });
+  assert.equal(ready.ready, true);
+  assert.equal(ready.reason, '');
+});
+
+test('状态合并：自检失败/地址变化会保留证据但标记失效', () => {
+  const expected = 'http://127.0.0.1:8790/v1';
+  const status = { configured: true, reason: '' };
+  const failed = deriveWebSearchReadiness({
+    status,
+    bridgeState: 'running',
+    tokenMatches: true,
+    expectedBaseURL: expected,
+    verification: {
+      at: Date.now(),
+      verified: false,
+      sourceCount: 0,
+      error: 'WEB_SEARCH_UPSTREAM',
+      baseURL: expected,
+    },
+  });
+  assert.equal(failed.ready, true, '配置/桥/令牌都对，ready 仍为真；失败通过自检证据表达');
+  assert.equal(failed.lastVerifyFailed, true);
+  assert.equal(failed.lastVerifyError, 'WEB_SEARCH_UPSTREAM');
+
+  const stale = deriveWebSearchReadiness({
+    status,
+    bridgeState: 'running',
+    tokenMatches: true,
+    expectedBaseURL: 'http://127.0.0.1:8791/v1',
+    verification: {
+      at: Date.now(),
+      verified: true,
+      sourceCount: 2,
+      baseURL: expected,
+    },
+  });
+  assert.equal(stale.lastVerifyStale, true);
+  assert.equal(stale.lastVerifyFailed, false, '失效的旧结果不能继续当成失败');
+});
+
 test('自检：走 dsh web 服务搜一次，成功/失败/缺失三种结果分明', async () => {
   let request;
   const ok = await verifyWorkBuddyWebSearch({
@@ -169,6 +236,12 @@ test('自检：走 dsh web 服务搜一次，成功/失败/缺失三种结果分
   });
   assert.equal(failed.verified, false);
   assert.match(failed.verifyError, /CONFIGURED_UNAVAILABLE/);
+
+  const empty = await verifyWorkBuddyWebSearch({
+    web: { async search() { return { sources: [] }; } },
+  });
+  assert.equal(empty.verified, false, '0 来源不能算自检通过');
+  assert.equal(empty.sourceCount, 0);
 
   assert.deepEqual(await verifyWorkBuddyWebSearch({ web: undefined }), { verified: null });
 });

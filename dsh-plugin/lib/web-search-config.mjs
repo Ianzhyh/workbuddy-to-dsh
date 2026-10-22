@@ -103,6 +103,69 @@ export function deriveWebSearchStatus({ section, webSection, expectedBaseURL, ke
 }
 
 /**
+ * 把配置状态、桥状态、凭据是否匹配和最近一次自检合并成面板可用的“现在能不能用”。
+ *
+ * `configured` 只代表 settings 写对了；桥没跑、令牌被轮换时它仍然为真。
+ * 面板必须用这里的 `ready`，否则会出现“绿色但搜索必失败”。
+ *
+ * @param {object} deps
+ * @param {ReturnType<typeof deriveWebSearchStatus>} deps.status
+ * @param {string} deps.bridgeState supervisor.probe() 的状态
+ * @param {boolean | null} deps.tokenMatches 凭据值是否等于当前桥令牌；null = 无法比对
+ * @param {{ at?: number, verified?: boolean | null, sourceCount?: number, error?: string, baseURL?: string } | null} [deps.verification]
+ * @param {string} [deps.expectedBaseURL]
+ * @returns {{ ready: boolean, reason: string, bridgeState: string, tokenMatches: boolean | null, lastVerifiedAt: string, lastVerifySourceCount: number | null, lastVerifyError: string, lastVerifyStale: boolean, lastVerifyFailed: boolean, lastVerifyVerified: boolean | null }}
+ */
+export function deriveWebSearchReadiness({
+  status,
+  bridgeState,
+  tokenMatches = null,
+  verification = null,
+  expectedBaseURL = '',
+} = {}) {
+  const configReady = status?.configured === true;
+  const bridgeReady = bridgeState === 'running';
+  const tokenReady = tokenMatches !== false;
+  const ready = configReady && bridgeReady && tokenReady;
+
+  let reason = '';
+  if (!configReady) reason = typeof status?.reason === 'string' && status.reason ? status.reason : 'config';
+  else if (!bridgeReady) {
+    // 桥进程在、但登录/令牌/端口有问题：不要笼统说“桥未运行”，那会让用户
+    // 去启动一个其实已经在跑的桥。
+    if (bridgeState === 'degraded' || bridgeState === 'unauthenticated') reason = 'bridge-auth';
+    else if (bridgeState === 'unauthorized' || bridgeState === 'foreign') reason = 'bridge-conflict';
+    else reason = 'bridge';
+  } else if (tokenMatches === false) reason = 'token';
+
+  const hasVerification = Boolean(verification && verification.at);
+  const stale = hasVerification && (
+    tokenMatches === false
+    || (typeof verification.baseURL === 'string'
+      && verification.baseURL !== ''
+      && typeof expectedBaseURL === 'string'
+      && expectedBaseURL !== ''
+      && verification.baseURL.replace(/\/+$/, '') !== expectedBaseURL.replace(/\/+$/, ''))
+  );
+  return {
+    ready,
+    reason,
+    bridgeState: typeof bridgeState === 'string' ? bridgeState : '',
+    tokenMatches: tokenMatches === true || tokenMatches === false ? tokenMatches : null,
+    lastVerifiedAt: hasVerification ? new Date(verification.at).toISOString() : '',
+    lastVerifySourceCount: hasVerification && Number.isFinite(verification.sourceCount)
+      ? verification.sourceCount
+      : null,
+    lastVerifyError: hasVerification && typeof verification.error === 'string' ? verification.error : '',
+    lastVerifyStale: stale,
+    lastVerifyFailed: hasVerification && verification.verified === false && !stale,
+    lastVerifyVerified: hasVerification && (verification.verified === true || verification.verified === false)
+      ? verification.verified
+      : null,
+  };
+}
+
+/**
  * 用 dsh 自己的 web 服务跑一次真实搜索，证明「配置 + 凭据 + 桥」整条链路可用。
  *
  * 这比只回显 baseURL 更可靠：令牌不对、桥没起、provider 没热更，都会在这里
@@ -134,10 +197,13 @@ export async function verifyWorkBuddyWebSearch({
     : null;
   try {
     const result = await web.search({ query, maxResults }, controller.signal);
-    return {
-      verified: true,
-      sourceCount: Array.isArray(result?.sources) ? result.sources.length : 0,
-    };
+    const sourceCount = Array.isArray(result?.sources) ? result.sources.length : 0;
+    // 自检请求的是固定词；0 来源说明链路有问题（桥回空、provider 没接上），
+    // 不能把“没抛错”当成成功。
+    if (sourceCount === 0) {
+      return { verified: false, sourceCount: 0, verifyError: 'self-test returned 0 sources' };
+    }
+    return { verified: true, sourceCount };
   } catch (error) {
     return {
       verified: false,

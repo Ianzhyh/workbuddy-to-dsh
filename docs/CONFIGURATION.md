@@ -35,7 +35,7 @@ copy .env.example .env
 | `WORKBUDDY_LOG` | `1` | `1` 时打印每次请求的模型、消息数、工具数（**不含对话内容**） |
 | `WORKBUDDY_SEARCH_BASE` | 按账号区域自动选择 | WorkBuddy 原生搜索网关（`/agenttool/v1/search`）。国际版默认 `https://www.workbuddy.ai`，国内版默认 `https://www.workbuddy.cn`；仅自建网关/A/B 时覆盖 |
 | `WORKBUDDY_SEARCH_VERSION` | 桌面/插件版本 | 搜索端 `X-IDE-Version` / UA 声明的 WorkBuddy 版本 |
-| `WORKBUDDY_SEARCH_TIMEOUT_MS` | `20000` | 单次网页搜索超时（毫秒） |
+| `WORKBUDDY_SEARCH_TIMEOUT_MS` | `20000` | 单次网页搜索总超时（毫秒，含 401 刷新/5xx 重试） |
 | `WORKBUDDY_SEARCH_MAX_RESULTS` | `8` | 原生搜索分支返回的结果上限（1-10）。与 Anthropic `max_uses`（服务端搜索执行次数）无关 |
 | `WORKBUDDY_ANTHROPIC_MODEL` | `glm-5.3` | Claude Code 的模型名映射到哪个上游真实模型。可填任意 `/v1/models` 里的 id |
 | `WORKBUDDY_ANTHROPIC_FAST_MODEL` | `glm-5.3-flash` | Claude Code 后台任务（标题生成、文件摘要）用的小快模型 |

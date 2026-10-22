@@ -63,6 +63,7 @@ export function createRouteTable(deps) {
     snapshot, supervisor, consoleSupervisor, client, adapter, paths, provider, log,
     onUpstreamMutation = () => {}, onWritePrefs = () => {}, notifyAdaptersUpdated = () => false,
     enableWebSearch = async () => { throw new Error('web search configuration is unavailable'); },
+    verifyWebSearch = async () => { throw new Error('web search verification is unavailable'); },
   } = deps;
 
   /** 写操作的准入检查。 */
@@ -121,6 +122,23 @@ export function createRouteTable(deps) {
           sendJson(res, 200, { ok: true, ...result });
         } catch (error) {
           log('panel web-search configure failed', error);
+          sendJson(res, 500, { ok: false, error: String(error?.message || error) });
+        }
+      },
+    },
+    {
+      // 只跑自检、不改配置：状态卡上的「重新检测」用它，避免为了看一眼结果
+      // 重新写入 settings/credentials。真实搜索会消耗一次额度，因此仍要求面板头。
+      kind: 'exact',
+      path: '/workbuddy/web-search/verify',
+      async handler(req, res) {
+        if (req.method !== 'POST') return sendJson(res, 405, { ok: false, error: `${req.method} not allowed` });
+        if (!guard(req)) return sendJson(res, 403, { ok: false, error: 'missing x-workbuddy-panel header' });
+        try {
+          const result = await verifyWebSearch();
+          sendJson(res, 200, { ok: true, ...result });
+        } catch (error) {
+          log('panel web-search verify failed', error);
           sendJson(res, 500, { ok: false, error: String(error?.message || error) });
         }
       },
