@@ -4,6 +4,8 @@ import {
   configureWorkBuddyWebSearch,
   deriveWebSearchReadiness,
   deriveWebSearchStatus,
+  restoreWorkBuddyWebSearch,
+  snapshotWorkBuddyWebSearch,
   verifyWorkBuddyWebSearch,
   SEARCH_KEY_REF,
 } from '../lib/web-search-config.mjs';
@@ -219,6 +221,105 @@ test('状态合并：自检失败/地址变化会保留证据但标记失效', (
   });
   assert.equal(stale.lastVerifyStale, true);
   assert.equal(stale.lastVerifyFailed, false, '失效的旧结果不能继续当成失败');
+});
+
+test('可撤销：快照保留旧分节与旧凭据，summary 不含令牌，恢复能逐项还原', async () => {
+  const oldSection = {
+    baseURL: 'https://api.deepseek.com/v1',
+    apiKeyEnv: 'DEEPSEEK_API_KEY',
+    apiKey: 'old-literal',
+  };
+  const oldWeb = { searchProvider: 'custom-provider' };
+  const sections = { 'web-search-deepseek': oldSection, web: oldWeb };
+  const settings = {
+    get(ns) { return sections[ns]; },
+    async replace(ns, section) { sections[ns] = { ...section }; },
+  };
+  const store = new Map([[SEARCH_KEY_REF, 'old-bridge-token']]);
+  const credentials = {
+    async resolve(ref) { return store.has(ref) ? { value: store.get(ref) } : undefined; },
+    async set(ref, value) { store.set(ref, value); },
+    async unset(ref) { store.delete(ref); },
+  };
+
+  const snapshot = await snapshotWorkBuddyWebSearch({ settings, credentials });
+  assert.equal(snapshot.ok, true);
+  assert.deepEqual(snapshot.section, oldSection);
+  assert.deepEqual(snapshot.webSection, oldWeb);
+  assert.equal(snapshot.credential, 'old-bridge-token');
+  assert.equal(JSON.stringify(snapshot.summary).includes('old-bridge-token'), false,
+    '对外 summary 不能包含令牌');
+  assert.equal(snapshot.summary.hadLiteralKey, true);
+
+  await restoreWorkBuddyWebSearch({ settings, credentials, snapshot });
+  assert.deepEqual(sections['web-search-deepseek'], oldSection);
+  assert.deepEqual(sections.web, oldWeb);
+  assert.equal(store.get(SEARCH_KEY_REF), 'old-bridge-token');
+});
+
+test('可撤销：原来没有桥令牌时，恢复会 unset 而不是写空值', async () => {
+  const oldSection = { baseURL: 'https://api.deepseek.com/v1', apiKeyEnv: 'DEEPSEEK_API_KEY' };
+  const sections = { 'web-search-deepseek': oldSection };
+  const settings = {
+    get(ns) { return sections[ns]; },
+    async replace(ns, section) { sections[ns] = { ...section }; },
+  };
+  const store = new Map();
+  let unsetRef = '';
+  const credentials = {
+    async resolve() { return undefined; },
+    async set(ref, value) { store.set(ref, value); },
+    async unset(ref) { unsetRef = ref; store.delete(ref); },
+  };
+
+  const snapshot = await snapshotWorkBuddyWebSearch({ settings, credentials });
+  assert.equal(snapshot.ok, true);
+  assert.deepEqual(snapshot.section, oldSection);
+  assert.equal(snapshot.credential, null);
+  await restoreWorkBuddyWebSearch({ settings, credentials, snapshot });
+  assert.equal(unsetRef, SEARCH_KEY_REF);
+  assert.equal(store.has(SEARCH_KEY_REF), false);
+  assert.deepEqual(sections['web-search-deepseek'], oldSection);
+});
+
+test('可撤销：优先快照 user 层，不把 base/default 里的密钥固化进用户配置', async () => {
+  const settings = {
+    describe() {
+      return [
+        { ns: 'web-search-deepseek', user: { baseURL: 'https://api.deepseek.com/v1', apiKeyEnv: 'DEEPSEEK_API_KEY' } },
+        { ns: 'web', user: undefined },
+      ];
+    },
+    get() { throw new Error('有 describe 时不应依赖解析后的 get 值'); },
+    async replace() {},
+  };
+  const credentials = {
+    async resolve() { return undefined; },
+    async set() {},
+    async unset() {},
+  };
+  const snapshot = await snapshotWorkBuddyWebSearch({ settings, credentials });
+  assert.equal(snapshot.ok, true);
+  assert.deepEqual(snapshot.section, {
+    baseURL: 'https://api.deepseek.com/v1',
+    apiKeyEnv: 'DEEPSEEK_API_KEY',
+  }, '不能把 base 里的 apiKey 写进快照');
+  assert.deepEqual(snapshot.webSection, {}, 'web 分节存在但无 user 覆盖时也要能恢复为空');
+});
+
+test('可撤销：分节不存在时不提供恢复（避免向未注册 namespace 写入）', async () => {
+  const snapshot = await snapshotWorkBuddyWebSearch({
+    settings: {
+      get() { return undefined; },
+      async replace() {},
+    },
+    credentials: {
+      async resolve() { return undefined; },
+      async set() {},
+      async unset() {},
+    },
+  });
+  assert.equal(snapshot.ok, false);
 });
 
 test('自检：走 dsh web 服务搜一次，成功/失败/缺失三种结果分明', async () => {

@@ -42,6 +42,8 @@ import {
   configureWorkBuddyWebSearch,
   deriveWebSearchReadiness,
   deriveWebSearchStatus,
+  restoreWorkBuddyWebSearch,
+  snapshotWorkBuddyWebSearch,
   verifyWorkBuddyWebSearch,
 } from './web-search-config.mjs';
 import { cleanLegacyRoutes, detectLegacyRoutes } from './legacy.mjs';
@@ -646,6 +648,11 @@ export function apply(ctx, rawConfig = {}) {
     bridgeAliveAt: 0,
     /** 最近一次网页搜索自检，只存元数据（不存 query/令牌）。 */
     webSearchVerify: { at: 0, verified: null, sourceCount: null, error: '', baseURL: '' },
+    /**
+     * 一键接入前的 dsh 搜索配置快照。含上一份桥令牌，只留在内存里；
+     * 对外只暴露 summary（baseURL/apiKeyRef/provider），绝不回传 credential。
+     */
+    webSearchPrevious: null,
   };
 
   /**
@@ -980,6 +987,13 @@ export function apply(ctx, rawConfig = {}) {
     const expectedBaseURL = `${supervisor.baseUrl}/v1`;
     const settings = ctx.get('settings');
     const credentials = ctx.get('credentials');
+    const revert = state.webSearchPrevious?.ok
+      ? {
+        available: true,
+        at: new Date(state.webSearchPrevious.at).toISOString(),
+        previous: state.webSearchPrevious.summary,
+      }
+      : { available: false };
     const unavailable = {
       available: false,
       configured: false,
@@ -990,6 +1004,7 @@ export function apply(ctx, rawConfig = {}) {
       apiKeyRef: '',
       expectedBaseURL,
       reason: 'unavailable',
+      revert,
     };
     if (!settings || typeof settings.get !== 'function') {
       return {
@@ -1071,6 +1086,7 @@ export function apply(ctx, rawConfig = {}) {
       available: true,
       expectedBaseURL,
       keyConfigured,
+      revert,
       ...status,
       ...deriveWebSearchReadiness({
         status,
@@ -1387,6 +1403,20 @@ export function apply(ctx, rawConfig = {}) {
     webSearchEnableInflight = (async () => {
       const ready = await supervisor.ensure({ readyTimeoutMs: config.autoStartTimeoutMs });
       if (!ready.ok) throw new Error(ready.error || ready.state || 'bridge is not ready');
+      /*
+       * 只保留**第一次接入前**的快照：用户点“重新接入”时不能把原始配置覆盖掉。
+       * 快照含旧凭据值，仅存内存，不写日志、不进 HTTP 响应。
+       */
+      if (!state.webSearchPrevious) {
+        const previous = await snapshotWorkBuddyWebSearch({
+          settings: ctx.get('settings'),
+          credentials: ctx.get('credentials'),
+        });
+        state.webSearchPrevious = previous.ok ? previous : null;
+        log(previous.ok
+          ? 'web search previous configuration captured for restore'
+          : 'web search previous configuration is not restorable on this host');
+      }
       // 配置即将变化：旧的自检结果不再代表当前链路。
       state.webSearchVerify = { at: 0, verified: null, sourceCount: null, error: '', baseURL: '' };
       const result = await configureWorkBuddyWebSearch({
@@ -1404,6 +1434,21 @@ export function apply(ctx, rawConfig = {}) {
       return { ...result, ...verification };
     })().finally(() => { webSearchEnableInflight = null; });
     return webSearchEnableInflight;
+  }
+
+  /** 把 dsh 的搜索配置恢复到第一次一键接入前的快照。 */
+  async function revertWebSearch() {
+    const previous = state.webSearchPrevious;
+    if (!previous?.ok) throw new Error('没有可恢复的接入前配置');
+    const result = await restoreWorkBuddyWebSearch({
+      settings: ctx.get('settings'),
+      credentials: ctx.get('credentials'),
+      snapshot: previous,
+    });
+    state.webSearchPrevious = null;
+    state.webSearchVerify = { at: 0, verified: null, sourceCount: null, error: '', baseURL: '' };
+    log('web search configuration restored', result.summary?.baseURL || '(unset)');
+    return result;
   }
 
   // ── 6. HTTP 数据面（入口页用） ─────────────────────────────────────────
@@ -1424,6 +1469,7 @@ export function apply(ctx, rawConfig = {}) {
         notifyAdaptersUpdated,
         enableWebSearch,
         verifyWebSearch: runWebSearchVerify,
+        revertWebSearch,
       });
       const disposeRoutes = mountRoutes(webServer, routes, log);
       ctx.effect(() => disposeRoutes, 'workbuddy.panel-routes');

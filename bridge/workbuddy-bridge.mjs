@@ -2796,10 +2796,18 @@ function extractNativeSearchQuery(body) {
   return text.replace(/^\s*Perform a web search for the query:\s*/i, '').trim();
 }
 
-function anthropicSearchMessage(model, search) {
+function anthropicSearchMessage(model, search, query) {
   const toolUseId = `srvtoolu_${trace().slice(0, 24)}`;
   /** @type {any[]} */
   const blocks = [{
+    // Anthropic 的 tool_use_id 必须指向同一响应里的 server_tool_use；原实现
+    // 只回 tool_result，严格客户端会把它当成悬空引用。dsh provider 按 type
+    // 过滤，不依赖块顺序，因此补在前面是安全的。
+    type: 'server_tool_use',
+    id: toolUseId,
+    name: 'web_search',
+    input: { query },
+  }, {
     type: 'web_search_tool_result',
     tool_use_id: toolUseId,
     content: search.results.map((r) => ({
@@ -2826,7 +2834,16 @@ function anthropicSearchMessage(model, search) {
     content: blocks,
     stop_reason: 'end_turn',
     stop_sequence: null,
-    usage: { input_tokens: 0, output_tokens: 0 },
+    /*
+     * 不伪造 encrypted_content / encrypted_index：它们是 Anthropic 侧生成、
+     * 用于多轮回放的 opaque 字段，桥无法凭空签发。dsh provider 只消费
+     * web_search_tool_result 与 citations，因此这里如实省略。
+     */
+    usage: {
+      input_tokens: 0,
+      output_tokens: 0,
+      server_tool_use: { web_search_requests: 1 },
+    },
   };
 }
 
@@ -8202,7 +8219,7 @@ async function handleRequest(req, res) {
             ok: true, status: 200, code: null,
           });
           log(`web_search (anthropic) results=${search.results.length} provider=${search.provider || '-'} ms=${Date.now() - startedAt}`);
-          return json(res, 200, anthropicSearchMessage(body.model || 'workbuddy-web-search', search));
+          return json(res, 200, anthropicSearchMessage(body.model || 'workbuddy-web-search', search, query));
         } catch (e) {
           if (e?.code === 'RATE_LIMIT_ABORTED' || e?.code === 'WEB_SEARCH_ABORTED' || ac.signal.aborted) return;
           const rateLimited = e?.code === 'RATE_LIMITED' || e?.code === 'WEB_SEARCH_RATE_LIMITED';

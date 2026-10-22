@@ -276,6 +276,41 @@ if (bridgePortState.state === 'ours' || bridgePortState.state === 'degraded') {
   }
 }
 
+/**
+ * 在 profile 的配置里找 web-search-deepseek 分节。
+ * 只做文本扫描（不引入 YAML 依赖），够用来回答“有没有指向当前桥”。
+ */
+function findSearchConfig(profileDir) {
+  const files = ['cordis.patch.yml', 'settings.yaml', 'settings.yml', 'config.yaml', 'config.yml'];
+  for (const file of files) {
+    const path = join(profileDir, file);
+    if (!existsSync(path)) continue;
+    let text = '';
+    try { text = readFileSync(path, 'utf8'); } catch { continue; }
+    const lines = text.split(/\r?\n/);
+    const start = lines.findIndex((line) => /^\s*-\s*id:\s*web-search-deepseek\s*$/.test(line)
+      || /^\s*web-search-deepseek\s*:\s*$/.test(line));
+    if (start < 0) continue;
+    const block = [];
+    for (let i = start; i < lines.length; i += 1) {
+      const line = lines[i];
+      if (i > start) {
+        if (/^\s*-\s*id:\s*/.test(line)) break;
+        if (/^\S/.test(line) && !/^\s/.test(line)) break;
+      }
+      block.push(line);
+    }
+    const body = block.join('\n');
+    const unquote = (value) => String(value || '').replace(/^['"]|['"]$/g, '');
+    return {
+      file: path,
+      baseURL: unquote((body.match(/baseURL:\s*(\S+)/) || [])[1]).replace(/\/+$/, ''),
+      apiKeyEnv: unquote((body.match(/apiKeyEnv:\s*(\S+)/) || [])[1]),
+    };
+  }
+  return null;
+}
+
 /** 6. 装进了哪些 dsh profile */
 const dshHome = process.env.DSH_HOME || join(homedir(), '.dsh');
 const profilesDir = join(dshHome, 'profiles');
@@ -283,6 +318,7 @@ if (!existsSync(profilesDir)) {
   record('warn', 'dsh profile', `${profilesDir} 不存在`, `确认 DSH_HOME（当前 ${dshHome}）；dsh 桌面版一般是 ~/.dsh`);
 } else {
   const installed = [];
+  const installedProfiles = [];
   for (const name of readdirSync(profilesDir)) {
     const pkgPath = join(profilesDir, name, 'package.json');
     if (!existsSync(pkgPath)) continue;
@@ -292,11 +328,36 @@ if (!existsSync(profilesDir)) {
       const inBundles = (pkg.dsh?.profile?.bundles || []).some((b) => PLUGIN_PACKAGE_NAMES.includes(b));
       if (dep) installed.push(`${name}（${pkg.dependencies[dep]}）`);
       else if (inBundles) installed.push(`${name}（bundle）`);
+      if (dep || inBundles) installedProfiles.push({ name, dir: join(profilesDir, name) });
     } catch { /* 忽略坏 JSON */ }
   }
   record(installed.length ? 'ok' : 'warn', '插件安装情况',
     installed.length ? `已装进：${installed.join('，')}` : '没有 profile 依赖 dsh-plugin-workbuddy / workbuddy-to-dsh',
     installed.length ? null : '在 dsh 里用「设置 → 插件 → 安装」指向本目录，或 `dsh plugin --profile <名字> add <本目录>`');
+
+  /*
+   * 网页搜索的**配置层**检查：不发起搜索、不消耗额度。真实链路（含 dsh
+   * provider 解析）要用面板的「重新检测」，这里只回答“有没有指向当前桥”。
+   */
+  if (installedProfiles.length) {
+    const expected = `http://127.0.0.1:${bridgePort}/v1`;
+    const states = installedProfiles.map(({ name, dir }) => {
+      const found = findSearchConfig(dir);
+      if (!found) return { name, state: 'missing', detail: '未配置（dsh 默认走 DeepSeek）' };
+      if (found.baseURL === expected && found.apiKeyEnv === 'WORKBUDDY_SEARCH_BRIDGE_KEY') {
+        return { name, state: 'ok', detail: `指向本地桥（${found.apiKeyEnv}）` };
+      }
+      return {
+        name,
+        state: 'other',
+        detail: `baseURL=${found.baseURL || '(空)'} · apiKeyEnv=${found.apiKeyEnv || '(空)'}`,
+      };
+    });
+    const okCount = states.filter((s) => s.state === 'ok').length;
+    record(okCount ? 'ok' : 'warn', '网页搜索（配置层）',
+      states.map((s) => `${s.name}：${s.detail}`).join('；'),
+      okCount ? null : '在 dsh 的 WorkBuddy → 概览 → 网页搜索点「一键接入」；真实搜索用「重新检测」');
+  }
 }
 
 /** 输出 */

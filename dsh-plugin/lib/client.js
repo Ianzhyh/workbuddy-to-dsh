@@ -517,6 +517,14 @@ body.dark .wb-root,
         'The bridge token or port is misconfigured; restart the bridge or check the port first.',
       '读取 dsh 的网页搜索配置失败；请到「诊断」页查看详情。':
         'Failed to read dsh web search settings; check the Diagnose tab for details.',
+      '恢复接入前配置': 'Restore previous config',
+      '恢复中…': 'Restoring…',
+      '恢复一键接入前保存的 dsh 搜索配置':
+        'Restore the dsh web search configuration saved before one-click setup',
+      '确定恢复接入前的网页搜索配置？只会还原 dsh 设置与独立凭据引用，不会动 DEEPSEEK_API_KEY。':
+        'Restore the web search configuration from before one-click setup? Only dsh settings and the dedicated credential reference are restored; DEEPSEEK_API_KEY is untouched.',
+      '已恢复接入前的搜索配置': 'Restored the previous web search configuration',
+      '恢复失败：': 'Restore failed: ',
       '网页搜索需要重新接入：桥令牌已变化':
         'Web search needs reconnecting: the bridge token changed',
       '网页搜索需要重新接入：provider 不是 deepseek-official':
@@ -2522,6 +2530,27 @@ body.dark .wb-root,
           setSearchAction('');
         }
       }
+      async function revertSearch() {
+        if (typeof window.confirm === 'function'
+          && !window.confirm(t('确定恢复接入前的网页搜索配置？只会还原 dsh 设置与独立凭据引用，不会动 DEEPSEEK_API_KEY。'))) return;
+        setSearchBusy(true);
+        setSearchAction('revert');
+        setSearchMsg('');
+        try {
+          const res = await postJson('/workbuddy/web-search/revert', {}, undefined, {
+            timeoutMs: LONG_REQUEST_TIMEOUT_MS,
+          });
+          if (res.status >= 200 && res.status < 300 && res.data?.ok) {
+            setSearchMsg(t('已恢复接入前的搜索配置'));
+            reload();
+          } else {
+            setSearchMsg(t('恢复失败：') + (res.data?.error || ('HTTP ' + res.status)));
+          }
+        } finally {
+          setSearchBusy(false);
+          setSearchAction('');
+        }
+      }
       if (state === 'degraded') {
         if (credentialKnown && !desktopAvailable && pluginCount === 0) {
           alerts.push({ tone: 'bad', text: '还没有可用的登录凭据：没有检测到桌面端，也没有插件账号', action: 'account' });
@@ -2655,6 +2684,13 @@ body.dark .wb-root,
                   onClick: verifySearch,
                   title: '只跑一次真实搜索，不改配置',
                 }, searchBusy && searchAction === 'verify' ? '检测中…' : '重新检测')
+                : null,
+              search.revert?.available
+                ? h(Btn, {
+                  disabled: busy || searchBusy,
+                  onClick: revertSearch,
+                  title: '恢复一键接入前保存的 dsh 搜索配置',
+                }, searchBusy && searchAction === 'revert' ? '恢复中…' : '恢复接入前配置')
                 : null),
             searchMsg
               ? h('p', { className: 'wb-note', role: 'status', 'aria-live': 'polite', style: { margin: '8px 0 0' } }, searchMsg)

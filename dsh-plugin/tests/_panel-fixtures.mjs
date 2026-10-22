@@ -91,6 +91,16 @@ export const FIXTURES = {
       lastVerifyStale: false,
       lastVerifyFailed: false,
       lastVerifyVerified: true,
+      revert: {
+        available: true,
+        at: new Date(now - 120_000).toISOString(),
+        previous: {
+          baseURL: 'https://api.deepseek.com/v1',
+          apiKeyRef: 'DEEPSEEK_API_KEY',
+          hadLiteralKey: false,
+          provider: '',
+        },
+      },
     },
     /*
      * 权益包：**必须带 monthly / expiresAt** —— 不带就渲染不出

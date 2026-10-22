@@ -64,6 +64,7 @@ export function createRouteTable(deps) {
     onUpstreamMutation = () => {}, onWritePrefs = () => {}, notifyAdaptersUpdated = () => false,
     enableWebSearch = async () => { throw new Error('web search configuration is unavailable'); },
     verifyWebSearch = async () => { throw new Error('web search verification is unavailable'); },
+    revertWebSearch = async () => { throw new Error('web search restore is unavailable'); },
   } = deps;
 
   /** 写操作的准入检查。 */
@@ -139,6 +140,23 @@ export function createRouteTable(deps) {
           sendJson(res, 200, { ok: true, ...result });
         } catch (error) {
           log('panel web-search verify failed', error);
+          sendJson(res, 500, { ok: false, error: String(error?.message || error) });
+        }
+      },
+    },
+    {
+      // 恢复一键接入前的 dsh 搜索配置。只改 dsh settings/独立凭据引用，
+      // 不碰 WorkBuddy 客户端文件；仍要求面板头，避免跨站触发配置回滚。
+      kind: 'exact',
+      path: '/workbuddy/web-search/revert',
+      async handler(req, res) {
+        if (req.method !== 'POST') return sendJson(res, 405, { ok: false, error: `${req.method} not allowed` });
+        if (!guard(req)) return sendJson(res, 403, { ok: false, error: 'missing x-workbuddy-panel header' });
+        try {
+          const result = await revertWebSearch();
+          sendJson(res, 200, { ok: true, ...result });
+        } catch (error) {
+          log('panel web-search restore failed', error);
           sendJson(res, 500, { ok: false, error: String(error?.message || error) });
         }
       },

@@ -117,6 +117,7 @@ paths:
                         snippet: { type: string }
                         site: { type: string }
                         favicon: { type: string }
+                        publishedAt: { type: string }
                   total_results: { type: integer }
                   response_time_ms: { type: integer }
                   truncated: { type: boolean }
@@ -127,7 +128,7 @@ paths:
   /v1/messages:
     post:
       summary: Anthropic Messages 兼容（Claude Code 直连）
-      description: system 顶层字段、tool_use / tool_result 块数组均按 Anthropic 规范翻译；上游拉黑 Claude Code 固定 system 模板的问题已在出站层最小改写。
+      description: system 顶层字段、tool_use / tool_result 块数组均按 Anthropic 规范翻译；上游拉黑 Claude Code 固定 system 模板的问题已在出站层最小改写。当 `tools` 含 `web_search_20250305` 时，桥改为调用 WorkBuddy 原生搜索，返回非流式 Anthropic 消息（`server_tool_use` + `web_search_tool_result` + 可选 text citations），不转发 DeepSeek；`stream:true` 会得到明确 400。
       requestBody:
         required: true
         content:

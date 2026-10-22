@@ -114,6 +114,34 @@ test('preflight：登录文件路径不存在时，必须给出可读结论而�
   }
 });
 
+test('preflight：识别 profile 里的网页搜索是否指向本地桥（只读配置层）', async () => {
+  const dshHome = mkdtempSync(join(tmpdir(), 'wb-preflight-dsh-'));
+  const profileDir = join(dshHome, 'profiles', 'desktop');
+  mkdirSync(profileDir, { recursive: true });
+  writeFileSync(join(profileDir, 'package.json'), JSON.stringify({
+    dependencies: { 'workbuddy-to-dsh': '^1.9.4' },
+  }));
+  writeFileSync(join(profileDir, 'cordis.patch.yml'), [
+    '- id: web-search-deepseek',
+    '  name: "@deepseek-ai/dsh-web-search-deepseek"',
+    '  config:',
+    '    apiKeyEnv: WORKBUDDY_SEARCH_BRIDGE_KEY',
+    '    baseURL: http://127.0.0.1:18896/v1',
+    '- id: other-plugin',
+    '  name: other',
+    '',
+  ].join('\n'));
+  try {
+    const r = runPreflight({ DSH_HOME: dshHome });
+    assertNoCrash(r, '网页搜索配置检查');
+    assert.match(r.stdout, /网页搜索（配置层）/, '应当报告网页搜索配置层检查');
+    assert.match(r.stdout, /指向本地桥/, '应当识别出 baseURL 与独立凭据引用都正确');
+    assert.match(r.stdout, /插件安装情况/, 'profile 检查不能被搜索检查打断');
+  } finally {
+    rmSync(dshHome, { recursive: true, force: true });
+  }
+});
+
 test('preflight：登录目录整体不存在时也不崩（真实目录解析不到的场景）', async () => {
   // 这一条与上面那条测的是**不同分支**：上面那条是"用户指定的文件不存在"，
   // 这条是"连登录目录都找不到"（全新机器、还没装客户端）。

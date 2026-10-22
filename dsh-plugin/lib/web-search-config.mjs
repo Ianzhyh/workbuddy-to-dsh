@@ -73,6 +73,138 @@ export async function configureWorkBuddyWebSearch({ settings, credentials, baseU
 }
 
 /**
+ * 在一键接入前备份 dsh 的搜索配置，供“恢复原配置”使用。
+ *
+ * 返回值里的 `credential` 是上一份桥令牌，只允许留在插件内存中；
+ * 对外的 `summary` 不含令牌，可直接放进状态快照给面板。
+ *
+ * @param {object} deps
+ * @param {{ get?: (ns: string) => unknown, describe?: () => Array<{ ns: string, user?: unknown }>, replace?: (ns: string, section: object) => Promise<void> }} deps.settings
+ * @param {{ resolve?: (ref: string) => Promise<{ value: string } | undefined>, set?: (ref: string, value: string) => Promise<void>, unset?: (ref: string) => Promise<void> }} deps.credentials
+ * @returns {Promise<{ ok: boolean, at: number, section: object | null, webSection: object | null, credential: string | null, summary: { baseURL: string, apiKeyRef: string, hadLiteralKey: boolean, provider: string } }>}
+ */
+export async function snapshotWorkBuddyWebSearch({ settings, credentials } = {}) {
+  const snapshot = {
+    ok: false,
+    at: Date.now(),
+    section: null,
+    webSection: null,
+    credential: null,
+    summary: { baseURL: '', apiKeyRef: '', hadLiteralKey: false, provider: '' },
+  };
+  if (!settings || typeof settings.get !== 'function') return snapshot;
+  if (!settings.replace || typeof settings.replace !== 'function') return snapshot;
+  if (!credentials || typeof credentials.resolve !== 'function'
+    || typeof credentials.set !== 'function' || typeof credentials.unset !== 'function') {
+    return snapshot;
+  }
+
+  let section;
+  let webSection;
+  let sectionExists = false;
+  let webExists = false;
+  try {
+    /*
+     * 优先用 describe() 的 **user 层**：get() 返回的是 base/default 合并后的
+     * 解析值，直接写回去会把 base 里的密钥或默认值“固化”成用户覆盖。
+     */
+    if (typeof settings.describe === 'function') {
+      const descriptors = settings.describe();
+      const list = Array.isArray(descriptors) ? descriptors : [];
+      const searchDesc = list.find((item) => item && item.ns === WEB_SEARCH_ENTRY_ID);
+      const webDesc = list.find((item) => item && item.ns === WEB_ENTRY_ID);
+      sectionExists = Boolean(searchDesc);
+      webExists = Boolean(webDesc);
+      section = searchDesc
+        ? (searchDesc.user && typeof searchDesc.user === 'object' && !Array.isArray(searchDesc.user)
+          ? { ...searchDesc.user }
+          : {})
+        : null;
+      webSection = webDesc
+        ? (webDesc.user && typeof webDesc.user === 'object' && !Array.isArray(webDesc.user)
+          ? { ...webDesc.user }
+          : {})
+        : null;
+    } else {
+      section = settings.get(WEB_SEARCH_ENTRY_ID);
+      webSection = settings.get(WEB_ENTRY_ID);
+      sectionExists = section !== undefined;
+      webExists = webSection !== undefined;
+    }
+  } catch { return snapshot; }
+
+  try {
+    const resolved = await credentials.resolve(SEARCH_KEY_REF);
+    snapshot.credential = resolved && typeof resolved.value === 'string' ? resolved.value : null;
+  } catch { return snapshot; }
+
+  snapshot.section = sectionExists && section && typeof section === 'object' && !Array.isArray(section)
+    ? { ...section }
+    : (sectionExists ? {} : null);
+  snapshot.webSection = webExists && webSection && typeof webSection === 'object' && !Array.isArray(webSection)
+    ? { ...webSection }
+    : (webExists ? {} : null);
+  snapshot.summary = {
+    baseURL: typeof section?.baseURL === 'string' ? section.baseURL : '',
+    apiKeyRef: typeof section?.apiKeyEnv === 'string' ? section.apiKeyEnv : '',
+    hadLiteralKey: typeof section?.apiKey === 'string' && section.apiKey.length > 0,
+    provider: typeof webSection?.searchProvider === 'string' ? webSection.searchProvider : '',
+  };
+  // 分节不存在时没有“原配置”可恢复（一键接入本身也会因 namespace 未注册失败）。
+  snapshot.ok = sectionExists;
+  return snapshot;
+}
+
+/**
+ * 把 dsh 的搜索配置恢复到一键接入前的快照。
+ *
+ * 只恢复 `web` / `web-search-deepseek` 两个分节和独立凭据引用；不碰
+ * DEEPSEEK_API_KEY 或任何 WorkBuddy 客户端文件。任何一步失败都保留快照，
+ * 让用户可以重试。
+ *
+ * @param {object} deps
+ * @param {{ replace?: (ns: string, section: object) => Promise<void> }} deps.settings
+ * @param {{ set?: (ref: string, value: string) => Promise<void>, unset?: (ref: string) => Promise<void> }} deps.credentials
+ * @param {Awaited<ReturnType<typeof snapshotWorkBuddyWebSearch>>} deps.snapshot
+ * @returns {Promise<{ reverted: boolean, summary: object }>}
+ */
+export async function restoreWorkBuddyWebSearch({ settings, credentials, snapshot } = {}) {
+  if (!snapshot?.ok) throw new Error('no restorable web search snapshot');
+  if (!settings || typeof settings.replace !== 'function') {
+    throw new Error('dsh settings service does not support restoring the previous section');
+  }
+
+  const errors = [];
+  if (snapshot.webSection !== null) {
+    try {
+      await settings.replace(WEB_ENTRY_ID, snapshot.webSection);
+    } catch (error) {
+      errors.push(`web: ${String(error?.message || error)}`);
+    }
+  }
+  try {
+    await settings.replace(WEB_SEARCH_ENTRY_ID, snapshot.section || {});
+  } catch (error) {
+    errors.push(`web-search-deepseek: ${String(error?.message || error)}`);
+  }
+
+  if (!credentials || typeof credentials.set !== 'function') {
+    errors.push('credentials service is unavailable');
+  } else {
+    try {
+      if (snapshot.credential) await credentials.set(SEARCH_KEY_REF, snapshot.credential);
+      else if (typeof credentials.unset === 'function') await credentials.unset(SEARCH_KEY_REF);
+      else errors.push('credentials service does not support unset');
+    } catch (error) {
+      errors.push(`credential: ${String(error?.message || error)}`);
+    }
+  }
+
+  if (errors.length) throw new Error(`restore incomplete: ${errors.join('; ')}`);
+  return { reverted: true, summary: snapshot.summary || {} };
+}
+
+/**
  * 判断 dsh 的网页搜索当前是否真的指向本地桥。
  *
  * 只做配置层判断（不发起搜索）：接口地址、凭据引用、provider 选择三者都对了

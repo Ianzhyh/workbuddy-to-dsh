@@ -221,13 +221,30 @@ DeepSeek key；一键接入用独立引用，不会动它。
 2. 接口地址填 `http://127.0.0.1:8790/v1`；
 3. API Key 填桥本地令牌（`dsh-plugin/.bridge-token` 或控制台「客户端接入」）；
 4. 保存后搜一次，桥日志应出现 `web_search (anthropic) results=...`。
-   也可以先运行 `node tools/dev/probe-web-search.mjs "DeepSeek latest news"` 单独验证桥链路。
+   也可以先运行 `node tools/dev/probe-web-search.mjs "DeepSeek latest news"` 单独验证
+   `/v1/web_search`；dsh 实际走的 `/v1/messages` 请用面板「重新检测」验证。
 
-也可在启动 dsh 前设 `DEEPSEEK_SEARCH_BASE_URL=http://127.0.0.1:8790/v1` 与
-`DEEPSEEK_API_KEY=<桥令牌>`。原生分支是非流式的（dsh provider 默认不带 stream；
-`stream:true` 会收到明确 400）。上游搜索限流 code `15001` 会被桥映射成 429；
-这不是 DeepSeek 余额问题。若搜索仍走 DeepSeek，检查 dsh 设置里是否又切回了
-DeepSeek Search API，或桥日志有没有搜到请求。
+不要按旧文档设置 `DEEPSEEK_SEARCH_BASE_URL`（本仓库没有这个变量），也不要把桥令牌
+写进 `DEEPSEEK_API_KEY`。脚本化时应直接配置 dsh 的 `web-search-deepseek` 分节：
+`baseURL=http://127.0.0.1:8790/v1`、`apiKeyEnv=WORKBUDDY_SEARCH_BRIDGE_KEY`，并把桥令牌
+写入该独立引用。原生分支是非流式的（dsh provider 默认不带 stream；`stream:true` 会收到
+明确 400）。`probe-web-search.mjs` 只验证 `/v1/web_search`，不覆盖 dsh 实际走的
+`/v1/messages`；完整链路请用面板的「重新检测」。
+
+也可以运行 `npm run preflight` 看**配置层**结论（只读、不消耗搜索额度）；真实搜索
+仍用面板「重新检测」。若搜索仍走 DeepSeek，先看面板状态卡的原因：
+
+| 现象 | 含义 | 处置 |
+|---|---|---|
+| `地址未指向本地桥` | dsh 的 `baseURL` 不是当前桥（常见于改端口） | 点「重新接入」 |
+| `缺少桥令牌` / `桥令牌已变化` | 独立凭据引用缺失或与当前 `.bridge-token` 不一致 | 点「重新接入」 |
+| `本地桥未运行` / `本地桥未登录` | 桥进程或 WorkBuddy 登录态不可用 | 启动桥 / 在「账号」页登录 |
+| `搜索 provider 不对` | dsh 选的不是 `deepseek-official` | 点「重新接入」 |
+| 429 / `WEB_SEARCH_RATE_LIMITED` | WorkBuddy 搜索限流（code `15001`），不是 DeepSeek 余额问题 | 按 `Retry-After` 等待，稍后重试 |
+| 504 / `WEB_SEARCH_TIMEOUT` | 搜索总预算（默认 20s）用完 | 检查网络/代理，或调大 `WORKBUDDY_SEARCH_TIMEOUT_MS` |
+| 502 / `WEB_SEARCH_UPSTREAM` | 上游返回 HTML/空体/5xx，或登录态失效 | 看桥日志里的 `web_search failed`；重新登录或重试 |
+| `WEB_SEARCH_AUTH` | WorkBuddy 搜索拒绝了当前凭据 | 在「账号」页重新登录，或检查插件凭据 |
+| `WEB_SEARCH_TRANSPORT` | DNS/TLS/连接失败 | 检查系统代理、防火墙和 `WORKBUDDY_SEARCH_BASE` |
 
 ### 上游版本漂移（身份指纹整体被拒）
 

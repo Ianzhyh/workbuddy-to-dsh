@@ -122,12 +122,16 @@ the `EN` / `中` toggle in its top-right corner switches all nine tabs
 <img src="docs/plugin-panel-en.png" width="100%"
      alt="The plugin settings page in English: Overview / Account / Usage / Requests / Check-in / Diagnose / Model / Chat test / Log tabs, with the overview showing Credit balance, Web search, Needs your attention, Status and Actions">
 
-The plugin also puts a dedicated **Web search** card at the top of the overview. When
-dsh search is not yet pointed at the local bridge, the card and the **Needs your
-attention** list show a prominent reminder with a one-click **Connect search** button.
-The bridge token is stored under a dedicated credential reference (never overwriting
-`DEEPSEEK_API_KEY`), and the setup self-tests through dsh's own web service. Search then
-uses WorkBuddy quota instead of the DeepSeek wallet.
+The plugin also puts a dedicated **Web search** card at the top of the overview. Its
+readiness reflects the actual configuration, bridge availability and token match — not
+just whether settings were written. When dsh search is not connected, the card and the
+**Needs your attention** list show a prominent reminder with a one-click **Connect
+search** button. The bridge token is stored under a dedicated credential reference
+(never overwriting `DEEPSEEK_API_KEY`), and setup self-tests through dsh's own web
+service; the card keeps the last test time/source count and offers **Test again**.
+The previous dsh search settings are snapshotted before setup, so **Restore previous
+config** can undo the change. Search then uses WorkBuddy quota instead of the DeepSeek
+wallet.
 
 ## Highlights
 

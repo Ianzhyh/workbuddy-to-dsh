@@ -267,7 +267,9 @@ npm run release:check      # = vendor:check + 单测 + 独立分发演练（发�
 “自检通过”或具体失败原因，不需要再去桥日志里猜。
 
 概览顶部有独立的「网页搜索」状态卡；**没接入时会在「需要你动手」里高亮提醒**，并给出
-「接入搜索」按钮。状态只读配置，不消耗搜索额度。
+「接入搜索」按钮。状态只读配置/凭据/桥存活，不消耗搜索额度；接入后会显示最近一次自检
+的时间与来源数，并提供「重新检测」「恢复接入前配置」。一键接入前会快照 dsh 的搜索分节，
+恢复时只还原该分节与独立凭据引用，不触碰 `DEEPSEEK_API_KEY`。
 
 验证提示词（贴进 dsh 对话即可）：
 
@@ -285,14 +287,14 @@ npm run release:check      # = vendor:check + 单测 + 独立分发演练（发�
 3. **接口地址**填 `http://127.0.0.1:8790/v1`；
 4. **API Key** 填桥的本地令牌（`dsh-plugin/.bridge-token`，或控制台「客户端接入」里显示的值）；
 5. 保存后搜一次；桥日志会出现 `web_search (anthropic) results=...`，请求不会发往 DeepSeek。
-   也可以先单独验证桥链路：`node tools/dev/probe-web-search.mjs "DeepSeek latest news"`。
+   `node tools/dev/probe-web-search.mjs "DeepSeek latest news"` 只验证 `/v1/web_search`；
+   dsh 实际走的 `/v1/messages` 用面板「重新检测」验证。
 
-也可以不用 UI，在启动 dsh 前设置：
-
-```ini
-DEEPSEEK_SEARCH_BASE_URL=http://127.0.0.1:8790/v1
-DEEPSEEK_API_KEY=<桥本地令牌>
-```
+不建议手工把桥令牌写进 `DEEPSEEK_API_KEY`：那会覆盖你用 DeepSeek 官方搜索的凭据，
+而且本仓库并不存在 `DEEPSEEK_SEARCH_BASE_URL` 这个环境变量。需要脚本化时，直接配置
+dsh 的 `web-search-deepseek` 分节：`baseURL=http://127.0.0.1:8790/v1`、
+`apiKeyEnv=WORKBUDDY_SEARCH_BRIDGE_KEY`，并把桥令牌写入该独立引用；更稳妥的做法仍是
+用面板的一键接入/重新检测。
 
 搜索端点默认按账号区域选择 `https://www.workbuddy.ai` / `https://www.workbuddy.cn`；
 只有自建网关或 A/B 时才需要设置 `WORKBUDDY_SEARCH_BASE`。原生分支是**非流式**的

@@ -606,6 +606,7 @@ try {
   if (offline || liveStatus?.webSearch?.available === true) {
     if (!/网页搜索/.test(overviewText)) problems.push('概览没有「网页搜索」状态卡');
     if (!/已接入本地桥/.test(overviewText)) problems.push('网页搜索已接入时状态卡没有显示「已接入本地桥」');
+    if (!/恢复接入前配置/.test(overviewText)) problems.push('有可恢复快照时没有「恢复接入前配置」按钮');
 
     const searchAlert = await page.cdp.evaluate(`(async () => {
       const orig = window.__routes['/workbuddy/status'];
