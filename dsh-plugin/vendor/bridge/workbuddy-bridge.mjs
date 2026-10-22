@@ -30,11 +30,11 @@ import { request as httpsRequest } from 'node:https';
 import { Agent as HttpAgent } from 'node:http';
 import { Agent as HttpsAgent } from 'node:https';
 import { join, dirname, isAbsolute } from 'node:path';
-import { homedir, userInfo } from 'node:os';
+import { homedir, userInfo, tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { createCipheriv, createDecipheriv, createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { spawn, spawnSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { waitDrain } from './wait-drain.mjs';
 
 // ── Static constants (values match the desktop app / official extension) ──
@@ -794,6 +794,7 @@ const log = (...a) => { if (LOG) console.error(`[${new Date().toISOString()}]`, 
 // the derived key for the process lifetime.
 const ATREST_AAD_DOMAIN = Buffer.from('WB-AAD\0', 'ascii');
 let atRestKeyCache;
+let atRestKeyPending = null; // 并发取钥合并：第二个请求等第一个 Promise，不重复拉 Electron
 let atRestUsedExe = ''; // 最近一次成功取到密钥的客户端 exe（供启动日志/诊断显示）
 let wantedKeyId = ''; // 登录文件里信封的 keyId —— 由 readStoredAuth 每次读取时刷新
 let memoryAuth = null; // refreshed in-process; the desktop file is never rewritten
@@ -947,6 +948,80 @@ const WB_SYS_PROBE_MIN_INTERVAL_MS = 120000;
 let wbSysHits = null;
 let wbSysProbeAt = 0;
 
+/**
+ * 异步子进程：stdin 可选、输出有限收集、超时 kill。
+ *
+ * 请求路径上的 `spawnSync` 会阻塞整个事件循环（取密钥最长 20s，期间所有
+ * 在途流式响应停摆），所以统一走这里。返回形状与 spawnSync 对齐：
+ * `{ error, code, stdout, stderr }`，调用方自己决定如何解释。
+ */
+/**
+ * @param {string} exe
+ * @param {string[]} args
+ * @param {{
+ *   input?: string | null,
+ *   env?: NodeJS.ProcessEnv,
+ *   timeout?: number,
+ *   maxBuffer?: number,
+ *   stdio?: import('node:child_process').StdioOptions,
+ * }} [options]
+ * @returns {Promise<{ error: Error | null, code: number | null, stdout: string, stderr: string }>}
+ */
+function runChild(exe, args, {
+  input = null,
+  env = undefined,
+  timeout = 20000,
+  maxBuffer = 1024 * 1024,
+  stdio = ['ignore', 'pipe', 'pipe'],
+} = {}) {
+  return new Promise((resolve) => {
+    let settled = false;
+    let stdout = '';
+    let stderr = '';
+    let child = null;
+    let timer = null;
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      resolve(result);
+    };
+    timer = setTimeout(() => {
+      try { child?.kill(); } catch { /* 已经退出 */ }
+      finish({ error: new Error(`timeout after ${timeout}ms`), code: null, stdout, stderr });
+    }, timeout);
+    try {
+      child = spawn(exe, args, { env: env || process.env, stdio, cwd: tmpdir(), windowsHide: true });
+    } catch (e) {
+      finish({ error: e, code: null, stdout: '', stderr: '' });
+      return;
+    }
+    if (child.stdout) {
+      child.stdout.setEncoding('utf8');
+      child.stdout.on('data', (chunk) => {
+        stdout += chunk;
+        if (stdout.length > maxBuffer) {
+          try { child.kill(); } catch { /* 已经退出 */ }
+          finish({ error: new Error(`stdout exceeded ${maxBuffer} bytes`), code: null, stdout: '', stderr });
+        }
+      });
+    }
+    if (child.stderr) {
+      child.stderr.setEncoding('utf8');
+      child.stderr.on('data', (chunk) => {
+        if (stderr.length < maxBuffer) stderr += chunk;
+      });
+    }
+    child.on('error', (e) => finish({ error: e, code: null, stdout, stderr }));
+    child.on('close', (code) => finish({ error: null, code, stdout, stderr }));
+    if (input !== null && child.stdin) {
+      // 子进程提前退出时 EPIPE 不应变成未捕获异常。
+      child.stdin.on('error', () => { /* ignore */ });
+      child.stdin.end(input);
+    }
+  });
+}
+
 function wbPowershellPath() {
   const full = join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
   return existsSync(full) ? full : 'powershell';
@@ -1024,7 +1099,7 @@ function wbExtractExePaths(signal) {
 }
 
 /** 系统信号兜底（Windows）。成功缓存；失败 2 分钟内不重试；任何异常静默返回 []。 */
-function wbProbeSystemSignals() {
+async function wbProbeSystemSignals() {
   if (wbSysHits && wbSysHits.some((p) => existsSync(p))) return wbSysHits;
   wbSysHits = null; // 陈旧：命中都已不存在 → 允许重探（由防抖限制频率）
   if (process.platform !== 'win32') return [];
@@ -1033,14 +1108,11 @@ function wbProbeSystemSignals() {
 
   let signal;
   try {
-    const res = spawnSync(wbPowershellPath(), ['-NoProfile', '-NonInteractive', '-Command', WB_SYS_PROBE_SCRIPT], {
-      encoding: 'utf8',
+    const res = await runChild(wbPowershellPath(), ['-NoProfile', '-NonInteractive', '-Command', WB_SYS_PROBE_SCRIPT], {
       timeout: 20000,
-      windowsHide: true,
-      stdio: ['ignore', 'pipe', 'pipe'],
       maxBuffer: 1048576,
     });
-    if (res.error || res.status !== 0 || !res.stdout) return [];
+    if (res.error || res.code !== 0 || !res.stdout) return [];
     signal = JSON.parse(Buffer.from(String(res.stdout).replace(/\s+/g, ''), 'base64').toString('utf8'));
   } catch {
     return [];
@@ -1054,13 +1126,13 @@ function wbProbeSystemSignals() {
  * 首个存在的客户端 exe；全部落空返回 ''。成功结果缓存，缓存失效自动重探。
  * 先便宜的（静态 + 扫描），全落空才动 PowerShell 兜底。
  */
-function resolveWorkBuddyExe() {
+async function resolveWorkBuddyExe() {
   if (wbExeCache && existsSync(wbExeCache)) return wbExeCache;
   wbExeCache = '';
   if (Date.now() - wbMissAt < WB_MISS_RETRY_MS) return '';
   let hit = workBuddyStaticCandidates().find((p) => existsSync(p));
   if (!hit) hit = workBuddyExeCandidates().find((p) => existsSync(p));
-  if (!hit) hit = wbProbeSystemSignals().find((p) => existsSync(p));
+  if (!hit) hit = (await wbProbeSystemSignals()).find((p) => existsSync(p));
   if (hit) {
     wbExeCache = hit;
     return hit;
@@ -1109,34 +1181,40 @@ function fieldKeyIdOf(value) {
   }
 }
 
-/** 从某个 exe 取一次密钥载荷；失败返回 { error }。 */
-function fetchKeyPayloadFrom(exe) {
-  const script =
-    "try{process.stdout.write(process._linkedBinding('electron_browser_workbuddy_storage').loggerGet())}"
-    + 'catch(e){process.exitCode=3;process.stderr.write(String((e&&e.message)||e))}';
-  const res = spawnSync(exe, ['-e', script], {
-    env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
-    // stdin MUST be ignored: the Electron binary fails with EBUSY when a
-    // pipe is opened for it, so only stdout/stderr may be piped.
-    stdio: ['ignore', 'pipe', 'pipe'],
-    timeout: 20000,
-    windowsHide: true,
-    maxBuffer: 1048576,
-    encoding: 'utf8',
-  });
-  if (res.error) return { error: res.error.message };
-  if (res.status !== 0) {
-    return { error: `exit ${res.status}: ${String(res.stderr || '').trim()}` };
-  }
-  try {
-    const secret = JSON.parse(res.stdout).atRestSecretKey;
-    if (typeof secret !== 'string' || secret === '') {
-      return { error: 'payload carries no atRestSecretKey' };
+/** 从某个 exe 取一次密钥载荷；失败返回 { error }。按 exe 缓存 Promise（并发合并）。 */
+const keyPayloadCache = new Map();
+async function fetchKeyPayloadFrom(exe) {
+  const slot = String(exe || '');
+  const cached = keyPayloadCache.get(slot);
+  if (cached) return cached;
+  const pending = (async () => {
+    const script =
+      "try{process.stdout.write(process._linkedBinding('electron_browser_workbuddy_storage').loggerGet())}"
+      + 'catch(e){process.exitCode=3;process.stderr.write(String((e&&e.message)||e))}';
+    // stdin 必须忽略：Electron 二进制在 stdin 开管道时会 EBUSY（runChild 默认 ignore）。
+    const res = await runChild(exe, ['-e', script], {
+      env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
+      timeout: 20000,
+      maxBuffer: 1048576,
+    });
+    if (res.error) return { error: res.error.message };
+    if (res.code !== 0) {
+      return { error: `exit ${res.code}: ${String(res.stderr || '').trim()}` };
     }
-    return { secret };
-  } catch (err) {
-    return { error: `unparsable payload: ${String((err && err.message) || err)}` };
-  }
+    try {
+      const secret = JSON.parse(res.stdout).atRestSecretKey;
+      if (typeof secret !== 'string' || secret === '') {
+        return { error: 'payload carries no atRestSecretKey' };
+      }
+      return { secret };
+    } catch (err) {
+      return { error: `unparsable payload: ${String((err && err.message) || err)}` };
+    }
+  })();
+  keyPayloadCache.set(slot, pending);
+  const result = await pending;
+  if (!result.secret) keyPayloadCache.delete(slot); // 失败不缓存，下次仍可重试
+  return result;
 }
 
 /**
@@ -1147,41 +1225,49 @@ function fetchKeyPayloadFrom(exe) {
  * 解开信封。所以按登录文件里信封的 keyId 逐个候选试，命中即用；一个都不
  * 匹配时退回第一个能取到密钥的，让 openAuthField 给出准确的 keyId 报错。
  */
-function atRestKey() {
+async function atRestKey() {
   if (atRestKeyCache) return atRestKeyCache;
-  let candidates = workBuddyExeCandidates().filter((p) => existsSync(p));
-  // 廉价层全 miss 才动 PowerShell 兜底（系统信号：进程 + 注册表）
-  if (candidates.length === 0) candidates = wbProbeSystemSignals().filter((p) => existsSync(p));
-  if (candidates.length === 0) {
-    throw new Error(
-      'key fetch failed: WorkBuddy 客户端可执行文件未找到'
-      + '（已探测默认安装位置并扫描常见目录）。'
-      + '若客户端装在非常规目录，请在 .env 设置 WORKBUDDY_APP_EXECUTABLE 指向其 WorkBuddy.exe',
-    );
-  }
-  const failures = [];
-  let fallback;
-  for (const exe of candidates) {
-    const { secret, error } = fetchKeyPayloadFrom(exe);
-    if (!secret) {
-      failures.push(`${exe} -> ${error}`);
-      continue;
+  if (atRestKeyPending) return atRestKeyPending;
+  atRestKeyPending = (async () => {
+    let candidates = workBuddyExeCandidates().filter((p) => existsSync(p));
+    // 廉价层全 miss 才动 PowerShell 兜底（系统信号：进程 + 注册表）
+    if (candidates.length === 0) candidates = (await wbProbeSystemSignals()).filter((p) => existsSync(p));
+    if (candidates.length === 0) {
+      throw new Error(
+        'key fetch failed: WorkBuddy 客户端可执行文件未找到'
+        + '（已探测默认安装位置并扫描常见目录）。'
+        + '若客户端装在非常规目录，请在 .env 设置 WORKBUDDY_APP_EXECUTABLE 指向其 WorkBuddy.exe',
+      );
     }
-    // The app hashes the base64 STRING, not its decoded bytes.
-    const key = createHash('sha256').update(secret, 'utf8').digest();
-    if (!wantedKeyId || atRestKeyId(key) === wantedKeyId) {
-      atRestKeyCache = key;
-      atRestUsedExe = exe;
-      return key;
+    const failures = [];
+    let fallback;
+    for (const exe of candidates) {
+      const { secret, error } = await fetchKeyPayloadFrom(exe);
+      if (!secret) {
+        failures.push(`${exe} -> ${error}`);
+        continue;
+      }
+      // The app hashes the base64 STRING, not its decoded bytes.
+      const key = createHash('sha256').update(secret, 'utf8').digest();
+      if (!wantedKeyId || atRestKeyId(key) === wantedKeyId) {
+        atRestKeyCache = key;
+        atRestUsedExe = exe;
+        return key;
+      }
+      if (!fallback) fallback = { key, exe }; // 可能不是写登录文件的那个 build：先留着
     }
-    if (!fallback) fallback = { key, exe }; // 可能不是写登录文件的那个 build：先留着
+    if (fallback) {
+      atRestKeyCache = fallback.key;
+      atRestUsedExe = fallback.exe;
+      return fallback.key;
+    }
+    throw new Error(`key fetch failed from all ${candidates.length} candidate(s): ${failures.join(' | ')}`);
+  })();
+  try {
+    return await atRestKeyPending;
+  } finally {
+    atRestKeyPending = null;
   }
-  if (fallback) {
-    atRestKeyCache = fallback.key;
-    atRestUsedExe = fallback.exe;
-    return fallback.key;
-  }
-  throw new Error(`key fetch failed from all ${candidates.length} candidate(s): ${failures.join(' | ')}`);
 }
 
 /** Whether a value is the app's encrypted-field wrapper. */
@@ -1193,11 +1279,11 @@ function isEncryptedField(value) {
 }
 
 /** Plaintext of an auth field, transparently opening the 5.6+ envelope. */
-function openAuthField(value, label) {
+async function openAuthField(value, label) {
   if (typeof value === 'string') return value; // pre-5.6 plaintext, or a refreshed value
   if (!isEncryptedField(value)) return '';
   const envelope = JSON.parse(Buffer.from(value.envelope, 'base64').toString('utf8'));
-  const key = atRestKey();
+  const key = await atRestKey();
   const expected = createHash('sha256').update(key).digest('hex').slice(0, 16);
   if (envelope.keyId !== expected) {
     throw new Error(`${label} was sealed under key ${envelope.keyId}, not ${expected};`
@@ -1242,7 +1328,7 @@ function pickUpstream(domain) {
  */
 let authFileCache = null;
 
-function readStoredAuth() {
+async function readStoredAuth() {
   /*
    * 刷新出的内存令牌可以比文件新，但**不能越过文件里的账号切换**：
    * 桌面端换号会原子替换 auth 文件，此时必须立刻丢掉旧 memoryAuth，
@@ -1276,8 +1362,8 @@ function readStoredAuth() {
   if (wantedKeyId && atRestKeyCache && atRestKeyId(atRestKeyCache) !== wantedKeyId) {
     atRestKeyCache = undefined;
   }
-  const access = openAuthField(auth.accessToken, 'accessToken');
-  const refresh = openAuthField(auth.refreshToken, 'refreshToken');
+  const access = await openAuthField(auth.accessToken, 'accessToken');
+  const refresh = await openAuthField(auth.refreshToken, 'refreshToken');
   const claims = decodeJwt(access);
   const domain = auth.domain || claims.iss || '';
   const endpoint = EXPLICIT_ENDPOINT || pickUpstream(domain);
@@ -1357,6 +1443,7 @@ let memoryActiveUid = '';
 /** store.key 与 active 凭据的进程内缓存。 */
 let credentialKey = null;
 let credentialKeyPrint = '';
+let credentialKeyPending = null; // 并发首次建钥合并：否则两个请求可能各写一把，先写的凭据再也解不开
 let pluginAuthCache = { file: '', uid: '', mtimeMs: -1, size: -1, auth: null };
 function invalidatePluginAuthCache() {
   pluginAuthCache = { file: '', uid: '', mtimeMs: -1, size: -1, auth: null };
@@ -1370,7 +1457,7 @@ const credentialSourceFile = () => join(CREDENTIAL_DIR, 'source.json');
 const VALID_SOURCES = new Set(['auto', 'desktop', 'plugin', 'api-key']);
 
 /** env 优先；否则用运行时/持久化的选择；都没有 = auto。 */
-function effectiveSource() {
+async function effectiveSource() {
   if (CREDENTIAL_SOURCE_PINNED) return CREDENTIAL_SOURCE_ENV;
   if (credentialSourcePreference !== null) return credentialSourcePreference || 'auto';
   let stored = '';
@@ -1383,7 +1470,7 @@ function effectiveSource() {
    * 继续按 plugin 只会让每个请求都报"没有插件凭据"。回到 auto，桌面端可用时照常服务；
    * 诊断里仍能看到 source.json 的内容，不会假装没发生过。
    */
-  if (stored === 'plugin' && readAllPluginCredentials().length === 0) {
+  if (stored === 'plugin' && (await readAllPluginCredentials()).length === 0) {
     log('stored source=plugin but no readable plugin credential; falling back to auto');
     stored = '';
   }
@@ -1395,7 +1482,7 @@ async function setSourcePreference(source) {
   const value = String(source || '').trim().toLowerCase();
   if (!VALID_SOURCES.has(value)) throw new Error(`source must be one of ${[...VALID_SOURCES].join(', ')}`);
   if (CREDENTIAL_SOURCE_PINNED) throw new Error(`credential source is pinned by WORKBUDDY_CREDENTIAL_SOURCE=${CREDENTIAL_SOURCE_ENV}`);
-  if (value === 'plugin' && readAllPluginCredentials().length === 0) {
+  if (value === 'plugin' && (await readAllPluginCredentials()).length === 0) {
     throw new Error(pluginCredentialError
       ? `plugin credentials are unreadable: ${pluginCredentialError}`
       : 'no plugin credential yet; sign in first');
@@ -1431,22 +1518,21 @@ function writeFileAtomic(file, text, mode = 0o600) {
 }
 
 /** DPAPI 调用的 PowerShell 脚本：密钥走 stdin，绝不进命令行（进程列表可见）。 */
-function dpapiCall(verb, inputBase64) {
+async function dpapiCall(verb, inputBase64) {
   if (process.platform !== 'win32') throw new Error('DPAPI is only available on Windows');
   const script = 'Add-Type -AssemblyName System.Security; '
     + '$in=[Console]::In.ReadToEnd().Trim(); $b=[Convert]::FromBase64String($in); '
     + `$p=[Security.Cryptography.ProtectedData]::${verb}($b,$null,[Security.Cryptography.DataProtectionScope]::CurrentUser); `
     + '[Console]::Out.Write([Convert]::ToBase64String($p))';
-  const res = spawnSync(wbPowershellPath(), ['-NoProfile', '-NonInteractive', '-Command', script], {
+  const res = await runChild(wbPowershellPath(), ['-NoProfile', '-NonInteractive', '-Command', script], {
     input: inputBase64,
-    encoding: 'utf8',
+    stdio: ['pipe', 'pipe', 'pipe'],
     timeout: 20000,
-    windowsHide: true,
     maxBuffer: 1024 * 1024,
   });
   if (res.error) throw new Error(`DPAPI ${verb} failed: ${res.error.message}`);
-  if (res.status !== 0) {
-    throw new Error(`DPAPI ${verb} failed: exit ${res.status} ${String(res.stderr || '').trim().slice(0, 200)}`);
+  if (res.code !== 0) {
+    throw new Error(`DPAPI ${verb} failed: exit ${res.code} ${String(res.stderr || '').trim().slice(0, 200)}`);
   }
   const out = String(res.stdout || '').trim();
   if (!out) throw new Error(`DPAPI ${verb} returned empty output`);
@@ -1454,36 +1540,44 @@ function dpapiCall(verb, inputBase64) {
 }
 
 const dpapiProtect = (buffer) => dpapiCall('Protect', buffer.toString('base64'));
-const dpapiUnprotect = (base64) => Buffer.from(dpapiCall('Unprotect', base64), 'base64');
+const dpapiUnprotect = async (base64) => Buffer.from(await dpapiCall('Unprotect', base64), 'base64');
 
 /** 取/建字段密钥；失败**不静默明文**，由调用方回退到 memory。 */
-function loadOrCreateCredentialKey() {
+async function loadOrCreateCredentialKey() {
   if (credentialKey) return credentialKey;
-  ensureCredentialDir();
-  const file = credentialKeyFile();
-  if (existsSync(file)) {
+  if (credentialKeyPending) return credentialKeyPending;
+  credentialKeyPending = (async () => {
+    ensureCredentialDir();
+    const file = credentialKeyFile();
+    if (existsSync(file)) {
+      const st = statSync(file);
+      const print = `${st.mtimeMs}:${st.size}`;
+      if (credentialKey && credentialKeyPrint === print) return credentialKey;
+      let blob;
+      try { blob = readFileSync(file, 'utf8').trim(); }
+      catch (e) { throw new Error(`cannot read credential key: ${e.message}`, { cause: e }); }
+      try { credentialKey = await dpapiUnprotect(blob); }
+      catch (e) { throw new Error(`credential key cannot be opened on this machine/user: ${e.message}`, { cause: e }); }
+      credentialKeyPrint = print;
+      return credentialKey;
+    }
+    const key = randomBytes(32);
+    const blob = await dpapiProtect(key);
+    writeFileAtomic(file, blob, 0o600);
+    credentialKey = key;
     const st = statSync(file);
-    const print = `${st.mtimeMs}:${st.size}`;
-    if (credentialKey && credentialKeyPrint === print) return credentialKey;
-    let blob;
-    try { blob = readFileSync(file, 'utf8').trim(); }
-    catch (e) { throw new Error(`cannot read credential key: ${e.message}`, { cause: e }); }
-    try { credentialKey = dpapiUnprotect(blob); }
-    catch (e) { throw new Error(`credential key cannot be opened on this machine/user: ${e.message}`, { cause: e }); }
-    credentialKeyPrint = print;
-    return credentialKey;
+    credentialKeyPrint = `${st.mtimeMs}:${st.size}`;
+    return key;
+  })();
+  try {
+    return await credentialKeyPending;
+  } finally {
+    credentialKeyPending = null;
   }
-  const key = randomBytes(32);
-  const blob = dpapiProtect(key);
-  writeFileAtomic(file, blob, 0o600);
-  credentialKey = key;
-  const st = statSync(file);
-  credentialKeyPrint = `${st.mtimeMs}:${st.size}`;
-  return key;
 }
 
-function sealCredential(cred) {
-  const key = loadOrCreateCredentialKey();
+async function sealCredential(cred) {
+  const key = await loadOrCreateCredentialKey();
   const iv = randomBytes(12);
   const cipher = createCipheriv('aes-256-gcm', key, iv);
   cipher.setAAD(credentialAad(cred.uid));
@@ -1498,12 +1592,12 @@ function sealCredential(cred) {
   });
 }
 
-function openCredential(text) {
+async function openCredential(text) {
   const env = JSON.parse(text);
   if (!env || env.v !== 1 || env.alg !== 'aes-256-gcm' || typeof env.uid !== 'string' || !env.uid) {
     throw new Error('unsupported credential envelope');
   }
-  const key = loadOrCreateCredentialKey();
+  const key = await loadOrCreateCredentialKey();
   const decipher = createDecipheriv('aes-256-gcm', key, Buffer.from(env.iv, 'base64'), { authTagLength: 16 });
   decipher.setAAD(credentialAad(env.uid));
   decipher.setAuthTag(Buffer.from(env.tag, 'base64'));
@@ -1576,7 +1670,7 @@ async function savePluginCredential(cred) {
   try {
     return await withCredentialLock(async () => {
       ensureCredentialDir();
-      writeFileAtomic(credentialFileFor(uid), sealCredential(record), 0o600);
+      writeFileAtomic(credentialFileFor(uid), await sealCredential(record), 0o600);
       writeActiveUid(uid);
       invalidatePluginAuthCache();
       return { stored: 'dpapi' };
@@ -1595,7 +1689,7 @@ async function savePluginCredential(cred) {
 let pluginCredentialError = '';
 
 /** 全部插件凭据（含令牌，**仅供内部使用**）。 */
-function readAllPluginCredentials() {
+async function readAllPluginCredentials() {
   const out = [];
   pluginCredentialError = '';
   if (credentialStoreMode() === 'memory') {
@@ -1607,7 +1701,7 @@ function readAllPluginCredentials() {
   catch { return out; }
   for (const file of files) {
     const full = join(CREDENTIAL_DIR, file);
-    try { out.push(openCredential(readFileSync(full, 'utf8'))); }
+    try { out.push(await openCredential(readFileSync(full, 'utf8'))); }
     catch (e) {
       pluginCredentialError = `${file}: ${e.message}`;
       log('credential file unreadable', shortError(pluginCredentialError, 160));
@@ -1629,9 +1723,10 @@ function publicCredential(cred) {
   };
 }
 
-function listPluginCredentials() {
+async function listPluginCredentials() {
   const active = readActiveUid();
-  return readAllPluginCredentials()
+  const all = await readAllPluginCredentials();
+  return all
     .map((c) => ({ ...publicCredential(c), active: c.uid === active }))
     .sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)));
 }
@@ -1654,7 +1749,7 @@ function pluginAuthFromCredential(cred) {
 }
 
 /** 取 active 插件凭据（热路径，按文件 mtime 缓存解密结果）。 */
-function readPluginAuth() {
+async function readPluginAuth() {
   if (credentialStoreMode() === 'memory') {
     const uid = memoryActiveUid;
     const cred = (uid && memoryCredentials.get(uid)) || [...memoryCredentials.values()].sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)))[0];
@@ -1679,7 +1774,7 @@ function readPluginAuth() {
     && pluginAuthCache.mtimeMs === st.mtimeMs && pluginAuthCache.size === st.size) {
     return pluginAuthCache.auth;
   }
-  const cred = openCredential(readFileSync(file, 'utf8'));
+  const cred = await openCredential(readFileSync(file, 'utf8'));
   const auth = pluginAuthFromCredential(cred);
   pluginAuthCache = { file, uid: cred.uid, mtimeMs: st.mtimeMs, size: st.size, auth };
   if (!uid) { try { writeActiveUid(cred.uid); } catch { /* 只影响下次选择 */ } }
@@ -1697,20 +1792,20 @@ async function deletePluginCredential(uid) {
       const file = credentialFileFor(uid);
       try { unlinkSync(file); } catch (e) { if (e.code !== 'ENOENT') throw e; }
       if (readActiveUid() === uid) {
-        const rest = readAllPluginCredentials().filter((c) => c.uid !== uid);
+        const rest = (await readAllPluginCredentials()).filter((c) => c.uid !== uid);
         writeActiveUid(rest[0]?.uid || '');
       }
       invalidatePluginAuthCache();
     });
   }
   // 最后一条插件凭据被删掉时，来源回到 auto（否则下次请求会报"没有插件凭据"）。
-  if (!CREDENTIAL_SOURCE_PINNED && effectiveSource() === 'plugin' && readAllPluginCredentials().length === 0) {
+  if (!CREDENTIAL_SOURCE_PINNED && (await effectiveSource()) === 'plugin' && (await readAllPluginCredentials()).length === 0) {
     try { await setSourcePreference('auto'); } catch { /* 下次启动回到 auto */ }
   }
 }
 
 async function setActivePluginCredential(uid) {
-  const exists = readAllPluginCredentials().some((c) => c.uid === uid);
+  const exists = (await readAllPluginCredentials()).some((c) => c.uid === uid);
   if (!exists) throw new Error(`unknown credential: ${uid}`);
   if (credentialStoreMode() === 'memory') {
     writeActiveUid(uid);
@@ -1733,20 +1828,20 @@ function apiKeyAuth() {
   };
 }
 
-function resolveAuth() {
+async function resolveAuth() {
   if (API_KEY) return apiKeyAuth();
-  const configured = effectiveSource();
+  const configured = await effectiveSource();
   if (configured === 'api-key') {
     throw new Error('credential source is api-key but CODEBUDDY_API_KEY is not set');
   }
-  if (configured === 'desktop') return readStoredAuth();
-  if (configured === 'plugin') return readPluginAuth();
+  if (configured === 'desktop') return await readStoredAuth();
+  if (configured === 'plugin') return await readPluginAuth();
   // auto：桌面端优先（老行为不变），仅在**本地不可用**时回退到插件登录。
   // 上游 401 不会触发中途换号 —— 账户可预测性优先（见 SECURITY 文档）。
   let desktopError;
-  try { return readStoredAuth(); }
+  try { return await readStoredAuth(); }
   catch (e) { desktopError = e; }
-  try { return readPluginAuth(); }
+  try { return await readPluginAuth(); }
   catch (e) {
     /** @type {Error & { code?: string }} */
     const err = new Error(`no usable credential (auto): desktop: ${desktopError.message}; plugin: ${e.message}`);
@@ -1764,7 +1859,7 @@ function resolveAuth() {
 async function resolveCredentialAlternative(auth) {
   if (!auth || auth.source === 'api-key' || CREDENTIAL_FAILOVER === 'off') return null;
   if (auth.source === 'desktop') {
-    const creds = readAllPluginCredentials();
+    const creds = await readAllPluginCredentials();
     if (!creds.length) return null;
     const match = CREDENTIAL_FAILOVER === 'any'
       ? (creds.find((c) => c.uid === auth.userId) || creds.find((c) => c.active) || creds[0])
@@ -1773,7 +1868,7 @@ async function resolveCredentialAlternative(auth) {
   }
   if (auth.source === 'plugin') {
     try {
-      const desktop = readStoredAuth();
+      const desktop = await readStoredAuth();
       if (CREDENTIAL_FAILOVER === 'any' || (auth.uid && desktop.userId === auth.uid)) return desktop;
     } catch { /* 桌面端不可用：没有可接管项 */ }
   }
@@ -1784,24 +1879,25 @@ async function resolveCredentialAlternative(auth) {
  * 登录区域默认值：显式 env > 当前插件账号 > 桌面账号域名 > 国内版。
  * 以前面板写死 cn，国际版用户每次都要手动切；这里让环境自己说话。
  */
-function suggestedLoginRegion() {
+async function suggestedLoginRegion() {
   const env = String(process.env.WORKBUDDY_LOGIN_REGION || '').trim().toLowerCase();
   if (env === 'global' || env === 'cn') return env;
   try {
-    const active = listPluginCredentials().find((c) => c.active) || listPluginCredentials()[0];
+    const list = await listPluginCredentials();
+    const active = list.find((c) => c.active) || list[0];
     if (active?.region === 'global' || active?.region === 'cn') return active.region;
   } catch { /* 没有插件凭据 */ }
   try {
-    const d = readStoredAuth();
+    const d = await readStoredAuth();
     if (/workbuddy\.ai|codebuddy\.ai|\.ai(?:\/|$)/i.test(`${d.domain || ''} ${d.endpoint || ''}`)) return 'global';
   } catch { /* 桌面端不可用 */ }
   return 'cn';
 }
 
 /** 诊断/健康用的来源状态：不含任何令牌。 */
-function credentialStatus() {
+async function credentialStatus() {
   const status = {
-    configured: effectiveSource(),
+    configured: await effectiveSource(),
     envPinned: CREDENTIAL_SOURCE_PINNED,
     storeMode: credentialStoreMode(),
     storeDir: credentialStoreMode() === 'memory' ? '' : CREDENTIAL_DIR,
@@ -1815,12 +1911,12 @@ function credentialStatus() {
     error: '',
   };
   try {
-    const d = readStoredAuth();
+    const d = await readStoredAuth();
     status.desktop.available = true;
     status.desktop.userId = d.userId || '';
   } catch (e) { status.desktop.error = String(e?.message || e).slice(0, 300); }
   try {
-    const list = listPluginCredentials();
+    const list = await listPluginCredentials();
     status.plugin.available = list.length > 0;
     status.plugin.count = list.length;
     status.plugin.activeUid = list.find((c) => c.active)?.uid || '';
@@ -1830,7 +1926,7 @@ function credentialStatus() {
       && String(status.desktop.userId) === String(status.plugin.activeUid));
   } catch (e) { status.plugin.error = String(e?.message || e).slice(0, 300); }
   try {
-    const auth = resolveAuth();
+    const auth = await resolveAuth();
     status.effective = {
       source: auth.source,
       uid: auth.uid || auth.userId || '',
@@ -1839,7 +1935,7 @@ function credentialStatus() {
       expiresAt: auth.expiresAt ? new Date(auth.expiresAt).toISOString() : '',
     };
   } catch (e) { status.error = String(e?.message || e).slice(0, 400); }
-  status.loginRegion = suggestedLoginRegion();
+  status.loginRegion = await suggestedLoginRegion();
   return status;
 }
 
@@ -2068,7 +2164,7 @@ async function pollDeviceLogin(state) {
     },
     stored,
     sourceSwitched,
-    effectiveSource: effectiveSource(),
+    effectiveSource: await effectiveSource(),
   };
 }
 
@@ -2686,7 +2782,7 @@ async function searchUpstream(auth, requestBody, conversationId, clientSignal) {
  * @param {{ conversationId?: string, signal?: AbortSignal }} [options]
  */
 async function workbuddySearch({ query, maxResults = SEARCH_DEFAULT_MAX_RESULTS, allowedDomains, freshness }, { conversationId, signal } = {}) {
-  const auth = resolveAuth();
+  const auth = await resolveAuth();
   const requestBody = {
     query,
     type: 'text2text',
@@ -3160,7 +3256,7 @@ async function callUpstream(bodyString, model, conversationId, clientSignal, { s
   const upEnter = Date.now();
 
   // 凭据来源：api-key（显式覆盖）→ 桌面端 → 插件登录（auto，见 resolveAuth）。
-  let auth = resolveAuth();
+  let auth = await resolveAuth();
   if (auth.source !== 'api-key' && auth.refresh && auth.expiresAt - REFRESH_SKEW_MS < Date.now()) {
     const next = await refreshAuth(auth);
     if (next) auth = next;
@@ -6394,7 +6490,7 @@ async function fetchCatalog(generation = catalogGeneration) {
   // 目录顶掉完整缓存——否则用户的模型列表会凭空少几个，还看不出原因。
   let hardError = false;
   try {
-    let auth = resolveAuth();
+    let auth = await resolveAuth();
     const shape = { paths: catalogPathsFor(), sources: {}, model: [] };
     const merged = new Map();
     const promotions = new Map(); // modelId → 徽章文案（如「Free now」）
@@ -6811,7 +6907,7 @@ function maybeAutoCheckin() {
   autoCheckinTries += 1;
   autoCheckinInflight = (async () => {
     try {
-      const claim = await claimDailyCheckin(resolveAuth());
+      const claim = await claimDailyCheckin(await resolveAuth());
       autoCheckinState = {
         at: new Date().toISOString(),
         // 上游「已签到」是成功，不是失败（复用 claimDailyCheckin 的幂等语义）
@@ -7355,7 +7451,7 @@ async function handleRequest(req, res) {
       let auth = null;
       let region = '';
       const credential = {
-        configured: effectiveSource(),
+        configured: await effectiveSource(),
         storeMode: credentialStoreMode(),
         storeDir: credentialStoreMode() === 'memory' ? '' : CREDENTIAL_DIR,
         fallbackReason: credentialStoreFallback,
@@ -7363,7 +7459,7 @@ async function handleRequest(req, res) {
         pluginCount: 0,
       };
       try {
-        const a = resolveAuth();
+        const a = await resolveAuth();
         region = upstreamRegion(a);
         credential.source = a.source;
         try {
@@ -7383,7 +7479,7 @@ async function handleRequest(req, res) {
         return json(res, 503, {
           ok: false, error: e.message, authFile: AUTH_PATH, pid: process.pid,
           startedAt: new Date(STARTED_AT).toISOString(),
-          credential: credentialStatus(),
+          credential: await credentialStatus(),
         });
       }
       // 这里**绝不能等上游**：控制台的探测超时是 4 秒，冷缓存时抓目录要好几秒，
@@ -7424,7 +7520,7 @@ async function handleRequest(req, res) {
     // ── OAuth device-code sign-in（第二条凭据来源）─────────────────────
     // 全部走同一道本地令牌闸门；响应里**永远不含** access / refresh token。
     if (url.pathname === '/v1/auth/source' && req.method === 'GET') {
-      return json(res, 200, { ok: true, ...credentialStatus() });
+      return json(res, 200, { ok: true, ...await credentialStatus() });
     }
 
     if (url.pathname === '/v1/auth/source' && req.method === 'POST') {
@@ -7432,7 +7528,7 @@ async function handleRequest(req, res) {
       try { body = JSON.parse(await readBody(req)); } catch { body = null; }
       try {
         await setSourcePreference(body?.source);
-        return json(res, 200, { ok: true, ...credentialStatus() });
+        return json(res, 200, { ok: true, ...await credentialStatus() });
       } catch (e) {
         return json(res, 400, { ok: false, error: e.message });
       }
@@ -7441,11 +7537,11 @@ async function handleRequest(req, res) {
     if (url.pathname === '/v1/auth/credentials' && req.method === 'GET') {
       return json(res, 200, {
         ok: true,
-        configuredSource: effectiveSource(),
+        configuredSource: await effectiveSource(),
         storeMode: credentialStoreMode(),
         fallbackReason: credentialStoreFallback,
         activeUid: readActiveUid(),
-        credentials: listPluginCredentials(),
+        credentials: await listPluginCredentials(),
         ...(pluginCredentialError ? { error: pluginCredentialError } : {}),
       });
     }
@@ -7455,7 +7551,7 @@ async function handleRequest(req, res) {
       if (!uid) return json(res, 400, { ok: false, error: 'uid is required' });
       try {
         await deletePluginCredential(uid);
-        return json(res, 200, { ok: true, credentials: listPluginCredentials() });
+        return json(res, 200, { ok: true, credentials: await listPluginCredentials() });
       } catch (e) {
         return json(res, 500, { ok: false, error: e.message });
       }
@@ -7530,7 +7626,8 @@ async function handleRequest(req, res) {
        * 凭据读不出来时给空串 —— 那时只列**全区域**条目：region-restricted 的
        * 条目在没有区域信息时不敢声称可用（多报一个一调就 400 的模型比少报更糟）。
        */
-      const region = (() => { try { return upstreamRegion(resolveAuth()); } catch { return ''; } })();
+      let region = '';
+      try { region = upstreamRegion(await resolveAuth()); } catch { region = ''; }
 
       let models;
       if (!catalog.length) {
@@ -7594,7 +7691,7 @@ async function handleRequest(req, res) {
 
     if (url.pathname === '/v1/quota') {
       try {
-        const quota = await fetchQuota(resolveAuth());
+        const quota = await fetchQuota(await resolveAuth());
         return json(res, 200, { ok: true, ...quota });
       } catch (e) {
         return json(res, 502, { ok: false, error: e.message });
@@ -7624,7 +7721,7 @@ async function handleRequest(req, res) {
 
     if (url.pathname === '/v1/checkin') {
       try {
-        const auth = resolveAuth();
+        const auth = await resolveAuth();
         if (req.method === 'POST') {
           const claim = await claimDailyCheckin(auth);
           const status = await fetchCheckinStatus(auth).catch(() => null);
@@ -8740,7 +8837,7 @@ if (process.argv.includes('--check')) {
     + `${credentialStoreMode() === 'memory' ? ' (not persisted)' : ` @ ${CREDENTIAL_DIR}`}`
     + `${credentialStoreFallback ? `  [degraded: ${credentialStoreFallback}]` : ''}`);
   try {
-    const a = resolveAuth();
+    const a = await resolveAuth();
     authOk = true;
     lines.push(`credential      ${a.source}${a.uid ? ` (${a.uid})` : ''}${a.region ? ` · ${a.region}` : ''}`);
     lines.push(`account         ${a.userId || a.uid || '(no sub claim)'}`);
@@ -8750,7 +8847,7 @@ if (process.argv.includes('--check')) {
   } catch (e) {
     lines.push(`auth            [FAIL] ${e.message}`);
   }
-  lines.push(`client exe      ${atRestUsedExe || resolveWorkBuddyExe() || '未找到（若只用插件登录，此行可忽略）'}`);
+  lines.push(`client exe      ${atRestUsedExe || (await resolveWorkBuddyExe()) || '未找到（若只用插件登录，此行可忽略）'}`);
   // 精选列表按区域过滤 —— 日志里列一个当前区域**不提供**的模型，会让人以为
   // "桥明明认识它、为什么 /v1/models 里没有"（诊断日志的可信度就靠这点）
   lines.push(`models          ${FEATURED.filter((m) => featuredAllowedIn(m, checkRegion)).map((m) => m.id).join(', ')}`);
@@ -8758,7 +8855,7 @@ if (process.argv.includes('--check')) {
   process.exit(authOk || API_KEY ? 0 : 1);
 }
 
-server.listen(PORT, HOST, () => {
+server.listen(PORT, HOST, async () => {
   /*
    * 先打印监听地址与登录文件路径，**再**尝试读凭据。
    *
@@ -8769,10 +8866,12 @@ server.listen(PORT, HOST, () => {
    */
   console.log(`workbuddy-bridge listening on http://${HOST}:${PORT}/v1`);
   console.log(`auth file  : ${AUTH_PATH}`);
-  console.log(`client exe : ${atRestUsedExe || resolveWorkBuddyExe() || '未找到（设置 WORKBUDDY_APP_EXECUTABLE 指向 WorkBuddy.exe）'}`);
+  // 只报**已经定位过**的 exe：这里不触发探测。探测要起 PowerShell（数秒），
+  // 启动日志不该为一行诊断信息付这个代价；真正需要时 atRestKey 会异步定位。
+  console.log(`client exe : ${atRestUsedExe || wbExeCache || '未定位（首次读取桌面凭据时再探测）'}`);
   let who = '(no desktop session read)';
   let region = '';
-  try { const a = resolveAuth(); region = upstreamRegion(a); who = `${a.userId || a.uid} @ ${a.endpoint} (${a.source})`; } catch (e) { who = `ERROR: ${e.message}`; }
+  try { const a = await resolveAuth(); region = upstreamRegion(a); who = `${a.userId || a.uid} @ ${a.endpoint} (${a.source})`; } catch (e) { who = `ERROR: ${e.message}`; }
   console.log(`auth       : ${API_KEY ? 'API key (CODEBUDDY_API_KEY)' : `desktop session ${who}`}`);
   // 同上：精选列表按区域过滤（国际版别在日志里列 v4-pro —— 那个区域不提供它）
   console.log(`models     : ${FEATURED.filter((m) => featuredAllowedIn(m, region)).map((m) => m.id).join(', ')}  (all models: /v1/models?all=1)`);

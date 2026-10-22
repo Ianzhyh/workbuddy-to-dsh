@@ -231,6 +231,20 @@ test('桥源码里不再有裸 Number(process.env.*) 的数值读取（防止回
   );
 });
 
+test('桥源码里不再有 spawnSync（取密钥 / DPAPI 必须异步，不能阻塞事件循环）', () => {
+  /*
+   * 冷路径的 spawnSync 会让**所有**在途流式响应停摆（PowerShell 最长 20s）。
+   * 统一走 runChild() 的异步子进程；这里防止以后又在某个分支里写回同步版。
+   */
+  const src = readFileSync(BRIDGE, 'utf8');
+  const offenders = [];
+  for (const [i, line] of src.split(/\r?\n/).entries()) {
+    const code = line.replace(/\/\/.*$/u, '');
+    if (/\bspawnSync\s*\(/u.test(code)) offenders.push(i + 1);
+  }
+  assert.deepEqual(offenders, [], `这些行仍在同步起子进程：${offenders.join(', ')}`);
+});
+
 /**
  * 任何**起了桥进程**的测试都必须显式隔离账本。
  *
