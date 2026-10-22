@@ -19,6 +19,19 @@
 
 ## [Unreleased]
 
+（暂无）
+
+## [1.9.5] - 2026-10-22
+
+### Added
+
+- 一键接入前快照 dsh 的搜索分节和独立凭据；新增「恢复接入前配置」，可还原
+  接入前的 `web-search-deepseek` / `web` 设置与凭据引用，不触碰 `DEEPSEEK_API_KEY`。
+- `/v1/messages` 的搜索响应补上 `server_tool_use` 与
+  `usage.server_tool_use.web_search_requests`，修复 `tool_use_id` 悬空；不伪造
+  Anthropic 的 opaque `encrypted_content`（dsh provider 不需要）。
+- `npm run preflight` 增加只读的网页搜索配置层检查。
+
 ### Fixed
 
 - 网页搜索状态卡改为「配置 + 桥存活 + 令牌匹配」判定：桥停止、令牌轮换、
@@ -29,13 +42,11 @@
   重试共享同一个 20s 总预算；限流错误统一映射成 429 / `rate_limit_error`。
 - 兼容 Node 18：搜索/聊天取消信号不再无条件使用 Node 20.3 才有的
   `AbortSignal.any`；超大请求体回 413 后主动排空剩余字节。
-- `/v1/messages` 的搜索响应补上 `server_tool_use` 与
-  `usage.server_tool_use.web_search_requests`，修复 `tool_use_id` 悬空；不伪造
-  Anthropic 的 opaque `encrypted_content`（dsh provider 不需要）。
-- 一键接入会先快照 dsh 的搜索分节和独立凭据；新增「恢复接入前配置」，可还原
-  接入前的 `web-search-deepseek` / `web` 设置与凭据引用，不触碰 `DEEPSEEK_API_KEY`。
-- `npm run preflight` 增加只读的网页搜索配置层检查；文档移除不存在的
-  `DEEPSEEK_SEARCH_BASE_URL` 建议，补充搜索错误码与限流排查。
+
+### Docs
+
+- 移除不存在的 `DEEPSEEK_SEARCH_BASE_URL` 建议，补充搜索错误码与限流排查；
+  在 `NOTICE.md` 补充使用边界（仅自己账号本地互操作、不做多账号池化/转售）。
 
 ## [1.9.4] - 2026-10-22
 

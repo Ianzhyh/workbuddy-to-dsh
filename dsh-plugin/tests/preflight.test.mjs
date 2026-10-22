@@ -119,7 +119,7 @@ test('preflight：识别 profile 里的网页搜索是否指向本地桥（只�
   const profileDir = join(dshHome, 'profiles', 'desktop');
   mkdirSync(profileDir, { recursive: true });
   writeFileSync(join(profileDir, 'package.json'), JSON.stringify({
-    dependencies: { 'workbuddy-to-dsh': '^1.9.4' },
+    dependencies: { 'workbuddy-to-dsh': '^1.9.5' },
   }));
   writeFileSync(join(profileDir, 'cordis.patch.yml'), [
     '- id: web-search-deepseek',
