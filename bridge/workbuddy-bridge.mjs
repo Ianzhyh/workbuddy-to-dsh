@@ -879,15 +879,10 @@ function wbScan() {
 }
 
 /**
- * All executable candidates, most-trusted first.
- *
- * 静态候选在前；扫描兜底（带缓存与失败防抖 —— "客户端正在重装"的窗口期内
- * 不会每次调用都全盘扫一遍）。返回**数组**而不是单个路径：机器上可能并存
- * 多个 build，由 atRestKey() 按登录文件的 keyId 挑选。
+ * 静态候选：显式覆盖 + 各平台默认安装位置，最可信在前。
+ * 只做路径拼接、不碰磁盘 —— 调用方可先用它做廉价的 `existsSync` 命中判断。
  */
-function workBuddyExeCandidates() {
-  if (wbExeCache && existsSync(wbExeCache)) return [wbExeCache];
-
+function workBuddyStaticCandidates() {
   const out = [];
   if (process.env.WORKBUDDY_APP_EXECUTABLE) out.push(process.env.WORKBUDDY_APP_EXECUTABLE);
   if (process.platform === 'win32') {
@@ -910,6 +905,19 @@ function workBuddyExeCandidates() {
   } else {
     out.push('/opt/WorkBuddy/workbuddy');
   }
+  return out;
+}
+
+/**
+ * 全部候选：静态在前，扫描兜底（带缓存与失败防抖 —— "客户端正在重装"的窗口期内
+ * 不会每次调用都全盘扫一遍）。返回**数组**而不是单个路径：机器上可能并存
+ * 多个 build，由 atRestKey() 按登录文件的 keyId 挑选。
+ * 只想找一个可用 exe 时优先用 workBuddyStaticCandidates()，别为标准安装白付扫描成本。
+ */
+function workBuddyExeCandidates() {
+  if (wbExeCache && existsSync(wbExeCache)) return [wbExeCache];
+
+  const out = workBuddyStaticCandidates();
 
   if (wbScanCache && !wbScanCache.some((p) => existsSync(p))) {
     wbScanCache = null; // 陈旧：命中的文件都不在了 → 允许重扫（由防抖限制频率）
@@ -1050,7 +1058,8 @@ function resolveWorkBuddyExe() {
   if (wbExeCache && existsSync(wbExeCache)) return wbExeCache;
   wbExeCache = '';
   if (Date.now() - wbMissAt < WB_MISS_RETRY_MS) return '';
-  let hit = workBuddyExeCandidates().find((p) => existsSync(p));
+  let hit = workBuddyStaticCandidates().find((p) => existsSync(p));
+  if (!hit) hit = workBuddyExeCandidates().find((p) => existsSync(p));
   if (!hit) hit = wbProbeSystemSignals().find((p) => existsSync(p));
   if (hit) {
     wbExeCache = hit;

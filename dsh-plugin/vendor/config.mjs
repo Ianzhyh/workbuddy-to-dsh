@@ -211,7 +211,10 @@ const BRIDGE_TOKEN_PATH = bridgeTokenPath();
  * 用 randomBytes 而非 Math.random()：后者不是密码学随机，令牌可预测就失去了
  * 防护意义。24 字节 base64url ≈ 192 位熵。
  */
+let localTokenCache = '';
+
 function resolveLocalToken() {
+  if (localTokenCache) return localTokenCache;
   if (env.WORKBUDDY_LOCAL_TOKEN) {
     /*
      * 令牌是环境变量给的 → 根本没落到磁盘上，也就没有「文件同机可读」这回事。
@@ -219,7 +222,8 @@ function resolveLocalToken() {
      * `doctor` 就会报一个与当前配置不符的结论。
      */
     tokenHardenResult = { ok: true, code: 'skipped', reason: '令牌由环境变量给定，未落盘，无需加固' };
-    return env.WORKBUDDY_LOCAL_TOKEN;
+    localTokenCache = env.WORKBUDDY_LOCAL_TOKEN;
+    return localTokenCache;
   }
   try {
     const stored = readFileSync(BRIDGE_TOKEN_PATH, 'utf8').trim();
@@ -230,7 +234,8 @@ function resolveLocalToken() {
      */
     if (/^[A-Za-z0-9._-]{16,}$/.test(stored)) {
       tokenHardenResult = hardenTokenFile(); // 旧版本创建的文件权限是继承来的，这里补一次
-      return stored;
+      localTokenCache = stored;
+      return localTokenCache;
     }
   } catch { /* 首次运行：文件还不存在 */ }
   const token = randomBytes(24).toString('base64url');
@@ -238,7 +243,8 @@ function resolveLocalToken() {
     writeFileSync(BRIDGE_TOKEN_PATH, `${token}\n`, { mode: 0o600 });
     tokenHardenResult = hardenTokenFile();
   } catch { /* 只读介质：本次运行有效，下次会换新（用户需重填客户端密钥） */ }
-  return token;
+  localTokenCache = token;
+  return localTokenCache;
 }
 
 /**
@@ -336,7 +342,7 @@ export const config = {
      * 默认值是**首次运行随机生成并落盘**的（见 resolveLocalToken），不再是
      * 从前的固定串 `wb-local-bridge` —— 那个值是公开的，等于没有防护。
      */
-    token: resolveLocalToken(),
+    get token() { return resolveLocalToken(); },
     /**
      * 令牌文件权限加固的结果（`{ok, code, reason}`）。
      *
@@ -432,8 +438,13 @@ export const config = {
     openBrowser: env.DASHBOARD_OPEN_BROWSER === '1',
   },
   workbuddy: {
-    exe: resolveWorkBuddyExe(),
-    authFile: resolveAuthFile(),
+    /*
+     * 与 dsh 路径切面同一个理由：探测可能扫盘 / 起 PowerShell（非标准安装
+     * 位置下实测数秒），不能在 import 那一刻就付这笔钱。用 getter 让真正
+     * 需要路径的调用方（拉桥、doctor）在用到时才算。
+     */
+    get exe() { return resolveWorkBuddyExe(); },
+    get authFile() { return resolveAuthFile(); },
     /*
      * 第二条凭据来源（插件登录）。凭据由桥自己保管：
      *   - source：auto（桌面端优先，本地不可用时回退插件）/ desktop / plugin / api-key
@@ -467,8 +478,8 @@ export const config = {
       if (typeof explicit === 'string' && explicit.trim()) return explicit.trim();
       return join(homedir(), '.dsh');
     },
-    runtime: resolveDshRuntime(),
-    desktopVersion: dshDesktopVersion(),
+    get runtime() { return resolveDshRuntime(); },
+    get desktopVersion() { return dshDesktopVersion(); },
     get settingsPath() { return join(config.dsh.home, 'settings.yaml'); },
     get credentialsPath() { return join(config.dsh.home, '.credentials.yaml'); },
     get profileDir() { return join(config.dsh.home, 'profiles', 'desktop'); },

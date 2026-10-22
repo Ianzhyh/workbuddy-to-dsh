@@ -345,7 +345,8 @@ export function findWorkBuddyExe() {
   if (hitCache && existsSync(hitCache)) return hitCache;
   hitCache = '';
   if (Date.now() - lastMissAt < MISS_RETRY_MS) return '';
-  let hit = workBuddyExeCandidates().find((p) => existsSync(p));
+  let hit = staticWorkBuddyExeCandidates().find((p) => existsSync(p));
+  if (!hit) hit = workBuddyExeCandidates().find((p) => existsSync(p));
   if (!hit) hit = probeSystemSignalsExe().find((p) => existsSync(p));
   if (hit) {
     hitCache = hit;
