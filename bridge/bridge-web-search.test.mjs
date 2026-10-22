@@ -191,6 +191,7 @@ test('workbuddy search：/v1/web_search 直连并归一化结果', async () => {
     headers: { authorization: `Bearer ${TOKEN}` },
   })).json();
   assert.equal(ledger.requests[0].model, 'web-search', '搜索也必须进账本/最近请求');
+  assert.equal(ledger.requests[0].kind, 'search', '搜索要带 kind，便于用量单列');
   assert.equal(ledger.requests[0].ok, true);
 });
 
@@ -342,4 +343,19 @@ test('workbuddy search：max_results 非法本地 400，wrapped/empty 正常', a
   const empty = await post('/v1/web_search', { query: 'empty query' });
   assert.equal(empty.status, 200);
   assert.equal((await empty.json()).results.length, 0);
+});
+
+test('workbuddy search：用量统计把搜索与模型调用分开', async () => {
+  const res = await fetch(base + '/v1/usage?days=1', {
+    headers: { authorization: `Bearer ${TOKEN}` },
+  });
+  assert.equal(res.status, 200);
+  const usage = await res.json();
+  assert.ok(usage.total.searches >= 1, '搜索应计入 searches');
+  assert.equal(usage.total.calls, 0, '这个套件没有模型调用，calls 不应包含搜索');
+  assert.ok(usage.total.searchFailed >= 1, '失败的搜索应单独计数');
+  assert.equal(usage.models.some((m) => m.model === 'web-search'), false,
+    '模型排行不应出现 web-search');
+  assert.ok(usage.days.every((d) => typeof d.searches === 'number'),
+    '日桶应带 searches 字段');
 });

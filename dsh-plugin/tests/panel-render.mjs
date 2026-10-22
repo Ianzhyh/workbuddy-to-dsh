@@ -43,6 +43,21 @@ const OUT = join(OUT_DIR, 'plugin-panel.png');
 const PORT = 8810; // 与控制台用例（8774~8798）分开，避免同时跑时抢端口
 const LIVE = 'http://127.0.0.1:19387';
 
+/**
+ * CDP 端口交给系统分配：本机一个普通出站连接就可能占住固定端口（实测 9333
+ * 被出站连接占住时 Chrome 无法监听，验收会以「无法连接 DevTools」中断）。
+ */
+async function freeCdpPort() {
+  const srv = createServer();
+  await new Promise((resolve, reject) => {
+    srv.once('error', reject);
+    srv.listen(0, '127.0.0.1', resolve);
+  });
+  const port = srv.address().port;
+  await new Promise((resolve) => srv.close(resolve));
+  return port;
+}
+
 // 桩数据与渲染骨架在 _panel-fixtures.mjs 里，与 panel-i18n.test.mjs 共用一份
 import { FIXTURES, buildRoutes, ensureVendor, harnessHtml, gather } from './_panel-fixtures.mjs';
 
@@ -88,7 +103,9 @@ await new Promise((resolve) => extra.listen(PORT + 1, '127.0.0.1', resolve));
 // 因此直接把 harness 页面挂到 extra 上，导航时用 PORT+1。
 // injectStub:false —— 打桩改由外壳页面自己做（见 harnessHtml）。CDP 的注入会连
 // iframe 一起打桩，内嵌的真控制台就再也拿不到自己的 /api/*。
-const page = await openPage(`http://127.0.0.1:${PORT + 1}/harness.html`, {}, { width: 900, height: 1400, injectStub: false });
+const page = await openPage(`http://127.0.0.1:${PORT + 1}/harness.html`, {}, {
+  width: 900, height: 1400, injectStub: false, cdpPort: await freeCdpPort(),
+});
 
 let failed = false;
 try {
@@ -172,7 +189,7 @@ try {
   const EXPECT = {
     概览: ['本地桥', 'dsh 原生路由', '积分余额', '启动桥', '复制诊断报告'],
     账号: ['workbuddy-desktop.info', '330000000000', '使用中', '切换', 'CodeBuddyExtension'],
-    用量: ['消耗积分', '积分花在哪些模型上', '导出 CSV', 'deepseek-v4.1-flash'],
+    用量: ['消耗积分', '积分花在哪些模型上', '搜索次数', '导出 CSV', 'deepseek-v4.1-flash'],
     请求: ['最近请求', '仅看失败', '导出当前筛选 CSV'],
     签到: ['每日签到', '连续天数', '自动签到', '上次尝试'],
     诊断: ['环境诊断', 'AtRest 密钥', '登录文件', 'profile bundles', '运行时注册，无需 settings.yaml'],
@@ -289,6 +306,10 @@ try {
   await sleep(500);
   const svgCount = await page.cdp.evaluate("document.querySelectorAll('.wb-root svg').length");
   if (!svgCount) problems.push('用量页没有渲染趋势图（内联 SVG）');
+  const usageText = await page.cdp.evaluate("document.querySelector('.wb-root') ? document.querySelector('.wb-root').innerText : ''");
+  if (!/搜索次数/.test(usageText)) problems.push('用量页没有单列搜索次数');
+  if (!/已回报 30\/36 次/.test(usageText)) problems.push('用量页没有显示积分回报覆盖率');
+  if (!/本地账本只覆盖本桥请求/.test(usageText)) problems.push('用量页没有说明本地账本与上游余额的口径差异');
   let shot = await page.cdp.send('Page.captureScreenshot', { format: 'png', captureBeyondViewport: true });
   writeFileSync(join(OUT_DIR, 'plugin-panel-usage.png'), Buffer.from(shot.result.data, 'base64'));
   await page.cdp.evaluate(`(() => { const b=[...document.querySelectorAll('.wb-tab')].find(x=>x.textContent==='模型'); b && b.click(); })()`);
@@ -1321,7 +1342,9 @@ async function verifyNarrow() {
       ],
     },
   };
-  const page3 = await openPage(`http://127.0.0.1:${PORT + 3}/harness.html`, {}, { width: 620, height: 1200, injectStub: false, cdpPort: 9335 });
+  const page3 = await openPage(`http://127.0.0.1:${PORT + 3}/harness.html`, {}, {
+    width: 620, height: 1200, injectStub: false, cdpPort: await freeCdpPort(),
+  });
   const extra3 = createServer((req, res) => {
     const path = new URL(req.url, `http://127.0.0.1:${PORT + 3}`).pathname;
     if (path === '/harness.html') { res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }); return res.end(harnessHtml(narrowRoutes)); }
@@ -1450,7 +1473,9 @@ async function verifyStaleHost() {
     '/workbuddy/log': data.log,
     // 故意**不提供** /workbuddy/console-api/* —— 外壳对未命中路径回 404，正好模拟旧宿主
   };
-  const page2 = await openPage(`http://127.0.0.1:${PORT + 2}/harness.html`, {}, { width: 900, height: 1400, injectStub: false, cdpPort: 9334 });
+  const page2 = await openPage(`http://127.0.0.1:${PORT + 2}/harness.html`, {}, {
+    width: 900, height: 1400, injectStub: false, cdpPort: await freeCdpPort(),
+  });
   const extra2 = createServer((req, res) => {
     const path = new URL(req.url, `http://127.0.0.1:${PORT + 2}`).pathname;
     if (path === '/harness.html') { res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }); return res.end(harnessHtml(staleRoutes)); }
@@ -1561,7 +1586,9 @@ async function verifyDegradedBridge() {
   const problems = [];
   let page4;
   try {
-    page4 = await openPage(`http://127.0.0.1:${port}/harness.html`, {}, { width: 900, height: 1100, injectStub: false, cdpPort: 9336 });
+    page4 = await openPage(`http://127.0.0.1:${port}/harness.html`, {}, {
+      width: 900, height: 1100, injectStub: false, cdpPort: await freeCdpPort(),
+    });
     await waitFor(page4.cdp, 'window.__harness && window.__harness.rendered === true', 15000, '面板挂载');
     await sleep(1000);
     const text = await page4.cdp.evaluate("document.querySelector('.wb-root') ? document.querySelector('.wb-root').innerText : ''");
@@ -1646,7 +1673,9 @@ async function verifyFirstRun() {
     },
   };
   const port = PORT + 5;
-  const page = await openPage(`http://127.0.0.1:${port}/harness.html`, {}, { width: 900, height: 1000, injectStub: false, cdpPort: 9337 });
+  const page = await openPage(`http://127.0.0.1:${port}/harness.html`, {}, {
+    width: 900, height: 1000, injectStub: false, cdpPort: await freeCdpPort(),
+  });
   const extra = createServer((req, res) => {
     const path = new URL(req.url, `http://127.0.0.1:${port}`).pathname;
     if (path === '/harness.html') { res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }); return res.end(harnessHtml(firstRunRoutes)); }

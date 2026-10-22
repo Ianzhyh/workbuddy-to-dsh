@@ -816,6 +816,21 @@ body.dark .wb-root,
       '清空中…': 'Clearing…',
       '清空账本': 'Clear ledger',
       '调用': 'Calls',
+      '模型调用': 'Model calls',
+      '搜索次数': 'Search calls',
+      '搜索失败': 'Search failures',
+      '已回报 ': 'Reported for ',
+      ' 次扣分（上游按两位小数）': ' calls with credit (upstream rounds to 2 decimals)',
+      '上游未回报扣分（': 'Upstream did not report credit for ',
+      ' 次模型调用）': ' model calls)',
+      '搜索调用 ': 'Search calls: ',
+      ' 次（不计入模型调用/积分）': ' (excluded from model calls/credit)',
+      '本地账本只覆盖本桥请求，和上游余额/其它客户端不是同一口径。':
+        'The local ledger covers only this bridge; it is not the same scope as the upstream balance or other clients.',
+      '当前桥版本较旧，搜索调用仍计入模型调用；重启桥后可按新口径拆分。':
+        'The running bridge is older, so search calls are still counted as model calls. Restart the bridge to split them.',
+      '未回报': 'not reported',
+      '未回报扣分的模型：': 'Models without reported credit: ',
       '失败': 'Failed',
       '输入 tokens': 'Input tokens',
       '输出 tokens': 'Output tokens',
@@ -3511,6 +3526,26 @@ body.dark .wb-root,
       // 首帧：数据还没到时给加载态，别先渲染一屏 0 / 空表
       const usage = data && data.usage ? data.usage : data;
       const total = usage?.total || {};
+      const totalCalls = Number(total.calls) || 0;
+      const creditCalls = Number(total.creditCalls) || 0;
+      const searches = Number(total.searches);
+      const hasSearchMetric = Number.isFinite(searches);
+      const searchFailed = Number(total.searchFailed) || 0;
+      const creditNote = totalCalls
+        ? (creditCalls
+          ? t('已回报 ') + creditCalls + '/' + totalCalls + t(' 次扣分（上游按两位小数）')
+          : t('上游未回报扣分（') + totalCalls + t(' 次模型调用）'))
+        : '';
+      const searchNote = hasSearchMetric && (searches > 0 || searchFailed > 0)
+        ? t('搜索调用 ') + searches + t(' 次（不计入模型调用/积分）')
+        : '';
+      const scopeNote = t('本地账本只覆盖本桥请求，和上游余额/其它客户端不是同一口径。');
+      const searchVersionNote = hasSearchMetric
+        ? ''
+        : t('当前桥版本较旧，搜索调用仍计入模型调用；重启桥后可按新口径拆分。');
+      const models = usage?.models || [];
+      const noCreditModels = models.filter((m) => (Number(m.calls) || 0) > 0
+        && !(Number(m.creditCalls) || 0));
       const series = hours ? (usage?.hours || []) : (usage?.days || []);
       const points = series.map((d) => ({
         label: hours ? String(d.key).slice(-2) + '时' : String(d.day || d.key).slice(5),
@@ -3564,18 +3599,26 @@ body.dark .wb-root,
             h('div', { className: 'wb-actions-group' },
               h(Btn, { onClick: reload }, '刷新'),
               h(Btn, { onClick: () => downloadCsv('workbuddy-usage.csv',
-                ['day', 'calls', 'promptTokens', 'completionTokens', 'credit'],
-                series.map((d) => [d.day || d.key, d.calls, d.promptTokens, d.completionTokens, d.credit])) }, '导出 CSV'),
+                ['day', 'calls', 'searches', 'searchFailed', 'promptTokens', 'completionTokens', 'credit'],
+                series.map((d) => [d.day || d.key, d.calls, d.searches || 0, d.searchFailed || 0,
+                  d.promptTokens, d.completionTokens, d.credit])) }, '导出 CSV'),
               h(Btn, { disabled: clearing, onClick: clearLedger }, clearing ? '清空中…' : '清空账本'))),
           error ? h(Alert, { bad: true }, error) : null,
           message ? h(Alert, null, message) : null,
           h('div', { className: 'wb-grid' },
-            h('div', { className: 'wb-metric' }, h('span', null, '调用'), h('b', null, fmtInt(total.calls))),
+            h('div', { className: 'wb-metric' }, h('span', null, '模型调用'), h('b', null, fmtInt(totalCalls))),
             h('div', { className: 'wb-metric' + ((total.failed || 0) > 0 ? ' warn' : '') }, h('span', null, '失败'), h('b', null, fmtInt(total.failed))),
+            hasSearchMetric
+              ? h('div', { className: 'wb-metric' }, h('span', null, '搜索次数'), h('b', null, fmtInt(searches)))
+              : null,
+            searchFailed > 0
+              ? h('div', { className: 'wb-metric warn' }, h('span', null, '搜索失败'), h('b', null, fmtInt(searchFailed)))
+              : null,
             h('div', { className: 'wb-metric' }, h('span', null, '输入 tokens'), h('b', null, fmtTokens(total.promptTokens))),
             h('div', { className: 'wb-metric' }, h('span', null, '输出 tokens'), h('b', null, fmtTokens(total.completionTokens))),
             h('div', { className: 'wb-metric brand' }, h('span', null, '消耗积分'), h('b', null, typeof total.credit === 'number' ? total.credit.toFixed(2) : '0')),
-            h('div', { className: 'wb-metric' }, h('span', null, '平均耗时'), h('b', null, total.calls ? Math.round((total.ms || 0) / total.calls) + ' ms' : '—'))),
+            h('div', { className: 'wb-metric' }, h('span', null, '平均耗时'), h('b', null, totalCalls ? Math.round((total.ms || 0) / totalCalls) + ' ms' : '—'))),
+          h('p', { className: 'wb-note' }, [creditNote, searchNote, searchVersionNote, scopeNote].filter(Boolean).join(' · ')),
           h(ModelProportionBar, { models: usage?.models || [], metric }),
           h('div', {
             key: chartView,
@@ -3595,23 +3638,30 @@ body.dark .wb-root,
                 h('th', { className: 'num' }, 'tokens'),
                 h('th', { className: 'num' }, '积分'),
                 h('th', { style: { width: '100px', textAlign: 'right' } }, '占比'))),
-              h('tbody', null, (usage?.models || []).map((m, idx) => {
-                const totalCalls = total.calls || 1;
-                const pct = Math.round(((m.calls || 0) / totalCalls) * 100);
+              h('tbody', null, models.map((m, idx) => {
+                const modelTotalCalls = total.calls || 1;
+                const pct = Math.round(((m.calls || 0) / modelTotalCalls) * 100);
                 const color = MODEL_COLORS[idx % MODEL_COLORS.length];
+                const creditReported = (Number(m.creditCalls) || 0) > 0;
                 return h('tr', { key: m.model },
                   h('td', null,
                     h('span', { style: { display: 'inline-block', width: '7px', height: '7px', borderRadius: '50%', background: color, marginRight: '8px', verticalAlign: 'middle' } }),
                     m.model),
                   h('td', { className: 'num' }, fmtInt(m.calls)),
                   h('td', { className: 'num' }, fmtTokens((m.promptTokens || 0) + (m.completionTokens || 0))),
-                  h('td', { className: 'num' }, typeof m.credit === 'number' ? m.credit.toFixed(2) : '0'),
+                  h('td', { className: 'num' }, creditReported
+                    ? (typeof m.credit === 'number' ? m.credit.toFixed(2) : '0')
+                    : t('未回报')),
                   h('td', { className: 'num', style: { color: 'var(--dsw-alias-label-secondary)' } },
                     h('div', { style: { display: 'inline-flex', alignItems: 'center', gap: '6px', justifyContent: 'flex-end', width: '100%' } },
                       h('div', { style: { width: '42px', height: '5px', borderRadius: '3px', background: 'var(--dsw-alias-interactive-bg-active, rgba(120,140,180,0.18))', overflow: 'hidden', flex: 'none' } },
                         h('div', { style: { width: pct + '%', height: '100%', background: color, borderRadius: '3px', transition: 'width .45s cubic-bezier(0.16, 1, 0.3, 1)' } })),
                       h('span', { style: { minWidth: '28px', textAlign: 'right' } }, pct + '%'))));
               })))),
+          noCreditModels.length
+            ? h('p', { className: 'wb-note' },
+              t('未回报扣分的模型：') + noCreditModels.map((m) => m.model).join('、'))
+            : null,
           (usage?.failures || []).length
             ? h('div', null, h('p', { className: 'wb-note' }, '最近的失败：'),
               h('div', { className: 'wb-scroll', style: { maxHeight: '200px' } },

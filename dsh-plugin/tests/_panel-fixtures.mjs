@@ -126,14 +126,17 @@ export const FIXTURES = {
     ok: true,
     usage: {
       windowDays: 7,
-      total: { calls: 36, promptTokens: 186000, completionTokens: 42000, ms: 38000, credit: 1.24, creditCalls: 30, failed: 2 },
+      total: {
+        calls: 36, promptTokens: 186000, completionTokens: 42000, ms: 38000,
+        credit: 1.24, creditCalls: 30, failed: 2, searches: 4, searchFailed: 1,
+      },
       models: [
-        { model: 'deepseek-v4.1-flash', calls: 21, promptTokens: 120000, completionTokens: 30000, credit: 0.62 },
-        { model: 'glm-5.3', calls: 12, promptTokens: 50000, completionTokens: 8000, credit: 0.48 },
+        { model: 'deepseek-v4.1-flash', calls: 24, promptTokens: 120000, completionTokens: 30000, credit: 0.76, creditCalls: 20 },
+        { model: 'glm-5.3', calls: 12, promptTokens: 50000, completionTokens: 8000, credit: 0.48, creditCalls: 10 },
       ],
       // 趋势图数据（离线模式下也要有，否则"用量页必须渲染 SVG"的断言会失败）
       days: [
-        { key: '2026-09-28', calls: 3, promptTokens: 12000, completionTokens: 3000, credit: 0.08 },
+        { key: '2026-09-28', calls: 3, promptTokens: 12000, completionTokens: 3000, credit: 0.08, searches: 2, searchFailed: 0 },
         { key: '2026-09-29', calls: 5, promptTokens: 21000, completionTokens: 5200, credit: 0.14 },
         { key: '2026-09-30', calls: 4, promptTokens: 18000, completionTokens: 4100, credit: 0.1 },
         { key: '2026-10-01', calls: 7, promptTokens: 32000, completionTokens: 7600, credit: 0.22 },
@@ -147,6 +150,7 @@ export const FIXTURES = {
       ],
       failures: [
         { t: now - 3_600_000, model: 'glm-5.3', error: 'invalid_request: 该模型当前不可用' },
+        { t: now - 1_800_000, model: 'web-search', kind: 'search', status: 504, code: 'WEB_SEARCH_TIMEOUT', error: 'WEB_SEARCH_TIMEOUT' },
       ],
     },
   },

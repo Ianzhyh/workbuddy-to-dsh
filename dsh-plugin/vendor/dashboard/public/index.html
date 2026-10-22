@@ -931,6 +931,13 @@ const I18N_EN = {
   '积分余额': 'Credit balance',
   'DSH 配置': 'DSH config',
   '调用次数': 'Calls',
+  '搜索次数': 'Search calls',
+  '搜索失败': 'Search failures',
+  '不计入模型调用/积分': 'excluded from model calls / credit',
+  '搜索调用不计入模型调用、tokens 与积分；本地账本只覆盖本桥流量，与上游余额/其它客户端不是同一口径。':
+    'Search calls are excluded from model calls, tokens, and credit. The local ledger covers only this bridge and is not the same scope as the upstream balance or other clients.',
+  '当前桥版本较旧，搜索调用仍计入调用次数；重启桥后可按新口径拆分。本地账本只覆盖本桥流量，与上游余额/其它客户端不是同一口径。':
+    'The running bridge is older, so search calls are still counted as calls. Restart the bridge to split them. The local ledger covers only this bridge and is not the same scope as the upstream balance or other clients.',
   '输入 tokens': 'Input tokens',
   '输出 tokens': 'Output tokens',
   '平均耗时': 'Avg duration',
@@ -3929,7 +3936,10 @@ function toWeekBuckets(days) {
   const cur = new Date(firstMonday.getTime());
   while (cur.getTime() <= thisMonday.getTime()) {
     const key = ymd(cur);
-    const b = { day: key, calls: 0, promptTokens: 0, completionTokens: 0, credit: 0, creditCalls: 0, byModel: new Map() };
+    const b = {
+      day: key, calls: 0, promptTokens: 0, completionTokens: 0, credit: 0, creditCalls: 0,
+      searches: 0, searchFailed: 0, byModel: new Map(),
+    };
     buckets.push(b);
     index.set(key, b);
     cur.setDate(cur.getDate() + 7);
@@ -3937,7 +3947,7 @@ function toWeekBuckets(days) {
   for (const d of list) {
     const b = index.get(ymd(mondayOf(d.day)));
     if (!b) continue;
-    for (const k of ['calls', 'promptTokens', 'completionTokens', 'credit', 'creditCalls']) {
+    for (const k of ['calls', 'promptTokens', 'completionTokens', 'credit', 'creditCalls', 'searches', 'searchFailed']) {
       b[k] += Number(d[k]) || 0;
     }
     for (const m of (Array.isArray(d.byModel) ? d.byModel : [])) {
@@ -4128,29 +4138,38 @@ function renderUsage() {
 
   // 账本被清空后总量会是「全 0」，那种一屏 0 没有信息量；
   // 只有失败记录时仍要显示卡片（失败不计入 calls）
-  const emptyTotal = u && u.total
-    && Number(u.total.calls) === 0 && Number(u.total.failed) === 0;
+  const t = u && u.total ? u.total : {};
+  const searches = Number(t.searches) || 0;
+  const searchFailed = Number(t.searchFailed) || 0;
+  const hasSearchMetric = Number.isFinite(Number(t.searches));
+  const emptyTotal = Boolean(u && u.total)
+    && Number(t.calls) === 0 && Number(t.failed) === 0
+    && searches === 0 && searchFailed === 0;
   if (!u || !u.total || emptyTotal) {
     box.innerHTML = '<div class="empty">暂无数据（桥未运行或还没有请求过）。</div>';
     return;
   }
 
-  const t = u.total;
   const avg = t.calls ? Math.round(t.ms / t.calls) : 0;
   const credit = Number(t.credit) || 0;
   const creditCalls = Number(t.creditCalls) || 0;
 
   // 明确告诉用户「扣分为什么是 0 / 为什么是 —」：上游按两位小数回报，
   // 小请求扣分本来就是 0.00；没有回报的调用才显示「—」。
-  const creditNote = creditCalls
-    ? '已回报 ' + creditCalls + '/' + t.calls + ' 次'
-      + (creditCalls > 1 ? '　平均 ' + fmtCredit(credit / creditCalls, true) : '')
-      + '　上游按两位小数回报'
-    : '上游未回报（' + t.calls + ' 次调用）';
+  const creditNote = !t.calls
+    ? ''
+    : creditCalls
+      ? '已回报 ' + creditCalls + '/' + t.calls + ' 次'
+        + (creditCalls > 1 ? '　平均 ' + fmtCredit(credit / creditCalls, true) : '')
+        + '　上游按两位小数回报'
+      : '上游未回报（' + t.calls + ' 次调用）';
 
   let html =
     '<div class="cards" style="margin-bottom:14px">' +
       card('调用次数', String(t.calls), '最近 ' + u.windowDays + ' 天') +
+      (hasSearchMetric
+        ? card('搜索次数', String(searches), '不计入模型调用/积分', true)
+        : '') +
       card('输入 tokens', fmtNum(t.promptTokens), '') +
       card('输出 tokens', fmtNum(t.completionTokens), '') +
       card('平均耗时', avg + ' ms', '', true) +
@@ -4158,7 +4177,13 @@ function renderUsage() {
       (Number(t.failed) > 0
         ? card('失败', String(t.failed), '不计入 token / 积分', true)
         : '') +
-    '</div>';
+      (searchFailed > 0
+        ? card('搜索失败', String(searchFailed), '不计入模型调用/积分', true)
+        : '') +
+    '</div>' +
+    '<p class="hint">' + (hasSearchMetric
+      ? '搜索调用不计入模型调用、tokens 与积分；本地账本只覆盖本桥流量，与上游余额/其它客户端不是同一口径。'
+      : '当前桥版本较旧，搜索调用仍计入调用次数；重启桥后可按新口径拆分。本地账本只覆盖本桥流量，与上游余额/其它客户端不是同一口径。') + '</p>';
 
   // 趋势图（R10.1）：指标由 #trendMetric、粒度由 #trendGran 决定。
   // 空态 / 单桶由 buildTrendChart 自己处理（不画空轴）。

@@ -5986,6 +5986,7 @@ function recentRequests(limit = 50) {
   return rows.map((r) => ({
     t: r.t,
     model: r.model || '',
+    ...(r.kind === 'search' ? { kind: 'search' } : {}),
     stream: r.stream === true,
     ms: Number(r.ms) || 0,
     ok: r.ok !== false,
@@ -6047,14 +6048,49 @@ function summarizeUsage(days = 7, opts = {}) {
   // 「没回报」的话，两者在页面上只能显示成同一个「—」，看起来像统计坏了。
   // 另外上游是**两位小数**量化，几十 token 的小请求真实扣分就是 0.00——
   // 那是「这次没扣到」，不是「没数据」。
-  let total = { calls: 0, promptTokens: 0, completionTokens: 0, ms: 0, credit: 0, creditCalls: 0, failed: 0 };
+  // searches / searchFailed 与模型调用分开：搜索不消耗模型 tokens/积分，
+  // 混进 calls 会让「调用次数」和平均耗时对不上模型账。
+  let total = {
+    calls: 0, promptTokens: 0, completionTokens: 0, ms: 0,
+    credit: 0, creditCalls: 0, failed: 0, searches: 0, searchFailed: 0,
+  };
+
+  const ensureDay = (ts) => {
+    const day = localDay(ts);
+    let bucket = byDay.get(day);
+    if (!bucket) {
+      bucket = {
+        day, calls: 0, promptTokens: 0, completionTokens: 0, credit: 0, creditCalls: 0,
+        searches: 0, searchFailed: 0, byModel: new Map(),
+      };
+      byDay.set(day, bucket);
+    }
+    return bucket;
+  };
+  const ensureHour = (ts) => {
+    if (!byHour) return null;
+    const key = localHour(ts);
+    let bucket = byHour.get(key);
+    if (!bucket) {
+      bucket = {
+        key, calls: 0, promptTokens: 0, completionTokens: 0, credit: 0, creditCalls: 0,
+        searches: 0, searchFailed: 0, byModel: new Map(),
+      };
+      byHour.set(key, bucket);
+    }
+    return bucket;
+  };
+  // 老账本没有 kind；model=web-search 是 v1.9.4 起的稳定标记。
+  const isSearchRow = (row) => row.kind === 'search' || row.model === 'web-search';
 
   for (const r of rows) {
     if (r.t < since) continue;
+    const isSearch = isSearchRow(r);
 
     // 失败的请求单独归类：它没有 token、没有扣分，混进成功率会误导
     if (r.ok === false) {
-      total.failed += 1;
+      if (isSearch) total.searchFailed += 1;
+      else total.failed += 1;
       failures.push({
         t: r.t,
         model: r.model || '',
@@ -6063,7 +6099,21 @@ function summarizeUsage(days = 7, opts = {}) {
         status: Number(r.status) || 0,
         code: r.code ?? null,
         error: shortError(r.error),
+        kind: isSearch ? 'search' : 'call',
       });
+      if (isSearch) {
+        ensureDay(r.t).searchFailed += 1;
+        const h = ensureHour(r.t);
+        if (h) h.searchFailed += 1;
+      }
+      continue;
+    }
+
+    if (isSearch) {
+      total.searches += 1;
+      ensureDay(r.t).searches += 1;
+      const h = ensureHour(r.t);
+      if (h) h.searches += 1;
       continue;
     }
 
@@ -6084,9 +6134,7 @@ function summarizeUsage(days = 7, opts = {}) {
     if (hasCredit) { m.credit += cr; m.creditCalls += 1; }
     byModel.set(r.model, m);
 
-    const day = localDay(r.t);
-    const d = byDay.get(day)
-      || { day, calls: 0, promptTokens: 0, completionTokens: 0, credit: 0, creditCalls: 0, byModel: new Map() };
+    const d = ensureDay(r.t);
     d.calls += 1; d.promptTokens += pt; d.completionTokens += ct;
     if (hasCredit) { d.credit += cr; d.creditCalls += 1; }
     /*
@@ -6101,12 +6149,9 @@ function summarizeUsage(days = 7, opts = {}) {
     dm.calls += 1; dm.promptTokens += pt; dm.completionTokens += ct;
     if (hasCredit) { dm.credit += cr; dm.creditCalls += 1; }
     d.byModel.set(r.model, dm);
-    byDay.set(day, d);
 
-    if (byHour) {
-      const hour = localHour(r.t);
-      const h = byHour.get(hour)
-        || { key: hour, calls: 0, promptTokens: 0, completionTokens: 0, credit: 0, creditCalls: 0, byModel: new Map() };
+    const h = ensureHour(r.t);
+    if (h) {
       h.calls += 1; h.promptTokens += pt; h.completionTokens += ct;
       if (hasCredit) { h.credit += cr; h.creditCalls += 1; }
       // 小时桶同样带按模型小计 —— 否则切到「最近 24 小时」这个功能就没了
@@ -6115,7 +6160,6 @@ function summarizeUsage(days = 7, opts = {}) {
       hm.calls += 1; hm.promptTokens += pt; hm.completionTokens += ct;
       if (hasCredit) { hm.credit += cr; hm.creditCalls += 1; }
       h.byModel.set(r.model, hm);
-      byHour.set(hour, h);
     }
   }
 
@@ -6140,7 +6184,10 @@ function summarizeUsage(days = 7, opts = {}) {
     for (let i = 23; i >= 0; i -= 1) {
       const key = localHour(hourAnchor - i * 3600000);
       // 补出来的空桶也要带 `byModel: []`，形状与真实桶一致 —— 前端不必分支判空
-      const h = byHour.get(key) || { key, calls: 0, promptTokens: 0, completionTokens: 0, credit: 0, creditCalls: 0, byModel: new Map() };
+      const h = byHour.get(key) || {
+        key, calls: 0, promptTokens: 0, completionTokens: 0, credit: 0, creditCalls: 0,
+        searches: 0, searchFailed: 0, byModel: new Map(),
+      };
       hours.push({ ...h, byModel: [...h.byModel.values()].sort((a, b) => b.credit - a.credit) });
     }
   }
@@ -7647,7 +7694,7 @@ async function handleRequest(req, res) {
           { conversationId: req.headers['x-conversation-id'] || trace(), signal: ac.signal },
         );
         recordRequest({
-          model: 'web-search', stream: false, ms: Date.now() - startedAt,
+          model: 'web-search', kind: 'search', stream: false, ms: Date.now() - startedAt,
           ok: true, status: 200, code: null,
         });
         log(`web_search results=${search.results.length} provider=${search.provider || '-'} ms=${Date.now() - startedAt}`);
@@ -7665,7 +7712,7 @@ async function handleRequest(req, res) {
         const rateLimited = e?.code === 'RATE_LIMITED' || e?.code === 'WEB_SEARCH_RATE_LIMITED';
         const status = rateLimited ? 429 : (Number(e?.status) || (e?.code === 'WEB_SEARCH_TIMEOUT' ? 504 : 502));
         recordRequest({
-          model: 'web-search', stream: false, ms: Date.now() - startedAt,
+          model: 'web-search', kind: 'search', stream: false, ms: Date.now() - startedAt,
           ok: false, status, code: e?.code || null, error: e?.message || String(e),
         });
         log('web_search failed', status, e?.code || '', shortError(e?.message || e, 200));
@@ -8215,7 +8262,7 @@ async function handleRequest(req, res) {
             { conversationId: req.headers['x-conversation-id'] || trace(), signal: ac.signal },
           );
           recordRequest({
-            model: 'web-search', stream: false, ms: Date.now() - startedAt,
+            model: 'web-search', kind: 'search', stream: false, ms: Date.now() - startedAt,
             ok: true, status: 200, code: null,
           });
           log(`web_search (anthropic) results=${search.results.length} provider=${search.provider || '-'} ms=${Date.now() - startedAt}`);
@@ -8225,7 +8272,7 @@ async function handleRequest(req, res) {
           const rateLimited = e?.code === 'RATE_LIMITED' || e?.code === 'WEB_SEARCH_RATE_LIMITED';
           const status = rateLimited ? 429 : (Number(e?.status) || (e?.code === 'WEB_SEARCH_TIMEOUT' ? 504 : 502));
           recordRequest({
-            model: 'web-search', stream: false, ms: Date.now() - startedAt,
+            model: 'web-search', kind: 'search', stream: false, ms: Date.now() - startedAt,
             ok: false, status, code: e?.code || null, error: e?.message || String(e),
           });
           log('web_search (anthropic) failed', status, e?.code || '', shortError(e?.message || e, 200));

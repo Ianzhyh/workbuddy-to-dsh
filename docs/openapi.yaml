@@ -192,7 +192,8 @@ paths:
           name: days
           schema: { type: integer }
       responses:
-        '200': { description: 用量统计（来自本地账本） }
+        '200':
+          description: 用量统计（来自本地账本）。`calls` / `promptTokens` / `completionTokens` / `credit` 只统计模型调用；网页搜索与接入自检单列为 `searches` / `searchFailed`，不计入模型 tokens 或积分。
     delete:
       summary: 清空账本
       responses:
