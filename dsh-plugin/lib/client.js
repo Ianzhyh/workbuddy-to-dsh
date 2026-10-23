@@ -41,6 +41,39 @@
     const CREDENTIAL_SOURCE_LABELS = { auto: '自动', desktop: '桌面端', plugin: '插件登录', 'api-key': 'API Key' };
     const credentialSourceLabel = (source) => CREDENTIAL_SOURCE_LABELS[source] || source || '—';
 
+    /**
+     * 容器宽度 < 阈值时返回 true。
+     *
+     * dsh 设置弹窗的宽度是官方固定的（内容区实测只有 ~400px），不能拿
+     * `window.innerWidth` 判断 —— 窗口 920px 时内容区仍然很窄。模型表 7 列
+     * 在这个宽度下会被裁掉右侧，所以在面板自己的容器上观察宽度，切成卡片布局。
+     */
+    function useNarrowContainer(ref, threshold = 720, dep = null) {
+      const [narrow, setNarrow] = useState(false);
+      useEffect(() => {
+        const el = ref.current;
+        if (!el) return undefined;
+        const update = (width) => setNarrow(width > 0 && width < threshold);
+        update(el.getBoundingClientRect().width);
+        // 首次挂载时标签页可能刚显示，布局还没稳定（宽度读到 0）；补一次测量。
+        const timer = typeof setTimeout === 'function'
+          ? setTimeout(() => update(el.getBoundingClientRect().width), 250)
+          : null;
+        if (typeof ResizeObserver !== 'function') {
+          return () => { if (timer) clearTimeout(timer); };
+        }
+        const ro = new ResizeObserver((entries) => {
+          for (const entry of entries) update(entry.contentRect.width);
+        });
+        ro.observe(el);
+        return () => {
+          if (timer) clearTimeout(timer);
+          ro.disconnect();
+        };
+      }, [ref, threshold, dep]);
+      return narrow;
+    }
+
     /*
      * 带翻译的 createElement。
      *
@@ -214,6 +247,44 @@ body.dark .wb-root,
 .wb-detail-item{display:flex;align-items:baseline;justify-content:space-between;gap:10px;min-width:0;font-size:12px}
 .wb-detail-item span:first-child{color:var(--dsw-alias-label-secondary,light-dark(#61666b,#cfd3d6));flex:0 0 auto}
 .wb-detail-item span:last-child{min-width:0;text-align:right;overflow-wrap:anywhere;font-variant-numeric:tabular-nums}
+.wb-model-table th:nth-child(6),.wb-model-table td:nth-child(6){width:66px;min-width:66px;white-space:nowrap}
+.wb-model-table th:nth-child(7),.wb-model-table td:nth-child(7){width:96px;min-width:96px;white-space:nowrap}
+/* 模型表：dsh 设置弹窗内容区很窄（约 400px），7 列在窄容器里改成卡片 */
+.wb-model-scroll{max-height:min(70vh,640px)}
+.wb-model-table.wb-narrow{display:block;width:100%}
+.wb-model-table.wb-narrow thead{display:none}
+.wb-model-table.wb-narrow tbody{display:block;width:100%}
+.wb-model-table.wb-narrow tr:not(.wb-detail-row){
+  display:grid;
+  grid-template-columns:26px minmax(0,1fr) auto auto;
+  grid-template-areas:"check model actions actions" "check name actions actions" "check meta probe rate";
+  column-gap:8px;row-gap:2px;
+  padding:10px 6px;
+  border-bottom:.5px solid var(--dsw-alias-border-l1,light-dark(#0000000a,#ffffff0f));
+  border-radius:8px;
+  align-items:start;
+  transition:background-color var(--wb-anim-fast);
+}
+.wb-model-table.wb-narrow tr:not(.wb-detail-row):hover,
+.wb-model-table.wb-narrow tr:not(.wb-detail-row).open{background:var(--dsw-alias-interactive-bg-hover,light-dark(#2631480f,#ffffff14))}
+.wb-model-table.wb-narrow tr:not(.wb-detail-row)>td{
+  display:block;width:auto;min-width:0;padding:0;border:0;
+  /* 表格行/单元格的底色在卡片布局里会变成一块块灰砖：整行只保留一个背景 */
+  background:transparent!important;
+}
+.wb-model-table.wb-narrow td:nth-child(1){grid-area:check;padding-top:3px!important}
+.wb-model-table.wb-narrow td:nth-child(2){grid-area:model;font-weight:600;overflow-wrap:anywhere;padding-right:2px!important}
+.wb-model-table.wb-narrow td:nth-child(3){grid-area:name;min-width:0}
+.wb-model-table.wb-narrow td:nth-child(4){grid-area:meta;color:var(--dsw-alias-label-secondary,light-dark(#61666b,#cfd3d6));font-variant-numeric:tabular-nums;white-space:nowrap}
+.wb-model-table.wb-narrow td:nth-child(5){grid-area:rate;text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums}
+.wb-model-table.wb-narrow td:nth-child(6){grid-area:probe;text-align:right;white-space:nowrap}
+.wb-model-table.wb-narrow td:nth-child(7){grid-area:actions;display:flex;justify-content:flex-end;align-items:flex-start;gap:4px;white-space:nowrap}
+.wb-model-table.wb-narrow td:nth-child(7) .wb-btn{padding:3px 9px;min-height:26px;font-size:12px}
+.wb-model-table.wb-narrow tr.wb-detail-row{display:block;width:100%}
+.wb-model-table.wb-narrow tr.wb-detail-row>td{display:block;width:100%;padding:0 6px 10px;background:transparent!important}
+.wb-model-table.wb-narrow .wb-detail-grid{grid-template-columns:minmax(0,1fr);gap:3px}
+.wb-model-table.wb-narrow .wb-detail-item{gap:8px}
+.wb-model-table.wb-narrow .wb-detail-item span:last-child{text-align:left}
 /* 促销徽章 */
 .wb-badge{display:inline-block;margin-left:6px;padding:0 6px;border-radius:6px;font-size:11px;line-height:16px;background:light-dark(#00000010,#ffffff1f);border:.5px solid transparent;white-space:nowrap;vertical-align:middle;transition:all var(--wb-anim-fast)}
 /* 账号：每账号一行 */
@@ -1888,7 +1959,7 @@ body.dark .wb-root,
         h('span', { className: 'wb-value' }, props.children));
     }
     function Pill(props) {
-      return h('span', { className: 'wb-pill' }, h('span', { className: 'wb-dot ' + (props.tone || '') }), props.text);
+      return h('span', { className: 'wb-pill', ...(props.title ? { title: props.title } : {}) }, h('span', { className: 'wb-dot ' + (props.tone || '') }), props.text);
     }
     function Btn(props) {
       return h('button', {
@@ -3987,6 +4058,9 @@ body.dark .wb-root,
     // ─────────────────────────── 可用模型 / 体检 ───────────────────────────
     function ModelsPanel({ onStartConsole, busy, sampleModel, onUseModel }) {
       const { data, error, reload, loading } = useJson('/workbuddy/models', { interval: 120000 });
+      // dsh 设置弹窗的有效宽度很小：观察本面板容器，窄的时候把 7 列表格改成卡片。
+      const layoutRef = useRef(null);
+      const narrow = useNarrowContainer(layoutRef, 720, Boolean(data));
       const [refreshing, setRefreshing] = useState(false);
       const probesApi = useConsoleApi(CONSOLE_API + '/probe-results', { interval: 30000 });
       const { data: probes, status: pstatus, reload: reloadProbes } = probesApi;
@@ -4328,8 +4402,8 @@ body.dark .wb-root,
             '配置里有模型被 modelDeny 排除，它们不会出现在 dsh 选择器里（面板里勾选也不生效）。')
           : null,
         prefsDirty ? h('p', { className: 'wb-note', style: { margin: '0 0 8px' } }, '有未保存的勾选改动 —— 点「保存显示设置」后才会应用到 dsh 的模型选择器。') : null,
-        h('div', { className: 'wb-scroll' },
-          h('table', { className: 'wb-table' },
+        h('div', { className: 'wb-scroll wb-model-scroll', ref: layoutRef },
+          h('table', { className: 'wb-table wb-model-table' + (narrow ? ' wb-narrow' : '') },
             h('thead', null, h('tr', null,
               // 列数压到 7 列：显示勾选 + 模型 + 名称 + 上下文/输出 + 倍率 + 体检 + 操作。
               // 显示勾选决定该模型是否出现在 dsh 的模型选择器里（保存后即时生效）。
@@ -4370,7 +4444,15 @@ body.dark .wb-root,
                 h('td', { className: 'num' }, (m.contextWindow ? fmtTokens(m.contextWindow) : '—') + ' / ' + (m.maxTokens ? fmtTokens(m.maxTokens) : '—')),
                 h('td', { className: 'num' }, m.free ? '免费' : (m.credits === null || m.credits === undefined ? '—' : String(m.credits))),
                 h('td', null, probe
-                  ? h(Pill, { tone: probe.ok ? 'ok' : 'bad', text: (probe.ok ? '可用' : '不可用') + ' · ' + probe.ms + 'ms' })
+                  ? h(Pill, {
+                    tone: probe.ok ? 'ok' : 'bad',
+                    // 表格里只放短状态，毫秒/错误放悬停与详情：`可用 · 253ms` 比
+                    // 「未测」长得多，会让这一列在体检后突然变宽、把右侧裁掉。
+                    text: probe.ok ? '可用' : '不可用',
+                    title: t(probe.ok ? '可用' : '不可用') + ' · ' + probe.ms + 'ms'
+                      + (probe.error ? ' · ' + probe.error : '')
+                      + (typeof probe.credit === 'number' ? ' · ' + t('实测扣分') + ' ' + probe.credit : ''),
+                  })
                   : h('span', { className: 'wb-note', style: { margin: 0 } }, '未测')),
                 h('td', { className: 'wb-actions-col' },
                   h(Btn, { disabled: !!working || !consoleReady, onClick: () => probeOne(m.id), title: probe?.error || (probe && typeof probe.credit === 'number' ? '实测扣分 ' + probe.credit : '') }, working === m.id ? '测…' : '测'),

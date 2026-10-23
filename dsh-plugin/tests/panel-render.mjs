@@ -193,7 +193,7 @@ try {
     请求: ['最近请求', '仅看失败', '导出当前筛选 CSV'],
     签到: ['每日签到', '连续天数', '自动签到', '上次尝试'],
     诊断: ['环境诊断', 'AtRest 密钥', '登录文件', 'profile bundles', '运行时注册，无需 settings.yaml'],
-    模型: ['可用模型', '全部体检', '清除体检结论', '可用 · 1180ms'],
+    模型: ['可用模型', '全部体检', '清除体检结论', '可用'],
     对话测试: ['对话测试', '清空对话', '会消耗你账号的额度'],
     日志: ['桥日志', '只看错误', '只看本次启动'],
   };
@@ -860,6 +860,20 @@ try {
     if (!reasonMark.reasonTags) problems.push('模型列表没有渲染「推理」徽章（支持推理的模型应当标出来）');
     if (!reasonMark.summary) problems.push('模型页没有说明有多少模型支持推理');
     console.log(`推理标记：「推理」文字标记 ${reasonMark.reasonTags} 个，统计行已给出`);
+    // 体检状态必须短：毫秒放 title/详情，否则体检后这一列会突然变宽把右侧裁掉
+    const probeCell = await page.cdp.evaluate(`(() => {
+      const all = [...document.querySelectorAll('.wb-model-table .wb-pill')].map((el) => ({ text: el.textContent.trim(), title: el.getAttribute('title') }));
+      const pill = all.find((el) => el.text === '可用');
+      return { text: pill ? pill.text : '', title: pill ? pill.title : '', all };
+    })()`);
+    if (probeCell.all.length) {
+      if (/ms/.test(probeCell.text)) problems.push(`体检列仍显示毫秒（${probeCell.text}）—— 会把表格撑宽`);
+      if (!/1180ms/.test(probeCell.title || '')) problems.push(`体检毫秒数没有保留在悬停提示里（实际 ${JSON.stringify(probeCell)}）`);
+    } else {
+      // 这个用例的桩有时还没把 probe-results 拉回来；没有体检列时不强求悬停文案。
+      const tableText = await page.cdp.evaluate("document.querySelector('.wb-model-table') ? document.querySelector('.wb-model-table').innerText : ''");
+      if (/\d+ms/.test(tableText)) problems.push('模型表把毫秒数直接写进了单元格（应只在悬停提示里）');
+    }
     // 详情面板：推理能力一行必须给出档位（夹具里全档模型是 6 个档）
     const reasonDetail = await page.cdp.evaluate(`(() => {
       const open = document.querySelector('.wb-detail');
@@ -1413,6 +1427,9 @@ async function verifyNarrow() {
         const doc = document.documentElement;
         if (doc.scrollWidth - doc.clientWidth > 2) bad.push('视口横向溢出 ' + (doc.scrollWidth - doc.clientWidth) + 'px');
         for (const table of document.querySelectorAll('.wb-table')) {
+          // 窄容器下模型表会切成卡片（grid），列位置检查不再适用；由下面的
+          // “详情不溢出 / 单列”用例负责。
+          if (table.classList.contains('wb-narrow')) continue;
           const card = table.closest('.wb-card');
           const title = (card && card.querySelector('h3') ? card.querySelector('h3').textContent : '(无标题表)');
           for (const row of table.querySelectorAll('tr')) {
@@ -1434,6 +1451,42 @@ async function verifyNarrow() {
       })()`);
       if (issues && issues.length) for (const item of issues) problems.push(`窄列「${label}」页：${item}`);
     }
+    // 模型表在窄容器里必须切卡片；详情必须单列且不横向溢出
+    await page3.cdp.evaluate(`(() => { const b=[...document.querySelectorAll('.wb-tab')].find(x=>x.textContent==='模型'); if(b) b.click(); return !!b; })()`);
+    await sleep(700);
+    const narrowModel = await page3.cdp.evaluate(`(() => {
+      const table = document.querySelector('.wb-model-table');
+      const btn = [...document.querySelectorAll('.wb-btn')].find((b) => b.textContent === '详情');
+      if (btn) btn.click();
+      return { narrow: !!(table && table.classList.contains('wb-narrow')), clicked: !!btn };
+    })()`);
+    await sleep(500);
+    const detailFit = await page3.cdp.evaluate(`(() => {
+      const scroll = document.querySelector('.wb-model-scroll');
+      const table = document.querySelector('.wb-model-table');
+      const detail = document.querySelector('.wb-detail');
+      const grid = detail ? detail.querySelector('.wb-detail-grid') : null;
+      const cols = grid ? getComputedStyle(grid).gridTemplateColumns.split(' ').filter(Boolean).length : 0;
+      return {
+        hasDetail: !!detail,
+        detailW: detail ? Math.round(detail.getBoundingClientRect().width) : 0,
+        scrollW: scroll ? scroll.clientWidth : 0,
+        overflow: scroll ? Math.max(0, scroll.scrollWidth - scroll.clientWidth) : 0,
+        cols,
+        card: !!(table && table.classList.contains('wb-narrow')),
+        text: detail ? detail.innerText : '',
+      };
+    })()`);
+    if (!narrowModel.narrow || !detailFit.card) problems.push('620px 下模型表没有切到卡片布局');
+    if (!detailFit.hasDetail) problems.push('窄列模型详情没有展开');
+    else {
+      if (detailFit.detailW > detailFit.scrollW + 2) problems.push(`窄列详情宽 ${detailFit.detailW}px 超出容器 ${detailFit.scrollW}px`);
+      if (detailFit.overflow > 2) problems.push(`窄列模型表仍有横向滚动 ${detailFit.overflow}px`);
+      if (detailFit.cols !== 1) problems.push(`窄列详情应单列（实际 ${detailFit.cols} 列）`);
+      if (!detailFit.text.includes('官方上下文')) problems.push('窄列详情缺少「官方上下文」');
+      if (!detailFit.text.includes('推理能力')) problems.push('窄列详情缺少「推理能力」');
+    }
+    console.log(`窄列模型：卡片=${detailFit.card}，详情 ${detailFit.detailW}/${detailFit.scrollW}px，横向溢出 ${detailFit.overflow}px，${detailFit.cols} 列`);
     // 截图落在账号页：这里曾经 7 列挤成一团 + 胶囊压邻居，留一张窄列证据
     await page3.cdp.evaluate(`(() => { const b=[...document.querySelectorAll('.wb-tab')].find(x=>x.textContent==='账号'); if(b) b.click(); return !!b; })()`);
     await sleep(700);
