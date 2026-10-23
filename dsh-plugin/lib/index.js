@@ -1155,7 +1155,7 @@ export function apply(ctx, rawConfig = {}) {
     if (probe.state === 'running') {
       try {
         const recent = await client.requests({ limit: 20, signal });
-        recentFailed = (recent?.requests || []).filter((r) => !r.ok)
+        recentFailed = (recent?.requests || []).filter((r) => !r.ok && r.probe !== true)
           .map((r) => ({ t: r.t, model: r.model, status: r.status, code: r.code, error: r.error }));
       } catch { /* 账本读不到就当"没有失败"，不要因此让整页报错 */ }
     }

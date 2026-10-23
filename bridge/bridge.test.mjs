@@ -793,6 +793,72 @@ test('/v1/models：对齐官方 GUI 清单，并直取 supportedEfforts / contex
   } finally { await bridge.stop(); upstream.close(); }
 });
 
+test('目录：v3 成功后 v2 的单端点 401 不得触发刷新/换号（否则目录永远建不起来）', { timeout: 90_000 }, async () => {
+  let refreshCalls = 0;
+  const upstream = createServer((req, res) => {
+    const path = new URL(req.url, 'http://127.0.0.1').pathname;
+    if (path === '/v3/config') {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      return res.end(JSON.stringify({
+        code: 0,
+        data: {
+          models: [{ id: 'workbuddy-cn-model', name: 'CN', maxInputTokens: 300000, maxOutputTokens: 64000, supportsToolCall: true }],
+          agents: [{ name: 'craft', models: ['workbuddy-cn-model'] }],
+        },
+      }));
+    }
+    if (path === '/v2/enterprises/personal/models') {
+      // 部分 workbuddy.cn 账号这个端点单独 401，但 v3 正常
+      res.writeHead(401, { 'content-type': 'application/json' });
+      return res.end(JSON.stringify({ code: 401, msg: 'unauthorized' }));
+    }
+    if (path === '/v2/plugin/auth/token/refresh') {
+      refreshCalls += 1;
+      res.writeHead(400, { 'content-type': 'application/json' });
+      return res.end(JSON.stringify({ code: 10001, msg: 'refreshToken is empty' }));
+    }
+    res.writeHead(404, { 'content-type': 'application/json' });
+    res.end('{}');
+  });
+  await new Promise((r) => upstream.listen(0, '127.0.0.1', r));
+  const upstreamBase = `http://127.0.0.1:${upstream.address().port}`;
+  const bridge = await startBridge({ CODEBUDDY_ENDPOINT: upstreamBase }, { auth: READABLE_FAKE_AUTH });
+  try {
+    const models = await (await fetch(bridge.baseUrl + '/v1/models?all=1', { headers: auth })).json();
+    assert.ok(models.data.some((m) => m.id === 'workbuddy-cn-model'), 'v3 目录必须保留');
+    assert.equal(refreshCalls, 0, '已有端点成功时不得因为另一端点 401 去刷新令牌');
+    const health = await (await fetch(bridge.baseUrl + '/health', { headers: auth })).json();
+    assert.match(String(health.upstreamShape?.sources?.['/v2/enterprises/personal/models']), /ignored/,
+      '诊断里要能看出 v2 的 401 被跳过，而不是被当成令牌过期');
+  } finally { await bridge.stop(); upstream.close(); }
+});
+
+test('账本：体检请求要标 probe，面板不再把它算进“最近失败”待办', { timeout: 90_000 }, async () => {
+  const upstream = await startStubUpstream(['stub-model']);
+  const bridge = await startBridge({ CODEBUDDY_ENDPOINT: upstream.base }, { auth: READABLE_FAKE_AUTH });
+  try {
+    const call = (probe) => fetch(bridge.baseUrl + '/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${TOKEN}`,
+        'content-type': 'application/json',
+        ...(probe ? { 'x-workbuddy-probe': '1' } : {}),
+      },
+      body: JSON.stringify({
+        model: 'stub-model', stream: true, max_tokens: 64,
+        messages: [{ role: 'system', content: 'You are a helpful assistant.' }, { role: 'user', content: 'hi' }],
+      }),
+    }).then((res) => res.text());
+    await call(true);
+    await call(false);
+    const ledger = await (await fetch(bridge.baseUrl + '/v1/requests?limit=5', { headers: auth })).json();
+    const rows = ledger.requests.filter((r) => r.model === 'stub-model');
+    assert.equal(rows.length, 2);
+    assert.equal(rows[1].probe, true, '体检请求必须带 probe 标记');
+    assert.equal(rows[0].probe, undefined, '普通对话不能被误标成体检');
+  } finally { await bridge.stop(); upstream.close(); }
+});
+
 test('账号跟随：桌面端换号后桥自动改读桌面登录文件；换回则恢复钉住的快照', { timeout: 90_000 }, async () => {
   /*
    * issue #6：面板切换账号把桥钉在快照上，用户随后在 WorkBuddy 客户端换号，

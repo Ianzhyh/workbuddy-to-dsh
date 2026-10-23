@@ -19,6 +19,23 @@
 
 ## [Unreleased]
 
+## [1.9.7] - 2026-10-23
+
+### Fixed
+
+- **目录抓取被单端点 401 拖死**：`/v2/enterprises/personal/models` 对部分
+  `workbuddy.cn` 账号会单独 401，而权威的 `/v3/config` 正常。旧逻辑每轮都把它
+  当令牌过期去刷新、再接管到插件凭据，目录永远建不起来（面板模型列表为空 /
+  反复刷新）。现在 `/v3/config` 优先，且已有目录端点成功时不再因另一端点
+  401 刷新/换号；诊断里会标注 `HTTP 401 (ignored: another catalog endpoint
+  already succeeded)`。
+- **配额 / 签到 401**：计费网关改为跟随登录域名选择（`workbuddy.cn` 账号走
+  `www.workbuddy.cn`，不再一律发到 `codebuddy.cn`）。桌面端重新登录后
+  `/v1/quota` 与 `/v1/checkin` 均恢复正常。
+- **体检误报与噪音**：体检请求的 `max_tokens` 从 1 提到 64（推理模型会拒绝
+  过小的输出预算，旧的 1 会把可用模型误判成不可用）；体检请求在账本里标
+  `probe: true`，不再计入面板「最近请求失败」待办。
+
 ## [1.9.6] - 2026-10-23
 
 ### Fixed

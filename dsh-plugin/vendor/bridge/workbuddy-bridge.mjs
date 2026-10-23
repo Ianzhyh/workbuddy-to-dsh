@@ -724,20 +724,21 @@ function contextWindowForModel(model) {
  */
 function mergeCatalogModel(prev, next) {
   if (!prev) return next;
-  const merged = { ...prev, ...next };
-  for (const [key, value] of Object.entries(prev)) {
+  // `/v3/config` 先到（官方真源）：它的标量字段优先，`/v2` 只补 v3 没给的。
+  const merged = { ...next, ...prev };
+  for (const [key, value] of Object.entries(next)) {
     if (merged[key] === undefined) merged[key] = value;
   }
   const nextEfforts = normalizeEfforts(next?.reasoning?.supportedEfforts);
   const prevEfforts = normalizeEfforts(prev?.reasoning?.supportedEfforts);
-  if (nextEfforts) merged.reasoning = next.reasoning;
-  else if (prevEfforts) merged.reasoning = prev.reasoning;
-  else if (next?.reasoning || prev?.reasoning) merged.reasoning = next?.reasoning || prev?.reasoning;
+  if (prevEfforts) merged.reasoning = prev.reasoning;
+  else if (nextEfforts) merged.reasoning = next.reasoning;
+  else if (next?.reasoning || prev?.reasoning) merged.reasoning = prev?.reasoning || next?.reasoning;
   const nextCtx = normalizeContextLengths(next?.contextWindow?.supportedLengths);
   const prevCtx = normalizeContextLengths(prev?.contextWindow?.supportedLengths);
-  if (nextCtx.length) merged.contextWindow = next.contextWindow;
-  else if (prevCtx.length) merged.contextWindow = prev.contextWindow;
-  else if (next?.contextWindow || prev?.contextWindow) merged.contextWindow = next?.contextWindow || prev?.contextWindow;
+  if (prevCtx.length) merged.contextWindow = prev.contextWindow;
+  else if (nextCtx.length) merged.contextWindow = next.contextWindow;
+  else if (next?.contextWindow || prev?.contextWindow) merged.contextWindow = prev?.contextWindow || next?.contextWindow;
   // tags 取并集：官方选择器判定依赖 craft/chat 标签，任一端点给了都算。
   const tags = [...new Set([...(Array.isArray(prev.tags) ? prev.tags : []), ...(Array.isArray(next.tags) ? next.tags : [])])];
   if (tags.length) merged.tags = tags;
@@ -6143,6 +6144,8 @@ function recordRequest(entry) {
     // key 哈希前 8 位）—— 桥不可用时静默跳过，不影响记账主流程。
     const client = requestScope.getStore()?.client;
     if (client) entry = { ...entry, client };
+    // 面板「体检」是主动探测，失败是预期结果之一；单独标记，避免计入待办。
+    if (requestScope.getStore()?.probe === true) entry = { ...entry, probe: true };
     /*
      * 失败原文在**写入侧**就压平并截断。
      *
@@ -6254,6 +6257,7 @@ function recentRequests(limit = 50) {
     t: r.t,
     model: r.model || '',
     ...(r.kind === 'search' ? { kind: 'search' } : {}),
+    ...(r.probe === true ? { probe: true } : {}),
     stream: r.stream === true,
     ms: Number(r.ms) || 0,
     ok: r.ok !== false,
@@ -6499,11 +6503,11 @@ function isNonChatModel(m) {
  *   /v3/config                       产品配置，其中 models 是**档位/内部型号**
  *                                    （default-model、enhance-1.0 这类）
  *
- * 单用任何一个都会漏。客户端界面里能看到的具体模型（Deepseek-V4.1-Flash、
- * GLM-5.3、Kimi-K3…）来自前者；所以这里**两个都请求、按 id 合并**，
- * 具体模型优先，档位补在后面。
+ * 单用任何一个都会漏。`/v3/config` 是**官方模型选择器的真源**（models + agents，
+ * 带 supportedEfforts / contextWindow），所以放第一位、字段优先；`/v2/.../models`
+ * 用来补 v3 没列出的型号。两个都请求、按 id 合并。
  */
-const CATALOG_PATHS = ['/v2/enterprises/personal/models', '/v3/config'];
+const CATALOG_PATHS = ['/v3/config', '/v2/enterprises/personal/models'];
 
 function catalogPathsFor() {
   return CATALOG_PATHS;
@@ -6694,14 +6698,12 @@ async function fetchCatalog(generation = catalogGeneration) {
         let res = await doFetch();
         /*
          * 401/403 不是「这个区域没有这个端点」，而是**令牌过期**（或会话失效）。
-         *
-         * 目录这条路原先没有刷新重试：401 被当成"该路径没有 models 字段"跳过，
-         * 于是上游目录一条都取不到，FEATURED 补出 2-3 个精选模型后仍被写进 5
-         * 分钟缓存 —— 用户看到"模型只剩几个"，而且要等 5 分钟才可能恢复。
-         * 聊天路径（callUpstream）早就对 401/403 做过 `refreshAuth` 后重试，
-         * 目录这条路必须一致。
+         * 但**另一个目录端点已经成功**时不能因为这份 401 去刷新/换号：
+         * `/v2/enterprises/personal/models` 对部分 workbuddy.cn 账号就会单独
+         * 401，而权威的 `/v3/config` 正常返回 —— 旧逻辑会因此每 8 秒刷新一次、
+         * 再接管到插件凭据，目录永远建不起来。
          */
-        if (res.status === 401 || res.status === 403) {
+        if ((res.status === 401 || res.status === 403) && merged.size === 0) {
           const refreshed = await refreshAuth(auth).catch(() => null);
           if (refreshed) {
             auth = refreshed;
@@ -6722,6 +6724,9 @@ async function fetchCatalog(generation = catalogGeneration) {
               res = await doFetch();
             }
           }
+        } else if (res.status === 401 || res.status === 403) {
+          shape.sources[path] = `HTTP ${res.status} (ignored: another catalog endpoint already succeeded)`;
+          continue;
         }
         // 5xx 是上游临时故障 → 硬失败；4xx / 端点没有 models 字段只算「这个
         // 区域没有这个端点」，不能因此让目录永远不更新。
@@ -7024,11 +7029,19 @@ function pickFeatured(catalog, region = '') {
  */
 const EXPLICIT_BILLING_BASE = process.env.WORKBUDDY_BILLING_BASE || '';
 
-function billingBase(endpoint) {
+function billingBase(auth) {
   if (EXPLICIT_BILLING_BASE) return EXPLICIT_BILLING_BASE;
-  const e = String(endpoint || '');
-  if (e.includes('codebuddy.ai')) return 'https://www.codebuddy.ai';
-  if (e.includes('workbuddy.ai')) return 'https://www.workbuddy.ai';
+  /*
+   * 计费网关要跟着**登录域名**走，而不是只看 chat 端点：workbuddy.cn 账号的
+   * chat 仍在 copilot.tencent.com，但计费/签到只认 www.workbuddy.cn ——
+   * 发到 codebuddy.cn 会回 401（issue #5 截图里的「积分读取失败 HTTP 401」）。
+   */
+  const endpoint = typeof auth === 'string' ? auth : String(auth?.endpoint || '');
+  const domain = typeof auth === 'object' ? String(auth?.domain || '') : '';
+  const hint = `${endpoint} ${domain}`;
+  if (hint.includes('codebuddy.ai')) return 'https://www.codebuddy.ai';
+  if (hint.includes('workbuddy.ai')) return 'https://www.workbuddy.ai';
+  if (hint.includes('workbuddy.cn')) return 'https://www.workbuddy.cn';
   return 'https://www.codebuddy.cn';
 }
 
@@ -7045,7 +7058,7 @@ function billingHeaders(auth) {
 
 /** 向计费网关发一次 POST，返回解包后的 data。 */
 async function billingPost(auth, path, body = {}) {
-  const res = await fetch(`${billingBase(auth.endpoint)}${path}`, {
+  const res = await fetch(`${billingBase(auth)}${path}`, {
     method: 'POST',
     headers: billingHeaders(auth),
     body: JSON.stringify(body),
@@ -7207,7 +7220,7 @@ async function fetchQuota(auth) {
     + ` ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
   const now = new Date();
 
-  const res = await fetch(`${billingBase(auth.endpoint)}/v2/billing/meter/get-user-resource`, {
+  const res = await fetch(`${billingBase(auth)}/v2/billing/meter/get-user-resource`, {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${auth.access}`,
@@ -7603,7 +7616,10 @@ function trackInflight(req, res, model, stream) {
 const server = createServer((req, res) => {
   // 请求级上下文：入口处识别调用方一次（local / client key 哈希前 8 位），
   // 账本与限流在处理链的任何深处用 requestScope.getStore() 取用。
-  requestScope.run({ client: identifyClientId(req) }, () => handleRequest(req, res));
+  requestScope.run({
+    client: identifyClientId(req),
+    probe: req.headers['x-workbuddy-probe'] === '1',
+  }, () => handleRequest(req, res));
 });
 
 async function handleRequest(req, res) {
