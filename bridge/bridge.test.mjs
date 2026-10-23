@@ -730,10 +730,17 @@ test('/v1/models：对齐官方 GUI 清单，并直取 supportedEfforts / contex
         code: 0,
         data: {
           models: [
-            // v2 的薄条目：没有 reasoning/contextWindow，不能覆盖 v3 的丰富字段
-            { id: 'glm-5.3', name: 'GLM 5.3', maxInputTokens: 1000000, maxOutputTokens: 64000, supportsReasoning: true, supportsToolCall: true },
+            // v2 的薄条目：档位表在 v3，但 defaultEffort/canDisableThinking 只在这里
+            {
+              id: 'glm-5.3', name: 'GLM 5.3', maxInputTokens: 1000000, maxOutputTokens: 64000,
+              supportsReasoning: true, supportsToolCall: true,
+              reasoning: { defaultEffort: 'high', canDisableThinking: true },
+              contextWindow: { defaultLength: 300000 },
+            },
             // 只在 v2 出现 = 官方目录外
             { id: 'old-model', name: 'Old Model', maxInputTokens: 64000, maxOutputTokens: 8192, supportsReasoning: true, supportsToolCall: true, reasoning: { supportedEfforts: ['low', 'high'] } },
+            // v2 单独挂 chat 标签：官方 GUI 也认，必须算 official
+            { id: 'chat-only', name: 'Chat Only', maxInputTokens: 64000, maxOutputTokens: 8192, supportsToolCall: true, tags: ['chat'] },
           ],
         },
       }));
@@ -747,8 +754,8 @@ test('/v1/models：对齐官方 GUI 清单，并直取 supportedEfforts / contex
             {
               id: 'glm-5.3', name: 'GLM-5.3', maxInputTokens: 1000000, maxOutputTokens: 131072,
               supportsReasoning: true, onlyReasoning: true, supportsToolCall: true, tags: ['craft'],
-              reasoning: { supportedEfforts: ['low', 'high', 'max'], defaultEffort: 'high', canDisableThinking: true },
-              contextWindow: { defaultLength: 300000, supportedLengths: [1000000, 300000, 600000] },
+              reasoning: { supportedEfforts: ['low', 'high', 'max'] },
+              contextWindow: { supportedLengths: [1000000, 300000, 600000] },
             },
             // 产品目录里有、但不在会话 agent 的 models 里 = 官方选择器不列
             {
@@ -787,6 +794,9 @@ test('/v1/models：对齐官方 GUI 清单，并直取 supportedEfforts / contex
     const old = byId.get('old-model');
     assert.equal(old.official, false, '只在 /v2 出现的模型必须标 official=false');
     assert.deepEqual(old.reasoning_efforts, ['low', 'high'], 'v2 自带 supportedEfforts 时同样优先采用');
+
+    const chatOnly = byId.get('chat-only');
+    assert.equal(chatOnly.official, true, 'v2 单独带 chat 标签的模型也算官方可选');
 
     const mem = byId.get('memory-model');
     assert.equal(mem.official, false, '产品目录里但不在会话 agent 清单里的模型不算官方可选');
@@ -856,6 +866,92 @@ test('账本：体检请求要标 probe，面板不再把它算进“最近失�
     assert.equal(rows.length, 2);
     assert.equal(rows[1].probe, true, '体检请求必须带 probe 标记');
     assert.equal(rows[0].probe, undefined, '普通对话不能被误标成体检');
+  } finally { await bridge.stop(); upstream.close(); }
+});
+
+test('目录：一个端点 5xx 不能吞掉另一个端点已成功的目录', { timeout: 90_000 }, async () => {
+  /*
+   * 旧逻辑用全局 hardError：v3 500 + v2 200 时整份结果被丢弃，模型只剩
+   * FEATURED。现在只有“没有任何端点成功”才保留旧缓存。
+   */
+  const upstream = createServer((req, res) => {
+    const path = new URL(req.url, 'http://127.0.0.1').pathname;
+    if (path === '/v3/config') {
+      res.writeHead(500, { 'content-type': 'text/html' });
+      return res.end('<html>gateway error</html>');
+    }
+    if (path === '/v2/enterprises/personal/models') {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      return res.end(JSON.stringify({
+        code: 0,
+        data: { models: [{ id: 'v2-survivor', name: 'V2 Survivor', maxInputTokens: 128000, maxOutputTokens: 8192, supportsToolCall: true }] },
+      }));
+    }
+    res.writeHead(404, { 'content-type': 'application/json' });
+    res.end('{}');
+  });
+  await new Promise((r) => upstream.listen(0, '127.0.0.1', r));
+  const upstreamBase = `http://127.0.0.1:${upstream.address().port}`;
+  const bridge = await startBridge({ CODEBUDDY_ENDPOINT: upstreamBase }, { auth: READABLE_FAKE_AUTH });
+  try {
+    const models = await (await fetch(bridge.baseUrl + '/v1/models?all=1', { headers: auth })).json();
+    assert.ok(models.data.some((m) => m.id === 'v2-survivor'), 'v2 成功的目录必须保留');
+    const health = await (await fetch(bridge.baseUrl + '/health', { headers: auth })).json();
+    assert.match(String(health.upstreamShape?.sources?.['/v3/config']), /500/, 'v3 的 5xx 仍要记进诊断');
+  } finally { await bridge.stop(); upstream.close(); }
+});
+
+test('刷新竞态：刷新期间桌面换号，旧令牌不得写回 memoryAuth', { timeout: 90_000 }, async () => {
+  /*
+   * 401 → refresh 请求在飞时，桌面端完成了换号。旧实现会在刷新返回后把
+   * **旧账号的 userId** 和**新文件的 mtime/size** 一起写进 memoryAuth，
+   * 于是桥一直用旧账号令牌（#6 的复发形态）。修复后这次刷新结果必须丢弃，
+   * 下一次 readStoredAuth 读到新文件。
+   */
+  let refreshStarted = false;
+  const upstream = createServer((req, res) => {
+    const path = new URL(req.url, 'http://127.0.0.1').pathname;
+    if (path === '/v2/plugin/auth/token/refresh') {
+      refreshStarted = true;
+      setTimeout(() => {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ code: 0, data: { accessToken: 'refreshed-old', refreshToken: 'rotated', expiresIn: 3600, refreshExpiresIn: 86400 } }));
+      }, 700);
+      return;
+    }
+    if (path === '/v2/chat/completions') {
+      res.writeHead(401, { 'content-type': 'application/json' });
+      return res.end(JSON.stringify({ code: 401, msg: 'expired' }));
+    }
+    if (path === '/v3/config' || path === '/v2/enterprises/personal/models') {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      return res.end(JSON.stringify({ code: 0, data: { models: [] } }));
+    }
+    res.writeHead(404, { 'content-type': 'application/json' });
+    res.end('{}');
+  });
+  await new Promise((r) => upstream.listen(0, '127.0.0.1', r));
+  const upstreamBase = `http://127.0.0.1:${upstream.address().port}`;
+  const bridge = await startBridge(
+    { CODEBUDDY_ENDPOINT: upstreamBase, WORKBUDDY_SKIP_MODEL_PREFLIGHT: '1' },
+    { auth: authFileFor('account-a') },
+  );
+  try {
+    const chat = fetch(bridge.baseUrl + '/v1/chat/completions', {
+      method: 'POST',
+      headers: { authorization: `Bearer ${TOKEN}`, 'content-type': 'application/json' },
+      body: JSON.stringify({
+        model: 'stub-model', stream: false, max_tokens: 8,
+        messages: [{ role: 'user', content: 'hi' }],
+      }),
+    }).then((res) => res.text());
+    for (let i = 0; i < 40 && !refreshStarted; i += 1) await new Promise((r) => setTimeout(r, 50));
+    assert.equal(refreshStarted, true, '请求 401 后必须触发一次 refresh');
+    writeFileSync(join(bridge.dir, 'fake-auth.info'), JSON.stringify(authFileFor('account-b')));
+    await chat;
+    await new Promise((r) => setTimeout(r, 300));
+    const h = await (await fetch(bridge.baseUrl + '/health', { headers: auth })).json();
+    assert.equal(h.auth?.userId, 'account-b', '刷新期间换号后不能把旧账号令牌写回；health 必须读新文件');
   } finally { await bridge.stop(); upstream.close(); }
 });
 

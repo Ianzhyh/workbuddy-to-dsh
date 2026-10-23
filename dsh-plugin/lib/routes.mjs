@@ -386,8 +386,15 @@ export function createRouteTable(deps) {
              * 「显示官方目录外的模型」：与 visible/hideAll 正交。
              * 官方列表（official=true）之外的老型号/未开通线路默认不进 dsh
              * 选择器；打开这个开关后按 visible 的规则一并显示。
+             *
+             * 只有**单独**提交这个开关时才走捷径。面板保存会同时带
+             * `visible`/`unset`/`hideAll` —— 旧实现先命中这里就直接返回，
+             * 把用户的勾选整批丢掉（实测：保存后面板读回空数组）。
              */
-            if (typeof body?.includeUnofficial === 'boolean') {
+            const hasVisibilityIntent = Object.prototype.hasOwnProperty.call(body, 'visible')
+              || Object.prototype.hasOwnProperty.call(body, 'unset')
+              || Object.prototype.hasOwnProperty.call(body, 'hideAll');
+            if (typeof body?.includeUnofficial === 'boolean' && !hasVisibilityIntent) {
               const includeUnofficial = body.includeUnofficial;
               adapter.setFilter({
                 allow: current.visible === null ? undefined : (current.visible || []),

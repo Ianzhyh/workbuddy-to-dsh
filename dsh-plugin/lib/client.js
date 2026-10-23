@@ -48,7 +48,7 @@
      * `window.innerWidth` 判断 —— 窗口 920px 时内容区仍然很窄。模型表 7 列
      * 在这个宽度下会被裁掉右侧，所以在面板自己的容器上观察宽度，切成卡片布局。
      */
-    function useNarrowContainer(ref, threshold = 720, dep = null) {
+    function useNarrowContainer(ref, threshold = 760, dep = null) {
       const [narrow, setNarrow] = useState(false);
       useEffect(() => {
         const el = ref.current;
@@ -247,7 +247,7 @@ body.dark .wb-root,
 .wb-detail-item{display:flex;align-items:baseline;justify-content:space-between;gap:10px;min-width:0;font-size:12px}
 .wb-detail-item span:first-child{color:var(--dsw-alias-label-secondary,light-dark(#61666b,#cfd3d6));flex:0 0 auto}
 .wb-detail-item span:last-child{min-width:0;text-align:right;overflow-wrap:anywhere;font-variant-numeric:tabular-nums}
-.wb-model-table th:nth-child(6),.wb-model-table td:nth-child(6){width:66px;min-width:66px;white-space:nowrap}
+.wb-model-table th:nth-child(6),.wb-model-table td:nth-child(6){width:80px;min-width:80px;white-space:nowrap}
 .wb-model-table th:nth-child(7),.wb-model-table td:nth-child(7){width:96px;min-width:96px;white-space:nowrap}
 /* 模型表：dsh 设置弹窗内容区很窄（约 400px），7 列在窄容器里改成卡片 */
 .wb-model-scroll{max-height:min(70vh,640px)}
@@ -277,7 +277,7 @@ body.dark .wb-root,
 .wb-model-table.wb-narrow td:nth-child(3){grid-area:name;min-width:0}
 .wb-model-table.wb-narrow td:nth-child(4){grid-area:meta;color:var(--dsw-alias-label-secondary,light-dark(#61666b,#cfd3d6));font-variant-numeric:tabular-nums;white-space:nowrap}
 .wb-model-table.wb-narrow td:nth-child(5){grid-area:rate;text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums}
-.wb-model-table.wb-narrow td:nth-child(6){grid-area:probe;text-align:right;white-space:nowrap}
+.wb-model-table.wb-narrow td:nth-child(6){grid-area:probe;min-width:80px;text-align:right;white-space:nowrap}
 .wb-model-table.wb-narrow td:nth-child(7){grid-area:actions;display:flex;justify-content:flex-end;align-items:flex-start;gap:4px;white-space:nowrap}
 .wb-model-table.wb-narrow td:nth-child(7) .wb-btn{padding:3px 9px;min-height:26px;font-size:12px}
 .wb-model-table.wb-narrow tr.wb-detail-row{display:block;width:100%}
@@ -1111,6 +1111,7 @@ body.dark .wb-root,
       '显示官方目录外的模型': 'Show models outside the official catalog',
       '当前：全部显示（含官方目录外）': 'Current: everything is shown (including models outside the official catalog)',
       '当前：官方模型全部显示（扩展模型隐藏）': 'Current: all official models are shown (extended models are hidden)',
+      '可用模型列表': 'Available models',
       '官方未上架': 'Not in official catalog',
       '网关目录里有，但 WorkBuddy 官方模型选择器未列出；默认不进 dsh 选择器，可先体检再手动显示':
         'Present in the gateway catalog but not listed by WorkBuddy\'s official model picker. Hidden from the dsh picker by default; probe it first, then show it manually.',
@@ -4060,7 +4061,7 @@ body.dark .wb-root,
       const { data, error, reload, loading } = useJson('/workbuddy/models', { interval: 120000 });
       // dsh 设置弹窗的有效宽度很小：观察本面板容器，窄的时候把 7 列表格改成卡片。
       const layoutRef = useRef(null);
-      const narrow = useNarrowContainer(layoutRef, 720, Boolean(data));
+      const narrow = useNarrowContainer(layoutRef, 760, Boolean(data));
       const [refreshing, setRefreshing] = useState(false);
       const probesApi = useConsoleApi(CONSOLE_API + '/probe-results', { interval: 30000 });
       const { data: probes, status: pstatus, reload: reloadProbes } = probesApi;
@@ -4071,6 +4072,14 @@ body.dark .wb-root,
       const models = data?.models || [];
       const unofficialCount = models.filter((m) => m.official === false).length;
       const results = probes?.results || {};
+      useEffect(() => {
+        if (!detail || typeof document === 'undefined') return;
+        // 展开最后一行时详情可能在滚动区下方：把它带到视口里，避免“点了详情没反应”。
+        const row = document.getElementById('wb-model-detail-' + detail);
+        if (row && typeof row.scrollIntoView === 'function') {
+          row.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+        }
+      }, [detail]);
       // ── 模型显示偏好：控制哪些模型出现在 dsh 的模型选择器里 ──────────────
       // 存偏好（.model-prefs.json）与读目录是两个接口：POST 后 adapter.setFilter
       // 立即生效（选择器下一次 listModels 就是新清单），无需重启 dsh。
@@ -4403,7 +4412,7 @@ body.dark .wb-root,
           : null,
         prefsDirty ? h('p', { className: 'wb-note', style: { margin: '0 0 8px' } }, '有未保存的勾选改动 —— 点「保存显示设置」后才会应用到 dsh 的模型选择器。') : null,
         h('div', { className: 'wb-scroll wb-model-scroll', ref: layoutRef },
-          h('table', { className: 'wb-table wb-model-table' + (narrow ? ' wb-narrow' : '') },
+          h('table', { className: 'wb-table wb-model-table' + (narrow ? ' wb-narrow' : ''), 'aria-label': '可用模型列表' },
             h('thead', null, h('tr', null,
               // 列数压到 7 列：显示勾选 + 模型 + 名称 + 上下文/输出 + 倍率 + 体检 + 操作。
               // 显示勾选决定该模型是否出现在 dsh 的模型选择器里（保存后即时生效）。
@@ -4419,6 +4428,8 @@ body.dark .wb-root,
                   checked: isVisible(m.id),
                   disabled: denied.includes(m.id),
                   onChange: () => toggleVisible(m.id),
+                  // 窄卡片布局会隐藏表头，复选框必须自己说清是哪个模型。
+                  'aria-label': t(isVisible(m.id) ? '隐藏' : '显示') + ' ' + m.id,
                   title: denied.includes(m.id)
                     ? '配置里被 modelDeny 排除，勾选不会让它出现在 dsh 选择器里'
                     : (isVisible(m.id) ? '已显示在 dsh 选择器' : '已隐藏（保存后 dsh 选择器不再出现）'),
@@ -4455,11 +4466,23 @@ body.dark .wb-root,
                   })
                   : h('span', { className: 'wb-note', style: { margin: 0 } }, '未测')),
                 h('td', { className: 'wb-actions-col' },
-                  h(Btn, { disabled: !!working || !consoleReady, onClick: () => probeOne(m.id), title: probe?.error || (probe && typeof probe.credit === 'number' ? '实测扣分 ' + probe.credit : '') }, working === m.id ? '测…' : '测'),
-                  h(Btn, { className: open ? 'primary' : '', onClick: () => setDetail(open ? '' : m.id), title: open ? '收起详情' : '查看详情' }, open ? '收起' : '详情')))];
+                  h(Btn, {
+                    disabled: !!working || !consoleReady,
+                    onClick: () => probeOne(m.id),
+                    title: probe?.error || (probe && typeof probe.credit === 'number' ? '实测扣分 ' + probe.credit : ''),
+                    'aria-label': t('体检') + ' ' + m.id,
+                  }, working === m.id ? '测…' : '测'),
+                  h(Btn, {
+                    className: open ? 'primary' : '',
+                    onClick: () => setDetail(open ? '' : m.id),
+                    title: open ? '收起详情' : '查看详情',
+                    'aria-label': t(open ? '收起详情' : '查看详情') + ' ' + m.id,
+                    'aria-expanded': open,
+                    'aria-controls': 'wb-model-detail-' + m.id,
+                  }, open ? '收起' : '详情')))];
               // 详情**紧跟这一行**展开（而不是挂到整张表下面 —— 那会让人找不到是哪个模型的）
               if (open) {
-                rows.push(h('tr', { key: m.id + ':detail', className: 'wb-detail-row' },
+                rows.push(h('tr', { key: m.id + ':detail', className: 'wb-detail-row', id: 'wb-model-detail-' + m.id },
                   h('td', { colSpan: 7 },
                     h('div', { className: 'wb-detail' },
                       h('div', { className: 'wb-detail-grid' },
@@ -4521,7 +4544,14 @@ body.dark .wb-root,
                         m.onlyReasoning
                           ? h(DetailItem, { label: '调用方式', value: '纯思考模型（不接受非思考调用）' })
                           : null,
-                        h(DetailItem, { label: '体检', value: probe ? (probe.ok ? `可用 · ${probe.ms}ms` : `不可用 · ${probe.ms}ms`) + (typeof probe.credit === 'number' ? ` · 实测扣分 ${probe.credit}` : '') : '未测' }),
+                        h(DetailItem, {
+                          label: '体检',
+                          value: probe
+                            ? (probe.ok ? `可用 · ${probe.ms}ms` : `不可用 · ${probe.ms}ms`)
+                              + (probe.error ? ' · ' + probe.error : '')
+                              + (typeof probe.credit === 'number' ? ` · 实测扣分 ${probe.credit}` : '')
+                            : '未测',
+                        }),
                         h(DetailItem, { label: '标签', value: tagsOf(m).join(' · ') || '—' })),
                       badgesOf(m).length
                         ? h('div', { style: { marginTop: '8px' } },
@@ -5119,7 +5149,8 @@ body.dark .wb-root,
       }
       const ratio = size > 0 ? remain / size : null;
       const ratioTone = ratio !== null && ratio <= 0.1 ? 'bad' : ratio !== null && ratio <= 0.3 ? 'warn' : '';
-      const last = requestData?.requests?.[0];
+      // 体检失败不是用户请求失败：胶囊只看真正的对话请求。
+      const last = (requestData?.requests || []).find((r) => r.probe !== true);
       const lastAt = Number(last?.t) || 0;
       const lastRecent = lastAt > 0 && Date.now() - lastAt <= 5 * 60 * 1000;
       const lastFailed = last && last.ok === false && lastRecent;

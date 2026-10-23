@@ -134,7 +134,7 @@ export function toAdapterModels(catalog, filter = {}) {
    * 旧实现只有 allow，空数组被当成"不过滤"，于是面板上"全不选 → 保存"后
    * dsh 里反而**全部还在**（提示语却写着"将不显示"）。
    */
-  if (filter?.hideAll === true) return [];
+  if (filter?.hideAll === true && !filter?.keep?.length) return [];
   const allow = new Set((filter.allow || []).map(String));
   const deny = new Set((filter.deny || []).map(String));
   // 官方目录外（official === false）默认不进 dsh 选择器；allow 里显式勾选、
@@ -146,9 +146,13 @@ export function toAdapterModels(catalog, filter = {}) {
   for (const raw of catalog || []) {
     if (!raw || typeof raw.id !== 'string' || !raw.id) continue;
     if (!isChatModel(raw.id)) continue;
-    if (allow.size > 0 && !allow.has(raw.id)) continue;
+    const kept = keep.has(raw.id);
+    // keep 是“当前正在用的模型”：即使面板勾了别的/全不选，也要留在清单里，
+    // 否则用户打开选择器会发现当前模型凭空消失。
+    if (filter?.hideAll === true && !kept) continue;
+    if (allow.size > 0 && !allow.has(raw.id) && !kept) continue;
     if (deny.has(raw.id)) continue;
-    if (raw.official === false && !includeUnofficial && !allow.has(raw.id) && !keep.has(raw.id)) continue;
+    if (raw.official === false && !includeUnofficial && !allow.has(raw.id) && !kept) continue;
     if (seen.has(raw.id)) continue;
     seen.add(raw.id);
     out.push(toAdapterModel(raw));

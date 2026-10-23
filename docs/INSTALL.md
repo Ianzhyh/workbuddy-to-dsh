@@ -55,12 +55,12 @@
 ```sh
 # 开发者机器
 npm run pack:plugin        # = vendor + npm pack
-# 产出 dsh-plugin/dsh-plugin-workbuddy-1.0.0.tgz
+# 产出 dsh-plugin/dsh-plugin-workbuddy-<版本>.tgz
 ```
 把 `.tgz` 发给对方，对方：
 ```sh
 node <解压出来的插件目录>/scripts/preflight.mjs    # 或解压后自检
-dsh plugin --profile desktop add D:\path\to\dsh-plugin-workbuddy-1.0.0.tgz
+dsh plugin --profile desktop add D:\path\to\dsh-plugin-workbuddy-<版本>.tgz
 ```
 > `package.json` 里是 `"private": true`，这是有意的：防止误发到公共 npm。
 > 本项目按非公开分发的定位维护，直接用 tgz 或文件夹拷贝即可。
@@ -153,8 +153,8 @@ WORKBUDDY_AUTH_FILE=C:\Users\you\AppData\Local\CodeBuddyExtension\Data\Public\au
 
 - **改完仓库里的 `bridge/`、`dashboard/`、`config.mjs`、`lib/` 之后，一定要重跑 `npm run vendor`**，
   否则发出去的 `vendor/` 还是旧快照。CI / 发版前用 `npm run vendor:check` 校验（不同步会失败）。
-- 发版前一键三连：`npm run release:check`（= vendor 同步校验 + 34 项单测 + 独立分发演练）。
-- `vendor/` 只复制运行必需的 15 个文件（约 347 KB），**日志、`usage.jsonl` 用量账本、
+- 发版前一键三连：`npm run release:check`（= vendor 同步校验 + lib/桥/插件单测 + 独立分发演练）。
+- `vendor/` 只复制运行必需的 19 个文件（约 1.5 MB），**日志、`usage.jsonl` 用量账本、
   `.state.json`、`*.bak`、`.env` 一律不打包**（这些属于使用者本人的数据，绝不能进分发包）；
   脚本还会**清理** vendor 里遗留的这类文件。
 - `npm run verify:standalone` 会把插件拷到一个没有仓库的临时目录，真起一遍桥与控制台
@@ -162,5 +162,4 @@ WORKBUDDY_AUTH_FILE=C:\Users\you\AppData\Local\CodeBuddyExtension\Data\Public\au
   "忘了 vendor""路径写死""vendor 里混进敏感文件"这类只在分发时才暴露的问题。
 - 对方**同时有仓库和 vendor** 时，插件优先用仓库（本机开发改 bridge 立刻生效）；
   只有仓库不在旁边时才用 vendor —— 这条顺序有单测守着。
-- 版本升级：改 `dsh-plugin/package.json` 的 `version` → `npm run vendor && npm run test:plugin` →
-  重新打包/发布。对方覆盖安装即可，`vendor/.state.json` 与 `.env` 会保留。
+- 版本升级：按 `CONTRIBUTING.md` 发版四步同步 5 处版本号（根/子包、lock、OpenAPI、README/tgz）→ `npm run release:check` → 重新打包/发布。对方覆盖安装即可，`vendor/.state.json` 与 `.env` 会保留。

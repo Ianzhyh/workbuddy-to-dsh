@@ -154,8 +154,8 @@ export const bridgeSetAuthSource = (source) => bridgeJsonCall('/v1/auth/source',
 /**
  * 模型可用性探测 —— 发一个最小请求，判断该模型是否真的能调通。
  *
- * 用于回答"哪些模型能用"。请求极小（`max_tokens: 1`），但**仍会消耗
- * 少量额度**，因此不做自动轮询，只在用户主动点击时执行。
+ * 用于回答"哪些模型能用"。请求很小（`max_tokens: 64`，推理模型会拒绝更小的
+ * 输出预算），但**仍会消耗少量额度**，因此不做自动轮询，只在用户主动点击时执行。
  *
  * 超时 20 秒：全量体检要打几十个模型，单项 90 秒会把整体拖成几十分钟；
  * 20 秒内没有任何响应的模型，对用户而言等同不可用。
@@ -284,7 +284,8 @@ export async function listAccountFiles() {
 
   // 桌面端当前登录文件对应的账号（不是 `.state.json` 钉住的快照）。
   const desktopEntry = out.accounts.find((entry) => normalizePath(entry.path) === normalizePath(out.desktopAuth));
-  out.desktopUid = desktopEntry?.userId || '';
+  // 另一个 build 写的加密字段解不开时，userId 会是空；`account`（uin）通常仍是明文。
+  out.desktopUid = desktopEntry?.userId || desktopEntry?.account || '';
 
   /*
    * 自定义名字（`.state.json` 的 `accountAliases`）。
@@ -354,7 +355,8 @@ export async function reconcileAccountPin() {
   if (pinnedEntry.usable !== true) return clear('pinned-file-unusable');
   const recorded = typeof state.authFileDesktopUid === 'string' ? state.authFileDesktopUid.trim() : '';
   if (!recorded) {
-    if (pinnedEntry.userId && String(pinnedEntry.userId) !== String(desktopUid)) {
+    const pinnedUid = pinnedEntry.userId || pinnedEntry.account || '';
+    if (pinnedUid && String(pinnedUid) !== String(desktopUid)) {
       return clear('legacy-pin-desktop-switched');
     }
     writeState({

@@ -71,6 +71,56 @@ test('setFilter：hideAll 表示"全不选"，与"未设置"（全显示）必�
   assert.equal((await adapter.listModels()).length, 3, 'resetFilter 必须恢复全显示');
 });
 
+test('keep：当前 dsh 默认模型不被 allow/hideAll 隐藏', async () => {
+  const adapter = makeAdapter({ getDefaultSelection: () => ({ provider: 'workbuddy', model: 'model-b' }) });
+  adapter.setFilter({ allow: ['model-a'] });
+  assert.deepEqual((await adapter.listModels()).map((m) => m.id), ['model-a', 'model-b'],
+    'allow 只勾了 a 时，当前正在用的 b 也必须留在清单里');
+  adapter.setFilter({ hideAll: true });
+  assert.deepEqual((await adapter.listModels()).map((m) => m.id), ['model-b'],
+    '全不选时当前默认模型仍要可见，否则用户打开选择器找不到自己正在用的模型');
+});
+
+test('model-visibility POST：同时带 includeUnofficial 时不能吞掉 visible', async () => {
+  /*
+   * 面板保存会同时发 visible/hideAll/includeUnofficial。旧实现里
+   * “只改 includeUnofficial”的捷径分支先命中，直接返回并把 visible 丢掉 ——
+   * 用户保存显示设置后看起来完全没生效。这里钉住组合请求的返回值与过滤结果。
+   */
+  const { createRouteTable } = await import('../lib/routes.mjs');
+  const adapter = makeAdapter();
+  let current = { visible: null, hideAll: false, includeUnofficial: false, paramsByModel: {} };
+  const writes = [];
+  const routes = createRouteTable({
+    adapter,
+    readPrefs: () => current,
+    onWritePrefs: (next) => { current = next; writes.push(next); },
+    notifyAdaptersUpdated: () => true,
+  });
+  const route = routes.find((r) => r.path === '/workbuddy/model-visibility');
+  const run = async (body) => {
+    let status = 0;
+    let raw = '';
+    const res = { writeHead(c) { status = c; }, write(c) { raw += String(c); }, end(c) { if (c) raw += String(c); }, on() {}, off() {} };
+    await route.handler({
+      url: '/workbuddy/model-visibility',
+      method: 'POST',
+      headers: { 'x-workbuddy-panel': '1' },
+      async *[Symbol.asyncIterator]() { yield Buffer.from(JSON.stringify(body)); },
+    }, res);
+    return { status, body: JSON.parse(raw || '{}') };
+  };
+  const saved = await run({ visible: ['model-a'], hideAll: false, includeUnofficial: true });
+  assert.equal(saved.status, 200);
+  assert.deepEqual(saved.body.visible, ['model-a'], '响应必须回显用户勾选');
+  assert.equal(saved.body.includeUnofficial, true);
+  assert.equal(writes.at(-1).visible[0], 'model-a', '偏好必须写入 visible，而不是只写 includeUnofficial');
+  assert.deepEqual((await adapter.listModels()).map((m) => m.id), ['model-a'], '保存后立即生效');
+
+  const toggle = await run({ includeUnofficial: false });
+  assert.equal(toggle.body.includeUnofficial, false, '单独切开关仍然可用');
+});
+
 test('setFilter：不覆盖配置里的 deny（面板只决定"显示哪些"）', async () => {
   const adapter = makeAdapter({ filter: { deny: ['model-c'] } });
   adapter.setFilter({ allow: ['model-a', 'model-c'] });

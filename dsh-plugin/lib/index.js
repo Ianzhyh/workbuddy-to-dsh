@@ -793,7 +793,9 @@ export function apply(ctx, rawConfig = {}) {
   if (savedPrefs) {
     if (savedPrefs.visible !== null || savedPrefs.hideAll || savedPrefs.includeUnofficial) {
       adapter.setFilter({
-        allow: savedPrefs.visible || [],
+        // visible=null（只有 includeUnofficial 偏好）时必须保留 config.modelAllow，
+        // 不能传空数组把它覆盖成“白名单为空”。
+        allow: savedPrefs.visible === null ? undefined : savedPrefs.visible,
         hideAll: savedPrefs.hideAll,
         includeUnofficial: savedPrefs.includeUnofficial,
       });

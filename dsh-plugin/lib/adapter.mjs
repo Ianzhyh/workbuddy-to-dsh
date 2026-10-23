@@ -967,6 +967,9 @@ export class WorkBuddyAdapter {
      * 官方表声明会让 dsh 在请求前抛 UNSUPPORTED_REASONING_EFFORT。这里把
      * **仅当前已保存的那个值**补回列表：能用、不改变新用户看到的官方档位，
      * 用户重新选一次后它就自然消失。
+     *
+     * 局限：这里只能读到 agent-default-model 的默认选择；某个旧会话自己
+     * 存了表外档位时，dsh 仍会在校验阶段拒绝，需要在该会话里重选一次。
      */
     const saved = this.#savedSelection();
     const savedEffort = saved && saved.provider === provider && saved.model === model

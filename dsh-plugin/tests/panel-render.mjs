@@ -1402,6 +1402,14 @@ async function verifyNarrow() {
         { name: 'workbuddy-desktop.2026-10-12.info', path: 'C:\\auth\\workbuddy-desktop.2026-10-12.info', active: false, usable: true, account: '330000000000', domain: 'copilot.tencent.com', encrypted: true, expiresAt: Date.now() + 44 * 86400000, remainingMs: 44 * 86400000, aliasKey: '330000000000', alias: '工作号', hidden: false, sameAccount: 2 },
       ],
     },
+    // 让窄屏用例同时覆盖“失败体检”：状态必须短，错误必须在详情里
+    '/workbuddy/console-api/probe-results': {
+      ...FIXTURES.consoleProbe,
+      results: {
+        ...FIXTURES.consoleProbe.results,
+        'glm-5.3': { ok: false, ms: 253, at: Date.now(), error: 'HTTP 400 · service info not found' },
+      },
+    },
   };
   const page3 = await openPage(`http://127.0.0.1:${PORT + 3}/harness.html`, {}, {
     width: 620, height: 1200, injectStub: false, cdpPort: await freeCdpPort(),
@@ -1456,7 +1464,9 @@ async function verifyNarrow() {
     await sleep(700);
     const narrowModel = await page3.cdp.evaluate(`(() => {
       const table = document.querySelector('.wb-model-table');
-      const btn = [...document.querySelectorAll('.wb-btn')].find((b) => b.textContent === '详情');
+      const rows = [...document.querySelectorAll('.wb-model-table tbody tr:not(.wb-detail-row)')];
+      const target = rows.find((r) => (r.children[1] ? r.children[1].textContent : '').includes('glm-5.3')) || rows[0];
+      const btn = target ? [...target.querySelectorAll('.wb-btn')].find((b) => b.textContent === '详情') : null;
       if (btn) btn.click();
       return { narrow: !!(table && table.classList.contains('wb-narrow')), clicked: !!btn };
     })()`);
@@ -1467,6 +1477,8 @@ async function verifyNarrow() {
       const detail = document.querySelector('.wb-detail');
       const grid = detail ? detail.querySelector('.wb-detail-grid') : null;
       const cols = grid ? getComputedStyle(grid).gridTemplateColumns.split(' ').filter(Boolean).length : 0;
+      const probeCell = [...document.querySelectorAll('.wb-model-table tbody tr:not(.wb-detail-row)')]
+        .map((r) => r.children[5]).find((c) => c && c.textContent.includes('不可用'));
       return {
         hasDetail: !!detail,
         detailW: detail ? Math.round(detail.getBoundingClientRect().width) : 0,
@@ -1475,6 +1487,11 @@ async function verifyNarrow() {
         cols,
         card: !!(table && table.classList.contains('wb-narrow')),
         text: detail ? detail.innerText : '',
+        probe: probeCell ? {
+          text: probeCell.textContent.trim(),
+          title: (probeCell.querySelector('.wb-pill') || {}).getAttribute ? probeCell.querySelector('.wb-pill').getAttribute('title') : '',
+          width: Math.round(probeCell.getBoundingClientRect().width),
+        } : null,
       };
     })()`);
     if (!narrowModel.narrow || !detailFit.card) problems.push('620px 下模型表没有切到卡片布局');
@@ -1485,8 +1502,63 @@ async function verifyNarrow() {
       if (detailFit.cols !== 1) problems.push(`窄列详情应单列（实际 ${detailFit.cols} 列）`);
       if (!detailFit.text.includes('官方上下文')) problems.push('窄列详情缺少「官方上下文」');
       if (!detailFit.text.includes('推理能力')) problems.push('窄列详情缺少「推理能力」');
+      if (!detailFit.text.includes('service info not found')) problems.push('体检失败详情没有带错误原因');
+      if (!detailFit.probe || !/不可用/.test(detailFit.probe.text) || /ms/.test(detailFit.probe.text)) {
+        problems.push(`体检失败的状态必须是短文案（实际 ${JSON.stringify(detailFit.probe)}）`);
+      } else if (!/253ms/.test(detailFit.probe.title || '')) {
+        problems.push('体检失败的毫秒数没有保留在悬停提示里');
+      }
+      if (detailFit.probe && detailFit.probe.width > 90) problems.push(`体检状态列过宽（${detailFit.probe.width}px）`);
     }
-    console.log(`窄列模型：卡片=${detailFit.card}，详情 ${detailFit.detailW}/${detailFit.scrollW}px，横向溢出 ${detailFit.overflow}px，${detailFit.cols} 列`);
+    console.log(`窄列模型：卡片=${detailFit.card}，详情 ${detailFit.detailW}/${detailFit.scrollW}px，横向溢出 ${detailFit.overflow}px，${detailFit.cols} 列，体检列 ${detailFit.probe ? detailFit.probe.width + 'px/' + detailFit.probe.text : '—'}`);
+    // 更极端的 400px 视口（dsh 窗口本身再收窄时）也要可用
+    let page400;
+    try {
+      page400 = await openPage(`http://127.0.0.1:${PORT + 3}/harness.html`, {}, {
+        width: 400, height: 1200, injectStub: false, cdpPort: await freeCdpPort(),
+      });
+      await waitFor(page400.cdp, 'window.__harness && window.__harness.rendered === true', 15000, '400px 面板挂载');
+      await sleep(900);
+      await page400.cdp.evaluate(`(() => { const b=[...document.querySelectorAll('.wb-tab')].find(x=>x.textContent==='模型'); if(b) b.click(); return !!b; })()`);
+      await sleep(800);
+      await page400.cdp.evaluate(`(() => {
+        const rows = [...document.querySelectorAll('.wb-model-table tbody tr:not(.wb-detail-row)')];
+        const target = rows.find((r) => (r.children[1] ? r.children[1].textContent : '').includes('glm-5.3')) || rows[0];
+        const b = target ? [...target.querySelectorAll('.wb-btn')].find((x) => x.textContent === '详情') : null;
+        if (b) b.click();
+        return !!b;
+      })()`);
+      await sleep(500);
+      const fit400 = await page400.cdp.evaluate(`(() => {
+        const doc = document.documentElement;
+        const scroll = document.querySelector('.wb-model-scroll');
+        const table = document.querySelector('.wb-model-table');
+        const detail = document.querySelector('.wb-detail');
+        const grid = detail ? detail.querySelector('.wb-detail-grid') : null;
+        return {
+          docOverflow: doc.scrollWidth - doc.clientWidth,
+          card: !!(table && table.classList.contains('wb-narrow')),
+          overflow: scroll ? Math.max(0, scroll.scrollWidth - scroll.clientWidth) : 0,
+          detailW: detail ? Math.round(detail.getBoundingClientRect().width) : 0,
+          scrollW: scroll ? scroll.clientWidth : 0,
+          cols: grid ? getComputedStyle(grid).gridTemplateColumns.split(' ').filter(Boolean).length : 0,
+          fields: detail ? detail.querySelectorAll('.wb-detail-item').length : 0,
+          text: detail ? detail.innerText : '',
+        };
+      })()`);
+      if (fit400.docOverflow > 2) problems.push(`400px 视口横向溢出 ${fit400.docOverflow}px`);
+      if (!fit400.card) problems.push('400px 下模型表没有切到卡片布局');
+      if (fit400.overflow > 2) problems.push(`400px 模型表横向滚动 ${fit400.overflow}px`);
+      if (fit400.detailW > fit400.scrollW + 2) problems.push(`400px 详情宽 ${fit400.detailW}px 超出 ${fit400.scrollW}px`);
+      if (fit400.cols !== 1) problems.push(`400px 详情应单列（实际 ${fit400.cols} 列）`);
+      if (fit400.fields < 12) problems.push(`400px 详情字段只有 ${fit400.fields} 个（应 >=12）`);
+      if (!fit400.text.includes('service info not found')) problems.push('400px 体检失败详情没有错误原因');
+      console.log(`400px 模型：卡片=${fit400.card}，详情 ${fit400.detailW}/${fit400.scrollW}px，字段 ${fit400.fields}，滚动 ${fit400.overflow}px，列 ${fit400.cols}`);
+    } catch (error) {
+      problems.push(`400px 场景失败：${error.message}`);
+    } finally {
+      if (page400) page400.close();
+    }
     // 截图落在账号页：这里曾经 7 列挤成一团 + 胶囊压邻居，留一张窄列证据
     await page3.cdp.evaluate(`(() => { const b=[...document.querySelectorAll('.wb-tab')].find(x=>x.textContent==='账号'); if(b) b.click(); return !!b; })()`);
     await sleep(700);

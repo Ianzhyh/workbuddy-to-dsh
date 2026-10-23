@@ -2968,7 +2968,7 @@ function initAlerts() {
  * 提示条与标签页标题都用它，两处数字必须永远相等（R3.3）。
  */
 function countNewFailures() {
-  return lastRequests.filter((r) => !r.ok && Number(r.t) > failSeenTs).length;
+  return lastRequests.filter((r) => !r.ok && r.probe !== true && Number(r.t) > failSeenTs).length;
 }
 
 /**
@@ -2976,7 +2976,7 @@ function countNewFailures() {
  * 点「知道了」或打开「仅看失败」时调用：同一批失败不重复提醒。
  */
 function advanceFailWatermark() {
-  const newest = lastRequests.filter((r) => !r.ok)
+  const newest = lastRequests.filter((r) => !r.ok && r.probe !== true)
     .reduce((mx, r) => Math.max(mx, Number(r.t) || 0), 0);
   if (newest > failSeenTs) {
     failSeenTs = newest;
@@ -4418,7 +4418,7 @@ function renderRequests() {
   }
 
   const shown = visibleRequests();
-  const failed = list.filter((r) => !r.ok).length;
+  const failed = list.filter((r) => !r.ok && r.probe !== true).length;
 
   // 失败率 + 出现最多的「错误码 · 模型」组合：取自已返回的明细，不新增接口
   let notice = '';
@@ -6274,7 +6274,7 @@ function buildDiagReport() {
 
   L.push('');
   L.push('## 最近 5 条失败');
-  const fails = lastRequests.filter((r) => !r.ok).slice(0, 5);
+  const fails = lastRequests.filter((r) => !r.ok && r.probe !== true).slice(0, 5);
   if (fails.length) {
     for (const r of fails) {
       const parts = [new Date(r.t).toLocaleString('zh-CN', { hour12: false }), r.model || '—'];

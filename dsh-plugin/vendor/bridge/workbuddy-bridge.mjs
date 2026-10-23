@@ -729,16 +729,33 @@ function mergeCatalogModel(prev, next) {
   for (const [key, value] of Object.entries(next)) {
     if (merged[key] === undefined) merged[key] = value;
   }
-  const nextEfforts = normalizeEfforts(next?.reasoning?.supportedEfforts);
-  const prevEfforts = normalizeEfforts(prev?.reasoning?.supportedEfforts);
-  if (prevEfforts) merged.reasoning = prev.reasoning;
-  else if (nextEfforts) merged.reasoning = next.reasoning;
-  else if (next?.reasoning || prev?.reasoning) merged.reasoning = prev?.reasoning || next?.reasoning;
-  const nextCtx = normalizeContextLengths(next?.contextWindow?.supportedLengths);
-  const prevCtx = normalizeContextLengths(prev?.contextWindow?.supportedLengths);
-  if (prevCtx.length) merged.contextWindow = prev.contextWindow;
-  else if (nextCtx.length) merged.contextWindow = next.contextWindow;
-  else if (next?.contextWindow || prev?.contextWindow) merged.contextWindow = prev?.contextWindow || next?.contextWindow;
+  // reasoning / contextWindow 必须**按子字段合并**：v3 可能只给
+  // supportedEfforts、v2 才带 defaultEffort/canDisableThinking；整块二选一
+  // 会把另一半丢掉（实测 defaultEffort 因此消失）。
+  if (prev?.reasoning || next?.reasoning) {
+    merged.reasoning = {
+      ...(next?.reasoning && typeof next.reasoning === 'object' ? next.reasoning : {}),
+      ...(prev?.reasoning && typeof prev.reasoning === 'object' ? prev.reasoning : {}),
+    };
+    if (!normalizeEfforts(merged.reasoning.supportedEfforts)
+      && normalizeEfforts(next?.reasoning?.supportedEfforts)) {
+      merged.reasoning.supportedEfforts = next.reasoning.supportedEfforts;
+    }
+  }
+  if (prev?.contextWindow || next?.contextWindow) {
+    merged.contextWindow = {
+      ...(next?.contextWindow && typeof next.contextWindow === 'object' ? next.contextWindow : {}),
+      ...(prev?.contextWindow && typeof prev.contextWindow === 'object' ? prev.contextWindow : {}),
+    };
+    if (!normalizeContextLengths(merged.contextWindow.supportedLengths).length
+      && normalizeContextLengths(next?.contextWindow?.supportedLengths).length) {
+      merged.contextWindow.supportedLengths = next.contextWindow.supportedLengths;
+    }
+    if (!(Number(merged.contextWindow.defaultLength) > 0)
+      && Number(next?.contextWindow?.defaultLength) > 0) {
+      merged.contextWindow.defaultLength = next.contextWindow.defaultLength;
+    }
+  }
   // tags 取并集：官方选择器判定依赖 craft/chat 标签，任一端点给了都算。
   const tags = [...new Set([...(Array.isArray(prev.tags) ? prev.tags : []), ...(Array.isArray(next.tags) ? next.tags : [])])];
   if (tags.length) merged.tags = tags;
@@ -750,8 +767,9 @@ function mergeCatalogModel(prev, next) {
  *
  * 桌面端 GUI 不是把 `/v2/.../models` 全量铺出来：它用 `/v3/config` 里
  * `agents[]` 的会话 agent（tag=default → name=cli → 第一个有 models 的）
- * 加 `chat` 标签模型，再过滤付费线路。这里复刻同一判据；拿不到 agent 时
- * 返回 null（= 未知，不能因此把所有模型都打成"非官方"）。
+ * 加 `chat` 标签模型。这里复刻同一判据（付费线路过滤依赖账号权益，桥侧
+ * 拿不到可靠输入，不做臆测）；拿不到 agent 时返回 null（= 未知，不能因此
+ * 把所有模型都打成"非官方"）。
  */
 function officialPickerIds(agents, models) {
   const list = Array.isArray(agents) ? agents.filter((a) => a && Array.isArray(a.models) && a.models.length) : [];
@@ -1464,6 +1482,18 @@ async function syncAuthPathFollow() {
     stat = statSync(AUTH_FILE_FOLLOW);
   } catch {
     authFollowProbe.error = 'missing';
+    /*
+     * 正在跟随桌面文件时它被删掉（客户端登出/换号中间态）：不能继续拿一个
+     * 不存在的路径读令牌。回到用户钉住的快照；若快照也没了，下一次读取会
+     * 如实报“登录文件不存在”，而不是把旧 AUTH_PATH 留在内存里。
+     */
+    if (AUTH_PATH !== AUTH_PINNED_PATH) {
+      AUTH_PATH = AUTH_PINNED_PATH;
+      memoryAuth = null;
+      authFileCache = null;
+      invalidateCatalogCache();
+      log('desktop auth file disappeared; falling back to pinned file');
+    }
     return;
   }
   if (authFollowProbe.path === AUTH_FILE_FOLLOW
@@ -1503,11 +1533,14 @@ async function syncAuthPathFollow() {
     AUTH_PATH = AUTH_FILE_FOLLOW;
     memoryAuth = null;
     authFileCache = null;
+    // 目录属于账号：换号后旧目录的模型/倍率/官方标记都不再成立。
+    invalidateCatalogCache();
     log('desktop switched account; following', AUTH_FILE_FOLLOW);
   } else if (!shouldFollow && AUTH_PATH !== AUTH_PINNED_PATH) {
     AUTH_PATH = AUTH_PINNED_PATH;
     memoryAuth = null;
     authFileCache = null;
+    invalidateCatalogCache();
     log('desktop account restored; using pinned auth file', AUTH_PINNED_PATH);
   }
 }
@@ -2400,6 +2433,17 @@ function expiryFromToken(access, expiresIn, fallbackMs = 3600_000) {
 
 async function doRefreshAuth(auth) {
   if (auth.source === 'plugin') return doRefreshPluginAuth(auth);
+  /*
+   * 刷新期间桌面端可能换号。先记住“这份 refresh 属于哪份文件、哪个指纹”：
+   * 请求回来时若文件已经被换掉，刷新结果属于旧账号，绝不能写回 memoryAuth
+   * （否则会带着新文件的指纹继续供旧账号令牌，issue #6 复发）。
+   */
+  const refreshAuthPath = AUTH_PATH;
+  let refreshFilePrint = '';
+  try {
+    const st = statSync(refreshAuthPath);
+    refreshFilePrint = `${st.mtimeMs}:${st.size}`;
+  } catch { /* 文件读不到就不做指纹比对，交给下一次 readStoredAuth */ }
   try {
     const res = await fetch(`${auth.endpoint}/v2/plugin/auth/token/refresh`, {
       method: 'POST',
@@ -2416,6 +2460,16 @@ async function doRefreshAuth(auth) {
         ? `${body.code ?? ''} ${body.msg || body.message || ''}`.trim()
         : '';
       log('refresh failed', res.status, shortError(reason || '(no protocol message)'));
+      return null;
+    }
+    let currentPrint = '';
+    try {
+      const st = statSync(AUTH_PATH);
+      currentPrint = `${st.mtimeMs}:${st.size}`;
+    } catch { /* 见上 */ }
+    if (AUTH_PATH !== refreshAuthPath
+      || (refreshFilePrint && currentPrint && refreshFilePrint !== currentPrint)) {
+      log('refresh result discarded: login file changed during refresh');
       return null;
     }
     const now = Date.now();
@@ -6357,6 +6411,8 @@ function summarizeUsage(days = 7, opts = {}) {
   for (const r of rows) {
     if (r.t < since) continue;
     const isSearch = isSearchRow(r);
+    // 体检失败是“探测结果”，不是用户请求事故：不进失败数/失败列表。
+    if (r.probe === true && r.ok === false) continue;
 
     // 失败的请求单独归类：它没有 token、没有扣分，混进成功率会误导
     if (r.ok === false) {
@@ -6837,6 +6893,15 @@ async function fetchCatalog(generation = catalogGeneration) {
      */
     const officialIds = officialPickerIds(productAgents, productModels);
     if (officialIds) {
+      /*
+       * v2 也可能单独给某个模型挂 `chat` 标签（v3 目录没列它）。官方 GUI 的
+       * selectConversationModels 同样认这个标签；只遍历 v3 会把这类模型误标成
+       * 非官方并在 dsh 里隐藏。
+       */
+      for (const m of merged.values()) {
+        if (m._supplemented) continue;
+        if (Array.isArray(m.tags) && m.tags.includes('chat')) officialIds.add(m.id);
+      }
       shape.officialPickerCount = officialIds.size;
       shape.officialPicker = [...officialIds];
     }
@@ -6875,7 +6940,9 @@ async function fetchCatalog(generation = catalogGeneration) {
     }
 
     const models = [...merged.values()];
-    if (models.length && !hardError) {
+    // 某个端点 5xx 不代表另一个端点拿到的目录不可用；只有“一个成功端点都没有”
+    // 时才保留旧缓存、拒绝写入。
+    if (models.length && (upstreamOk || !hardError)) {
       /*
        * 发起后发生过换号 / 换来源：这份结果属于**旧凭据**，绝不能写进新缓存。
        * 旧请求无法取消（已经打出去了），只能在这里作废；invalidate 已经用
@@ -6979,7 +7046,8 @@ async function fetchCatalog(generation = catalogGeneration) {
       log('catalog refresh failed; keeping cached catalog');
     }
   } catch (e) { log('catalog fetch failed', e.message); hardError = true; }
-  return { models: catalogCache.models, upstreamOk: upstreamOk && !hardError };
+  // 至少一个目录端点成功就算刷新成功；另一个端点的 5xx 只记在 shape.sources。
+  return { models: catalogCache.models, upstreamOk };
 }
 
 /**

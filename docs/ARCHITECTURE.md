@@ -150,24 +150,23 @@ WorkBuddy 有**国内与国际两套网关**，必须按登录域名选择，选
 
 ## 二·六、模型目录与积分
 
-### 模型目录：两个端点必须**合并**
+### 模型目录：两个端点必须**合并**，v3 是官方真源
 
 两个端点返回的**不是同一份目录**，单用任何一个都会漏：
 
-| 端点 | 内容 | 国内 | 国际 |
-|---|---|---|---|
-| `/v2/enterprises/personal/models` | 具体模型（带倍率、标签、厂商） | 31 个 | 18 个 |
-| `/v3/config` | 产品配置，`models` 是**档位/内部型号** | 21 个 | 15 个 |
-
-因此桥**两个都请求、按 id 合并**（具体模型优先，档位补后），实测：
-
-| 区域 | 修正前 | 修正后 |
+| 端点 | 内容 | 角色 |
 |---|---|---|
-| 国内 | 13 | **31** |
-| 国际 | 13 | **26** |
+| `/v3/config` | 产品配置：`models` + `agents[]`（会话 agent 的模型清单）、`reasoning.supportedEfforts`、`contextWindow` | **官方模型选择器真源**，优先 |
+| `/v2/enterprises/personal/models` | 网关可用模型全量（带倍率、标签、厂商） | 补充 v3 没列出的型号 |
 
-> **`/v3/config` 的 `models` 是档位**（`default-model`、`enhance-1.0`、`nes-1.2` 这类），
-> 不是客户端界面里看到的模型。只看它就会得出"国际版没有 Deepseek-V4.1-Flash"的错误结论。
+因此桥**两个都请求、按 id 合并**：`/v3/config` 先取、标量字段优先，
+`/v2` 补 v3 缺的字段/型号。官方 GUI 是否列出某模型用 v3 的
+`models` + `agents[].models` + `chat` 标签判定（`official`），
+`/v2` 独有的型号标 `official:false`，默认不进 dsh 选择器。
+
+> **`/v3/config` 的 `models` 不是档位名**：它和 `agents[]` 一起构成客户端
+> 模型选择器；`default-model` / `enhance-1.0` 这类内部项会被过滤。
+> 只看 `/v2` 会把已下架/未开通的旧型号也列出来（用户 issue #5 的根因）。
 
 ### 促销徽章（Free now）
 
@@ -233,12 +232,16 @@ maxInputTokens 缺失或 <= 0   // 未声明上下文窗口
 
 ### 积分余额
 
-计费网关与 chat 网关**不是同一个主机**：
+计费网关与 chat 网关**不是同一个主机**，且要跟随**登录域名**：
 
-| 区域 | chat | 计费 |
+| 账号 / 区域 | chat | 计费 |
 |---|---|---|
-| 国内 | `copilot.tencent.com` | `www.codebuddy.cn` |
-| 国际 | `www.workbuddy.ai` | `www.workbuddy.ai` |
+| WorkBuddy 国内（`www.workbuddy.cn`） | `copilot.tencent.com` | `www.workbuddy.cn` |
+| CodeBuddy 国内（`www.codebuddy.cn`） | `copilot.tencent.com` | `www.codebuddy.cn` |
+| 国际（`www.workbuddy.ai`） | `www.workbuddy.ai` | `www.workbuddy.ai` |
+
+`WORKBUDDY_BILLING_BASE` 可显式覆盖。只看 chat 端点会把 workbuddy.cn 账号的
+计费请求发到 codebuddy.cn，回 401（issue #5 截图里的「积分读取失败」）。
 
 端点 `POST /v2/billing/meter/get-user-resource`（**只读，不消耗积分**），
 按套餐聚合：月度包看 `CycleCapacityRemain`，一次性包看 `CapacityRemain`。
