@@ -31,6 +31,12 @@ function shortCount(n) {
   return String(value);
 }
 
+/** 上下文档位数组 → 正整数、去重、升序。 */
+function normalizeLengths(list) {
+  return [...new Set((Array.isArray(list) ? list : []).map((n) => Number(n))
+    .filter((n) => Number.isSafeInteger(n) && n > 0))].sort((a, b) => a - b);
+}
+
 /**
  * 模型的一句话简介，给 dsh 的模型选择器用。
  *
@@ -42,7 +48,8 @@ function shortCount(n) {
 export function describeModel(model) {
   const bits = [];
   const context = shortCount(model?.context_window || model?.contextWindow);
-  if (context) bits.push(`上下文 ${context}`);
+  const maxContext = shortCount(model?.context_window_max || model?.maxContextWindow);
+  if (context) bits.push(`上下文 ${context}${maxContext && maxContext !== context ? `（上限 ${maxContext}）` : ''}`);
   const output = shortCount(model?.max_output_tokens || model?.maxTokens);
   if (output) bits.push(`输出 ${output}`);
   // 积分倍率放到模型名后面（见 modelCostLabel），描述里不再重复一遍
@@ -87,15 +94,30 @@ export function toAdapterModel(model) {
     : null;
   const baseName = String(model.name || id);
   const cost = modelCostLabel(model);
+  const contextWindowDefault = Number(model.context_window_default) || undefined;
+  const contextWindowMax = Number(model.context_window_max) || undefined;
+  const contextWindowOptions = Array.isArray(model.context_window_options)
+    ? normalizeLengths(model.context_window_options)
+    : undefined;
   return {
     id,
     name: cost ? baseName + ' · ' + cost : baseName,
     ...(describeModel(model) ? { description: describeModel(model) } : {}),
     ...(contextWindow ? { contextWindow } : {}),
     ...(maxTokens ? { maxTokens } : {}),
+    ...(contextWindowDefault ? { contextWindowDefault } : {}),
+    ...(contextWindowMax ? { contextWindowMax } : {}),
+    ...(contextWindowOptions && contextWindowOptions.length ? { contextWindowOptions } : {}),
     inputModalities: images ? ['text', 'image'] : ['text'],
     ...(reasoning ? { reasoning: true } : {}),
     ...(efforts ? { reasoningEfforts: efforts } : {}),
+    ...(typeof model.default_reasoning_effort === 'string' && model.default_reasoning_effort
+      ? { defaultReasoningEffort: model.default_reasoning_effort }
+      : {}),
+    ...(model.reasoning_efforts_source === 'upstream' || model.reasoning_efforts_source === 'measured'
+      ? { reasoningEffortsSource: model.reasoning_efforts_source }
+      : {}),
+    ...(model.official === true ? { official: true } : model.official === false ? { official: false } : {}),
   };
 }
 
@@ -115,6 +137,10 @@ export function toAdapterModels(catalog, filter = {}) {
   if (filter?.hideAll === true) return [];
   const allow = new Set((filter.allow || []).map(String));
   const deny = new Set((filter.deny || []).map(String));
+  // 官方目录外（official === false）默认不进 dsh 选择器；allow 里显式勾选、
+  // 或面板打开"显示非官方模型"、或当前 dsh 默认模型就是它（keep）时例外。
+  const includeUnofficial = filter?.includeUnofficial === true;
+  const keep = new Set((filter?.keep || []).map(String));
   const seen = new Set();
   const out = [];
   for (const raw of catalog || []) {
@@ -122,6 +148,7 @@ export function toAdapterModels(catalog, filter = {}) {
     if (!isChatModel(raw.id)) continue;
     if (allow.size > 0 && !allow.has(raw.id)) continue;
     if (deny.has(raw.id)) continue;
+    if (raw.official === false && !includeUnofficial && !allow.has(raw.id) && !keep.has(raw.id)) continue;
     if (seen.has(raw.id)) continue;
     seen.add(raw.id);
     out.push(toAdapterModel(raw));
@@ -165,10 +192,23 @@ export function toDirectory(catalog) {
         name: String(m.name || m.id),
         contextWindow: Number(m.context_window || 0) || null,
         maxTokens: Number(m.max_output_tokens || 0) || null,
+        // 官方 GUI 的上下文档位：默认预算 / 可选档 / 模型上限
+        contextWindowDefault: Number(m.context_window_default || 0) || null,
+        contextWindowOptions: normalizeLengths(m.context_window_options),
+        contextWindowMax: Number(m.context_window_max || 0) || null,
         images: m.supports_images === true,
         // 推理：reasoning=是否支持；efforts=实测档位（null=未知/无此字段，[]=实测无档）
         reasoning,
         efforts,
+        // 档位来源：upstream = 官方目录 supportedEfforts；measured = 本地实测表
+        effortsSource: m.reasoning_efforts_source === 'upstream' || m.reasoning_efforts_source === 'measured'
+          ? m.reasoning_efforts_source
+          : null,
+        defaultEffort: typeof m.default_reasoning_effort === 'string' ? m.default_reasoning_effort : null,
+        canDisableThinking: m.can_disable_thinking === true,
+        // 官方模型选择器是否列出它（null = 无法判定）
+        official: m.official === true ? true : m.official === false ? false : null,
+        supplemented: m.supplemented === true,
         // 只推理模型（上游 only_reasoning）：面板据此提示"这是纯思考模型"。
         onlyReasoning: m.only_reasoning === true,
         credits: typeof m.credits === 'number' ? m.credits : null,

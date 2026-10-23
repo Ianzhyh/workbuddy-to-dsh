@@ -374,8 +374,34 @@ export function createRouteTable(deps) {
               if (cleaned) paramsByModel[model] = cleaned;
               else delete paramsByModel[model];
               if (typeof adapter.setModelParams === 'function') adapter.setModelParams(paramsByModel);
-              onWritePrefs({ visible: current.visible, hideAll: current.hideAll === true, paramsByModel });
+              onWritePrefs({
+                visible: current.visible,
+                hideAll: current.hideAll === true,
+                includeUnofficial: current.includeUnofficial === true,
+                paramsByModel,
+              });
               return sendJson(res, 200, { ok: true, model, params: paramsByModel[model] || null, paramsByModel });
+            }
+            /*
+             * 「显示官方目录外的模型」：与 visible/hideAll 正交。
+             * 官方列表（official=true）之外的老型号/未开通线路默认不进 dsh
+             * 选择器；打开这个开关后按 visible 的规则一并显示。
+             */
+            if (typeof body?.includeUnofficial === 'boolean') {
+              const includeUnofficial = body.includeUnofficial;
+              adapter.setFilter({
+                allow: current.visible === null ? undefined : (current.visible || []),
+                hideAll: current.hideAll === true,
+                includeUnofficial,
+              });
+              onWritePrefs({
+                visible: current.visible,
+                hideAll: current.hideAll === true,
+                includeUnofficial,
+                paramsByModel: current.paramsByModel || {},
+              });
+              const applied = notifyAdaptersUpdated();
+              return sendJson(res, 200, { ok: true, includeUnofficial, applied });
             }
             /*
              * 三种显示意图，必须分开建模（旧实现只认 `visible` 数组）：
@@ -385,18 +411,35 @@ export function createRouteTable(deps) {
              *   - 勾选清单：只显示这些。
              */
             const wantsUnset = body?.unset === true || body?.visible === null;
+            const includeUnofficial = typeof body?.includeUnofficial === 'boolean'
+              ? body.includeUnofficial
+              : current.includeUnofficial === true;
             if (wantsUnset) {
+              // 只重置"哪些模型显示"，不重置"是否包含官方目录外"
               adapter.resetFilter();
-              onWritePrefs({ visible: null, hideAll: false, paramsByModel: current.paramsByModel || {} });
+              adapter.setFilter({ includeUnofficial });
+              onWritePrefs({
+                visible: null,
+                hideAll: false,
+                includeUnofficial,
+                paramsByModel: current.paramsByModel || {},
+              });
               const applied = notifyAdaptersUpdated();
-              return sendJson(res, 200, { ok: true, unset: true, visible: null, hideAll: false, count: 0, applied });
+              return sendJson(res, 200, {
+                ok: true, unset: true, visible: null, hideAll: false, includeUnofficial, count: 0, applied,
+              });
             }
             const visible = Array.isArray(body?.visible) ? body.visible.map(String).filter(Boolean) : [];
             const hideAll = body?.hideAll === true || visible.length === 0;
             // 目录里不存在的 id 也照存：上游目录可能暂时没抓到，用户勾选的意图优先，
             // 目录恢复后自然重新生效。
-            adapter.setFilter({ allow: visible, hideAll });
-            onWritePrefs({ visible, hideAll, paramsByModel: current.paramsByModel || {} });
+            adapter.setFilter({ allow: visible, hideAll, includeUnofficial });
+            onWritePrefs({
+              visible,
+              hideAll,
+              includeUnofficial,
+              paramsByModel: current.paramsByModel || {},
+            });
             // 广播 llm/adapters-updated：dsh 的模型选择器**不轮询**目录，只认这个
             // 事件。不广播的话 filter 虽已生效，但 UI 会一直显示旧清单。
             const applied = notifyAdaptersUpdated();
@@ -405,6 +448,7 @@ export function createRouteTable(deps) {
               unset: false,
               visible,
               hideAll,
+              includeUnofficial,
               count: hideAll ? 0 : visible.length,
               applied,
             });
@@ -422,6 +466,8 @@ export function createRouteTable(deps) {
             unset: !current2 || current2.visible === null,
             visible: current2 ? current2.visible : null,
             hideAll: current2 ? current2.hideAll === true : false,
+            /** 是否把官方目录外的模型也放进 dsh 选择器 */
+            includeUnofficial: current2 ? current2.includeUnofficial === true : false,
             /** 每模型默认参数（面板详情里编辑） */
             paramsByModel: typeof adapter.modelParamsSnapshot === 'function'
               ? adapter.modelParamsSnapshot()

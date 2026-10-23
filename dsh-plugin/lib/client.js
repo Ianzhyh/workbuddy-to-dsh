@@ -1037,6 +1037,33 @@ body.dark .wb-root,
       '个档位：': ' levels: ',
       '暂无可选档位（网关对该模型尚未提供）': 'No selectable levels yet (the gateway does not offer them for this model)',
       '上游未给档位信息（按低/中/高三档兜底）': 'The upstream did not report levels (falls back to low/medium/high)',
+      '显示官方目录外的模型': 'Show models outside the official catalog',
+      '当前：全部显示（含官方目录外）': 'Current: everything is shown (including models outside the official catalog)',
+      '当前：官方模型全部显示（扩展模型隐藏）': 'Current: all official models are shown (extended models are hidden)',
+      '官方未上架': 'Not in official catalog',
+      '网关目录里有，但 WorkBuddy 官方模型选择器未列出；默认不进 dsh 选择器，可先体检再手动显示':
+        'Present in the gateway catalog but not listed by WorkBuddy\'s official model picker. Hidden from the dsh picker by default; probe it first, then show it manually.',
+      '官方模型列表': 'Official model list',
+      '在列': 'Listed',
+      '未上架（扩展）': 'Not listed (extended)',
+      '未判定': 'Unknown',
+      '网关目录里有，但 WorkBuddy 官方模型选择器未列出；能否实际调用以体检为准':
+        'Present in the gateway catalog but not listed by WorkBuddy\'s official model picker; use the probe to confirm it actually works.',
+      '上游目录未提供，由本项目按实测补全': 'Not in the upstream catalog; supplemented from local measurements',
+      'dsh 没有上下文档位选择器；这里显示实际生效值': 'dsh has no context-window selector; this is the effective value.',
+      'dsh 没有上下文档位选择器；这里显示实际生效值，官方默认与可选档位见下两行':
+        'dsh has no context-window selector; this is the effective value. The official default and options are shown below.',
+      '官方默认上下文': 'Official default context',
+      '官方可选上下文': 'Official context options',
+      '模型上下文上限': 'Model context maximum',
+      '默认档位': 'Default level',
+      '官方上下文': 'Official context',
+      '可选': 'Options',
+      '上限': 'Max',
+      '档位来自上游目录 reasoning.supportedEfforts（与 WorkBuddy 官方 GUI 一致）；这也是 dsh 选择器里的候选':
+        'Levels come from the upstream catalog reasoning.supportedEfforts (matching the official WorkBuddy GUI); these are the candidates in the dsh picker.',
+      '上游未给档位表，按本地实测兜底；这也是 dsh 选择器里的候选':
+        'The upstream reported no level table; locally measured levels are used as a fallback. These are the candidates in the dsh picker.',
       '免费': 'Free',
       /*
        * 上游促销徽章的**已知**标签（藏在 `tags` 里的 `badge:限时免费:#FF0000`）。
@@ -3968,6 +3995,7 @@ body.dark .wb-root,
       const [progress, setProgress] = useState(null);
       const [message, setMessage] = useState('');
       const models = data?.models || [];
+      const unofficialCount = models.filter((m) => m.official === false).length;
       const results = probes?.results || {};
       // ── 模型显示偏好：控制哪些模型出现在 dsh 的模型选择器里 ──────────────
       // 存偏好（.model-prefs.json）与读目录是两个接口：POST 后 adapter.setFilter
@@ -3983,6 +4011,7 @@ body.dark .wb-root,
        */
       const [visibility, setVisibility] = useState(null);   // null = 跟随配置（全部显示）
       const [hideAll, setHideAll] = useState(false);
+      const [includeUnofficial, setIncludeUnofficial] = useState(false); // 是否显示官方目录外
       const [denied, setDenied] = useState([]);             // 配置 modelDeny 排除的模型
       const [prefsLoaded, setPrefsLoaded] = useState(false);
       const [prefsDirty, setPrefsDirty] = useState(false);
@@ -3995,6 +4024,7 @@ body.dark .wb-root,
         if (!prefsLoaded && prefsApi.data && prefsApi.data.ok) {
           setVisibility(prefsApi.data.unset ? null : (Array.isArray(prefsApi.data.visible) ? prefsApi.data.visible : null));
           setHideAll(prefsApi.data.hideAll === true);
+          setIncludeUnofficial(prefsApi.data.includeUnofficial === true);
           setDenied(Array.isArray(prefsApi.data.deny) ? prefsApi.data.deny.map(String) : []);
           setPrefsLoaded(true);
         }
@@ -4002,12 +4032,18 @@ body.dark .wb-root,
       const isVisible = (id) => {
         if (denied.includes(id)) return false;
         if (hideAll) return false;
-        if (!Array.isArray(visibility)) return true;   // 未设置 = 全显示（默认）
+        if (!Array.isArray(visibility)) {
+          // 未设置 = 跟随配置；官方目录外的模型默认不进 dsh 选择器
+          const model = models.find((m) => m.id === id);
+          return model?.official !== false || includeUnofficial;
+        }
         return visibility.includes(id);
       };
       const toggleVisible = (id) => {
         setVisibility((prev) => {
-          const base = Array.isArray(prev) ? prev : (hideAll ? [] : models.map((m) => m.id));
+          const base = Array.isArray(prev)
+            ? prev
+            : (hideAll ? [] : models.filter((m) => m.official !== false || includeUnofficial).map((m) => m.id));
           return base.includes(id) ? base.filter((x) => x !== id) : [...base, id];
         });
         setHideAll(false);
@@ -4018,12 +4054,13 @@ body.dark .wb-root,
         // null + 非 hideAll = "恢复全部"：请求服务端删除偏好，回到配置的 allow/deny
         const unset = visibility === null && !hideAll;
         const res = await postJson('/workbuddy/model-visibility', unset
-          ? { unset: true }
-          : { visible: Array.isArray(visibility) ? visibility : [], hideAll });
+          ? { unset: true, includeUnofficial }
+          : { visible: Array.isArray(visibility) ? visibility : [], hideAll, includeUnofficial });
         setPrefsSaving(false);
         if (res.data?.ok) {
           setVisibility(res.data.unset ? null : (Array.isArray(res.data.visible) ? res.data.visible : []));
           setHideAll(res.data.hideAll === true);
+          setIncludeUnofficial(res.data.includeUnofficial === true);
           setPrefsDirty(false);
           // applied = 宿主是否成功广播了 llm/adapters-updated（dsh 选择器重拉模型
           // 清单的信号）。广播失败（旧版 dsh 没有该内部方法）时偏好其实已保存，
@@ -4270,13 +4307,22 @@ body.dark .wb-root,
             h(Btn, { disabled: prefsSaving, onClick: selectNoneVisible }, '全不选'),
             h(Btn, { disabled: prefsSaving || !consoleReady, onClick: onlyAvailableVisible, title: '按体检结论隐藏"不可用"的模型' }, '只留可用的'),
             visibility === null && !hideAll
-              ? h('span', { className: 'wb-note', style: { margin: 0 } }, '当前：全部显示（跟随配置）')
+              ? h('span', { className: 'wb-note', style: { margin: 0 } },
+                includeUnofficial ? t('当前：全部显示（含官方目录外）') : t('当前：官方模型全部显示（扩展模型隐藏）'))
               : hideAll
                 ? h('span', { className: 'wb-note', style: { margin: 0 } }, '当前：全部隐藏')
                 : h('span', { className: 'wb-note', style: { margin: 0 } }, `已勾选 ${visibility.length} / ${models.length}`)),
           h('div', { className: 'wb-actions-group' },
             h(Btn, { primary: prefsDirty, disabled: prefsSaving || !prefsDirty, onClick: () => savePrefs() }, prefsSaving ? '保存中…' : prefsDirty ? '保存显示设置' : '已保存'),
-            h(Btn, { disabled: prefsSaving, onClick: () => { setVisibility(null); setHideAll(false); setPrefsDirty(true); }, title: '恢复为全部显示（删除偏好，跟随配置的 allow/deny）' }, '恢复全部'))),
+            h(Btn, { disabled: prefsSaving, onClick: () => { setVisibility(null); setHideAll(false); setPrefsDirty(true); }, title: '恢复为全部显示（删除偏好，跟随配置的 allow/deny）' }, '恢复全部'),
+            h('label', { className: 'wb-note', style: { display: 'flex', alignItems: 'center', gap: '6px', margin: 0 } },
+              h('input', {
+                type: 'checkbox',
+                checked: includeUnofficial,
+                disabled: prefsSaving,
+                onChange: (e) => { setIncludeUnofficial(e.target.checked); setPrefsDirty(true); },
+              }),
+              t('显示官方目录外的模型'), `（${unofficialCount}）`))),
         denied.length
           ? h('p', { className: 'wb-note', style: { margin: '0 0 8px' } },
             '配置里有模型被 modelDeny 排除，它们不会出现在 dsh 选择器里（面板里勾选也不生效）。')
@@ -4306,6 +4352,12 @@ body.dark .wb-root,
                 h('td', null, m.id + (m.id === sampleModel ? ' ★' : '')),
                 h('td', null, m.name ? h(Raw, { text: String(m.name) }) : '',
                   denied.includes(m.id) ? h('span', { className: 'wb-badge', title: '配置的 modelDeny 排除了它' }, '配置排除') : null,
+                  m.official === false
+                    ? h('span', {
+                      className: 'wb-badge',
+                      title: '网关目录里有，但 WorkBuddy 官方模型选择器未列出；默认不进 dsh 选择器，可先体检再手动显示',
+                    }, '官方未上架')
+                    : null,
                   m.images ? h('span', { className: 'wb-badge', title: '支持图片输入（多模态）' }, '图片') : null,
                   // 「推理」徽章与「图片」并列：有推理能力就标（档位细节在详情里，
                   // 列表行只做"能不能"的一眼判断，避免把六个档位名塞进一行）。
@@ -4332,7 +4384,30 @@ body.dark .wb-root,
                         h(DetailItem, { label: '模型 ID', value: m.id }),
                         h(DetailItem, { label: '名称', value: m.name || '—' }),
                         h(DetailItem, { label: '厂商标识', value: m.vendor || '—', hint: '上游返回的厂商代码（单字母），不是厂商名' }),
-                        h(DetailItem, { label: '上下文 / 输出', value: `${fmtInt(m.contextWindow)} / ${fmtInt(m.maxTokens)} tokens` }),
+                        h(DetailItem, {
+                          label: '上下文 / 输出',
+                          value: `${fmtInt(m.contextWindow)} / ${fmtInt(m.maxTokens)} tokens`,
+                          hint: 'dsh 没有上下文档位选择器；这里显示实际生效值',
+                        }),
+                        h(DetailItem, {
+                          label: '官方上下文',
+                          value: [
+                            m.contextWindowDefault ? `${t('默认')} ${fmtTokens(m.contextWindowDefault)}` : '',
+                            Array.isArray(m.contextWindowOptions) && m.contextWindowOptions.length
+                              ? `${t('可选')} ${m.contextWindowOptions.map((n) => fmtTokens(n)).join(' / ')}`
+                              : '',
+                            m.contextWindowMax && m.contextWindowMax !== m.contextWindow
+                              ? `${t('上限')} ${fmtTokens(m.contextWindowMax)}`
+                              : '',
+                          ].filter(Boolean).join(' · ') || '—',
+                        }),
+                        h(DetailItem, {
+                          label: '官方模型列表',
+                          value: m.official === true ? '在列' : (m.official === false ? '未上架（扩展）' : '未判定'),
+                          hint: m.official === false
+                            ? '网关目录里有，但 WorkBuddy 官方模型选择器未列出；能否实际调用以体检为准'
+                            : (m.supplemented ? '上游目录未提供，由本项目按实测补全' : undefined),
+                        }),
                         h(DetailItem, { label: '计费倍率', value: m.free ? '免费' : (m.credits === null || m.credits === undefined ? '未知' : String(m.credits)) }),
                         h(DetailItem, { label: '多模态', value: m.images ? '支持图片' : '纯文本' }),
                         /*
@@ -4353,9 +4428,14 @@ body.dark .wb-root,
                                 ? '支持 · 暂无可选档位（网关对该模型尚未提供）'
                                 : '支持 · 上游未给档位信息（按低/中/高三档兜底）')),
                           hint: m.reasoning && Array.isArray(m.efforts) && m.efforts.length
-                            ? '这就是 dsh 模型选择器里「思考强度」下拉会显示的档位'
+                            ? (m.effortsSource === 'upstream'
+                              ? '档位来自上游目录 reasoning.supportedEfforts（与 WorkBuddy 官方 GUI 一致）；这也是 dsh 选择器里的候选'
+                              : '上游未给档位表，按本地实测兜底；这也是 dsh 选择器里的候选')
                             : undefined,
                         }),
+                        m.reasoning && m.defaultEffort
+                          ? h(DetailItem, { label: '默认档位', value: m.defaultEffort })
+                          : null,
                         m.onlyReasoning
                           ? h(DetailItem, { label: '调用方式', value: '纯思考模型（不接受非思考调用）' })
                           : null,

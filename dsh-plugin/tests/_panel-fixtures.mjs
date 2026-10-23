@@ -55,8 +55,8 @@ export const FIXTURES = {
      * 排序也特意覆盖三种形态：全档 / 无档位字段（老桥） / 显式空数组（网关不接）。
      */
     directory: [
-      { id: 'deepseek-v4.1-flash', name: 'Deepseek-V4.1-Flash', contextWindow: 1000000, maxTokens: 128000, images: true, reasoning: true, efforts: ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'], onlyReasoning: true, credits: 0.11, free: false, vendor: 'f', tags: ['craft'], badges: [] },
-      { id: 'glm-5.3', name: 'GLM-5.3', contextWindow: 1000000, maxTokens: 48000, images: true, reasoning: true, efforts: ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'], onlyReasoning: true, credits: 0.79, free: false, vendor: 'e', tags: ['craft'], badges: [] },
+      { id: 'deepseek-v4.1-flash', name: 'Deepseek-V4.1-Flash', contextWindow: 300000, maxTokens: 128000, contextWindowDefault: 300000, contextWindowOptions: [300000, 600000, 1000000], contextWindowMax: 1000000, effortsSource: 'upstream', defaultEffort: 'high', official: true, images: true, reasoning: true, efforts: ['low', 'high', 'max'], onlyReasoning: true, credits: 0.11, free: false, vendor: 'f', tags: ['craft'], badges: [] },
+      { id: 'glm-5.3', name: 'GLM-5.3', contextWindow: 300000, maxTokens: 48000, contextWindowDefault: 300000, contextWindowOptions: [300000, 600000, 1000000], contextWindowMax: 1000000, effortsSource: 'upstream', defaultEffort: 'high', official: true, images: true, reasoning: true, efforts: ['low', 'high', 'max'], onlyReasoning: true, credits: 0.79, free: false, vendor: 'e', tags: ['craft'], badges: [] },
       // 没有 efforts 字段：老桥 / 上游未给档位 → 面板提示"按低/中/高三档兜底"
       { id: 'kimi-k3', name: 'Kimi-K3', contextWindow: 960000, maxTokens: 32000, images: false, reasoning: true, efforts: null, onlyReasoning: false, credits: 0.35, free: false, vendor: 'v', tags: ['craft'], badges: [] },
       // 带促销徽章的样例：既让"徽章要渲染成带色标记"这条断言在离线模式下也成立，
@@ -64,7 +64,7 @@ export const FIXTURES = {
       { id: 'hy3', name: 'HY3', contextWindow: 131072, maxTokens: 8192, images: false, reasoning: false, efforts: null, onlyReasoning: false, credits: 0, free: true, vendor: 'j', tags: ['craft', 'badge:限时免费:#FF0000'], badges: [{ label: '限时免费', color: '#FF0000' }] },
       { id: 'hy4-preview', name: 'Hy4 preview', contextWindow: 960000, maxTokens: 64000, images: true, reasoning: true, efforts: ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'], onlyReasoning: true, credits: 0, free: true, vendor: 'j', tags: ['badge:夜间免费:#FF0000'], badges: [{ label: '夜间免费', color: '#FF0000' }] },
       // 显式空数组：桥实测"一个档都不收"（网关暂时不接）→ 面板提示"暂无可选档位"
-      { id: 'glm-5v-turbo', name: 'GLM-5v-Turbo', contextWindow: 200000, maxTokens: 64000, images: true, reasoning: true, efforts: [], onlyReasoning: false, credits: 0.71, free: false, vendor: 'e', tags: [], badges: [] },
+      { id: 'glm-5v-turbo', name: 'GLM-5v-Turbo', contextWindow: 200000, maxTokens: 64000, images: true, reasoning: true, efforts: [], onlyReasoning: false, credits: 0.71, free: false, vendor: 'e', tags: [], badges: [], official: false },
     ],
     catalogAt: new Date(now - 300_000).toISOString(),
     catalogError: '',
@@ -173,6 +173,15 @@ FIXTURES.models.models = FIXTURES.status.directory.map((m) => ({
   // 空数组的区分语义）—— 少一个字段，模型页的「推理」徽章与详情档位就渲染不出来，
   // 而 i18n 验收只扫渲染出来的东西，于是会静默漏掉。
   reasoning: m.reasoning === true, efforts: m.efforts ?? null, onlyReasoning: m.onlyReasoning === true,
+  // 官方清单 / 上下文档位 / 档位来源：与 lib/models.mjs 的输出逐字段对齐
+  official: m.official === true ? true : m.official === false ? false : null,
+  contextWindowDefault: m.contextWindowDefault ?? null,
+  contextWindowOptions: m.contextWindowOptions ?? [],
+  contextWindowMax: m.contextWindowMax ?? null,
+  effortsSource: m.effortsSource ?? null,
+  defaultEffort: m.defaultEffort ?? null,
+  canDisableThinking: m.canDisableThinking === true,
+  supplemented: m.supplemented === true,
   // tags 要洗干净（`badge:标签:#色` 已拆进 badges）；模型页的促销徽章靠 badges 渲染
   tags: (m.tags || []).filter((t) => !/^badge:/.test(t)), badges: m.badges,
   description: '',

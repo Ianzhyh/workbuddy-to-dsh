@@ -31,6 +31,7 @@ import {
   listAccounts,
   probeModel,
   readBridgeLog,
+  reconcileAccountPin,
 } from '../lib/diagnostics.mjs';
 import { readDshStatus, writeRegistration } from '../lib/dsh.mjs';
 import {
@@ -356,6 +357,18 @@ function startBridge(opts = {}) {
   if (!existsSync(script)) return { started: false, error: `找不到桥脚本：${script}` };
   if (!existsSync(authFile)) return { started: false, error: `登录文件不存在：${authFile}` };
 
+  /*
+   * 钉住的是账号快照时，同时把「桌面端当前登录文件」告诉桥：用户在 WorkBuddy
+   * 客户端里换号后桥会自动跟随（issue #6）。`followUid` 是钉住那一刻桌面文件
+   * 里的账号；没有它（旧状态）由桥按"快照账号 ≠ 桌面账号"迁移一次。
+   */
+  const desktopAuth = config.workbuddy.authFile;
+  const followAuthFile = opts.followAuthFile
+    || (normPath(authFile) !== normPath(desktopAuth) && existsSync(desktopAuth) ? desktopAuth : '');
+  const followUid = opts.followUid !== undefined
+    ? String(opts.followUid || '')
+    : String(readState().authFileDesktopUid || '');
+
   rotateLogIfNeeded(config.paths.bridgeLog);
   const logPath = config.paths.bridgeLog;
   const logOffset = existsSync(logPath) ? statSync(logPath).size : 0;
@@ -363,7 +376,7 @@ function startBridge(opts = {}) {
   const child = spawn(process.execPath, [script], {
     cwd: config.paths.root,
     // 自动签到的开关随启动注入一次 —— 桥侧读 env，改了要重启桥才生效
-    env: bridgeEnv({ authFile, autoCheckin: readCheckinState().auto }),
+    env: bridgeEnv({ authFile, autoCheckin: readCheckinState().auto, followAuthFile, followUid }),
     detached: true,
     stdio: ['ignore', logFd, logFd],
     windowsHide: true,
@@ -670,6 +683,18 @@ function checkinViewWithBridge(bridgeAuto) {
 const normPath = (p) => String(p || '').replace(/\\/g, '/').toLowerCase();
 
 /**
+ * 桥健康响应是否符合"我们期望的登录文件"。
+ *
+ * 钉住快照 + 自动跟随时，桥可能已经跟随桌面端登录文件：`authFile` 是当前
+ * 生效文件，`authFilePinned` 才是启动时钉住的那个。两者任一匹配都算——
+ * 否则控制台会误判"端口被另一个账号的桥占用"。
+ */
+function authFileMatches(healthBody, expected) {
+  const want = normPath(expected);
+  return normPath(healthBody?.authFile) === want || normPath(healthBody?.authFilePinned) === want;
+}
+
+/**
  * 启动桥，并等到「本次 spawn 的那个进程」真正在服务为止。
  *
  * 不能再接受「端口上有个健康应答者」就算成功：端口被上一个桥占用时，新 spawn
@@ -681,7 +706,7 @@ async function startBridgeAndWait(opts = {}) {
 
   // 已经在跑且账号一致的桥：直接复用，不做注定失败的重复启动
   const before = await bridgeHealth();
-  if (before.running && normPath(before.body?.authFile) === expected) {
+  if (before.running && authFileMatches(before.body, expected)) {
     return { started: true, reused: true, pid: before.body?.pid ?? null, health: before.body, authFile: expected };
   }
 
@@ -701,7 +726,7 @@ async function startBridgeAndWait(opts = {}) {
   // 新进程没能成为服务方。端口上若仍有别的桥在答，说清楚「在复用谁」
   const now = await bridgeHealth(1500);
   if (now.running) {
-    if (normPath(now.body?.authFile) === expected) {
+    if (authFileMatches(now.body, expected)) {
       return {
         started: true,
         reused: true,
@@ -730,6 +755,25 @@ async function startBridgeAndWait(opts = {}) {
       ? `新进程启动失败：${result.spawnError}`
       : `端口 ${config.bridge.port} 在 10 秒内没有有效响应（进程 PID ${result.pid}）`,
   };
+}
+
+/**
+ * 解除账号钉住后，把还在用旧快照的桥重启到桌面端当前账号。
+ *
+ * 只重启「确实是按 `previousPin` 启动」的桥：插件自己拉起、跟随默认文件的
+ * 桥不该被控制台顺手重启。
+ */
+async function applyAccountPinCorrection(pin) {
+  if (!pin?.changed) return { applied: false, restarted: false, error: null };
+  const health = await bridgeHealth();
+  if (!health.running) return { applied: false, restarted: false, error: null };
+  const running = health.body?.authFilePinned || health.body?.authFile;
+  if (pin.previousPin && normPath(running) !== normPath(pin.previousPin)) {
+    return { applied: false, restarted: false, error: null };
+  }
+  await stopBridgeAndWait();
+  const started = await startBridgeAndWait();
+  return { applied: true, restarted: started.started === true, error: started.error || started.warning || null };
 }
 
 /**
@@ -1454,7 +1498,22 @@ const server = createServer(async (req, res) => {
     }
 
     if (route === '/api/accounts') {
-      sendJson(res, 200, await listAccounts());
+      /*
+       * 先校正"钉住的快照 vs 桌面端当前账号"：用户在 WorkBuddy 客户端里换号后，
+       * 这里解除旧钉住并让桥跟着桌面走（issue #6）。列表随后再读，active 标记
+       * 才是当前真实生效的那份文件。
+       */
+      const pin = await reconcileAccountPin();
+      const correction = await applyAccountPinCorrection(pin);
+      sendJson(res, 200, {
+        ...(await listAccounts()),
+        pin: {
+          followedDesktop: pin.changed === true,
+          reason: pin.reason || '',
+          restarted: correction.restarted === true,
+          error: correction.error || null,
+        },
+      });
       return;
     }
 
@@ -1567,12 +1626,20 @@ const server = createServer(async (req, res) => {
 
         const wasRunning = (await bridgeHealth()).running;
         if (wasRunning) await stopBridgeAndWait();
-        writeState({ authFile: hit.path });
+        /*
+         * 记住"切换那一刻桌面端是哪个账号"：以后桌面端换号时，桥据此判断
+         * 是用户主动钉住的快照还是桌面端已经换了人（见 reconcileAccountPin）。
+         */
+        writeState({
+          authFile: hit.path,
+          authFileDesktopUid: listed.desktopUid || null,
+          authFilePinnedAt: new Date().toISOString(),
+        });
         // 体检结论只对被测时的那个账号成立：换账号后旧结论不能再作为新账号的
         // 事实展示（模型 id 往往两个账号都有，混用会直接误导）
         clearProbeResults();
         invalidateQuotaCache(); // 换了账号，余额是另一个账号的
-        const started = await startBridgeAndWait({ authFile: hit.path });
+        const started = await startBridgeAndWait({ authFile: hit.path, followUid: listed.desktopUid || '' });
 
         sendJson(res, 200, {
           switched: true,
@@ -1822,7 +1889,7 @@ function isMainModule() {
 function startConsoleServer() {
   server.listen(config.dashboard.port, config.dashboard.host, async () => {
     console.log(`WorkBuddy 控制台  ->  ${config.dashboard.url}`);
-    console.log(`登录文件          ->  ${config.workbuddy.authFile}`);
+    console.log(`登录文件          ->  ${effectiveAuthFile()}`);
 
     // 地址以实际监听结果为准（.env 里的 DASHBOARD_PORT 已生效），不再由脚本猜端口
     if (config.dashboard.openBrowser) openBrowser(config.dashboard.url);
@@ -1835,6 +1902,21 @@ function startConsoleServer() {
       console.log(`桥地址            ->  ${config.bridge.url}/v1（未自动启动）`);
       console.log('仅监听回环地址，Ctrl+C 退出。');
       return;
+    }
+
+    /*
+     * 上次钉住的账号快照可能已经过期（用户之后在 WorkBuddy 客户端里换了号）。
+     * 先校正，再判断桥是否可复用 —— 否则会 happily 复用旧快照的桥，
+     * 表现就是"重启了 dsh Web 还是旧账号"（issue #6）。
+     */
+    try {
+      const pin = await reconcileAccountPin();
+      if (pin.changed) {
+        await applyAccountPinCorrection(pin);
+        console.log(`账号钉住状态已校正（${pin.reason}）-> 跟随桌面端当前账号`);
+      }
+    } catch (err) {
+      console.warn(`账号钉住状态校正失败（不影响启动）：${err.message}`);
     }
 
     // 桥若已在跑就直接复用，避免重复绑定端口

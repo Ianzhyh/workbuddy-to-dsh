@@ -16,7 +16,7 @@ import {
 } from './atrest.mjs';
 import { inspectClientInstalls } from './find-workbuddy.mjs';
 import config from '../config.mjs';
-import { effectiveAuthFile, readAccountAliases, readAccountOrder, readHiddenAccounts } from './state.mjs';
+import { effectiveAuthFile, readAccountAliases, readAccountOrder, readHiddenAccounts, readState, writeState } from './state.mjs';
 import { readDshStatus } from './dsh.mjs';
 /*
  * 与 `client-connect.mjs` 是**循环引用**（那边也 import 本模块的 bridgeHealth /
@@ -43,6 +43,11 @@ export function humanDuration(ms) {
   if (d > 0) return `${d} 天 ${h} 小时`;
   if (h > 0) return `${h} 小时 ${m} 分`;
   return `${m} 分`;
+}
+
+/** 路径归一化：Windows 上同一路径可能以 / 或 \ 出现，比较前统一。 */
+export function normalizePath(p) {
+  return String(p || '').replace(/\\/g, '/').toLowerCase();
 }
 
 // ── 桥探测 ──────────────────────────────────────────────────────────────
@@ -212,7 +217,7 @@ export async function probeModel(model, timeoutMs = 20000) {
 export async function listAccountFiles() {
   const active = effectiveAuthFile();
   const dir = join(active, '..');
-  const out = { dir, active, accounts: [], keyError: null };
+  const out = { dir, active, desktopAuth: config.workbuddy.authFile, desktopUid: '', accounts: [], keyError: null };
 
   let names = [];
   try {
@@ -254,7 +259,7 @@ export async function listAccountFiles() {
       entry.remainingMs = entry.expiresAt - Date.now();
       entry.modifiedAt = statSync(full).mtimeMs;
 
-      if (key) {
+      if (key || !entry.encrypted) {
         const field = auth.accessToken;
         const token = entry.encrypted ? openEncryptedField(field, key) : String(field || '');
         const claims = decodeJwtClaims(token);
@@ -271,6 +276,10 @@ export async function listAccountFiles() {
     }
     out.accounts.push(entry);
   }
+
+  // 桌面端当前登录文件对应的账号（不是 `.state.json` 钉住的快照）。
+  const desktopEntry = out.accounts.find((entry) => normalizePath(entry.path) === normalizePath(out.desktopAuth));
+  out.desktopUid = desktopEntry?.userId || '';
 
   /*
    * 自定义名字（`.state.json` 的 `accountAliases`）。
@@ -304,6 +313,53 @@ export async function listAccounts() {
   const rank = new Map(readAccountOrder().map((name, i) => [name, i]));
   out.accounts = foldAccountSnapshots(out.accounts, rank);
   return out;
+}
+
+/**
+ * 校正 `.state.json` 里的账号钉住状态。
+ *
+ * 面板的「切换账号」会把桥钉到某个登录快照（`authFile`）。但用户后来在
+ * WorkBuddy 客户端里换号时，客户端覆盖的是它**自己的默认登录文件**，不是
+ * 我们钉住的快照 —— 于是桥和面板一直显示旧账号（issue #6）。
+ *
+ * 判据：
+ *   - 钉住时记录了 `authFileDesktopUid`：桌面账号变了 → 解除钉住，跟随桌面；
+ *   - 老状态没有该字段：钉住快照的账号与桌面当前账号不同 → 解除（迁移一次）；
+ *     相同则补记，视为用户主动选的同账号快照。
+ *   - 钉住文件已被删除/解不开 → 解除。
+ *
+ * 只写 `.state.json`，**不动任何登录文件**。返回 `{changed, previousPin, reason}`。
+ */
+export async function reconcileAccountPin() {
+  const state = readState();
+  const pinned = typeof state.authFile === 'string' ? state.authFile.trim() : '';
+  const desktop = config.workbuddy.authFile;
+  if (!pinned || normalizePath(pinned) === normalizePath(desktop)) {
+    return { changed: false, previousPin: '', reason: '' };
+  }
+  const listed = await listAccountFiles();
+  const desktopUid = listed.desktopUid || '';
+  if (!desktopUid) return { changed: false, previousPin: pinned, reason: 'desktop-unreadable' };
+  const pinnedEntry = listed.accounts.find((a) => normalizePath(a.path) === normalizePath(pinned));
+  const clear = (reason) => {
+    writeState({ authFile: null, authFileDesktopUid: null, authFilePinnedAt: null });
+    return { changed: true, previousPin: pinned, reason };
+  };
+  if (!existsSync(pinned) || !pinnedEntry) return clear('pinned-file-missing');
+  if (pinnedEntry.usable !== true) return clear('pinned-file-unusable');
+  const recorded = typeof state.authFileDesktopUid === 'string' ? state.authFileDesktopUid.trim() : '';
+  if (!recorded) {
+    if (pinnedEntry.userId && String(pinnedEntry.userId) !== String(desktopUid)) {
+      return clear('legacy-pin-desktop-switched');
+    }
+    writeState({
+      authFileDesktopUid: String(desktopUid),
+      authFilePinnedAt: state.authFilePinnedAt || new Date().toISOString(),
+    });
+    return { changed: false, previousPin: pinned, reason: 'legacy-pin-adopted' };
+  }
+  if (String(recorded) !== String(desktopUid)) return clear('desktop-switched');
+  return { changed: false, previousPin: pinned, reason: '' };
 }
 
 /**

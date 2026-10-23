@@ -675,6 +675,101 @@ function effortsFor(id) {
 }
 
 /**
+ * 上游目录里 `reasoning.supportedEfforts` 的合法取值。
+ *
+ * 官方客户端（以及 dsh 适配器）只认这几个 id；未知值既不能展示也不能下发。
+ * `off` / `none` 不在表里：它们表达"关闭思考"，而网关对它们处理不一致。
+ */
+const KNOWN_REASONING_EFFORTS = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
+
+/** 目录数组 → 去空、去重、只留已知档位；不是数组/没有有效值返回 null。 */
+function normalizeEfforts(list) {
+  if (!Array.isArray(list)) return null;
+  const out = [];
+  for (const raw of list) {
+    const id = String(raw || '').trim();
+    if (KNOWN_REASONING_EFFORTS.includes(id) && !out.includes(id)) out.push(id);
+  }
+  return out.length ? out : null;
+}
+
+/** 上下文档位（如 300000 / 600000 / 1000000）→ 去重升序；无效返回空数组。 */
+function normalizeContextLengths(list) {
+  if (!Array.isArray(list)) return [];
+  return [...new Set(list.map((n) => Number(n)).filter((n) => Number.isSafeInteger(n) && n > 0))].sort((a, b) => a - b);
+}
+
+/**
+ * 用户显式指定的上下文预算（`WORKBUDDY_CONTEXT_WINDOW=600000`）。
+ *
+ * dsh 的适配器契约只有**一个** contextWindow，没有"选择器"；默认跟随官方
+ * 的 `defaultLength`（多数模型 300K），显式设置才钉到某个值（上限仍受模型
+ * maxInputTokens 约束）。不设置时默认 0 = 用官方默认。
+ */
+const CONTEXT_WINDOW_OVERRIDE = numEnv('WORKBUDDY_CONTEXT_WINDOW', 0, { min: 1, integer: true });
+
+/** 该模型对 dsh 暴露的上下文容量：显式覆盖 > 官方默认 > 模型上限。 */
+function contextWindowForModel(model) {
+  const max = Number(model?.context) || 0;
+  const wanted = CONTEXT_WINDOW_OVERRIDE || Number(model?.contextDefault) || max;
+  return max && wanted > max ? max : wanted;
+}
+
+/**
+ * 同一模型在 `/v2/.../models` 与 `/v3/config` 里各有一份描述。
+ *
+ * 两个端点字段并不等价：`/v3/config` 带官方选择器用的 `reasoning.supportedEfforts`
+ * 与 `contextWindow.supportedLengths`，`/v2/.../models` 有时反而缺。合并时
+ * **不能让后到的薄条目把先到的丰富字段冲掉**，否则又会退回"硬编码六档"。
+ */
+function mergeCatalogModel(prev, next) {
+  if (!prev) return next;
+  const merged = { ...prev, ...next };
+  for (const [key, value] of Object.entries(prev)) {
+    if (merged[key] === undefined) merged[key] = value;
+  }
+  const nextEfforts = normalizeEfforts(next?.reasoning?.supportedEfforts);
+  const prevEfforts = normalizeEfforts(prev?.reasoning?.supportedEfforts);
+  if (nextEfforts) merged.reasoning = next.reasoning;
+  else if (prevEfforts) merged.reasoning = prev.reasoning;
+  else if (next?.reasoning || prev?.reasoning) merged.reasoning = next?.reasoning || prev?.reasoning;
+  const nextCtx = normalizeContextLengths(next?.contextWindow?.supportedLengths);
+  const prevCtx = normalizeContextLengths(prev?.contextWindow?.supportedLengths);
+  if (nextCtx.length) merged.contextWindow = next.contextWindow;
+  else if (prevCtx.length) merged.contextWindow = prev.contextWindow;
+  else if (next?.contextWindow || prev?.contextWindow) merged.contextWindow = next?.contextWindow || prev?.contextWindow;
+  // tags 取并集：官方选择器判定依赖 craft/chat 标签，任一端点给了都算。
+  const tags = [...new Set([...(Array.isArray(prev.tags) ? prev.tags : []), ...(Array.isArray(next.tags) ? next.tags : [])])];
+  if (tags.length) merged.tags = tags;
+  return merged;
+}
+
+/**
+ * 官方模型选择器实际列出的 id。
+ *
+ * 桌面端 GUI 不是把 `/v2/.../models` 全量铺出来：它用 `/v3/config` 里
+ * `agents[]` 的会话 agent（tag=default → name=cli → 第一个有 models 的）
+ * 加 `chat` 标签模型，再过滤付费线路。这里复刻同一判据；拿不到 agent 时
+ * 返回 null（= 未知，不能因此把所有模型都打成"非官方"）。
+ */
+function officialPickerIds(agents, models) {
+  const list = Array.isArray(agents) ? agents.filter((a) => a && Array.isArray(a.models) && a.models.length) : [];
+  const picker = list.find((a) => Array.isArray(a.tags) && a.tags.includes('default'))
+    || list.find((a) => a.name === 'cli')
+    || list[0]
+    || null;
+  const ids = new Set();
+  if (picker) for (const id of picker.models) if (typeof id === 'string' && id) ids.add(id);
+  for (const m of Array.isArray(models) ? models : []) {
+    if (!m || typeof m.id !== 'string' || !m.id) continue;
+    if (Array.isArray(m.tags) && m.tags.includes('chat')) ids.add(m.id);
+    // 用户自定义模型在 GUI 里始终可见（selectConversationModels 的 custom 分支）
+    if ((Array.isArray(m.tags) && m.tags.includes('custom')) || m.id.startsWith('custom:')) ids.add(m.id);
+  }
+  return ids.size ? ids : null;
+}
+
+/**
  * 取某模型的消耗倍率。
  *
  * 上游给的 `credits` 可能是**数字**，也可能是形如 `"x0.03"` 的**字符串**——
@@ -782,7 +877,25 @@ function resolveAuthPath() {
   return join(AUTH_DIRS[0] || HOME_FOR_AUTH || process.cwd(), 'workbuddy-desktop.info');
 }
 
-const AUTH_PATH = resolveAuthPath();
+/*
+ * 多账号切换时，控制台会把桥钉在某个 `.info` 快照上（WORKBUDDY_AUTH_FILE）。
+ * 但用户随后在 WorkBuddy 客户端里换号，客户端覆盖的是**它自己的默认登录文件**，
+ * 不是我们钉住的快照 —— 于是桥一直读旧账号，面板显示旧账号（issue #6）。
+ *
+ * `WORKBUDDY_AUTH_FILE_FOLLOW` 是「桌面端当前登录文件」，`WORKBUDDY_AUTH_FOLLOW_UID`
+ * 是**钉住那一刻**该文件里的账号 uid。之后该文件账号变了 = 用户在客户端换了号，
+ * 桥自动改读它；账号没变（只是令牌刷新）则继续用用户显式选的快照。
+ * 没给 FOLLOW_UID（旧状态）时按"快照账号 ≠ 桌面账号"迁移一次。
+ */
+const AUTH_FILE_FOLLOW = (() => {
+  const raw = String(process.env.WORKBUDDY_AUTH_FILE_FOLLOW || '').trim();
+  return raw && isAbsolute(raw) ? raw : '';
+})();
+const AUTH_FOLLOW_UID = String(process.env.WORKBUDDY_AUTH_FOLLOW_UID || '').trim();
+const AUTH_PINNED_PATH = resolveAuthPath();
+let AUTH_PATH = AUTH_PINNED_PATH;
+const authFollowProbe = { path: '', mtimeMs: -1, size: -1, uid: '', error: '' };
+const authPinnedProbe = { mtimeMs: -1, size: -1, uid: '' };
 
 const log = (...a) => { if (LOG) console.error(`[${new Date().toISOString()}]`, ...a); };
 
@@ -1328,7 +1441,80 @@ function pickUpstream(domain) {
  */
 let authFileCache = null;
 
+/** 读取某个登录文件里的账号 uid（只解密 accessToken，不缓存全量 auth）。 */
+async function fileAccountUid(path) {
+  const raw = JSON.parse(readFileSync(path, 'utf8'));
+  const field = raw?.auth?.accessToken;
+  if (!field) return '';
+  const token = await openAuthField(field, 'accessToken');
+  return decodeJwt(token).sub || '';
+}
+
+/**
+ * 桌面端换号检测：只做 stat + （文件变了才）解密 accessToken。
+ *
+ * 热路径上每个请求会多一次 stat（微秒级）；文件没变就直接用上次结论。
+ * 解密失败（另一个 build 写的信封 / 文件正在替换）时**不切换**，保持原位。
+ */
+async function syncAuthPathFollow() {
+  if (!AUTH_FILE_FOLLOW || AUTH_FILE_FOLLOW === AUTH_PINNED_PATH) return;
+  let stat;
+  try {
+    stat = statSync(AUTH_FILE_FOLLOW);
+  } catch {
+    authFollowProbe.error = 'missing';
+    return;
+  }
+  if (authFollowProbe.path === AUTH_FILE_FOLLOW
+    && authFollowProbe.mtimeMs === stat.mtimeMs
+    && authFollowProbe.size === stat.size) {
+    // 结论已缓存，直接按上次结果执行下方切换
+  } else {
+    let uid = '';
+    let error = '';
+    try { uid = await fileAccountUid(AUTH_FILE_FOLLOW); }
+    catch (e) { error = String(e?.message || e).slice(0, 160); }
+    Object.assign(authFollowProbe, {
+      path: AUTH_FILE_FOLLOW, mtimeMs: stat.mtimeMs, size: stat.size, uid, error,
+    });
+    if (error) log('auth follow file is unreadable; keeping the pinned account', error);
+  }
+  const followUid = authFollowProbe.uid;
+  if (!followUid) return;
+  let shouldFollow = false;
+  if (AUTH_FOLLOW_UID) {
+    shouldFollow = followUid !== AUTH_FOLLOW_UID;
+  } else {
+    // 旧控制台只写了 authFile：以钉住文件里的账号为基准迁移一次。
+    let pinnedUid = '';
+    try {
+      const st = statSync(AUTH_PINNED_PATH);
+      if (authPinnedProbe.mtimeMs !== st.mtimeMs || authPinnedProbe.size !== st.size) {
+        authPinnedProbe.uid = await fileAccountUid(AUTH_PINNED_PATH);
+        authPinnedProbe.mtimeMs = st.mtimeMs;
+        authPinnedProbe.size = st.size;
+      }
+      pinnedUid = authPinnedProbe.uid;
+    } catch { /* 读不出就跟随桌面 */ }
+    shouldFollow = !pinnedUid || followUid !== pinnedUid;
+  }
+  if (shouldFollow && AUTH_PATH !== AUTH_FILE_FOLLOW) {
+    AUTH_PATH = AUTH_FILE_FOLLOW;
+    memoryAuth = null;
+    authFileCache = null;
+    log('desktop switched account; following', AUTH_FILE_FOLLOW);
+  } else if (!shouldFollow && AUTH_PATH !== AUTH_PINNED_PATH) {
+    AUTH_PATH = AUTH_PINNED_PATH;
+    memoryAuth = null;
+    authFileCache = null;
+    log('desktop account restored; using pinned auth file', AUTH_PINNED_PATH);
+  }
+}
+
 async function readStoredAuth() {
+  // 先确认"桌面端是否换号"：换号后必须立刻改读桌面登录文件，
+  // 否则下面 memoryAuth/authFileCache 会继续供旧账号（issue #6）。
+  await syncAuthPathFollow();
   /*
    * 刷新出的内存令牌可以比文件新，但**不能越过文件里的账号切换**：
    * 桌面端换号会原子替换 auth 文件，此时必须立刻丢掉旧 memoryAuth，
@@ -6494,6 +6680,9 @@ async function fetchCatalog(generation = catalogGeneration) {
     const shape = { paths: catalogPathsFor(), sources: {}, model: [] };
     const merged = new Map();
     const promotions = new Map(); // modelId → 徽章文案（如「Free now」）
+    // `/v3/config` 是官方模型选择器的真源；单独留下 models/agents 用来标 official。
+    let productModels = [];
+    let productAgents = [];
 
     for (const path of catalogPathsFor()) {
       try {
@@ -6543,6 +6732,7 @@ async function fetchCatalog(generation = catalogGeneration) {
         }
         const body = await res.json();
         // 包裹层级随端点而异，都试一遍
+        const data = body?.data || {};
         const list = body?.data?.models
           ?? body?.data?.data?.models
           ?? body?.data?.Data?.models;
@@ -6552,9 +6742,13 @@ async function fetchCatalog(generation = catalogGeneration) {
         }
         upstreamOk = true;
         shape.sources[path] = list.length;
+        if (path === '/v3/config') {
+          productModels = list;
+          productAgents = Array.isArray(data.agents) ? data.agents : [];
+        }
         for (const m of list) {
           if (!m || typeof m.id !== 'string') continue;
-          if (!merged.has(m.id)) merged.set(m.id, m);
+          merged.set(m.id, mergeCatalogModel(merged.get(m.id), m));
         }
         if (!shape.model.length && list[0]) shape.model = Object.keys(list[0]);
 
@@ -6630,6 +6824,19 @@ async function fetchCatalog(generation = catalogGeneration) {
     // 重复 id 不会把计数灌水，正好等于「桥实际认识多少个上游模型」。
     upstreamModelCount = merged.size;
 
+    /*
+     * 官方选择器的模型清单。**只用来标注 official，不删模型**：
+     * `/v2/.../models` 里有些模型官方 GUI 不列（老型号 / 未开通线路），
+     * 但直接调网关仍可能可用。插件默认只把 official 的放进 dsh 选择器，
+     * 面板仍能看到全部并手动勾选。
+     */
+    const officialIds = officialPickerIds(productAgents, productModels);
+    if (officialIds) {
+      shape.officialPickerCount = officialIds.size;
+      shape.officialPicker = [...officialIds];
+    }
+    shape.productModelCount = productModels.length;
+
     // 目录接口**并不完整**：国际版能成功调用 deepseek-v4.1-flash，
     // 但它不出现在任何一个目录端点里。因此把已知可用、目录却漏掉的模型补进来
     // ——能不能用最终由上游决定，列出来才有机会被选到。
@@ -6701,6 +6908,13 @@ async function fetchCatalog(generation = catalogGeneration) {
           name: m.name || m.id,
           context: m.maxInputTokens,
           maxOutput: m.maxOutputTokens,
+          /*
+           * 官方 GUI 的上下文选择器（300K / 600K / 1M）来自
+           * `contextWindow.{defaultLength,supportedLengths}`。默认预算与上限
+           * 是两回事：上限仍是 maxInputTokens，选择器只影响客户端压缩预算。
+           */
+          contextDefault: Number(m.contextWindow?.defaultLength) > 0 ? Number(m.contextWindow.defaultLength) : 0,
+          contextOptions: normalizeContextLengths(m.contextWindow?.supportedLengths),
           images: !!m.supportsImages,
           credits: m.credits,
           // 上游的推理能力标记：supportsReasoning=true 表示该模型接受推理强度控制
@@ -6708,7 +6922,24 @@ async function fetchCatalog(generation = catalogGeneration) {
           // 推理模式使用。不上报数据里的这两个字段，插件就无法给模型声明
           // reasoning 元数据 —— dsh 的选择器会少一个有用的控件。
           supportsReasoning: m.supportsReasoning === true,
+          /*
+           * 档位首选**上游目录**的 `reasoning.supportedEfforts`（这正是官方
+           * GUI 下拉里的 low/high/max）。没有这个字段时才退回按 id 的实测表
+           * （见 REASONING_EFFORTS_BY_MODEL）；两者都没有则按默认三档。
+           * 存 null = "上游没给，输出时走实测兜底"。
+           */
+          reasoningEfforts: normalizeEfforts(m.reasoning?.supportedEfforts),
+          defaultReasoningEffort: typeof m.reasoning?.defaultEffort === 'string'
+            ? m.reasoning.defaultEffort
+            : '',
+          canDisableThinking: m.reasoning?.canDisableThinking === true,
           onlyReasoning: m.onlyReasoning === true,
+          /*
+           * 官方模型选择器是否列出它。supplemented 项是我们按实测补的，
+           * 无法据此断言"官方未上架"，所以留 null（未知），既不隐藏也不冒充。
+           */
+          official: m._supplemented ? null : (officialIds ? officialIds.has(m.id) : null),
+          supplemented: m._supplemented === true,
           // 保留上游的说明与标签：国际版把具体型号写在 description 里，
           // 光看 id（default-model 这类档位名）无法判断它其实是哪个模型
           vendor: m.vendor,
@@ -7478,6 +7709,7 @@ async function handleRequest(req, res) {
         // 带上 pid：未登录/凭据异常时 stop() 也要能停掉自己的进程（否则用户点停止只会得到一个假错误）
         return json(res, 503, {
           ok: false, error: e.message, authFile: AUTH_PATH, pid: process.pid,
+          ...(AUTH_PATH !== AUTH_PINNED_PATH ? { authFilePinned: AUTH_PINNED_PATH, authFollow: true } : {}),
           startedAt: new Date(STARTED_AT).toISOString(),
           credential: await credentialStatus(),
         });
@@ -7493,6 +7725,7 @@ async function handleRequest(req, res) {
         uptimeMs: Date.now() - STARTED_AT,
         auth,
         authFile: AUTH_PATH,
+        ...(AUTH_PATH !== AUTH_PINNED_PATH ? { authFilePinned: AUTH_PINNED_PATH, authFollow: true } : {}),
         credential,
         // 客户端定位结果（**只读内存缓存、绝不触发探测** —— /health 有 4 秒超时
         // 约束，慢探测会让控制台把桥误判成"未运行"；没定位过就显示空）
@@ -7656,27 +7889,47 @@ async function handleRequest(req, res) {
       const list = models.map((m) => {
         const credits = creditsOf(m);
         /*
-         * 档位：只在目录说"支持推理"时才给，且按 id 查实测表（见 REASONING_EFFORTS_BY_MODEL）。
-         * 插件据此给 dsh 声明"这个模型能选哪几档思考强度" —— 写死三档的旧做法
-         * 既会漏档（模型支持更多），也会埋雷（声明了上游不接受的值）。
+         * 档位：只在目录说"支持推理"时才给。
+         *   1. 上游给了 `reasoning.supportedEfforts`（官方 GUI 的档位表）→ 原样用；
+         *   2. 没给（老账号 / 老目录）→ 退回按 id 的实测表；
+         *   3. 实测表也没有 → 默认低/中/高。
          * **空数组也要发**：那是"实测一个档都不收"（如网关暂时不接的 claude-*），
          * 插件看到空数组就不声明推理 —— 选择器不显示一个必然失败的控件。
-         * 不声明推理的模型才完全没有这个字段。
          */
-        const efforts = m.supportsReasoning ? effortsFor(m.id) : null;
+        const upstreamEfforts = Array.isArray(m.reasoningEfforts) && m.reasoningEfforts.length
+          ? m.reasoningEfforts
+          : null;
+        const efforts = m.supportsReasoning ? (upstreamEfforts || effortsFor(m.id)) : null;
+        const defaultEffort = typeof m.defaultReasoningEffort === 'string'
+          && Array.isArray(efforts) && efforts.includes(m.defaultReasoningEffort)
+          ? m.defaultReasoningEffort
+          : '';
+        const contextWindow = contextWindowForModel(m);
         return {
           id: m.id,
           object: 'model',
           created: Math.floor(Date.now() / 1000),
           owned_by: 'workbuddy',
           ...(m.name ? { name: m.name } : {}),
-          ...(m.context ? { context_window: m.context } : {}),
+          ...(contextWindow ? { context_window: contextWindow } : {}),
+          // 官方 GUI 的上下文档位（默认 + 可选）；dsh 只消费 context_window，
+          // 面板用这两个字段显示"默认 300K / 可选 300K·600K·1M"。
+          ...(m.contextDefault ? { context_window_default: m.contextDefault } : {}),
+          ...(Array.isArray(m.contextOptions) && m.contextOptions.length
+            ? { context_window_options: m.contextOptions }
+            : {}),
+          ...(m.context ? { context_window_max: m.context } : {}),
           ...(m.maxOutput ? { max_output_tokens: m.maxOutput } : {}),
           ...(typeof credits === 'number' ? { credits } : {}),
           ...(m.images ? { supports_images: true } : {}),
           ...(m.supportsReasoning ? { supports_reasoning: true } : {}),
           ...(Array.isArray(efforts) ? { reasoning_efforts: efforts } : {}),
+          ...(defaultEffort ? { default_reasoning_effort: defaultEffort } : {}),
+          ...(Array.isArray(efforts) ? { reasoning_efforts_source: upstreamEfforts ? 'upstream' : 'measured' } : {}),
+          ...(m.canDisableThinking ? { can_disable_thinking: true } : {}),
           ...(m.onlyReasoning ? { only_reasoning: true } : {}),
+          ...(m.official === true ? { official: true } : m.official === false ? { official: false } : {}),
+          ...(m.supplemented ? { supplemented: true } : {}),
           ...(m.vendor ? { vendor: m.vendor } : {}),
           ...(Array.isArray(m.tags) && m.tags.length ? { tags: m.tags } : {}),
           ...(m.descriptionZh ? { description_zh: m.descriptionZh } : {}),

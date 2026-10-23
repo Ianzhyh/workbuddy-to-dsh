@@ -60,6 +60,7 @@ copy .env.example .env
 | `WORKBUDDY_APP_EXECUTABLE` | 自动探测 | 客户端可执行文件。探测顺序见下 |
 | `WORKBUDDY_AUTH_FILE` | 自动定位 | 登录文件绝对路径。**多账号时务必显式指定** |
 | `WORKBUDDY_AUTH_DIR` | 平台默认 | 登录文件所在目录，仅在目录被移动时需要 |
+| `WORKBUDDY_CONTEXT_WINDOW` | 官方默认（多为 300000） | dsh 只有一个上下文容量、没有上下文档位选择器。这里可钉到官方可选档（如 `600000` / `1000000`，不超过模型上限）；不设置则用 `/v3/config` 的 `contextWindow.defaultLength` |
 
 ### 插件登录（第二条凭据来源）
 

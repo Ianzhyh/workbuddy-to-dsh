@@ -63,6 +63,24 @@ const READABLE_FAKE_AUTH = {
   },
 };
 
+/** 可解码的假 JWT（只带 sub/exp）—— 账号跟随用例靠 sub 区分身份。 */
+function fakeJwt(sub) {
+  const body = Buffer.from(JSON.stringify({ sub, exp: Math.floor(Date.now() / 1000) + 86_400 }), 'utf8').toString('base64url');
+  return `e30.${body}.sig`;
+}
+
+/** 一份可被桥解密的登录文件内容（纯文本字段，不走 at-rest 信封）。 */
+function authFileFor(sub, domain = 'example.invalid') {
+  return {
+    auth: {
+      accessToken: fakeJwt(sub),
+      refreshToken: 'fake-refresh-token',
+      domain,
+      expiresAt: Date.now() + 30 * 86_400_000,
+    },
+  };
+}
+
 /**
  * 起一个隔离的桥实例。
  * @param {object} [env] 额外环境变量
@@ -694,6 +712,152 @@ test('/v1/models：每模型给出**实测过**的 reasoning_efforts 档位（�
       '补全进来的模型也要带档位 —— 否则 dsh 里它还是没有思考强度可选',
     );
   } finally { await bridge.stop(); upstream.close(); }
+});
+
+test('/v1/models：对齐官方 GUI 清单，并直取 supportedEfforts / contextWindow', { timeout: 90_000 }, async () => {
+  /*
+   * issue #5：插件列表比 WorkBuddy 官方多、档位也比官方多。
+   * 根因是桥只读 `/v2/.../models` 全量并把档位写死在本地实测表；官方 GUI
+   * 用的是 `/v3/config` 的 models + agents[]，且目录本身就带
+   * `reasoning.supportedEfforts` 与 `contextWindow.supportedLengths`。
+   * 本用例钉住：官方清单标注、档位来源、上下文档位、以及显式覆盖。
+   */
+  const upstream = createServer((req, res) => {
+    const path = new URL(req.url, 'http://127.0.0.1').pathname;
+    if (path === '/v2/enterprises/personal/models') {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      return res.end(JSON.stringify({
+        code: 0,
+        data: {
+          models: [
+            // v2 的薄条目：没有 reasoning/contextWindow，不能覆盖 v3 的丰富字段
+            { id: 'glm-5.3', name: 'GLM 5.3', maxInputTokens: 1000000, maxOutputTokens: 64000, supportsReasoning: true, supportsToolCall: true },
+            // 只在 v2 出现 = 官方目录外
+            { id: 'old-model', name: 'Old Model', maxInputTokens: 64000, maxOutputTokens: 8192, supportsReasoning: true, supportsToolCall: true, reasoning: { supportedEfforts: ['low', 'high'] } },
+          ],
+        },
+      }));
+    }
+    if (path === '/v3/config') {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      return res.end(JSON.stringify({
+        code: 0,
+        data: {
+          models: [
+            {
+              id: 'glm-5.3', name: 'GLM-5.3', maxInputTokens: 1000000, maxOutputTokens: 131072,
+              supportsReasoning: true, onlyReasoning: true, supportsToolCall: true, tags: ['craft'],
+              reasoning: { supportedEfforts: ['low', 'high', 'max'], defaultEffort: 'high', canDisableThinking: true },
+              contextWindow: { defaultLength: 300000, supportedLengths: [1000000, 300000, 600000] },
+            },
+            // 产品目录里有、但不在会话 agent 的 models 里 = 官方选择器不列
+            {
+              id: 'memory-model', name: 'Memory Model', maxInputTokens: 128000, maxOutputTokens: 8192,
+              supportsToolCall: true,
+            },
+          ],
+          agents: [{ name: 'craft', models: ['glm-5.3'] }],
+        },
+      }));
+    }
+    res.writeHead(404, { 'content-type': 'application/json' });
+    res.end('{}');
+  });
+  await new Promise((r) => upstream.listen(0, '127.0.0.1', r));
+  const upstreamBase = `http://127.0.0.1:${upstream.address().port}`;
+
+  const bridge = await startBridge(
+    { CODEBUDDY_ENDPOINT: upstreamBase, WORKBUDDY_CONTEXT_WINDOW: '600000' },
+    { auth: READABLE_FAKE_AUTH },
+  );
+  try {
+    const payload = await (await fetch(bridge.baseUrl + '/v1/models?all=1', { headers: auth })).json();
+    const byId = new Map(payload.data.map((m) => [m.id, m]));
+    const glm = byId.get('glm-5.3');
+    assert.equal(glm.official, true, '官方 craft agent 的模型必须标 official=true');
+    assert.deepEqual(glm.reasoning_efforts, ['low', 'high', 'max'], '档位必须直取上游 supportedEfforts（低/高/极致）');
+    assert.equal(glm.default_reasoning_effort, 'high');
+    assert.equal(glm.reasoning_efforts_source, 'upstream');
+    assert.equal(glm.context_window, 600000, 'WORKBUDDY_CONTEXT_WINDOW 显式覆盖生效，且不能超过模型上限');
+    assert.equal(glm.context_window_default, 300000);
+    assert.deepEqual(glm.context_window_options, [300000, 600000, 1000000], '上下文档位排序去重后原样给出');
+    assert.equal(glm.context_window_max, 1000000);
+    assert.equal(glm.can_disable_thinking, true);
+
+    const old = byId.get('old-model');
+    assert.equal(old.official, false, '只在 /v2 出现的模型必须标 official=false');
+    assert.deepEqual(old.reasoning_efforts, ['low', 'high'], 'v2 自带 supportedEfforts 时同样优先采用');
+
+    const mem = byId.get('memory-model');
+    assert.equal(mem.official, false, '产品目录里但不在会话 agent 清单里的模型不算官方可选');
+  } finally { await bridge.stop(); upstream.close(); }
+});
+
+test('账号跟随：桌面端换号后桥自动改读桌面登录文件；换回则恢复钉住的快照', { timeout: 90_000 }, async () => {
+  /*
+   * issue #6：面板切换账号把桥钉在快照上，用户随后在 WorkBuddy 客户端换号，
+   * 客户端覆盖的是它自己的默认登录文件 —— 桥必须能发现并跟随。
+   */
+  const pinSub = 'account-pinned';
+  const desktopAtPin = 'account-desktop';
+  const desktopAfterSwitch = 'account-switched';
+  const aux = mkdtempSync(join(tmpdir(), 'wb-bridge-follow-'));
+  const followPath = join(aux, 'workbuddy-desktop.info');
+  writeFileSync(followPath, JSON.stringify(authFileFor(desktopAtPin)));
+
+  const bridge = await startBridge(
+    {
+      WORKBUDDY_AUTH_FILE_FOLLOW: followPath,
+      WORKBUDDY_AUTH_FOLLOW_UID: desktopAtPin,
+    },
+    { auth: authFileFor(pinSub) },
+  );
+  const health = async () => (await (await fetch(bridge.baseUrl + '/health', { headers: auth })).json());
+  const waitForUid = async (uid) => {
+    const deadline = Date.now() + 10_000;
+    while (Date.now() < deadline) {
+      const h = await health().catch(() => null);
+      if (h?.auth?.userId === uid) return h;
+      await new Promise((r) => setTimeout(r, 150));
+    }
+    throw new Error(`10 秒内没有切换到 ${uid}；最后一次 health=${JSON.stringify(await health().catch(() => null))}`);
+  };
+  try {
+    const before = await waitForUid(pinSub);
+    assert.equal(before.authFollow, undefined, '桌面账号未变时必须继续用用户钉住的快照');
+
+    // 模拟用户在 WorkBuddy 客户端换号：客户端覆盖自己的默认登录文件
+    writeFileSync(followPath, JSON.stringify(authFileFor(desktopAfterSwitch)));
+    const after = await waitForUid(desktopAfterSwitch);
+    assert.equal(after.authFilePinned, join(bridge.dir, 'fake-auth.info'), '健康信息里要能看出钉住的是哪份文件');
+    assert.equal(after.authFollow, true, '跟随桌面后必须如实报告');
+
+    // 用户在客户端换回原账号：钉住仍然有效，桥回到快照
+    writeFileSync(followPath, JSON.stringify(authFileFor(desktopAtPin)));
+    const restored = await waitForUid(pinSub);
+    assert.equal(restored.authFollow, undefined, '桌面账号恢复后应回到钉住的快照');
+  } finally { await bridge.stop(); rmSync(aux, { recursive: true, force: true }); }
+});
+
+test('账号跟随：没有 uid 元数据的旧钉住按“快照账号 ≠ 桌面账号”迁移一次', { timeout: 90_000 }, async () => {
+  const aux = mkdtempSync(join(tmpdir(), 'wb-bridge-follow-legacy-'));
+  const followPath = join(aux, 'workbuddy-desktop.info');
+  writeFileSync(followPath, JSON.stringify(authFileFor('desktop-current')));
+  const bridge = await startBridge(
+    { WORKBUDDY_AUTH_FILE_FOLLOW: followPath },
+    { auth: authFileFor('snapshot-old') },
+  );
+  try {
+    const deadline = Date.now() + 10_000;
+    let h = null;
+    while (Date.now() < deadline) {
+      h = await (await fetch(bridge.baseUrl + '/health', { headers: auth })).json().catch(() => null);
+      if (h?.auth?.userId === 'desktop-current') break;
+      await new Promise((r) => setTimeout(r, 150));
+    }
+    assert.equal(h?.auth?.userId, 'desktop-current', '旧状态必须跟随桌面当前账号，而不是继续用过期快照');
+    assert.equal(h?.authFollow, true);
+  } finally { await bridge.stop(); rmSync(aux, { recursive: true, force: true }); }
 });
 
 test('目录：上游 401 时必须刷新令牌后重试（不能把目录缩成 2-3 个精选模型）', { timeout: 90_000 }, async () => {

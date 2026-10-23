@@ -19,8 +19,31 @@
 
 ## [Unreleased]
 
+## [1.9.6] - 2026-10-23
+
 ### Fixed
 
+- **账号切换后插件仍显示旧账号（#6）**：在 WorkBuddy 客户端里换号时，客户端覆盖
+  的是它自己的默认登录文件，而面板的「切换账号」把桥钉在了某个历史快照上，于是桥
+  和面板一直用旧账号，重启 dsh 也不恢复。现在记录「钉住那一刻桌面端的账号」，
+  桌面端换号后桥自动跟随桌面登录文件（换回原账号则恢复钉住）；旧的 `.state.json`
+  没有该元数据时按「快照账号 ≠ 桌面账号」迁移一次。控制台启动与账号页也会校正
+  过期钉住，并只重启确实按旧快照启动的桥。
+- **模型清单与思考档位对齐官方目录（#5）**：桥现在以 `/v3/config` 的 models +
+  agents[] 判定「官方模型选择器是否列出」，`/v2/.../models` 独有的模型标
+  `official:false`；dsh 选择器默认只显示官方清单，面板保留全部并标「官方未上架」，
+  可在「显示官方目录外的模型」里手动开启（建议先体检 —— 实测部分扩展模型
+  `glm-4.6` / `glm-5.0` / `minimax-m2.5` / `hy4-preview-x` 上游直接 400，
+  `kimi-k2.5` / `deepseek-v3-2-volc` / `hunyuan-chat` 可正常调用）。
+- **思考档位改为直取上游 `reasoning.supportedEfforts`**（官方 GUI 的低/高/极致 =
+  low/high/max），不再用本地六档表覆盖官方声明；上游没给时才退回实测表。
+  已保存的旧档位（如 `hy3` 的 `medium`）会临时保留，避免升级后 dsh 直接
+  `UNSUPPORTED_REASONING_EFFORT`，用户重选后自动消失。
+- **上下文默认值对齐官方**：`/v1/models` 的 `context_window` 改为官方
+  `contextWindow.defaultLength`（多为 300K，不再一律报模型上限 1M），并新增
+  `context_window_default` / `context_window_options` / `context_window_max`；
+  dsh 没有上下文档位选择器时，可用 `WORKBUDDY_CONTEXT_WINDOW=600000|1000000`
+  钉住（不超过模型上限）。
 - 用量统计把网页搜索与接入自检从模型调用中分离：新增 `searches` /
   `searchFailed`，模型 calls / tokens / credit / 平均耗时不再混入搜索调用。
 - 面板用量页补上「已回报 X/Y 次扣分」、搜索次数/搜索失败，以及

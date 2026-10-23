@@ -508,8 +508,9 @@ config.dashboard.url = `http://${config.dashboard.host}:${config.dashboard.port}
 /**
  * 生成给桥进程用的环境变量（保持与桥读取的变量名一致）。
  *
- * @param {{ authFile?: string, autoCheckin?: boolean }} [overrides] 运行时覆盖：
- *   `authFile` 用于多账号切换；`autoCheckin` 来自 `.state.json` 的 `checkin.auto`
+ * @param {{ authFile?: string, autoCheckin?: boolean, followAuthFile?: string, followUid?: string }} [overrides] 运行时覆盖：
+ *   `authFile` 用于多账号切换；`followAuthFile`/`followUid` 让桥在桌面端换号后
+ *   自动跟随桌面登录文件（issue #6），`autoCheckin` 来自 `.state.json` 的 `checkin.auto`
  *   ——桥侧的开关**要重启桥才生效**，所以这里只能启动时注入一次。
  */
 export function bridgeEnv(overrides = {}) {
@@ -531,6 +532,11 @@ export function bridgeEnv(overrides = {}) {
     WORKBUDDY_ACTIVE_ALERT_MS: String(config.bridge.activeAlertMs),
     WORKBUDDY_CLIENT_KEYS: config.bridge.clientKeys,
     WORKBUDDY_AUTH_FILE: overrides.authFile || config.workbuddy.authFile,
+    // 钉住某个账号快照时，再告诉桥"桌面端当前登录文件 + 钉住时的账号 uid"：
+    // 桌面端换号后桥自动跟随，避免面板一直显示旧账号。
+    ...(overrides.followAuthFile ? { WORKBUDDY_AUTH_FILE_FOLLOW: overrides.followAuthFile } : {}),
+    ...(overrides.followUid ? { WORKBUDDY_AUTH_FOLLOW_UID: overrides.followUid } : {}),
+    ...(env.WORKBUDDY_CONTEXT_WINDOW ? { WORKBUDDY_CONTEXT_WINDOW: env.WORKBUDDY_CONTEXT_WINDOW } : {}),
     ...(config.workbuddy.credentialSource ? { WORKBUDDY_CREDENTIAL_SOURCE: config.workbuddy.credentialSource } : {}),
     WORKBUDDY_CREDENTIAL_STORE: config.workbuddy.credentialStore,
     WORKBUDDY_CREDENTIAL_DIR: config.workbuddy.credentialDir,

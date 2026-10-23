@@ -84,7 +84,7 @@ function readModelPrefs() {
     const paramsByModel = j.paramsByModel && typeof j.paramsByModel === 'object' && !Array.isArray(j.paramsByModel)
       ? j.paramsByModel
       : {};
-    const hasDisplay = Array.isArray(j.visible) || j.hideAll === true;
+    const hasDisplay = Array.isArray(j.visible) || j.hideAll === true || typeof j.includeUnofficial === 'boolean';
     // 只有"每个模型的默认参数"、没有显示偏好时也要能读回来
     if (!hasDisplay && !Object.keys(paramsByModel).length) return null;
     const visible = Array.isArray(j.visible) ? j.visible.map(String).filter(Boolean) : null;
@@ -93,6 +93,8 @@ function readModelPrefs() {
       visible,
       // 兼容旧文件：老面板的"全不选"写的也是空数组，且当时提示语承诺"全隐藏"
       hideAll: j.hideAll === true || (Array.isArray(j.visible) && visible.length === 0 && j.hideAll !== false),
+      // 是否把"官方目录外"的模型也放进 dsh 选择器（默认 false）
+      includeUnofficial: j.includeUnofficial === true,
       paramsByModel,
     };
   } catch { return null; }
@@ -108,12 +110,13 @@ function writeModelPrefs(prefs) {
     const paramsByModel = prefs?.paramsByModel && typeof prefs.paramsByModel === 'object' ? prefs.paramsByModel : {};
     const visible = Array.isArray(prefs?.visible) ? prefs.visible.map(String).filter(Boolean) : null;
     const hideAll = prefs?.hideAll === true;
+    const includeUnofficial = prefs?.includeUnofficial === true;
     // 显示"未设置"且没有每模型参数 → 没有可存的东西，删文件更干净
-    if (visible === null && !hideAll && !Object.keys(paramsByModel).length) {
+    if (visible === null && !hideAll && !includeUnofficial && !Object.keys(paramsByModel).length) {
       if (existsSync(MODEL_PREFS_PATH)) unlinkSync(MODEL_PREFS_PATH);
       return;
     }
-    writeFileSync(MODEL_PREFS_PATH, `${JSON.stringify({ visible, hideAll, paramsByModel, at: Date.now() }, null, 2)}\n`, 'utf8');
+    writeFileSync(MODEL_PREFS_PATH, `${JSON.stringify({ visible, hideAll, includeUnofficial, paramsByModel, at: Date.now() }, null, 2)}\n`, 'utf8');
   } catch { /* 只读介质：本次运行生效，不持久化 */ }
 }
 
@@ -462,6 +465,7 @@ export const BRIDGE_ENV_PASSTHROUGH = Object.freeze([
   // 11128 / 预校验 / 诊断
   'WORKBUDDY_11128_FALLBACK',
   'WORKBUDDY_SKIP_MODEL_PREFLIGHT',
+  'WORKBUDDY_CONTEXT_WINDOW',
   'WORKBUDDY_SHAPE',
   // 超时、连接池、重试
   'WORKBUDDY_TIMEOUT_MS',
@@ -743,6 +747,12 @@ export function apply(ctx, rawConfig = {}) {
     // 下一次对话重新探测/拉起，而不是在 5 秒 TTL 内对着死桥空转。
     onTransportFailure: () => { state.bridgeAliveAt = 0; },
     filter: { allow: config.modelAllow, deny: config.modelDeny },
+    // dsh 保存的默认模型选择（含 reasoningEffort）：用来兼容升级前存下的旧档位，
+    // 并在选择器里保留"官方目录外但正在使用"的模型。
+    getDefaultSelection: () => {
+      try { return ctx.get('agentDefaultModel')?.currentSelection?.() || null; }
+      catch { return null; }
+    },
     defaults: {
       maxTokens: config.defaultMaxTokens,
       temperature: config.defaultTemperature,
@@ -781,8 +791,12 @@ export function apply(ctx, rawConfig = {}) {
   // 它是用户在界面上表达的最新意图）。
   const savedPrefs = readModelPrefs();
   if (savedPrefs) {
-    if (savedPrefs.visible !== null || savedPrefs.hideAll) {
-      adapter.setFilter({ allow: savedPrefs.visible || [], hideAll: savedPrefs.hideAll });
+    if (savedPrefs.visible !== null || savedPrefs.hideAll || savedPrefs.includeUnofficial) {
+      adapter.setFilter({
+        allow: savedPrefs.visible || [],
+        hideAll: savedPrefs.hideAll,
+        includeUnofficial: savedPrefs.includeUnofficial,
+      });
     }
     if (savedPrefs.paramsByModel && Object.keys(savedPrefs.paramsByModel).length) {
       adapter.setModelParams(savedPrefs.paramsByModel);
@@ -791,12 +805,13 @@ export function apply(ctx, rawConfig = {}) {
       source: 'prefs',
       allow: savedPrefs.visible,
       hideAll: savedPrefs.hideAll,
+      includeUnofficial: savedPrefs.includeUnofficial === true,
       paramsByModel: savedPrefs.paramsByModel || {},
     };
     log(savedPrefs.hideAll
       ? '已应用模型显示偏好：全部隐藏（面板里点过「全不选」）'
       : (savedPrefs.visible === null
-        ? '已应用模型偏好：显示跟随配置（只有每模型默认参数）'
+        ? `已应用模型偏好：显示跟随配置（含官方目录外：${savedPrefs.includeUnofficial ? '是' : '否'}）`
         : `已应用模型显示偏好：${savedPrefs.visible.length} 个模型`));
   }
 

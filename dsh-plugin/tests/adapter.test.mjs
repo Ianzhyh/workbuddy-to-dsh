@@ -13,6 +13,7 @@ import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 
 import { WorkBuddyAdapter, mapUsage, errorHint, CODE } from '../lib/adapter.mjs';
+import { toAdapterModels } from '../lib/models.mjs';
 import { BridgeClient } from '../lib/bridge.mjs';
 
 /** 起一个假桥：/health、/v1/models、/v1/chat/completions（SSE 回放）。 */
@@ -162,6 +163,55 @@ test('resolveModel：按桥给的 reasoning_efforts 逐模型声明档位（用�
 
     const dead = await adapter.resolveModel('workbuddy', 'dead');
     assert.equal(dead.reasoning, undefined, '显式空数组 = 桥实测无档可用 → 不声明推理');
+  } finally { await stub.close(); }
+});
+
+test('官方目录外模型：默认不进 dsh，显式勾选/开关/当前默认模型例外', async () => {
+  const catalog = [
+    { id: 'official', name: 'Official', context_window: 300000, max_output_tokens: 64000, official: true },
+    { id: 'extra', name: 'Extra', context_window: 128000, max_output_tokens: 8192, official: false },
+    { id: 'unknown', name: 'Unknown', context_window: 64000, max_output_tokens: 4096 },
+  ];
+  assert.deepEqual(toAdapterModels(catalog).map((m) => m.id), ['official', 'unknown'],
+    'official=false 默认隐藏；official=null（无法判定）保留');
+  assert.deepEqual(toAdapterModels(catalog, { includeUnofficial: true }).map((m) => m.id), ['official', 'extra', 'unknown']);
+  assert.deepEqual(toAdapterModels(catalog, { allow: ['extra'] }).map((m) => m.id), ['extra'],
+    '用户显式勾选 official=false 的模型时必须能显示');
+  assert.deepEqual(toAdapterModels(catalog, { keep: ['extra'] }).map((m) => m.id), ['official', 'extra', 'unknown'],
+    '当前 dsh 默认模型即使官方未上架也要保留在清单里');
+});
+
+test('resolveModel：默认档位取上游 defaultEffort，并兼容已保存的旧档位', async () => {
+  const stub = await startStub({
+    catalog: [
+      {
+        id: 'hy3', name: 'Hy3', context_window: 300000, max_output_tokens: 64000,
+        supports_reasoning: true, reasoning_efforts: ['low', 'high'],
+        default_reasoning_effort: 'high', reasoning_efforts_source: 'upstream',
+      },
+    ],
+  });
+  const make = (getDefaultSelection) => new WorkBuddyAdapter({
+    provider: 'workbuddy',
+    displayName: 'WorkBuddy',
+    client: new BridgeClient({ baseUrl: stub.baseUrl, token: 't', timeoutMs: 5000 }),
+    ensureReady: async () => new BridgeClient({ baseUrl: stub.baseUrl, token: 't', timeoutMs: 5000 }),
+    log: () => {},
+    filter: { allow: [], deny: [] },
+    catalogTtlMs: 0,
+    ...(getDefaultSelection ? { getDefaultSelection } : {}),
+  });
+  try {
+    const fresh = await make().resolveModel('workbuddy', 'hy3');
+    assert.deepEqual(fresh.reasoning.efforts.map((e) => e.id), ['low', 'high'], '新用户只看官方档位');
+    assert.equal(fresh.reasoning.defaultEffort, 'high', '默认档位取上游 defaultEffort，而不是硬编码 medium');
+
+    // 1.9.x 存过 medium 的用户：升级后 dsh 仍会带着这个值来校验
+    const legacy = await make(() => ({ provider: 'workbuddy', model: 'hy3', reasoningEffort: 'medium' }))
+      .resolveModel('workbuddy', 'hy3');
+    assert.deepEqual(legacy.reasoning.efforts.map((e) => e.id), ['low', 'medium', 'high'],
+      '已保存的旧档位必须临时保留，避免 UNSUPPORTED_REASONING_EFFORT');
+    assert.equal(legacy.reasoning.defaultEffort, 'high');
   } finally { await stub.close(); }
 });
 

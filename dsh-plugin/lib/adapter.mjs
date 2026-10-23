@@ -34,6 +34,9 @@ export const EFFORT_NAMES = {
   max: 'Max',
 };
 
+const EFFORT_ORDER = Object.keys(EFFORT_NAMES);
+const KNOWN_EFFORTS = new Set(EFFORT_ORDER);
+
 /**
  * 老桥（没有 `reasoning_efforts` 字段）时的兜底档位。
  *
@@ -568,18 +571,28 @@ export class WorkBuddyAdapter {
     this.ensureReady = options.ensureReady || (async () => this.client);
     this.resolveImage = options.resolveImage || (async () => null);
     this.log = options.log || (() => {});
+    /**
+     * dsh 保存的「默认模型选择」读取器（`agentDefaultModel.currentSelection()`）。
+     * 只用于两件事：把**已保存的旧档位**临时加回可选列表（避免升级后
+     * `UNSUPPORTED_REASONING_EFFORT` 直接拒绝），以及在目录里保留当前模型。
+     */
+    this.getDefaultSelection = typeof options.getDefaultSelection === 'function'
+      ? options.getDefaultSelection
+      : () => null;
     /** 对话 TRANSPORT 失败时回调（宿主端用来作废「桥活着」的短 TTL 缓存）。 */
     this.onTransportFailure = options.onTransportFailure || (() => {});
     this.filter = {
       allow: Array.isArray(options.filter?.allow) ? options.filter.allow.map(String) : [],
       deny: Array.isArray(options.filter?.deny) ? options.filter.deny.map(String) : [],
       hideAll: options.filter?.hideAll === true,
+      includeUnofficial: options.filter?.includeUnofficial === true,
     };
     /** 构造时的过滤器：面板点「恢复全部」时回到这份配置意图（含 deny）。 */
     this.configFilter = {
       allow: [...this.filter.allow],
       deny: [...this.filter.deny],
       hideAll: this.filter.hideAll,
+      includeUnofficial: this.filter.includeUnofficial,
     };
     this.defaults = options.defaults || {};
     /**
@@ -848,6 +861,9 @@ export class WorkBuddyAdapter {
       allow: Array.isArray(filter?.allow) ? filter.allow.map(String) : this.filter.allow,
       deny: Array.isArray(filter?.deny) ? filter.deny.map(String) : this.filter.deny,
       hideAll: filter?.hideAll === true,
+      includeUnofficial: typeof filter?.includeUnofficial === 'boolean'
+        ? filter.includeUnofficial
+        : this.filter.includeUnofficial === true,
     };
   }
 
@@ -880,7 +896,13 @@ export class WorkBuddyAdapter {
       this.catalogError = String(error?.message || error);
       throw error;
     }
-    return toAdapterModels(catalog, this.filter).map((m) => ({
+    // 当前 dsh 默认模型即使属于"官方目录外"，也要留在清单里 —— 否则用户
+    // 打开选择器找不到自己正在用的模型，只能去改配置文件。
+    const saved = this.#savedSelection();
+    const keep = saved && saved.provider === provider && typeof saved.model === 'string'
+      ? [saved.model]
+      : [];
+    return toAdapterModels(catalog, { ...this.filter, keep }).map((m) => ({
       provider,
       id: m.id,
       name: m.name,
@@ -889,6 +911,15 @@ export class WorkBuddyAdapter {
       ...(m.description ? { description: m.description } : {}),
       ...(m.inputModalities ? { inputModalities: m.inputModalities } : {}),
     }));
+  }
+
+  #savedSelection() {
+    try {
+      const selection = this.getDefaultSelection?.();
+      return selection && typeof selection === 'object' ? selection : null;
+    } catch {
+      return null;
+    }
   }
 
   /**
@@ -925,11 +956,33 @@ export class WorkBuddyAdapter {
     const hit = catalog.find((m) => m && m.id === model);
     if (!hit) return { provider, id: model, name: model };
     const [mapped] = toAdapterModels([hit]);
-    const levels = Array.isArray(mapped?.reasoningEfforts)
-      ? mapped.reasoningEfforts
-      : (mapped?.reasoning ? FALLBACK_EFFORTS : []);
-    // defaultEffort 必须在列表里（dsh 会校验）：优先 medium，退 high，再退化到最强档
-    const defaultEffort = ['medium', 'high'].find((e) => levels.includes(e)) || levels[levels.length - 1];
+    let levels = Array.isArray(mapped?.reasoningEfforts)
+      ? [...mapped.reasoningEfforts]
+      : (mapped?.reasoning ? [...FALLBACK_EFFORTS] : []);
+    /*
+     * 已保存的旧档位兼容。
+     *
+     * 1.9.x 曾按实测表给 6 档（如 medium），而官方目录只给 low/high/max。
+     * 用户升级后，dsh 的 `agent-default-model` 里可能还存着 medium；直接按
+     * 官方表声明会让 dsh 在请求前抛 UNSUPPORTED_REASONING_EFFORT。这里把
+     * **仅当前已保存的那个值**补回列表：能用、不改变新用户看到的官方档位，
+     * 用户重新选一次后它就自然消失。
+     */
+    const saved = this.#savedSelection();
+    const savedEffort = saved && saved.provider === provider && saved.model === model
+      && typeof saved.reasoningEffort === 'string'
+      ? saved.reasoningEffort
+      : '';
+    if (mapped?.reasoning && savedEffort && KNOWN_EFFORTS.has(savedEffort) && !levels.includes(savedEffort)) {
+      levels = [...levels, savedEffort].sort((a, b) => EFFORT_ORDER.indexOf(a) - EFFORT_ORDER.indexOf(b));
+    }
+    // defaultEffort 必须在列表里（dsh 会校验）：优先上游默认，再退 medium/high，再退化到最强档
+    const officialDefault = typeof mapped?.defaultReasoningEffort === 'string'
+      ? mapped.defaultReasoningEffort
+      : '';
+    const defaultEffort = (officialDefault && levels.includes(officialDefault))
+      ? officialDefault
+      : (['medium', 'high'].find((e) => levels.includes(e)) || levels[levels.length - 1]);
     return {
       provider,
       id: model,
