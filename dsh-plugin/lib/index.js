@@ -102,6 +102,8 @@ function parseModelPrefs(raw) {
     // 是否把"官方目录外"的模型也放进 dsh 选择器（默认 false）
     includeUnofficial: j.includeUnofficial === true,
     paramsByModel,
+    /** 写入时刻：两处文件都存在时（插件目录 + DSH_HOME 回退）取更新的那份。 */
+    at: Number(j.at) || 0,
   };
 }
 
@@ -114,14 +116,20 @@ function parseModelPrefs(raw) {
  * 于是"全不选 → 保存"后 dsh 里反而全部还在。
  */
 function readModelPrefs() {
+  let best = null;
   for (const file of modelPrefsPaths()) {
     if (!existsSync(file)) continue;
     try {
       const parsed = parseModelPrefs(readFileSync(file, 'utf8'));
-      if (parsed) return parsed;
+      if (!parsed) continue;
+      /*
+       * 插件目录与 DSH_HOME 回退可能都有一份（例如插件目录先可写、后来
+       * 变只读）。按写入时刻取**更新**的那份，不能无条件相信主路径上的旧文件。
+       */
+      if (!best || (parsed.at || 0) > (best.at || 0)) best = parsed;
     } catch { /* 损坏：尝试下一个位置 */ }
   }
-  return null;
+  return best;
 }
 
 /** 写偏好。`null` = 清除偏好（恢复到配置的 allow/deny）。两处都写不了会抛错。 */
@@ -745,6 +753,9 @@ export function apply(ctx, rawConfig = {}) {
     checkinCache: { at: 0, value: null, error: '', account: null },
     checkinInflight: null,
     bridgeAccount: null,
+    /** 桥进程身份：PID 或构建变了 = 模型目录/档位可能已经换代，必须让 dsh 重拉。 */
+    bridgePid: 0,
+    bridgeBuild: '',
     /** 桥最近一次确认「活着」的时刻；ensureReady 的短 TTL 缓存用。 */
     bridgeAliveAt: 0,
     /** 最近一次网页搜索自检，只存元数据（不存 query/令牌）。 */
@@ -1038,6 +1049,29 @@ export function apply(ctx, rawConfig = {}) {
    * checkinCache（30min）没人清 —— 面板就会把 A 账号的积分挂在 B 账号头上。
    * 现在所有跨账号的缓存值都打上账号标记，快照时发现身份不一致立即作废并强制重取。
    */
+  /**
+   * 桥进程换代（重启/升级/崩溃后重拉）时作废适配器目录并通知 dsh。
+   *
+   * 账号没变、只是桥重启的情况下，`reconcileAccount` 不会触发；但目录/思考
+   * 档位是桥代码算的 —— 不重拉的话，dsh 选择器最多要等一个目录 TTL 才更新
+   * （issue #5 的「升级后仍显示六档位」在桥被控制台重启时同样会复现）。
+   */
+  function reconcileBridgeProcess(probe) {
+    if (probe.state !== 'running') return false;
+    const pid = Number(probe.health?.pid) || 0;
+    const build = String(probe.health?.build || '');
+    const changed = (state.bridgePid && pid && pid !== state.bridgePid)
+      || (state.bridgeBuild && build && build !== state.bridgeBuild);
+    if (pid) state.bridgePid = pid;
+    if (build) state.bridgeBuild = build;
+    if (changed) {
+      log(`桥进程已换代（pid ${state.bridgePid}，build ${state.bridgeBuild || '?'}）：重拉模型目录`);
+      adapter.invalidate();
+      notifyAdaptersUpdated();
+    }
+    return changed;
+  }
+
   function reconcileAccount(probe) {
     const account = bridgeAccountOf(probe);
     // 桥还没就绪 / 旧桥没有 userId：保留现状（不能用 null 去作废有效缓存）
@@ -1220,7 +1254,9 @@ export function apply(ctx, rawConfig = {}) {
     syncBridgeAccountConfig();
     const probe = await supervisor.probe(signal);
     const consoleProbe = await consoleSupervisor.probe({ signal, cached: true });
-    // 先对账号：身份变了就作废全部跨账号缓存（含模型目录）
+    // 桥换代（重启/升级）→ 目录与档位属于新代码，先作废旧缓存
+    reconcileBridgeProcess(probe);
+    // 再对账号：身份变了就作废全部跨账号缓存（含模型目录）
     const reconciliation = reconcileAccount(probe);
     let quotaValue = state.quotaCache.value;
     let quotaError = state.quotaCache.error;

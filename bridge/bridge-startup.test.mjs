@@ -15,7 +15,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -202,6 +202,51 @@ test('登录文件目录：LOCALAPPDATA / HOME 都缺时也必须给出绝对路
       child.kill();
       setTimeout(resolve, 3000);
     });
+  }
+});
+
+test('登录文件选择：两个客户端的活动文件按最近写入选，登出快照不参与', async () => {
+  /*
+   * 与 config.mjs 同一条规则（桥不 import 它，只能靠用例守住）：
+   * 只用国际版、或当前使用国际版时，不能被国内版的旧活动文件抢走；
+   * 带时间戳的登出快照即使 mtime 最新也不能选。
+   */
+  const dir = mkdtempSync(join(tmpdir(), 'wb-bridge-authpick-'));
+  const domestic = join(dir, 'workbuddy-desktop.info');
+  const intl = join(dir, 'workbuddy-desktop-ai.info');
+  const snapshot = join(dir, 'workbuddy-desktop.2026-01-01T00-00-00-000Z.1.abc.info');
+  const now = Date.now();
+  for (const file of [domestic, intl, snapshot]) writeFileSync(file, '{}');
+  utimesSync(domestic, new Date(now - 60_000), new Date(now - 60_000));
+  utimesSync(intl, new Date(now - 30_000), new Date(now - 30_000));
+  utimesSync(snapshot, new Date(now), new Date(now));
+  const env = {
+    ...process.env,
+    WORKBUDDY_PORT: String(20000 + Math.floor(Math.random() * 20000)),
+    WORKBUDDY_LOCAL_TOKEN: TOKEN,
+    WORKBUDDY_AUTH_DIR: dir,
+    WORKBUDDY_AUTO_CHECKIN: '0',
+  };
+  delete env.WORKBUDDY_AUTH_FILE;
+  const child = spawn(process.execPath, [BRIDGE], { cwd: HERE, env, stdio: ['ignore', 'pipe', 'pipe'] });
+  let output = '';
+  child.stdout.on('data', (d) => { output += d; });
+  child.stderr.on('data', (d) => { output += d; });
+  try {
+    const deadline = Date.now() + 10_000;
+    while (Date.now() < deadline && !/auth file/iu.test(output) && child.exitCode === null) {
+      await new Promise((r) => setTimeout(r, 150));
+    }
+    const m = output.match(/auth file\s*:\s*(.+)/iu);
+    assert.ok(m, `桥没打印 auth file 行，输出：\n${output.slice(-500)}`);
+    assert.equal(m[1].trim(), intl, '应选最近写入的国际版活动文件，而不是国内版或快照');
+  } finally {
+    await new Promise((resolve) => {
+      child.once('exit', resolve);
+      child.kill();
+      setTimeout(resolve, 3000);
+    });
+    rmSync(dir, { recursive: true, force: true });
   }
 });
 

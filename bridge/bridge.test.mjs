@@ -1076,6 +1076,55 @@ test('/v1/quota：余额必须带上归属账号，供面板按身份作废缓�
   }
 });
 
+test('目录缓存：桌面换号后必须作废上一个账号的模型目录', { timeout: 90_000 }, async () => {
+  /*
+   * 目录属于账号。若只在“切换路径”时作废，同路径原地换号（或来源自动回退
+   * 到另一条凭据）会让 /v1/models 继续返回上一个账号的模型/倍率，而 /health
+   * 已经是新账号 —— 面板与 dsh 选择器各说一套。
+   */
+  const stubModels = ['model-a'];
+  const stub = await startStubUpstream(stubModels);
+  const aux = mkdtempSync(join(tmpdir(), 'wb-catalog-account-'));
+  const followPath = join(aux, 'workbuddy-desktop.info');
+  writeFileSync(followPath, JSON.stringify(authFileFor('catalog-a')));
+  const bridge = await startBridge(
+    {
+      CODEBUDDY_ENDPOINT: stub.base,
+      WORKBUDDY_AUTH_FILE_FOLLOW: followPath,
+      WORKBUDDY_AUTH_FOLLOW_UID: 'catalog-a',
+      WORKBUDDY_SKIP_MODEL_PREFLIGHT: '1',
+    },
+    { auth: authFileFor('catalog-a') },
+  );
+  const health = async () => (await fetch(`${bridge.baseUrl}/health`, { headers: auth })).json();
+  const waitUid = async (uid) => {
+    const deadline = Date.now() + 10_000;
+    while (Date.now() < deadline) {
+      const h = await health().catch(() => null);
+      if (h?.auth?.userId === uid) return h;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    throw new Error(`10 秒内没有切换到 ${uid}`);
+  };
+  try {
+    const first = await (await fetch(`${bridge.baseUrl}/v1/models?all=1`, { headers: auth })).json();
+    assert.ok(first.data.some((m) => m.id === 'model-a'), '初始目录必须来自账号 A');
+
+    stubModels.splice(0, stubModels.length, 'model-b');
+    writeFileSync(followPath, JSON.stringify(authFileFor('catalog-b')));
+    await waitUid('catalog-b');
+
+    const second = await (await fetch(`${bridge.baseUrl}/v1/models?all=1`, { headers: auth })).json();
+    const ids = second.data.map((m) => m.id);
+    assert.ok(ids.includes('model-b'), `换号后必须重取目录，实际：${ids.join(',')}`);
+    assert.ok(!ids.includes('model-a'), '不能把上一个账号的模型继续留在目录里');
+  } finally {
+    await bridge.stop();
+    stub.close();
+    rmSync(aux, { recursive: true, force: true });
+  }
+});
+
 test('目录：上游 401 时必须刷新令牌后重试（不能把目录缩成 2-3 个精选模型）', { timeout: 90_000 }, async () => {
   /*
    * 凭据过期时目录端点回 401。旧实现把 401 当成「这个区域没有这个端点」跳过，
@@ -3690,6 +3739,7 @@ test('插件登录：设备码 → 加密落盘 → auto 回退 → 刷新轮换
   let bridge5 = null;
   let bridge6 = null;
   let bridgeFollow = null;
+  let bridgeLegacyFollow = null;
   try {
     // ① 设备码开始 → 第一次 poll 返回 pending → 第二次拿到令牌
     const device = await (await fetch(`${bridge1.baseUrl}/v1/auth/device`, {
@@ -3776,6 +3826,11 @@ test('插件登录：设备码 → 加密落盘 → auto 回退 → 刷新轮换
     if (storeMode === 'dpapi') {
       const followPath = join(credRoot, 'desktop-follow.info');
       writeFileSync(followPath, JSON.stringify(authFileFor('uid-1')));
+      // 模拟「用户在桌面文件最后一次写入之后才选择插件来源」：此刻不该抢桌面
+      writeFileSync(join(credDir, 'source.json'), JSON.stringify({
+        source: 'plugin',
+        updatedAt: new Date(Date.now() + 60_000).toISOString(),
+      }));
       bridgeFollow = await startBridge({
         ...sharedEnv,
         WORKBUDDY_AUTH_FILE_FOLLOW: followPath,
@@ -3797,6 +3852,35 @@ test('插件登录：设备码 → 加密落盘 → auto 回退 → 刷新轮换
       assert.equal(after?.auth?.userId, 'uid-new', '桌面换号后桥必须改读桌面，而不是继续用旧插件账号');
       assert.equal(after?.auth?.source, 'desktop', '桌面换号是更新的用户意图：来源应从 plugin 跟随到 desktop');
       assert.equal(after?.authFollow, true);
+    }
+
+    /*
+     * ⑥c 旧 source.json（没有 desktopUid 基线）但桌面文件在选择之后被重写：
+     * 升级后第一次就要跟上用户刚做的换号，不能要求再换一次。
+     */
+    if (storeMode === 'dpapi') {
+      const legacyFollow = join(credRoot, 'legacy-follow.info');
+      writeFileSync(legacyFollow, JSON.stringify(authFileFor('legacy-desktop-new')));
+      writeFileSync(join(credDir, 'source.json'), JSON.stringify({
+        source: 'plugin',
+        updatedAt: new Date(Date.now() - 3600_000).toISOString(),
+      }));
+      bridgeLegacyFollow = await startBridge({
+        ...sharedEnv,
+        WORKBUDDY_AUTH_FILE_FOLLOW: legacyFollow,
+      }, { auth: authFileFor('legacy-desktop-old') });
+      let legacy = null;
+      const deadlineLegacy = Date.now() + 10_000;
+      while (Date.now() < deadlineLegacy) {
+        legacy = await (await fetch(`${bridgeLegacyFollow.baseUrl}/health`, { headers: auth })).json().catch(() => null);
+        if (legacy?.auth?.userId === 'legacy-desktop-new' && legacy?.auth?.source === 'desktop') break;
+        await new Promise((r) => setTimeout(r, 150));
+      }
+      assert.equal(legacy?.auth?.userId, 'legacy-desktop-new',
+        '旧 source.json 没有基线时，桌面文件更新于选择时刻 → 应跟随桌面；输出：\n'
+        + bridgeLegacyFollow.out()
+        + '\nsource.json=' + readFileSync(join(credDir, 'source.json'), 'utf8'));
+      assert.equal(legacy?.auth?.source, 'desktop');
     }
 
     // ⑦ auto：桌面端可用时仍然优先桌面端（老行为不变）
@@ -3866,11 +3950,11 @@ test('插件登录：设备码 → 加密落盘 → auto 回退 → 刷新轮换
       assert.equal(chatHeaders.at(-1)['x-ide-type'], 'WorkBuddy');
     }
   } finally {
-    for (const b of [bridge1, bridge2, bridge3, bridge4, bridge5, bridge6, bridgeFollow]) {
+    for (const b of [bridge1, bridge2, bridge3, bridge4, bridge5, bridge6, bridgeFollow, bridgeLegacyFollow]) {
       if (b) { try { await b.stop(); } catch { /* 忽略 */ } }
     }
     try { await stub.close(); } catch { /* 忽略 */ }
-    for (const b of [bridge1, bridge2, bridge3, bridge4, bridge5, bridge6, bridgeFollow]) {
+    for (const b of [bridge1, bridge2, bridge3, bridge4, bridge5, bridge6, bridgeFollow, bridgeLegacyFollow]) {
       if (b) { try { rmSync(b.dir, { recursive: true, force: true }); } catch { /* 忽略 */ } }
     }
     rmSync(credRoot, { recursive: true, force: true });

@@ -6,7 +6,7 @@
  * spawn 时注入同样的环境变量，从而保持桥的单文件自包含特性；两边使用的
  * 变量名以本文件为准。
  */
-import { existsSync, readFileSync, readdirSync, writeFileSync, chmodSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, statSync, writeFileSync, chmodSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { homedir } from 'node:os';
@@ -147,16 +147,46 @@ export function authDir() {
 }
 
 /**
+ * 当前客户端的**活动**登录文件名（登出留下的快照是 `workbuddy-desktop.<时间>.info`，
+ * 不能当成活动文件）。
+ */
+const ACTIVE_AUTH_NAMES = ['workbuddy-desktop.info', 'workbuddy-desktop-ai.info'];
+
+/**
+ * 从目录里挑活动登录文件：两个客户端可能同时装着，**用最近被写入的那个**。
+ *
+ * 原先写死优先 `workbuddy-desktop.info`（国内版）。只用国际版、或两个客户端
+ * 都装但当前用国际版时，桥会一直读国内版的旧账号 —— 客户端里换号也看不到
+ * 变化。反之亦然。活动文件只有两个固定名字，按 mtime 取最新即可；快照
+ * （带时间戳）永远不参与。
+ */
+function pickActiveAuthFile(dir) {
+  let best = '';
+  let bestAt = -1;
+  for (const name of ACTIVE_AUTH_NAMES) {
+    const full = join(dir, name);
+    try {
+      const st = statSync(full);
+      // 同一时刻（粗粒度文件系统）时保留列表顺序，结果仍确定
+      if (st.mtimeMs > bestAt) { best = full; bestAt = st.mtimeMs; }
+    } catch { /* 这个客户端没装 */ }
+  }
+  return best;
+}
+
+/**
  * 实际使用的登录文件。
  *
  * 该目录下可能同时存在多个账号快照（例如国际版的 `workbuddy-desktop-ai.info`），
- * 按目录顺序取第一个会选错账号，所以必须显式指定。
+ * 按目录顺序取第一个会选错账号，所以必须显式指定。活动文件优先；都读不到时
+ * 才退回排序后的第一个 `.info`（与桥的 resolveAuthPath() 同一判据）。
  */
 export function resolveAuthFile() {
   if (env.WORKBUDDY_AUTH_FILE) return env.WORKBUDDY_AUTH_FILE;
   const dir = authDir();
+  const active = pickActiveAuthFile(dir);
+  if (active) return active;
   const preferred = join(dir, 'workbuddy-desktop.info');
-  if (existsSync(preferred)) return preferred;
   try {
     // 兜底必须**排序后取第一个**，与桥的 resolveAuthPath() 同一判据：
     // readdir 的顺序不受任何保证（随平台与文件系统而异），不排序就可能出现

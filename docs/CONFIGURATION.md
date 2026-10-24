@@ -192,8 +192,12 @@ config.dsh.settingsPath;                  // → X:\my-dsh\settings.yaml
 > 机器上同时装着多个客户端（如国内版 + 国际版）时，以**登录文件里信封的 keyId**
 > 为准挑选能解开它的那个 build —— 而不是盲取第一个找到的 exe。
 
-**登录文件定位规则**：先找 `<auth 目录>/workbuddy-desktop.info`；不存在则取目录下第一个
-`.info`。auth 目录按平台为：
+**登录文件定位规则**：先找两个客户端自己的**活动**文件
+（`workbuddy-desktop.info` = 国内版、`workbuddy-desktop-ai.info` = 国际版），
+存在多个时在**启动时**取最近写入的那个（当前在用的客户端）；两个都没有时才取
+目录下第一个 `.info`（登出留下的 `workbuddy-desktop.<时间>.info` 快照永远不优先）。
+运行中不跟随另一个客户端的文件来回切（双方后台刷新会让 mtime 互相追超）；
+同一文件内换号仍会实时跟随。auth 目录按平台为：
 
 | 平台 | 路径 |
 |---|---|
@@ -201,9 +205,9 @@ config.dsh.settingsPath;                  // → X:\my-dsh\settings.yaml
 | macOS | `~/Library/Application Support/CodeBuddyExtension/Data/Public/auth` |
 | Linux | `~/.local/share/CodeBuddyExtension/Data/Public/auth` |
 
-> ⚠️ 该目录下可能同时存在多个账号快照（例如另一账号或国际版的
-> `workbuddy-desktop-ai.info`）。仅按目录顺序取第一个会**选错账号**，
-> 因此本项目的默认值是固定的 `workbuddy-desktop.info`。
+> ⚠️ 该目录下可能同时存在多个账号快照。仅按目录顺序取第一个会**选错账号**，
+> 所以活动文件按 mtime 选、快照只在没有活动文件时兜底。
+> 面板里显式切换账号仍以 `.state.json` 的钉住快照优先，并在客户端换号时自动跟随。
 
 ### DeepSeek Harness
 

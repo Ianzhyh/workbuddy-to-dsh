@@ -380,6 +380,13 @@ export class ConsoleSupervisor {
       // 关键：不要让 dsh 每次启动都弹一个浏览器窗口
       DASHBOARD_OPEN_BROWSER: '0',
       ...this.env,
+      /*
+       * 监听地址必须与 supervisor 探测的地址一致。插件配置里的 consolePort
+       * 不一定写进了 `.env`，不显式注入就会出现「插件探 8899、控制台起在
+       * 8792」的假故障。
+       */
+      DASHBOARD_HOST: this.host,
+      DASHBOARD_PORT: String(this.port),
     };
 
     try {

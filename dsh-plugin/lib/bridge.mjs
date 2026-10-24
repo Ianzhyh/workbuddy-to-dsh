@@ -496,9 +496,28 @@ export class BridgeSupervisor {
     if (status.state === 'degraded' || status.state === 'unauthenticated') {
       // 桥在跑，但登录凭据读不出来 / 还没登录：**复用**它并把原因带上去，
       // 绝不因为"健康检查不绿"就再拉一个（会撞端口，而且用户重新登录后同一个进程就能恢复）。
-      // `restart` 也不能越过这里：503 body 没有 pid，stop() 停不掉它；
-      // 往下走 start() 只会再起一个实例、撞端口 —— 对用户是个假故障。
-      return { ok: false, started: false, reused: true, state: status.state, error: status.error, health: status.health };
+      /*
+       * 但升级后必须例外：端口上的进程如果还是旧脚本，用户重新登录后仍是旧
+       * 逻辑。先看构建指纹；旧进程有 pid 才停，停不掉就如实报错。
+       */
+      const diff = this.buildDiff(status.health);
+      if (diff.stale) {
+        this.onLog(`bridge build changed while degraded (${diff.actual || 'unknown'} -> ${diff.expected}); restarting bridge`);
+        const stopped = await this.stop(signal);
+        if (!stopped.ok) {
+          return {
+            ok: false,
+            started: false,
+            reused: true,
+            state: status.state,
+            staleBuild: true,
+            error: `${status.error || 'bridge is not ready'}；旧构建进程无法重启：${stopped.error}`,
+          };
+        }
+        // 旧进程已停：继续走下面的 start()，用当前脚本重新拉起
+      } else {
+        return { ok: false, started: false, reused: true, state: status.state, error: status.error, health: status.health };
+      }
     }
     if (status.state === 'running' && (restart || restartReason)) {
       const stopped = await this.stop(signal);

@@ -1024,6 +1024,47 @@ test('ConsoleSupervisor：靠首页结构标记识别控制台，认不出就报
   assert.equal((await sup.probe({ cached: false })).state, 'stopped');
 });
 
+test('ConsoleSupervisor：页面构建指纹不一致或旧页面没有 meta → staleBuild', async () => {
+  /*
+   * 升级后 8792 上可能还是旧控制台。页面里嵌 `wb-console-build`，插件探活
+   * 时对照当前磁盘代码；缺失（旧版页面）或不同都必须标记，才能自动重启。
+   */
+  const { ConsoleSupervisor, consoleBuildHash, CONSOLE_MARKER } = await import('../lib/console.mjs');
+  const { createServer } = await import('node:http');
+  const dir = mkdtempSync(join(tmpdir(), 'wb-console-build-'));
+  mkdirSync(join(dir, 'dashboard', 'public'), { recursive: true });
+  writeFileSync(join(dir, 'dashboard', 'server.mjs'), '// console under test\n');
+  writeFileSync(join(dir, 'dashboard', 'public', 'index.html'), '<meta name="wb-console-build" content="__WB_BUILD__">\n');
+  writeFileSync(join(dir, 'dashboard', 'public', 'style.css'), '/* style */\n');
+  const expected = consoleBuildHash(dir);
+  assert.ok(expected, '临时控制台文件必须能算出指纹');
+
+  const state = { build: expected };
+  const srv = createServer((req, res) => {
+    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+    res.end('<!doctype html><head>'
+      + (state.build === null ? '' : `<meta name="wb-console-build" content="${state.build}">`)
+      + `</head><body><nav ${CONSOLE_MARKER}></nav></body>`);
+  });
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+  const sup = new ConsoleSupervisor({ projectRoot: dir, port: srv.address().port, cacheTtlMs: 0 });
+  try {
+    const fresh = await sup.probe({ cached: false });
+    assert.equal(fresh.state, 'running');
+    assert.equal(fresh.staleBuild, false, '指纹一致时不应触发重启');
+    assert.equal(fresh.build, expected);
+
+    state.build = 'old-build';
+    assert.equal((await sup.probe({ cached: false })).staleBuild, true, '旧构建必须标记');
+
+    state.build = null;
+    assert.equal((await sup.probe({ cached: false })).staleBuild, true, '旧版页面没有 meta 也必须标记');
+  } finally {
+    await new Promise((r) => srv.close(r));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('probe() 有界读取：标记远在首个 chunk 之后也必须认出来（先红后绿，§7 P0-2）', async () => {
   const { ConsoleSupervisor, CONSOLE_MARKER } = await import('../lib/console.mjs');
   const { createServer } = await import('node:http');

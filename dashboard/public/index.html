@@ -925,6 +925,7 @@ const I18N_EN = {
 
   // ---- 卡片指标（也用于 CARD_ICONS 的 key） ----
   '账号': 'Account',
+  '未使用': 'Not in use',
   '改用桌面端': 'Use desktop session',
   '正在运行的桥还是旧构建（升级后旧进程仍在服务）。重启桥后新逻辑才会生效。':
     'The running bridge is still the old build (the old process survived the upgrade). Restart it to load the new logic.',
@@ -2166,6 +2167,8 @@ const I18N_RULES_EN = [
    */
   [/^令牌将于 (.+) 天后到期；桌面端在线时会自行续期，若届时返回 401 请在桌面端重新登录。$/,
     'The token expires in $1 days; the desktop app renews it while online — if you get a 401 by then, sign in again in the desktop app.'],
+  [/^插件登录令牌将于 (.+) 天后到期；到时返回 401 请在「账号」页重新走一次浏览器授权。$/,
+    'The plugin sign-in token expires in $1 days; if you get a 401 by then, sign in through the browser again on the Account tab.'],
   [/^「(.+)」已不在最近明细里，已恢复「全部模型」$/, '“$1” is no longer in the recent details; restored to All models'],
   [/^疑似卡死（超过 (.+)）—— 桥不会主动打断，请检查客户端与上游$/,
     (m, dur) => 'Possibly stuck (over ' + translateText(dur) + ') — the bridge never interrupts; check the client and the upstream'],
@@ -3038,15 +3041,23 @@ function renderAlerts() {
     });
   }
 
-  // 2. 令牌临期（≤3 天）
+  // 2. 令牌临期（≤3 天）—— 以桥实际使用的凭据为准，而不是桌面登录文件
   const a = lastOverview && lastOverview.credentials && lastOverview.credentials.active;
-  const remainMs = a && Number(a.remainingMs);
-  if (a && Number.isFinite(remainMs) && remainMs <= 3 * 86400000 && !tokenMuted) {
+  const liveAuth = b && b.auth;
+  const liveSource = (b && (b.credentialSource || (liveAuth && liveAuth.source))) || '';
+  const expiryMs = liveAuth && liveAuth.expiresAt
+    ? Date.parse(liveAuth.expiresAt)
+    : (a && a.expiresAt);
+  const remainMs = Number.isFinite(expiryMs) ? expiryMs - Date.now() : (a && Number(a.remainingMs));
+  if (Number.isFinite(remainMs) && remainMs <= 3 * 86400000 && !tokenMuted) {
     const days = Math.max(0, Math.ceil(remainMs / 86400000));
+    const pluginSource = liveSource === 'plugin';
     items.push({
       sev: 1,
       cls: 'warn',
-      text: '令牌将于 ' + days + ' 天后到期；桌面端在线时会自行续期，若届时返回 401 请在桌面端重新登录。',
+      text: pluginSource
+        ? '插件登录令牌将于 ' + days + ' 天后到期；到时返回 401 请在「账号」页重新走一次浏览器授权。'
+        : '令牌将于 ' + days + ' 天后到期；桌面端在线时会自行续期，若届时返回 401 请在桌面端重新登录。',
       dismiss: { label: '知道了', run: () => { tokenMuted = true; lsSet('wb.muted.token', '1'); renderAlerts(); } },
       action: { label: '重新诊断', run: () => $('diagBtn').click() },
     });
@@ -4931,7 +4942,7 @@ async function loadAccounts() {
     return '<div class="acct" data-plugin-acct="' + escapeAttr(c.uid) + '">' +
       '<div class="acct-head">' +
         '<div class="acct-name">' + escapeAttr(c.nickname || String(c.uid).slice(0, 8) + '…')
-          + (isEffective ? ' <span class="tag ok">使用中</span>' : ' <span class="tag">可用</span>')
+          + (isEffective ? ' <span class="tag ok">使用中</span>' : ' <span class="tag">未使用</span>')
           + ' <span class="tag">插件</span></div>' +
         '<div class="acct-act">' +
           (isEffective ? '' : '<button class="mini" data-use-plugin="' + escapeAttr(c.uid) + '">使用</button>') +

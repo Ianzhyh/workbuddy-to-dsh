@@ -895,11 +895,40 @@ const AUTH_DIRS = [
  * serve the wrong account. config.mjs resolves the same way, so both entry
  * points agree.
  */
-function defaultAuthPath() {
+/**
+ * 当前客户端的**活动**登录文件名。
+ *
+ * 客户端登出/换号会留下 `workbuddy-desktop.<时间>.info` 快照；它们不是活动
+ * 文件，按文件名排序还会排到活动文件前面。活动文件只有这两个固定名字。
+ */
+const ACTIVE_AUTH_NAMES = ['workbuddy-desktop.info', 'workbuddy-desktop-ai.info'];
+
+/**
+ * 挑活动登录文件：两个客户端同时装着时，用**最近被写入**的那个。
+ *
+ * 旧逻辑写死优先 `workbuddy-desktop.info`（国内版）。只用国际版、或两个都装
+ * 但当前用国际版时，桥一直读国内版旧账号 —— 客户端换号当然看不到变化。
+ * 与 config.mjs 的 resolveAuthFile() 必须同一判据。
+ */
+function pickActiveAuthFile() {
+  let best = '';
+  let bestAt = -1;
   for (const dir of AUTH_DIRS) {
-    const preferred = join(dir, 'workbuddy-desktop.info');
-    if (existsSync(preferred)) return preferred;
+    for (const name of ACTIVE_AUTH_NAMES) {
+      const full = join(dir, name);
+      try {
+        const st = statSync(full);
+        if (st.mtimeMs > bestAt) { best = full; bestAt = st.mtimeMs; }
+      } catch { /* 这个客户端没装 */ }
+    }
   }
+  return best;
+}
+
+function defaultAuthPath() {
+  const active = pickActiveAuthFile();
+  if (active) return active;
+  const fallback = join(AUTH_DIRS[0] || HOME_FOR_AUTH || process.cwd(), 'workbuddy-desktop.info');
   for (const dir of AUTH_DIRS) {
     try {
       const hit = readdirSync(dir).filter((f) => f.endsWith('.info')).sort()[0];
@@ -912,7 +941,7 @@ function defaultAuthPath() {
    * 那正是「绝对路径悄悄变成相对路径」这个 bug 的形态。
    * 退到 `HOME_FOR_AUTH`，再不行退到 cwd，两者都是绝对的。
    */
-  return join(AUTH_DIRS[0] || HOME_FOR_AUTH || process.cwd(), 'workbuddy-desktop.info');
+  return fallback;
 }
 
 function resolveAuthPath() {
@@ -938,12 +967,19 @@ const AUTH_FILE_FOLLOW = (() => {
    *
    * 插件拉起桥时只知道 `.state.json` 里的钉住快照，不应该自己再复制一份
    * 「默认登录文件在哪」的探测逻辑（两套规则迟早漂移）。让桥在这里解析，
-   * 与控制台/配置共用同一套 AUTH_DIRS 顺序。
+   * 与控制台/配置共用同一套 AUTH_DIRS 顺序。只在启动时解析一次。
    */
   if (raw.toLowerCase() === 'auto') return defaultAuthPath();
   return isAbsolute(raw) ? raw : '';
 })();
 const AUTH_FOLLOW_UID = String(process.env.WORKBUDDY_AUTH_FOLLOW_UID || '').trim();
+/**
+ * 显式指定了登录文件 = 用户/面板的钉住选择；否则启动时取“当前活动客户端”的文件。
+ *
+ * 只在**启动时**选一次，运行中不随另一个客户端的令牌刷新来回切 —— 两个
+ * 客户端同时装着时，后台刷新会让 mtime 互相追超，动态跟着切会把钱包切来
+ * 切去。客户端内换号（同一个文件被重写）由 readStoredAuth 的文件指纹处理。
+ */
 const AUTH_PINNED_PATH = resolveAuthPath();
 let AUTH_PATH = AUTH_PINNED_PATH;
 const authFollowProbe = { path: '', mtimeMs: -1, size: -1, uid: '', error: '' };
@@ -1509,10 +1545,11 @@ async function fileAccountUid(path) {
  * 解密失败（另一个 build 写的信封 / 文件正在替换）时**不切换**，保持原位。
  */
 async function syncAuthPathFollow() {
-  if (!AUTH_FILE_FOLLOW || AUTH_FILE_FOLLOW === AUTH_PINNED_PATH) return;
+  const followPath = AUTH_FILE_FOLLOW;
+  if (!followPath || followPath === AUTH_PINNED_PATH) return;
   let stat;
   try {
-    stat = statSync(AUTH_FILE_FOLLOW);
+    stat = statSync(followPath);
   } catch {
     authFollowProbe.error = 'missing';
     /*
@@ -1529,17 +1566,17 @@ async function syncAuthPathFollow() {
     }
     return;
   }
-  if (authFollowProbe.path === AUTH_FILE_FOLLOW
+  if (authFollowProbe.path === followPath
     && authFollowProbe.mtimeMs === stat.mtimeMs
     && authFollowProbe.size === stat.size) {
     // 结论已缓存，直接按上次结果执行下方切换
   } else {
     let uid = '';
     let error = '';
-    try { uid = await fileAccountUid(AUTH_FILE_FOLLOW); }
+    try { uid = await fileAccountUid(followPath); }
     catch (e) { error = String(e?.message || e).slice(0, 160); }
     Object.assign(authFollowProbe, {
-      path: AUTH_FILE_FOLLOW, mtimeMs: stat.mtimeMs, size: stat.size, uid, error,
+      path: followPath, mtimeMs: stat.mtimeMs, size: stat.size, uid, error,
     });
     if (error) log('auth follow file is unreadable; keeping the pinned account', error);
   }
@@ -1562,13 +1599,13 @@ async function syncAuthPathFollow() {
     } catch { /* 读不出就跟随桌面 */ }
     shouldFollow = !pinnedUid || followUid !== pinnedUid;
   }
-  if (shouldFollow && AUTH_PATH !== AUTH_FILE_FOLLOW) {
-    AUTH_PATH = AUTH_FILE_FOLLOW;
+  if (shouldFollow && AUTH_PATH !== followPath) {
+    AUTH_PATH = followPath;
     memoryAuth = null;
     authFileCache = null;
     // 目录属于账号：换号后旧目录的模型/倍率/官方标记都不再成立。
     invalidateCatalogCache();
-    log('desktop switched account; following', AUTH_FILE_FOLLOW);
+    log('desktop switched account; following', followPath);
   } else if (!shouldFollow && AUTH_PATH !== AUTH_PINNED_PATH) {
     AUTH_PATH = AUTH_PINNED_PATH;
     memoryAuth = null;
@@ -1618,7 +1655,8 @@ async function probeAuthFileUid(path) {
 
 /** 没有钉住快照时，插件来源也能跟随“客户端自己的默认登录文件”。 */
 function pluginFollowPath() {
-  if (AUTH_FILE_FOLLOW) return AUTH_FILE_FOLLOW;
+  const follow = AUTH_FILE_FOLLOW;
+  if (follow) return follow;
   const candidate = defaultAuthPath();
   const norm = (p) => String(p || '').replace(/\\/g, '/').toLowerCase();
   // 显式 WORKBUDDY_AUTH_FILE 指向别的快照时，不越过用户的显式选择
@@ -1629,7 +1667,24 @@ async function probeFollowUidForAdopt() {
   return probeAuthFileUid(pluginFollowPath());
 }
 
+let adoptInflight = null;
+/**
+ * 单飞：启动时目录刷新与 /health 会并发调用这里。两次调用如果各跑一遍，
+ * 后一次可能在前一次已经把来源改成 desktop 之后又按“没有基线”写回 plugin
+ * （source.json 实测被这样来回覆盖）。并发调用必须共享同一个结论。
+ */
 async function adoptDesktopAfterPluginSwitch() {
+  if (adoptInflight) return adoptInflight;
+  const task = adoptDesktopAfterPluginSwitchOnce();
+  adoptInflight = task;
+  try {
+    return await task;
+  } finally {
+    if (adoptInflight === task) adoptInflight = null;
+  }
+}
+
+async function adoptDesktopAfterPluginSwitchOnce() {
   if (CREDENTIAL_SOURCE_PINNED) return false;
   const followPath = pluginFollowPath();
   if (!followPath) return false;
@@ -1641,20 +1696,49 @@ async function adoptDesktopAfterPluginSwitch() {
    * 基线 = 「用户选择插件登录时，桌面端是哪个账号」。
    *   - 钉住过快照：`.state.json` 记录了那一刻的桌面 UID；
    *   - 新版本登录/切换来源：source.json 记录了 desktopUid；
-   *   - 老 source.json 没有基线：**只记录当前值，不自动切钱包** ——
-   *     没有证据区分“用户刚换了桌面号”和“桌面刚刷新了令牌”，宁可不猜。
+   *   - 老 source.json 没有基线：用桌面文件与 source.json 的写入时间判断 ——
+   *     桌面文件在「选择插件」之后被重写，说明客户端换号（或最近一次使用
+   *     是桌面端）是更新的意图，跟随桌面；否则保留插件来源并补记基线。
+   *     这样升级后第一次就能跟上用户刚在客户端做的换号，而不是再等一次。
    */
-  let baseline = AUTH_FOLLOW_UID || credentialSourceMeta.desktopUid;
+  let baseline = credentialSourceMeta.desktopUid;
+  /*
+   * 老 source.json 有 updatedAt 但没有 desktopUid：选择时刻比 .state.json 的
+   * 钉住时刻更可靠，走下面的时间比较；连 updatedAt 都没有的远古文件才退回
+   * 钉住时的桌面 UID。
+   */
+  if (!baseline && !credentialSourceMeta.updatedAt) baseline = AUTH_FOLLOW_UID;
   if (!baseline) {
-    try { await setSourcePreference('plugin'); } catch { /* 写不了就仅进程内记住 */ }
+    let desktopIsNewer = !credentialSourceMeta.updatedAt;
+    try {
+      const st = statSync(followPath);
+      desktopIsNewer = !credentialSourceMeta.updatedAt || st.mtimeMs > credentialSourceMeta.updatedAt;
+    } catch { /* 桌面文件读不到：保持插件来源 */ }
+    if (!desktopIsNewer) {
+      // 结论可能已被并发调用改写；只有来源仍是 plugin 时才补记基线
+      if ((await effectiveSource()) === 'plugin') {
+        try { await setSourcePreference('plugin'); } catch { /* 写不了就仅进程内记住 */ }
+      }
+      return false;
+    }
+    log('plugin source had no desktop baseline; desktop login is newer, following desktop');
+  } else if (String(followUid) === String(baseline)) {
     return false;
   }
-  if (String(followUid) === String(baseline)) return false;
-  await setSourcePreference('desktop');
+  /*
+   * 先占住“已跟随这个 UID”：即使 setSourcePreference 内部有 await，
+   * 其他路径看到同一个桌面账号时也不会重复进入跟随分支。
+   */
+  adoptedDesktopFollowUid = String(followUid);
+  try {
+    await setSourcePreference('desktop');
+  } catch (e) {
+    adoptedDesktopFollowUid = '';
+    throw e;
+  }
   memoryAuth = null;
   authFileCache = null;
   invalidateCatalogCache();
-  adoptedDesktopFollowUid = String(followUid);
   log('desktop account switched; following desktop instead of the plugin credential', followUid);
   return true;
 }
@@ -1663,6 +1747,8 @@ async function readStoredAuth() {
   // 先确认"桌面端是否换号"：换号后必须立刻改读桌面登录文件，
   // 否则下面 memoryAuth/authFileCache 会继续供旧账号（issue #6）。
   await syncAuthPathFollow();
+  /** 重读前的身份：同一个文件内容被换号时，也要让账号相关的目录缓存失效。 */
+  const previousAuth = memoryAuth || authFileCache?.auth || null;
   /*
    * 刷新出的内存令牌可以比文件新，但**不能越过文件里的账号切换**：
    * 桌面端换号会原子替换 auth 文件，此时必须立刻丢掉旧 memoryAuth，
@@ -1713,6 +1799,20 @@ async function readStoredAuth() {
     endpoint,
     domain,
   };
+  /*
+   * 同一个登录文件被客户端原地换号时，路径没变、`syncAuthPathFollow` 也可能
+   * 因为 followPath === AUTH_PATH 而不走“切换路径”分支。目录属于账号：
+   * 身份或区域变了就必须作废，否则模型/倍率/思考档位会继续用上一个账号的。
+   */
+  if (previousAuth && (
+    String(previousAuth.userId || '') !== String(result.userId || '')
+    || String(previousAuth.endpoint || '') !== String(result.endpoint || '')
+    || String(previousAuth.domain || '') !== String(result.domain || '')
+  )) {
+    invalidateCatalogCache();
+    log('desktop login identity changed; catalog invalidated',
+      `${previousAuth.userId || '?'} -> ${result.userId || '?'}`);
+  }
   authFileCache = { mtimeMs: stat.mtimeMs, size: stat.size, auth: result };
   return result;
 }
@@ -2189,19 +2289,30 @@ function apiKeyAuth() {
 async function resolveAuth() {
   if (API_KEY) return apiKeyAuth();
   /*
-   * 每次解析先确认桌面端是否换号。原先只有 `readStoredAuth()` 会做这件事，
+   * 每次解析凭据前确认桌面端是否换号。原先只有 readStoredAuth() 会做这件事，
    * 所以来源是 plugin 时永远发现不了桌面换号（issue #6 的另一半）。
    */
   await syncAuthPathFollow();
-  const configured = await effectiveSource();
+  let configured = await effectiveSource();
   if (configured === 'api-key') {
     throw new Error('credential source is api-key but CODEBUDDY_API_KEY is not set');
   }
-  if (configured === 'desktop') return await readStoredAuth();
   if (configured === 'plugin') {
-    if (await adoptDesktopAfterPluginSwitch()) return await readStoredAuth();
-    return await readPluginAuth();
+    if (await adoptDesktopAfterPluginSwitch()) {
+      const adopted = await readStoredAuth();
+      log('adopted desktop auth', adopted.userId || '(none)', 'from', AUTH_PATH);
+      return adopted;
+    }
+    /*
+     * 并发请求可能在上面这一小段时间里已经完成了“跟随桌面”并把来源改成
+     * desktop。此时不能拿着开头读到的 plugin 继续走 readPluginAuth() ——
+     * 否则同一个账号切换会表现为「有的请求用新号、有的还用旧号」（启动时
+     * 的目录刷新与 /health 并发就撞过这个）。
+     */
+    configured = await effectiveSource();
+    if (configured === 'plugin') return await readPluginAuth();
   }
+  if (configured === 'desktop') return await readStoredAuth();
   // auto：桌面端优先（老行为不变），仅在**本地不可用**时回退到插件登录。
   // 上游 401 不会触发中途换号 —— 账户可预测性优先（见 SECURITY 文档）。
   let desktopError;
@@ -6718,7 +6829,7 @@ function catalogPathsFor() {
 const CATALOG_TTL_MS = 5 * 60 * 1000;
 // `upstreamModelCount` 初值必须是 0：冷启动时一个模型都没看过，此时任何请求都
 // 该放行。它同时也是「模型预校验能不能启用」的唯一开关（见 preflightModelError）。
-let catalogCache = { at: 0, models: [], shape: null, upstreamModelCount: 0 };
+let catalogCache = { at: 0, models: [], shape: null, upstreamModelCount: 0, account: '', source: '' };
 let catalogRefreshing = null;
 /**
  * 目录代次：换号 / 换来源时 +1。
@@ -6736,7 +6847,7 @@ let catalogGeneration = 0;
  */
 function invalidateCatalogCache() {
   catalogGeneration += 1;
-  catalogCache = { at: 0, models: [], shape: null, upstreamModelCount: 0 };
+  catalogCache = { at: 0, models: [], shape: null, upstreamModelCount: 0, account: '', source: '' };
   refreshCatalog({ force: true }).catch(() => {});
 }
 
@@ -6775,6 +6886,22 @@ function refreshCatalog({ force = false } = {}) {
  * 把这段延迟转嫁给调用方，会让「桥在跑」被误判成「桥没起」。
  */
 async function upstreamCatalog() {
+  /*
+   * 目录属于账号：缓存里记着它是用哪个账号抓的。来源变化（plugin ↔ desktop、
+   * 自动回退到另一条凭据）不一定走 setSourcePreference，不能只靠那里作废；
+   * 这里按当前实际凭据再核一次，避免把上一个账号的模型/倍率发给客户端。
+   */
+  if (catalogCache.models.length && catalogCache.account) {
+    try {
+      const auth = await resolveAuth();
+      const account = auth.userId || auth.uid || '';
+      if (account && account !== catalogCache.account) {
+        log('catalog account changed; refetching', `${catalogCache.account} -> ${account}`);
+        invalidateCatalogCache();
+        await refreshCatalog();
+      }
+    } catch { /* 凭据读不出来：沿用缓存，调用方会另行报鉴权错误 */ }
+  }
   if (!catalogCache.models.length) await refreshCatalog();
   else if (Date.now() - catalogCache.at > CATALOG_TTL_MS) refreshCatalog();
   return catalogCache.models;
@@ -7121,6 +7248,8 @@ async function fetchCatalog(generation = catalogGeneration) {
       } else {
       catalogCache = {
         at: nextAt,
+        account: auth.userId || auth.uid || '',
+        source: auth.source || '',
         models: kept.map((m) => ({
           id: m.id,
           name: m.name || m.id,
@@ -7920,8 +8049,7 @@ async function handleRequest(req, res) {
         pluginCount: 0,
       };
       try {
-        const a = await resolveAuth();
-        region = upstreamRegion(a);
+        let a = await resolveAuth();
         credential.source = a.source;
         /*
          * 桌面登录文件当前是谁：用于面板/插件对照「桥实际使用的账号」。
@@ -7935,6 +8063,13 @@ async function handleRequest(req, res) {
           credential.desktopUserId = '';
           credential.desktopError = String(desktopError?.message || desktopError).slice(0, 200);
         }
+        /*
+         * 并发请求可能在这段时间完成“跟随桌面”并改写来源。再对一次，避免
+         * 这一份 /health 同时报出新账号的 desktopUserId 和旧账号的 auth。
+         */
+        if ((await effectiveSource()) !== a.source) a = await resolveAuth();
+        region = upstreamRegion(a);
+        credential.source = a.source;
         try {
           credential.pluginCount = credentialStoreMode() === 'memory'
             ? memoryCredentials.size

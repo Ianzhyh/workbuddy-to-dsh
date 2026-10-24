@@ -109,6 +109,11 @@ function originAllowed(req) {
 // 控制台自身的版本信息（诊断报告要用）。读一次 package.json 就缓存，不每次请求都碰磁盘；
 // 文件缺失或损坏时降级为 '?'，绝不让 /api/overview 因为读不到版本而 500。
 const STARTED_AT = Date.now();
+/**
+ * 上一次看到的桥 PID。桥重启（换号/升级/手动重启）后积分可能已经换了钱包，
+ * 即便账号相同也重取一次，避免「刚重启，页面还是重启前的余额」。
+ */
+let lastBridgePid = 0;
 let consoleVersionCache = null;
 function consoleVersion() {
   if (consoleVersionCache !== null) return consoleVersionCache;
@@ -387,13 +392,16 @@ function startBridge(opts = {}) {
   if (!existsSync(authFile)) return { started: false, error: `登录文件不存在：${authFile}` };
 
   /*
-   * 钉住的是账号快照时，同时把「桌面端当前登录文件」告诉桥：用户在 WorkBuddy
-   * 客户端里换号后桥会自动跟随（issue #6）。`followUid` 是钉住那一刻桌面文件
-   * 里的账号；没有它（旧状态）由桥按"快照账号 ≠ 桌面账号"迁移一次。
+   * 钉住的是账号快照时，同时把「跟随桌面活动登录文件」告诉桥：用户在客户端
+   * 换号（或改用另一个客户端）后桥会自动跟随。传 `auto` 而不是固定路径，
+   * 让桥在每次检查时按当前活动文件（国内版/国际版）重新判断。
+   * `followUid` 是钉住那一刻桌面文件里的账号；没有它（旧状态）由桥按
+   * "快照账号 ≠ 桌面账号"迁移一次。
    */
   const desktopAuth = config.workbuddy.authFile;
+  const statePinned = Boolean(String(readState().authFile || '').trim());
   const followAuthFile = opts.followAuthFile
-    || (normPath(authFile) !== normPath(desktopAuth) && existsSync(desktopAuth) ? desktopAuth : '');
+    || ((statePinned && normPath(authFile) !== normPath(desktopAuth)) ? 'auto' : '');
   const followUid = opts.followUid !== undefined
     ? String(opts.followUid || '')
     : String(readState().authFileDesktopUid || '');
@@ -1090,6 +1098,11 @@ const server = createServer(async (req, res) => {
        */
       const health = await bridgeHealth();
       const bridgeAccount = health.body?.auth?.userId || '';
+      const bridgePid = Number(health.body?.pid) || 0;
+      if (bridgePid && bridgePid !== lastBridgePid) {
+        if (lastBridgePid) invalidateQuotaCache();
+        lastBridgePid = bridgePid;
+      }
       let creds = await credentialStatus();
       /*
        * 桥已经跟随桌面换号（来源=desktop），但 `.state.json` 还钉着旧快照：
