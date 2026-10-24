@@ -115,6 +115,11 @@ const STARTED_AT = Date.now();
  * 即便账号相同也重取一次，避免「刚重启，页面还是重启前的余额」。
  */
 let lastBridgePid = 0;
+/**
+ * 上次尝试校正账号钉住的键（桌面账号|生效文件账号）。只在校正失败/用户
+ * 主动钉住不同快照时避免每 20 秒重复启动客户端取密钥。
+ */
+let lastPinReconcileKey = '';
 let consoleVersionCache = null;
 function consoleVersion() {
   if (consoleVersionCache !== null) return consoleVersionCache;
@@ -1117,15 +1122,21 @@ const server = createServer(async (req, res) => {
       }
       let creds = await credentialStatus();
       /*
-       * 桥已经跟随桌面换号（来源=desktop），但 `.state.json` 还钉着旧快照：
-       * 这里顺手校正一次，别让「账号页/概览」继续显示旧钉住。只在账号确实
-       * 不一致时做（listAccountFiles 要启动客户端取密钥，不能每轮都跑）。
+       * 钉住状态过期：桥已经跟随桌面换号（来源=desktop），或来源是插件
+       * 但桌面登录文件已经换了人 —— 两种情况下 `.state.json` 里的旧快照
+       * 都不该继续当作“当前桌面账号”展示。按「桌面 UID|生效文件 UID」做
+       * 一次性校正，避免用户主动钉住不同快照时每轮都启动客户端取密钥。
        */
-      if (health.running
-        && health.body?.auth?.source === 'desktop'
-        && bridgeAccount
-        && creds.active?.userId
-        && creds.active.userId !== bridgeAccount) {
+      const desktopUid = health.body?.credential?.desktopUserId || '';
+      const pinReconcileKey = `${desktopUid}|${creds.active?.userId || ''}`;
+      const pinLooksStale = Boolean(health.running && creds.active?.userId && (
+        (health.body?.auth?.source === 'desktop'
+          && bridgeAccount && creds.active.userId !== bridgeAccount)
+        || (health.body?.auth?.source === 'plugin'
+          && desktopUid && desktopUid !== creds.active.userId)
+      ));
+      if (pinLooksStale && pinReconcileKey !== lastPinReconcileKey) {
+        lastPinReconcileKey = pinReconcileKey;
         try {
           const pin = await reconcileAccountPin();
           if (pin.changed) {

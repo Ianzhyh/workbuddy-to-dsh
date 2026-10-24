@@ -7959,9 +7959,17 @@ function observeResponse(req, res) {
   res.writeHead = (...args) => {
     const statusCode = args[0];
     if (typeof statusCode === 'number') {
-      procStats.requests += 1;
-      procStats.byStatus[statusCode] = (procStats.byStatus[statusCode] || 0) + 1;
-      if (statusCode >= 400) procStats.errors += 1;
+      /*
+       * 探活类请求不进进程计数：控制台/插件现在每 2 秒打一次 /v1/identity
+       * （外加各自的 /health）。算进去会把“真实请求数/失败数”稀释成噪音，
+       * 面板的待办与成功率也会被探活污染。
+       */
+      const statPath = String(req.url || '').split('?')[0];
+      if (statPath !== '/health' && statPath !== '/v1/identity') {
+        procStats.requests += 1;
+        procStats.byStatus[statusCode] = (procStats.byStatus[statusCode] || 0) + 1;
+        if (statusCode >= 400) procStats.errors += 1;
+      }
     }
     // 只在 (status, headers对象) 形态时注入；其余形态（数组头/statusMessage）原样放行
     if (args.length === 2 && args[1] && typeof args[1] === 'object' && !Array.isArray(args[1])) {
