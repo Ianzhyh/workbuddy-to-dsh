@@ -2,6 +2,7 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
+<meta name="wb-console-build" content="__WB_BUILD__">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>WorkBuddy 本地 API 桥 · 控制台</title>
 <link rel="stylesheet" href="/style.css">
@@ -924,6 +925,9 @@ const I18N_EN = {
 
   // ---- 卡片指标（也用于 CARD_ICONS 的 key） ----
   '账号': 'Account',
+  '改用桌面端': 'Use desktop session',
+  '正在运行的桥还是旧构建（升级后旧进程仍在服务）。重启桥后新逻辑才会生效。':
+    'The running bridge is still the old build (the old process survived the upgrade). Restart it to load the new logic.',
   '令牌剩余': 'Token TTL',
   '凭据加密': 'Credential encryption',
   '上游端点': 'Upstream endpoint',
@@ -2281,6 +2285,12 @@ const I18N_RULES_EN = [
       + optional + ' optional experimental bundles)' + (version ? ' · DSH ' + version : '')],
   [/^(\d+) 个，缺失 (\d+) 个( · DSH (.+))?$/, 'bundles: $1, missing: $2$3'],
   [/^未找到 profile( · DSH (.+))?$/, 'no profile found$1'],
+  [/^桥实际使用账号 (.+)…（来源 (.+)），桌面登录文件是 (.+)…；后者当前未生效。$/,
+    (m, bridge, source, desktop) => 'The bridge uses account ' + bridge + '… (source '
+      + translateText(source) + '), while the desktop login file is ' + desktop
+      + '…; the latter is not in effect.'],
+  [/^(.*?)　桌面文件 (.+)… 未生效$/, (m, head, desktop) =>
+    translateText(head) + ' · desktop file ' + desktop + '… is not in effect'],
   [/^存在多个账号快照，已固定使用 (.+)，避免选错账号$/,
     'multiple account snapshots exist; pinned to $1 to avoid picking the wrong account'],
   [/^缺失：(.+)；在 profile 目录执行 pnpm add <包名>@<与 DSH 一致的版本>。注意版本必须对齐——装错代次会连 peer 依赖一起错$/,
@@ -3039,6 +3049,42 @@ function renderAlerts() {
       text: '令牌将于 ' + days + ' 天后到期；桌面端在线时会自行续期，若届时返回 401 请在桌面端重新登录。',
       dismiss: { label: '知道了', run: () => { tokenMuted = true; lsSet('wb.muted.token', '1'); renderAlerts(); } },
       action: { label: '重新诊断', run: () => $('diagBtn').click() },
+    });
+  }
+
+  /*
+   * 2b. 运行中的桥不是当前磁盘上的构建。
+   *
+   * 升级插件只会换脚本，不会杀后台的桥进程；旧进程会继续按旧逻辑服务
+   * （思考档位、换号跟随、目录判定都是旧的），而面板看不出原因。
+   */
+  if (b && b.running && b.staleBuild) {
+    items.push({
+      sev: 1,
+      cls: 'warn',
+      text: '正在运行的桥还是旧构建（升级后旧进程仍在服务）。重启桥后新逻辑才会生效。',
+      action: { label: '重启桥', run: () => $('restartBtn').click() },
+    });
+  }
+
+  /*
+   * 2c. 桥实际使用的账号 ≠ 桌面登录文件里的账号。
+   *
+   * 两者可以不同（来源=插件账号时会刻意如此），但必须说清楚，否则用户会把
+   * 桌面端的账号当成桥的钱包 —— issue #6 的「账号是新的、余额是旧的」。
+   */
+  const bridgeAuth = b && b.auth;
+  if (bridgeAuth && bridgeAuth.userId && a && a.userId && bridgeAuth.userId !== a.userId) {
+    items.push({
+      sev: 2,
+      cls: 'warn',
+      text: '桥实际使用账号 ' + String(bridgeAuth.userId).slice(0, 8) + '…（来源 '
+        + credentialSourceLabel(b.credentialSource || bridgeAuth.source) + '），桌面登录文件是 '
+        + String(a.userId).slice(0, 8) + '…；后者当前未生效。',
+      action: {
+        label: '改用桌面端',
+        run: () => changePluginSource('desktop'),
+      },
     });
   }
 
@@ -4741,6 +4787,9 @@ async function changePluginSource(source) {
   setMsg(r.ok ? '凭据来源已切换。' : '切换失败：' + (r.error || '未知错误'), r.ok ? 'good' : 'err');
   await loadPluginLogin();
   loadModels();
+  // 来源变了 = 账号/钱包变了：账号「使用中」标记与积分/概览都要立刻重读
+  loadAccounts();
+  loadOverview();
 }
 
 /** 桌面账号行里的「用插件凭据」：设插件 active，再把来源切到 plugin。 */
@@ -4804,9 +4853,16 @@ async function loadAccounts() {
       ? '<span class="tag ok">可用</span>'
       : '<span class="tag fail" title="' + escapeAttr(a.error || '') + '">不可用</span>';
     const expire = a.remainingMs > 0 ? fmtDuration(a.remainingMs) : '已过期';
-    const switchBtn = a.active
+    /*
+     * 目标文件已是「选中的桌面账号」，但桥实际在插件凭据上时，不能只显示
+     * 「已选（未生效）」而没有操作 —— 用户会找不到怎么切回桌面。
+     */
+    const needsDesktopSource = a.active && activeSource === 'plugin';
+    const switchBtn = a.active && !needsDesktopSource
       ? ''
-      : '<button data-switch="' + escapeAttr(a.name) + '"' + (a.usable ? '' : ' disabled') + '>切换</button>';
+      : (needsDesktopSource
+        ? '<button data-use-desktop="1"' + (a.usable ? '' : ' disabled') + '>改用桌面端</button>'
+        : '<button data-switch="' + escapeAttr(a.name) + '"' + (a.usable ? '' : ' disabled') + '>切换</button>');
     /*
      * 自定义名字（`.state.json` 的 `accountAliases`）。
      *
@@ -4898,6 +4954,9 @@ async function loadAccounts() {
 
   el.querySelectorAll('[data-switch]').forEach(btn => {
     btn.onclick = () => switchAccount(btn.dataset.switch);
+  });
+  el.querySelectorAll('[data-use-desktop]').forEach(btn => {
+    btn.onclick = () => changePluginSource('desktop');
   });
   el.querySelectorAll('[data-use-plugin]').forEach(btn => {
     btn.onclick = () => usePluginCredential(btn.dataset.usePlugin);
@@ -5615,16 +5674,26 @@ function renderCards() {
     'primary'));
 
   /*
-   * 令牌剩余按**剩余时长**给图标上色：< 7 天红、< 30 天琥珀、否则绿。
-   * 这样「还剩 5 天」不用读文字就能被一眼看见 —— 而这正是这张卡存在的全部意义。
-   * 纯视觉映射，不参与任何判断。
+   * 令牌/账号都必须以**桥实际生效的凭据**为准。
+   *
+   * `credentials.active` 读的是 `.state.json` 钉住的桌面登录文件；而桥可能
+   * 跟随了桌面换号、也可能正在用插件账号。拿桌面文件去配桥的积分，就会出现
+   * 「账号是新的、余额是旧的」（issue #6）。桥运行且有 auth 时优先用桥的身份。
    */
-  const tokenTone = !a ? 'muted'
-    : (a.remainingMs < 7 * 86400000 ? 'fail'
-      : (a.remainingMs < 30 * 86400000 ? 'warn' : 'ok'));
+  const effectiveAuth = b.auth || null;
+  const sourceLabel = credentialSourceLabel(b.credentialSource || effectiveAuth?.source || '');
+  const tokenExpiry = effectiveAuth?.expiresAt
+    ? new Date(effectiveAuth.expiresAt).getTime()
+    : (a?.expiresAt || 0);
+  const tokenRemain = tokenExpiry ? tokenExpiry - Date.now() : a?.remainingMs;
+  const tokenTone = !Number.isFinite(tokenRemain) ? 'muted'
+    : (tokenRemain < 7 * 86400000 ? 'fail'
+      : (tokenRemain < 30 * 86400000 ? 'warn' : 'ok'));
   cards.push(card('令牌剩余',
-    a ? fmtDuration(a.remainingMs) : '—',
-    a ? '至 ' + new Date(a.expiresAt).toLocaleString('zh-CN', { hour12: false }) : '',
+    Number.isFinite(tokenRemain) ? fmtDuration(tokenRemain) : '—',
+    tokenExpiry
+      ? '至 ' + new Date(tokenExpiry).toLocaleString('zh-CN', { hour12: false }) + (effectiveAuth ? ' · ' + sourceLabel + '凭据' : '')
+      : '',
     true,
     tokenTone));
 
@@ -5652,12 +5721,25 @@ function renderCards() {
     true,
     cfgOk ? 'ok' : 'muted'));
 
-  cards.push(card('账号',
-    a ? (a.alias || a.account || '—') : '—',
-    // 起了名字就把 uin 挪到副行；没起名字时与从前逐字相同
-    a ? (a.alias && a.account ? a.account + ' · ' : '') + 'uid ' + (a.userId || '').slice(0, 8) + '…' : (d.credentials.error || '未取到'),
-    false,
-    'muted'));
+  /*
+   * 账号卡：值 = 桥实际服务的账号；副行区分「桌面文件」与「实际来源」。
+   * 来源是插件账号时，桌面文件可能已经换号 —— 把「未生效」说清楚，
+   * 不要让人对着两个账号猜哪一个是钱包。
+   */
+  const desktopMismatch = !!(effectiveAuth?.userId && a?.userId && effectiveAuth.userId !== a.userId);
+  let accountValue = a ? (a.alias || a.account || '—') : '—';
+  let accountNote = a ? (a.alias && a.account ? a.account + ' · ' : '') + 'uid ' + (a.userId || '').slice(0, 8) + '…' : (d.credentials.error || '未取到');
+  if (effectiveAuth?.userId) {
+    if (a && a.userId === effectiveAuth.userId) {
+      accountValue = a.alias || a.account || ('uid ' + effectiveAuth.userId.slice(0, 8) + '…');
+      accountNote = (a.account ? a.account + ' · ' : '') + 'uid ' + effectiveAuth.userId.slice(0, 8) + '… · ' + sourceLabel;
+    } else {
+      accountValue = 'uid ' + effectiveAuth.userId.slice(0, 8) + '…';
+      accountNote = sourceLabel + '凭据';
+    }
+    if (desktopMismatch) accountNote += '　桌面文件 ' + a.userId.slice(0, 8) + '… 未生效';
+  }
+  cards.push(card('账号', accountValue, accountNote, false, 'muted'));
 
   cards.push(card('凭据加密',
     a ? (a.encrypted ? 'AtRest 信封' : '明文') : '—',

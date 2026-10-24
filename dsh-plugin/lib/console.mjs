@@ -12,8 +12,9 @@
  * 识别方式：控制台首页的 `<title>` 是 `WorkBuddy 中转控制台` —— 用它判断 8792
  * 上跑的到底是不是我们的控制台，而不是随便一个占着端口的 HTTP 服务。
  */
-import { spawn } from 'node:child_process';
-import { existsSync, mkdirSync, openSync, closeSync } from 'node:fs';
+import { spawn, spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { existsSync, mkdirSync, openSync, closeSync, readFileSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 
 /**
@@ -42,6 +43,50 @@ export const CONSOLE_READ_CAP = 512 * 1024;
 export const CONSOLE_SCRIPT_REL = join('dashboard', 'server.mjs');
 /** 控制台日志相对项目根的位置。 */
 export const CONSOLE_LOG_REL = join('dashboard', 'console.log');
+
+/**
+ * 控制台构建指纹（服务端 + 页面 + 样式，与控制台 `/api/version` 同一算法）。
+ *
+ * 插件升级后旧的 8792 进程不会自己退出，继续提供旧页面/旧接口。没有这道
+ * 比对，用户在界面上看到的仍是旧逻辑（保存显示设置回退、账号卡片读旧值）。
+ */
+export function consoleBuildHash(projectRoot) {
+  try {
+    const hash = createHash('sha256');
+    for (const rel of [
+      CONSOLE_SCRIPT_REL,
+      join('dashboard', 'public', 'index.html'),
+      join('dashboard', 'public', 'style.css'),
+    ]) {
+      hash.update(readFileSync(join(projectRoot, rel)));
+    }
+    return hash.digest('hex').slice(0, 16);
+  } catch {
+    return '';
+  }
+}
+
+/** 端口上正在监听的那个进程（找不到就返回 null；只用于“确认是我们自己的控制台”之后）。 */
+export function findPortPid(port) {
+  try {
+    if (process.platform === 'win32') {
+      const r = spawnSync('netstat', ['-ano', '-p', 'tcp'], { encoding: 'utf8', windowsHide: true, timeout: 4000 });
+      if (r.error || r.status !== 0) return null;
+      for (const line of String(r.stdout || '').split('\n')) {
+        if (!line.includes('LISTENING') || !line.includes(`:${port}`)) continue;
+        const pid = Number((line.trim().match(/(\d+)\s*$/) || [])[1]);
+        if (Number.isInteger(pid) && pid > 0) return pid;
+      }
+      return null;
+    }
+    const r = spawnSync('lsof', ['-ti', `tcp:${port}`, '-sTCP:LISTEN'], { encoding: 'utf8', timeout: 4000 });
+    if (r.error || r.status !== 0) return null;
+    const pid = Number(String(r.stdout || '').trim().split(/\s+/)[0]);
+    return Number.isInteger(pid) && pid > 0 ? pid : null;
+  } catch {
+    return null;
+  }
+}
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -73,8 +118,49 @@ export class ConsoleSupervisor {
     this.lastStartError = null;
     this.pendingEnsure = null;
     /** 探测结果缓存：面板每 5 秒问一次状态，没必要每次都把首页拉一遍。 */
-    this.cache = { at: 0, state: null, error: '' };
+    this.cache = { at: 0, state: null, error: '', build: '', expectedBuild: '', staleBuild: false };
     this.cacheTtlMs = options.cacheTtlMs ?? 20_000;
+    this.buildCache = { key: '', hash: '' };
+  }
+
+  /** 当前磁盘上的控制台构建指纹（文件 stat 变了才重算）。 */
+  expectedBuild() {
+    try {
+      const files = [
+        join(this.projectRoot, CONSOLE_SCRIPT_REL),
+        join(this.projectRoot, 'dashboard', 'public', 'index.html'),
+        join(this.projectRoot, 'dashboard', 'public', 'style.css'),
+      ];
+      const key = files.map((f) => {
+        const st = statSync(f);
+        return `${st.mtimeMs}:${st.size}`;
+      }).join('|');
+      if (this.buildCache.key === key) return this.buildCache.hash;
+      const hash = consoleBuildHash(this.projectRoot);
+      this.buildCache = { key, hash };
+      return hash;
+    } catch {
+      return '';
+    }
+  }
+
+  /** 从 `/api/version` 取控制台自述的 pid/build（旧控制台没有该路由）。 */
+  async fetchVersion(signal) {
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(new Error('timeout')), 2500);
+    const onAbort = () => ac.abort(signal?.reason);
+    signal?.addEventListener('abort', onAbort, { once: true });
+    try {
+      const res = await fetch(`${this.url}/api/version`, { signal: ac.signal, headers: { accept: 'application/json' } });
+      if (!res.ok) return null;
+      const body = await res.json().catch(() => null);
+      return body && body.ok ? body : null;
+    } catch {
+      return null;
+    } finally {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
+    }
   }
 
   get url() {
@@ -87,7 +173,14 @@ export class ConsoleSupervisor {
    */
   async probe({ signal, cached = false } = {}) {
     if (cached && this.cache.state && Date.now() - this.cache.at < this.cacheTtlMs) {
-      return { state: this.cache.state, error: this.cache.error, cached: true };
+      return {
+        state: this.cache.state,
+        error: this.cache.error,
+        build: this.cache.build,
+        expectedBuild: this.cache.expectedBuild,
+        staleBuild: this.cache.staleBuild,
+        cached: true,
+      };
     }
     let result;
     try {
@@ -126,13 +219,33 @@ export class ConsoleSupervisor {
         clearTimeout(timer);
         signal?.removeEventListener('abort', onAbort);
       }
-      result = text.includes(CONSOLE_MARKER)
-        ? { state: 'running', error: '' }
-        : { state: 'foreign', error: `端口 ${this.port} 上有 HTTP 服务，但不是 WorkBuddy 控制台（换个 DASHBOARD_PORT）` };
+      if (text.includes(CONSOLE_MARKER)) {
+        const match = /<meta[^>]+name="wb-console-build"[^>]*content="([^"]*)"/i.exec(text)
+          || /<meta[^>]+content="([^"]*)"[^>]*name="wb-console-build"/i.exec(text);
+        const build = match ? match[1] : '';
+        const expectedBuild = this.expectedBuild();
+        result = {
+          state: 'running',
+          error: '',
+          build,
+          expectedBuild,
+          /* 旧控制台没有这个 meta（build 为空）→ 同样视为旧构建 */
+          staleBuild: Boolean(expectedBuild && build !== expectedBuild),
+        };
+      } else {
+        result = { state: 'foreign', error: `端口 ${this.port} 上有 HTTP 服务，但不是 WorkBuddy 控制台（换个 DASHBOARD_PORT）` };
+      }
     } catch (error) {
       result = { state: 'stopped', error: String(error?.message || error) };
     }
-    this.cache = { at: Date.now(), state: result.state, error: result.error };
+    this.cache = {
+      at: Date.now(),
+      state: result.state,
+      error: result.error,
+      build: result.build || '',
+      expectedBuild: result.expectedBuild || '',
+      staleBuild: result.staleBuild === true,
+    };
     return result;
   }
 
@@ -152,7 +265,65 @@ export class ConsoleSupervisor {
 
   async #ensure({ signal, readyTimeoutMs }) {
     const status = await this.probe({ signal });
-    if (status.state === 'running') return { ok: true, started: false, reused: true, state: 'running', url: this.url };
+    let restartedForBuild = false;
+    if (status.state === 'running' && status.staleBuild) {
+      /*
+       * 控制台页面/接口已经升级，但 8792 上还是旧进程。旧页面会让用户继续
+       * 看到「勾选保存回退」「账号新余额旧」这类已修好的问题，必须换掉。
+       *
+       * 只杀**确认过是本项目控制台**（probe 已读 marker）且能查到监听 PID 的
+       * 进程；查不到就如实报错，让用户手动关，绝不瞎杀一个 PID。
+       */
+      const version = await this.fetchVersion(signal);
+      const pid = Number(version?.pid) || findPortPid(this.port);
+      if (!Number.isInteger(pid) || pid <= 0 || pid === process.pid) {
+        return {
+          ok: false,
+          started: false,
+          reused: true,
+          state: 'running',
+          staleBuild: true,
+          error: `控制台还是旧构建（${status.build || '旧版本'}），但无法确定监听进程；请手动关闭控制台后重启 dsh`,
+        };
+      }
+      this.onLog(`console build changed (${status.build || 'old'} -> ${status.expectedBuild}); restarting pid=${pid}`);
+      try { process.kill(pid, 'SIGTERM'); } catch { /* 已经退出 */ }
+      const deadline = Date.now() + 8000;
+      let stopped = false;
+      while (Date.now() < deadline) {
+        await sleep(200);
+        if ((await this.probe({ signal })).state === 'stopped') { stopped = true; break; }
+      }
+      if (!stopped && process.platform !== 'win32') {
+        try { process.kill(pid, 'SIGKILL'); } catch { /* 已退出 */ }
+        for (let i = 0; i < 10 && !stopped; i += 1) {
+          await sleep(200);
+          stopped = (await this.probe({ signal })).state === 'stopped';
+        }
+      }
+      if (!stopped) {
+        return {
+          ok: false,
+          started: false,
+          reused: true,
+          state: 'running',
+          staleBuild: true,
+          error: `控制台构建已变化，但旧进程（pid ${pid}）在 8 秒内没有退出`,
+        };
+      }
+      restartedForBuild = true;
+    } else if (status.state === 'running') {
+      return {
+        ok: true,
+        started: false,
+        reused: true,
+        state: 'running',
+        url: this.url,
+        build: status.build,
+        expectedBuild: status.expectedBuild,
+        staleBuild: false,
+      };
+    }
     if (status.state === 'foreign') return { ok: false, started: false, reused: false, state: 'foreign', error: status.error };
     const started = await this.start();
     if (!started.ok) return { ok: false, started: false, reused: false, state: 'stopped', error: started.error };
@@ -162,7 +333,21 @@ export class ConsoleSupervisor {
       if (signal?.aborted) return { ok: false, started: true, reused: false, state: 'starting', error: 'aborted' };
       await sleep(250);
       const probe = await this.probe({ signal });
-      if (probe.state === 'running') return { ok: true, started: true, reused: false, state: 'running', url: this.url, pid: started.pid };
+      if (probe.state === 'running') {
+        return {
+          ok: !probe.staleBuild,
+          started: true,
+          reused: false,
+          state: 'running',
+          url: this.url,
+          pid: started.pid,
+          build: probe.build,
+          expectedBuild: probe.expectedBuild,
+          staleBuild: probe.staleBuild === true,
+          restartedForBuild,
+          ...(probe.staleBuild ? { error: '控制台已启动，但页面仍是旧构建' } : {}),
+        };
+      }
       if (probe.state === 'foreign') return { ok: false, started: true, reused: false, state: 'foreign', error: probe.error };
       lastError = probe.error || lastError;
     }

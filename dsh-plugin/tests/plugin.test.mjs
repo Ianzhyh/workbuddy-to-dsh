@@ -16,7 +16,7 @@ import {
   resolveConfig, detectProjectRoot, apply, readProjectEnv, DEFAULTS,
   collectBridgeExtraEnv, BRIDGE_ENV_PASSTHROUGH,
 } from '../lib/index.js';
-import { BridgeSupervisor } from '../lib/bridge.mjs';
+import { BridgeSupervisor, bridgeBuildHash } from '../lib/bridge.mjs';
 
 /** 真实插件目录（测试里要用它当"源"来造分发布的副本）。 */
 const PLUGIN_ROOT = fileURLToPath(new URL('..', import.meta.url));
@@ -576,6 +576,142 @@ test('桥的健康检查：503 要认领成「凭据异常」，不能误判成"
     const sup = new BridgeSupervisor({ host: '127.0.0.1', port: wrongToken.port, token: 't', projectRoot: '.', logPath: 'x' });
     assert.equal((await sup.probe()).state, 'unauthorized');
   } finally { await wrongToken.close(); }
+});
+
+test('构建指纹：端口上的桥与当前脚本不一致（含旧桥没有 build）必须标记 staleBuild', async () => {
+  /*
+   * 升级只换磁盘脚本，旧桥进程不会自己退出。没有这个比对，插件会一直
+   * 复用旧进程：思考档位、换号跟随、目录判定全是旧代码，而版本号看起来
+   * 已经是最新（issue #5 / #6 的真实触发条件）。
+   */
+  const { createServer } = await import('node:http');
+  const dir = mkdtempSync(join(tmpdir(), 'wb-build-'));
+  const scriptPath = join(dir, 'bridge.mjs');
+  writeFileSync(scriptPath, '// build under test\nexport const marker = 1;\n');
+  const expected = bridgeBuildHash(scriptPath);
+  assert.ok(expected, '临时脚本必须能算出指纹');
+
+  const state = { build: 'old-build' };
+  const server = createServer((req, res) => {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({
+      ok: true,
+      pid: 4242,
+      authFile: join(dir, 'workbuddy-desktop.info'),
+      ...(state.build === null ? {} : { build: state.build }),
+    }));
+  });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  const sup = new BridgeSupervisor({
+    host: '127.0.0.1',
+    port: server.address().port,
+    token: 't',
+    projectRoot: dir,
+    scriptPath,
+    logPath: join(dir, 'bridge.log'),
+  });
+  try {
+    const stale = await sup.probe();
+    assert.equal(stale.state, 'running');
+    assert.equal(stale.staleBuild, true, '旧 build 必须标记为需要重启');
+    assert.equal(stale.expectedBuild, expected);
+    assert.equal(stale.bridgeBuild, 'old-build');
+
+    // 旧版桥根本没有 build 字段：同样要重启，否则永远升不上去
+    state.build = null;
+    const missing = await sup.probe();
+    assert.equal(missing.staleBuild, true, '没有 build 字段的旧桥也必须标记');
+    assert.equal(missing.bridgeBuild, '');
+
+    // 与磁盘脚本一致：正常复用
+    state.build = expected;
+    const fresh = await sup.probe();
+    assert.equal(fresh.staleBuild, false, 'build 一致时不应触发重启');
+  } finally {
+    await new Promise((r) => server.close(r));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('ensure：旧构建 / 账号文件不一致时必须停掉旧桥并重新拉起', async () => {
+  /*
+   * 仅探测到 staleBuild 还不够 —— 真正加载新逻辑的动作是 ensure 里的
+   * 「stop 旧进程 → start 新进程」。这里用桩把这条路径钉住，避免以后
+   * 有人把判断加进了 probe 却忘记在 ensure 里执行。
+   */
+  const dir = mkdtempSync(join(tmpdir(), 'wb-ensure-build-'));
+  const scriptPath = join(dir, 'bridge.mjs');
+  writeFileSync(scriptPath, '// ensure-build test\nexport const marker = 1;\n');
+  const expected = bridgeBuildHash(scriptPath);
+  const makeStub = () => {
+    const sup = new BridgeSupervisor({
+      host: '127.0.0.1',
+      port: 1,
+      token: 't',
+      projectRoot: dir,
+      scriptPath,
+      authFile: join(dir, 'wanted.info'),
+      logPath: join(dir, 'bridge.log'),
+    });
+    let probes = 0;
+    const calls = { stopped: 0, started: 0 };
+    sup.stop = async () => { calls.stopped += 1; return { ok: true, stopped: true }; };
+    sup.start = async () => { calls.started += 1; return { ok: true, pid: 2222 }; };
+    return { sup, calls, nextProbe: () => { probes += 1; return probes; } };
+  };
+
+  try {
+    // ① 旧构建：第一次探测是旧 build，重启后是当前磁盘脚本
+    {
+      const { sup, calls, nextProbe } = makeStub();
+      sup.probe = async () => (nextProbe() === 1
+        ? {
+          state: 'running',
+          health: { ok: true, pid: 1111, build: 'old-build', authFile: join(dir, 'wanted.info') },
+          staleBuild: true,
+          bridgeBuild: 'old-build',
+          expectedBuild: expected,
+        }
+        : {
+          state: 'running',
+          health: { ok: true, pid: 2222, build: expected, authFile: join(dir, 'wanted.info') },
+          staleBuild: false,
+          bridgeBuild: expected,
+          expectedBuild: expected,
+        });
+      const result = await sup.ensure({ readyTimeoutMs: 3000 });
+      assert.equal(calls.stopped, 1, '旧构建必须先停掉旧进程');
+      assert.equal(calls.started, 1, '必须重新拉起一次');
+      assert.equal(result.started, true);
+      assert.equal(result.reused, false);
+    }
+
+    // ② 构建一致但账号文件不同：同样必须重启，否则会继续服务另一个账号
+    {
+      const { sup, calls, nextProbe } = makeStub();
+      sup.probe = async () => (nextProbe() === 1
+        ? {
+          state: 'running',
+          health: { ok: true, pid: 1111, build: expected, authFile: join(dir, 'other.info') },
+          staleBuild: false,
+          bridgeBuild: expected,
+          expectedBuild: expected,
+        }
+        : {
+          state: 'running',
+          health: { ok: true, pid: 2222, build: expected, authFile: join(dir, 'wanted.info') },
+          staleBuild: false,
+          bridgeBuild: expected,
+          expectedBuild: expected,
+        });
+      const result = await sup.ensure({ readyTimeoutMs: 3000 });
+      assert.equal(calls.stopped, 1, '账号文件不一致时必须重启');
+      assert.equal(calls.started, 1);
+      assert.equal(result.started, true);
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('分发形态：只有插件文件夹（自带 vendor）时也能定位到运行目录', async () => {

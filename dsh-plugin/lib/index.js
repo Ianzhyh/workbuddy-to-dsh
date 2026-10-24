@@ -25,7 +25,7 @@
  * （只调用 providerInfo / providerRetryPolicy，没有 instanceof 检查）。
  */
 
-import { existsSync, readFileSync, writeFileSync, chmodSync, unlinkSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync, chmodSync, unlinkSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { homedir } from 'node:os';
@@ -68,6 +68,42 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
  * 同生命周期；git 安装到 node_modules 里写文件是常见做法（pnpm 不清理）。
  */
 const MODEL_PREFS_PATH = join(PLUGIN_DIR, '.model-prefs.json');
+/**
+ * 写入回退位置。
+ *
+ * 插件目录在部分安装形态下是**只读**的（包管理器的工作副本、受管设备）。
+ * 原实现写失败被 `catch {}` 静默吞掉，用户看到「已保存」，重开面板却是默认值
+ * —— 正是 issue #5 最后一段的形态（保存显示设置后勾选恢复默认）。
+ * 因此：优先写插件目录；失败时写 `<DSH_HOME>/workbuddy-model-prefs.json`；
+ * 两者都失败就抛错，让接口如实返回“没保存”，不再骗人。
+ */
+const MODEL_PREFS_FALLBACK = join(
+  process.env.DSH_HOME || join(homedir(), '.dsh'),
+  'workbuddy-model-prefs.json',
+);
+const modelPrefsPaths = () => [MODEL_PREFS_PATH, MODEL_PREFS_FALLBACK];
+
+/** 解析一份偏好文件；格式不对返回 null（由调用方继续尝试回退位置）。 */
+function parseModelPrefs(raw) {
+  const j = JSON.parse(raw);
+  if (!j || typeof j !== 'object') return null;
+  const paramsByModel = j.paramsByModel && typeof j.paramsByModel === 'object' && !Array.isArray(j.paramsByModel)
+    ? j.paramsByModel
+    : {};
+  const hasDisplay = Array.isArray(j.visible) || j.hideAll === true || typeof j.includeUnofficial === 'boolean';
+  // 只有"每个模型的默认参数"、没有显示偏好时也要能读回来
+  if (!hasDisplay && !Object.keys(paramsByModel).length) return null;
+  const visible = Array.isArray(j.visible) ? j.visible.map(String).filter(Boolean) : null;
+  return {
+    // visible=null 且 hideAll=false = 显示跟随配置（"恢复全部"就是写这个状态）
+    visible,
+    // 兼容旧文件：老面板的"全不选"写的也是空数组，且当时提示语承诺"全隐藏"
+    hideAll: j.hideAll === true || (Array.isArray(j.visible) && visible.length === 0 && j.hideAll !== false),
+    // 是否把"官方目录外"的模型也放进 dsh 选择器（默认 false）
+    includeUnofficial: j.includeUnofficial === true,
+    paramsByModel,
+  };
+}
 
 /**
  * 读取面板保存的模型显示偏好。
@@ -78,46 +114,70 @@ const MODEL_PREFS_PATH = join(PLUGIN_DIR, '.model-prefs.json');
  * 于是"全不选 → 保存"后 dsh 里反而全部还在。
  */
 function readModelPrefs() {
-  try {
-    const j = JSON.parse(readFileSync(MODEL_PREFS_PATH, 'utf8'));
-    if (!j || typeof j !== 'object') return null;
-    const paramsByModel = j.paramsByModel && typeof j.paramsByModel === 'object' && !Array.isArray(j.paramsByModel)
-      ? j.paramsByModel
-      : {};
-    const hasDisplay = Array.isArray(j.visible) || j.hideAll === true || typeof j.includeUnofficial === 'boolean';
-    // 只有"每个模型的默认参数"、没有显示偏好时也要能读回来
-    if (!hasDisplay && !Object.keys(paramsByModel).length) return null;
-    const visible = Array.isArray(j.visible) ? j.visible.map(String).filter(Boolean) : null;
-    return {
-      // visible=null 且 hideAll=false = 显示跟随配置（"恢复全部"就是写这个状态）
-      visible,
-      // 兼容旧文件：老面板的"全不选"写的也是空数组，且当时提示语承诺"全隐藏"
-      hideAll: j.hideAll === true || (Array.isArray(j.visible) && visible.length === 0 && j.hideAll !== false),
-      // 是否把"官方目录外"的模型也放进 dsh 选择器（默认 false）
-      includeUnofficial: j.includeUnofficial === true,
-      paramsByModel,
-    };
-  } catch { return null; }
+  for (const file of modelPrefsPaths()) {
+    if (!existsSync(file)) continue;
+    try {
+      const parsed = parseModelPrefs(readFileSync(file, 'utf8'));
+      if (parsed) return parsed;
+    } catch { /* 损坏：尝试下一个位置 */ }
+  }
+  return null;
 }
 
-/** 写偏好。`null` = 清除偏好（恢复到配置的 allow/deny）。 */
+/** 写偏好。`null` = 清除偏好（恢复到配置的 allow/deny）。两处都写不了会抛错。 */
 function writeModelPrefs(prefs) {
+  if (prefs === null) {
+    for (const file of modelPrefsPaths()) {
+      try { if (existsSync(file)) unlinkSync(file); } catch { /* 尽力清理 */ }
+    }
+    return;
+  }
+  const paramsByModel = prefs?.paramsByModel && typeof prefs.paramsByModel === 'object' ? prefs.paramsByModel : {};
+  const visible = Array.isArray(prefs?.visible) ? prefs.visible.map(String).filter(Boolean) : null;
+  const hideAll = prefs?.hideAll === true;
+  const includeUnofficial = prefs?.includeUnofficial === true;
+  // 显示"未设置"且没有每模型参数 → 没有可存的东西，删文件更干净
+  if (visible === null && !hideAll && !includeUnofficial && !Object.keys(paramsByModel).length) {
+    for (const file of modelPrefsPaths()) {
+      try { if (existsSync(file)) unlinkSync(file); } catch { /* 尽力清理 */ }
+    }
+    return;
+  }
+  const body = `${JSON.stringify({ visible, hideAll, includeUnofficial, paramsByModel, at: Date.now() }, null, 2)}\n`;
+  let firstError = null;
+  for (const file of modelPrefsPaths()) {
+    try {
+      mkdirSync(dirname(file), { recursive: true });
+      writeFileSync(file, body, 'utf8');
+      return;
+    } catch (error) {
+      if (!firstError) firstError = error;
+    }
+  }
+  throw new Error(`模型显示设置无法落盘：${firstError?.message || '未知原因'}`);
+}
+
+/**
+ * 读控制台写下的账号钉住状态（`.state.json`）。
+ *
+ * 插件与插件自带控制台共用同一个项目根；面板「切换账号」写的是这里。
+ * 插件拉起桥时必须带上同一份 `authFile` + 桌面 UID，否则会出现：
+ * 控制台按 A 账号启动、dsh 重启后插件按默认文件启动 —— 两边各服务一个账号。
+ *
+ * 只读两个字段，**不写**这份文件（它的唯一写者是控制台）。
+ */
+function readBridgeAccountState(projectRoot) {
+  const file = process.env.WORKBUDDY_STATE_FILE || (projectRoot ? join(projectRoot, '.state.json') : '');
+  if (!file) return { authFile: '', desktopUid: '' };
   try {
-    if (prefs === null) {
-      if (existsSync(MODEL_PREFS_PATH)) unlinkSync(MODEL_PREFS_PATH);
-      return;
-    }
-    const paramsByModel = prefs?.paramsByModel && typeof prefs.paramsByModel === 'object' ? prefs.paramsByModel : {};
-    const visible = Array.isArray(prefs?.visible) ? prefs.visible.map(String).filter(Boolean) : null;
-    const hideAll = prefs?.hideAll === true;
-    const includeUnofficial = prefs?.includeUnofficial === true;
-    // 显示"未设置"且没有每模型参数 → 没有可存的东西，删文件更干净
-    if (visible === null && !hideAll && !includeUnofficial && !Object.keys(paramsByModel).length) {
-      if (existsSync(MODEL_PREFS_PATH)) unlinkSync(MODEL_PREFS_PATH);
-      return;
-    }
-    writeFileSync(MODEL_PREFS_PATH, `${JSON.stringify({ visible, hideAll, includeUnofficial, paramsByModel, at: Date.now() }, null, 2)}\n`, 'utf8');
-  } catch { /* 只读介质：本次运行生效，不持久化 */ }
+    const state = JSON.parse(readFileSync(file, 'utf8'));
+    return {
+      authFile: typeof state?.authFile === 'string' ? state.authFile : '',
+      desktopUid: typeof state?.authFileDesktopUid === 'string' ? state.authFileDesktopUid : '',
+    };
+  } catch {
+    return { authFile: '', desktopUid: '' };
+  }
 }
 
 /**
@@ -597,12 +657,22 @@ export function apply(ctx, rawConfig = {}) {
   // 桥的上游身份/超时/11128/预校验等逃生门：`.env` 里写了必须真的到桥。
   const bridgeExtraEnv = collectBridgeExtraEnv(projectEnv, process.env);
 
+  /*
+   * 与控制台共用账号选择：
+   *   - 面板切换过账号 → `.state.json` 里是钉住的快照，同时带「钉住那一刻桌面端是谁」；
+   *   - 没切换过 → 用 .env/配置里的 authFile（通常为空 = 桥自己探测默认登录文件）。
+   * 插件原先只传 config.authFile，导致 dsh 拉起的桥完全不认面板的选择（issue #6）。
+   */
+  const initialAccountState = readBridgeAccountState(projectRoot);
+  const followDesktop = Boolean(initialAccountState.authFile);
   const supervisor = new BridgeSupervisor({
     projectRoot: projectRoot || process.cwd(),
     host: config.bridgeHost,
     port: config.bridgePort,
     token: config.localToken,
-    authFile: config.authFile || '',
+    authFile: initialAccountState.authFile || config.authFile || '',
+    followAuthFile: followDesktop ? 'auto' : '',
+    followUid: followDesktop ? initialAccountState.desktopUid : '',
     autoCheckin: config.autoCheckin,
     autoStart: config.autoStart,
     nodePath: config.nodePath || undefined,
@@ -622,6 +692,33 @@ export function apply(ctx, rawConfig = {}) {
     token: config.localToken,
     timeoutMs: 8000,
   });
+
+  /**
+   * 把面板最新的账号选择同步给 supervisor。
+   *
+   * 面板切账号只重启了桥，插件进程里 `supervisor.authFile` 还是旧的；桥下次
+   * 挂掉时插件会用旧账号把它拉起来。每次 ensure/快照前重读一次 `.state.json`
+   * （小文件、毫秒级），保证「插件拉起的桥」和「控制台拉起的桥」选同一个账号。
+   */
+  const syncBridgeAccountConfig = () => {
+    const saved = readBridgeAccountState(projectRoot);
+    const fromState = Boolean(saved.authFile);
+    const nextAuthFile = fromState ? saved.authFile : (config.authFile || '');
+    const nextFollow = fromState ? 'auto' : '';
+    const nextUid = fromState ? saved.desktopUid : '';
+    const changed = supervisor.authFile !== nextAuthFile
+      || supervisor.followAuthFile !== nextFollow
+      || supervisor.followUid !== nextUid;
+    if (changed) {
+      supervisor.authFile = nextAuthFile;
+      supervisor.followAuthFile = nextFollow;
+      supervisor.followUid = nextUid;
+      log(`账号配置已同步：authFile=${nextAuthFile || '(默认)'}`
+        + `${nextFollow ? `, followDesktop=${nextUid || '(未记录)'}` : ''}`);
+    }
+    return changed;
+  };
+
   /** 控制台（数据界面）：插件只负责让它常驻 + 给入口，界面本身仍是它自己的。 */
   const consoleSupervisor = new ConsoleSupervisor({
     projectRoot: projectRoot || process.cwd(),
@@ -767,6 +864,8 @@ export function apply(ctx, rawConfig = {}) {
       // 对话失败时 reset() 会立刻作废缓存（见 stream 的 TRANSPORT 路径）。
       if (!config.autoStart) return client;
       if (state.readyPromise) return state.readyPromise;
+      // 桥挂了要重新拉起时，先读一次面板最新选择（切过账号后不能用旧快照）
+      syncBridgeAccountConfig();
       const now = Date.now();
       if (now - (state.bridgeAliveAt || 0) < config.bridgeAliveTtlMs) return client;
       const probe = await supervisor.probe();
@@ -1116,6 +1215,9 @@ export function apply(ctx, rawConfig = {}) {
   }
 
   async function snapshot({ signal, quota = false } = {}) {
+    // 面板切号只改 .state.json；插件每次取快照前同步，保证下面的探测/重启
+    // 用的是当前账号，而不是加载插件时的旧值。
+    syncBridgeAccountConfig();
     const probe = await supervisor.probe(signal);
     const consoleProbe = await consoleSupervisor.probe({ signal, cached: true });
     // 先对账号：身份变了就作废全部跨账号缓存（含模型目录）
@@ -1130,11 +1232,26 @@ export function apply(ctx, rawConfig = {}) {
     if (probe.state === 'running' && wantQuota) {
       try {
         quotaValue = await client.quota(signal);
-        // 身份没再变才入缓存（避免"取的是新账号、标记却是旧账号"的错位）
-        if (state.bridgeAccount === reconciliation.account) {
-          state.quotaCache = { at: Date.now(), value: quotaValue, error: '', account: reconciliation.account };
+        /*
+         * 桥现在会带回「这份余额属于哪个账号」。与探测到的桥账号不一致
+         * 说明取数期间又换号了 —— 宁可这一轮显示「—」，也不要把上一个
+         * 账号的余额挂在新账号下。
+         */
+        const quotaAccount = quotaValue && typeof quotaValue.account === 'string' ? quotaValue.account : '';
+        if (quotaAccount && reconciliation.account && quotaAccount !== reconciliation.account) {
+          quotaValue = null;
+          quotaError = '积分属于另一个账号，正在重新读取';
+          state.quotaCache = { at: 0, value: null, error: quotaError, account: null };
+        } else if (state.bridgeAccount === reconciliation.account) {
+          // 身份没再变才入缓存（避免"取的是新账号、标记却是旧账号"的错位）
+          state.quotaCache = {
+            at: Date.now(),
+            value: quotaValue,
+            error: '',
+            account: quotaAccount || reconciliation.account,
+          };
+          quotaError = '';
         }
-        quotaError = '';
       } catch (error) {
         quotaError = String(error?.message || error);
         if (state.bridgeAccount === reconciliation.account) {
@@ -1163,12 +1280,24 @@ export function apply(ctx, rawConfig = {}) {
     }
     const catalog = adapter.catalogCache.models;
     return {
-      bridge: { state: probe.state, health: probe.health || null, error: probe.error || '' },
+      bridge: {
+        state: probe.state,
+        health: probe.health || null,
+        error: probe.error || '',
+        /** 端口上的桥是不是当前插件里的脚本（旧进程会没有 build） */
+        build: probe.bridgeBuild || probe.health?.build || '',
+        expectedBuild: probe.expectedBuild || '',
+        staleBuild: probe.staleBuild === true,
+      },
       /** 控制台：数据界面在它那儿，插件只报状态与地址。 */
       console: {
         state: consoleProbe.state,
         url: consoleSupervisor.url,
         error: consoleProbe.error || '',
+        /** 端口上的页面是不是当前插件里的控制台代码（旧进程没有 meta） */
+        build: consoleProbe.build || '',
+        expectedBuild: consoleProbe.expectedBuild || '',
+        staleBuild: consoleProbe.staleBuild === true,
         /** true = 这个实例是插件拉起的（插件有权停它） */
         managed: consoleSupervisor.spawnedPid !== null,
         autoStart: config.consoleAutoStart,
@@ -1204,6 +1333,12 @@ export function apply(ctx, rawConfig = {}) {
       quotaAccount: state.quotaCache.account,
       /** 桥当前登录的账号（本快照探测到的）——重启 dsh 后可在面板核对它与 quotaAccount 一致 */
       bridgeAccount: state.bridgeAccount,
+      /**
+       * 桌面登录文件里当前的账号（桥 /health 顺带读出）。
+       * 与 bridgeAccount 不同 = 桌面已换号、但桥还在用插件账号另一条凭据
+       * （或反过来），面板要把这件事说清楚，不能让人以为两者是同一个钱包。
+       */
+      desktopAccount: probe.health?.credential?.desktopUserId || '',
       checkin: state.checkinCache.value,
       checkinError: state.checkinCache.error || '',
       checkinAccount: state.checkinCache.account,
@@ -1252,6 +1387,7 @@ export function apply(ctx, rawConfig = {}) {
                   : { kind: 'error', text: `控制台启动失败：${result.error}` };
               }
               if (arg === 'start' || arg === 'restart') {
+                syncBridgeAccountConfig();
                 const result = await supervisor.ensure({ restart: arg === 'restart', signal });
                 adapter.invalidate();
                 if (result.ok) adapter.warmup().then(() => notifyAdaptersUpdated(), () => notifyAdaptersUpdated());
@@ -1418,6 +1554,7 @@ export function apply(ctx, rawConfig = {}) {
   function enableWebSearch() {
     if (webSearchEnableInflight) return webSearchEnableInflight;
     webSearchEnableInflight = (async () => {
+      syncBridgeAccountConfig();
       const ready = await supervisor.ensure({ readyTimeoutMs: config.autoStartTimeoutMs });
       if (!ready.ok) throw new Error(ready.error || ready.state || 'bridge is not ready');
       /*
@@ -1497,6 +1634,7 @@ export function apply(ctx, rawConfig = {}) {
   if (config.autoStart) {
     void (async () => {
       try {
+        syncBridgeAccountConfig();
         const result = await supervisor.ensure({ readyTimeoutMs: config.autoStartTimeoutMs });
         state.lastEnsure = { at: Date.now(), ...result };
         if (result.ok) {

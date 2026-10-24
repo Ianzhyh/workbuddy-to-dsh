@@ -1022,6 +1022,60 @@ test('账号跟随：没有 uid 元数据的旧钉住按“快照账号 ≠ 桌�
   } finally { await bridge.stop(); rmSync(aux, { recursive: true, force: true }); }
 });
 
+test('/v1/quota：余额必须带上归属账号，供面板按身份作废缓存', { timeout: 90_000 }, async () => {
+  /*
+   * issue #6 的第二段现象：「账号显示新、积分还是旧的」。控制台/插件各自
+   * 有积分缓存；桌面端在客户端里换号时没有任何东西通知它们。只有让余额
+   * 自带 account，才能在下一次读取时发现「这份缓存不属于当前账号」。
+   */
+  const upstream = createServer((req, res) => {
+    const path = new URL(req.url, 'http://127.0.0.1').pathname;
+    if (path === '/v2/billing/meter/get-user-resource') {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      return res.end(JSON.stringify({
+        code: 0,
+        data: {
+          Response: {
+            Data: {
+              Accounts: [{
+                PackageName: 'stub-package',
+                CapacityType: 4,
+                CycleCapacitySize: 100,
+                CycleCapacityRemain: 42,
+              }],
+            },
+          },
+        },
+      }));
+    }
+    res.writeHead(404, { 'content-type': 'application/json' });
+    return res.end('{}');
+  });
+  await new Promise((r) => upstream.listen(0, '127.0.0.1', r));
+  const bridge = await startBridge(
+    {
+      CODEBUDDY_ENDPOINT: `http://127.0.0.1:${upstream.address().port}`,
+      WORKBUDDY_BILLING_BASE: `http://127.0.0.1:${upstream.address().port}`,
+    },
+    { auth: authFileFor('quota-account') },
+  );
+  try {
+    const res = await fetch(bridge.baseUrl + '/v1/quota', { headers: auth, signal: AbortSignal.timeout(15000) });
+    const body = await res.json();
+    assert.equal(res.status, 200);
+    assert.equal(body.ok, true);
+    assert.equal(body.total, 42);
+    assert.equal(body.account, 'quota-account', '/v1/quota 必须说明这份余额属于哪个账号');
+    assert.equal(body.source, 'desktop', '来源也要一并带回，面板才能解释账号与桌面文件为何不同');
+
+    const health = await (await fetch(bridge.baseUrl + '/health', { headers: auth })).json();
+    assert.match(String(health.build || ''), /^[0-9a-f]{16}$/, '/health 必须带构建指纹（启动方据此重启旧桥）');
+  } finally {
+    await bridge.stop();
+    upstream.close();
+  }
+});
+
 test('目录：上游 401 时必须刷新令牌后重试（不能把目录缩成 2-3 个精选模型）', { timeout: 90_000 }, async () => {
   /*
    * 凭据过期时目录端点回 401。旧实现把 401 当成「这个区域没有这个端点」跳过，
@@ -3635,6 +3689,7 @@ test('插件登录：设备码 → 加密落盘 → auto 回退 → 刷新轮换
   let bridge4 = null;
   let bridge5 = null;
   let bridge6 = null;
+  let bridgeFollow = null;
   try {
     // ① 设备码开始 → 第一次 poll 返回 pending → 第二次拿到令牌
     const device = await (await fetch(`${bridge1.baseUrl}/v1/auth/device`, {
@@ -3717,6 +3772,33 @@ test('插件登录：设备码 → 加密落盘 → auto 回退 → 刷新轮换
       assert.equal(refreshes, 1, '1 小时有效期内不应再次刷新');
     }
 
+    // ⑥b 来源=plugin，但用户在桌面客户端换号：桥必须跟随桌面（issue #6 的残留形态）
+    if (storeMode === 'dpapi') {
+      const followPath = join(credRoot, 'desktop-follow.info');
+      writeFileSync(followPath, JSON.stringify(authFileFor('uid-1')));
+      bridgeFollow = await startBridge({
+        ...sharedEnv,
+        WORKBUDDY_AUTH_FILE_FOLLOW: followPath,
+        WORKBUDDY_AUTH_FOLLOW_UID: 'uid-1',
+      }, { auth: authFileFor('uid-1') });
+      const health = async () => (await fetch(`${bridgeFollow.baseUrl}/health`, { headers: auth })).json();
+      const before = await health();
+      assert.equal(before.auth?.source, 'plugin', '来源偏好仍是 plugin（上一步登录造成）');
+      assert.equal(before.auth?.userId, 'uid-1');
+
+      writeFileSync(followPath, JSON.stringify(authFileFor('uid-new')));
+      let after = null;
+      const deadlineFollow = Date.now() + 10_000;
+      while (Date.now() < deadlineFollow) {
+        after = await health().catch(() => null);
+        if (after?.auth?.userId === 'uid-new' && after?.auth?.source === 'desktop') break;
+        await new Promise((r) => setTimeout(r, 150));
+      }
+      assert.equal(after?.auth?.userId, 'uid-new', '桌面换号后桥必须改读桌面，而不是继续用旧插件账号');
+      assert.equal(after?.auth?.source, 'desktop', '桌面换号是更新的用户意图：来源应从 plugin 跟随到 desktop');
+      assert.equal(after?.authFollow, true);
+    }
+
     // ⑦ auto：桌面端可用时仍然优先桌面端（老行为不变）
     // 先把来源偏好写回 auto —— 否则上一段的登录会把偏好留在 plugin。
     if (storeMode === 'dpapi') {
@@ -3784,11 +3866,11 @@ test('插件登录：设备码 → 加密落盘 → auto 回退 → 刷新轮换
       assert.equal(chatHeaders.at(-1)['x-ide-type'], 'WorkBuddy');
     }
   } finally {
-    for (const b of [bridge1, bridge2, bridge3, bridge4, bridge5, bridge6]) {
+    for (const b of [bridge1, bridge2, bridge3, bridge4, bridge5, bridge6, bridgeFollow]) {
       if (b) { try { await b.stop(); } catch { /* 忽略 */ } }
     }
     try { await stub.close(); } catch { /* 忽略 */ }
-    for (const b of [bridge1, bridge2, bridge3, bridge4, bridge5, bridge6]) {
+    for (const b of [bridge1, bridge2, bridge3, bridge4, bridge5, bridge6, bridgeFollow]) {
       if (b) { try { rmSync(b.dir, { recursive: true, force: true }); } catch { /* 忽略 */ } }
     }
     rmSync(credRoot, { recursive: true, force: true });

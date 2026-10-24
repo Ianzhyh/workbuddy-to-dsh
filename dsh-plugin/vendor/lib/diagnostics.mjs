@@ -6,6 +6,7 @@
  */
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
+import { createHash } from 'node:crypto';
 import {
   defaultExecutableCandidates,
   deriveAtRestKeyId,
@@ -32,6 +33,20 @@ export function decodeJwtClaims(token) {
     return JSON.parse(Buffer.from(String(token).split('.')[1], 'base64url').toString('utf8'));
   } catch {
     return {};
+  }
+}
+
+/**
+ * 本地脚本的内容指纹（与桥 `/health.build` 同一算法）。
+ *
+ * 用途：判断「端口上正在跑的那个进程」是不是当前磁盘上的代码。升级后
+ * 旧进程继续服务时，面板/诊断可以据此说清原因，而不是把旧行为当成新版本。
+ */
+export function fileBuildHash(path) {
+  try {
+    return createHash('sha256').update(readFileSync(path)).digest('hex').slice(0, 16);
+  } catch {
+    return '';
   }
 }
 
@@ -427,7 +442,15 @@ const QUOTA_FAIL_TTL_MS = 15 * 1000;
  * 超过这个时间就先回 null（页面显示「—」），请求继续在后台跑，下次轮询就能拿到。
  */
 const QUOTA_BLOCK_MS = 3000;
-let quotaCache = { at: 0, ttl: 0, value: null };
+/**
+ * 积分缓存。`account` = 这份余额属于哪个账号（桥的 `/v1/quota` 现在会带回）。
+ *
+ * 为什么要按账号记账：换号可以由**桌面客户端**发起（桥自动跟随），控制台
+ * 根本收不到任何通知。只清缓存不够 —— 必须在下一次读取时知道「缓存里的
+ * 余额不是当前桥账号的」，否则会继续把上一个账号的余额显示在新账号下面
+ * （issue #6 的第二段现象）。
+ */
+let quotaCache = { at: 0, ttl: 0, value: null, account: '' };
 /** 同一时刻只允许一个上游请求在跑：多次轮询不会叠加成 N 个并发计费查询。 */
 let quotaInflight = null;
 /**
@@ -450,35 +473,56 @@ let quotaGeneration = 0;
  * 「上一代」的 promise。
  */
 export function invalidateQuotaCache() {
-  quotaCache = { at: 0, ttl: 0, value: null };
+  quotaCache = { at: 0, ttl: 0, value: null, account: '' };
   quotaGeneration += 1;
   quotaInflight = null;
 }
 
 /** 真正去上游取一次（带 in-flight 去重）。永不 reject，失败按 null 缓存。 */
-function fetchQuota(timeoutMs) {
+function fetchQuota(timeoutMs, expectedAccount = '') {
   if (quotaInflight) return quotaInflight;
   const gen = quotaGeneration;
-  quotaInflight = (async () => {
+  const run = (async () => {
     let value = null;
     try {
       const res = await bridgeFetch('/v1/quota', timeoutMs);
       if (res.ok) {
         const body = await res.json();
-        if (body && body.ok) value = body;
+        if (body && body.ok) {
+          /*
+           * 桥带回了「这份余额属于谁」。与调用方期望的账号不一致时丢弃 ——
+           * 典型时序：轮询在飞 → 桌面端换号 → 响应回来时已经是新账号。
+           * 不比对的话，旧账号的余额会被写成新账号的缓存。
+           */
+          const account = typeof body.account === 'string' ? body.account : '';
+          if (expectedAccount && account && account !== expectedAccount) {
+            value = null;
+          } else {
+            value = body;
+          }
+        }
       }
     } catch {
       /* 上游不可用：按失败缓存，页面显示「—」而不是卡住 */
     }
     // 只有自己这一代仍是当前代才写回：作废过的结果不许覆盖新缓存
     if (gen === quotaGeneration) {
-      quotaCache = { at: Date.now(), ttl: value ? QUOTA_TTL_MS : QUOTA_FAIL_TTL_MS, value };
+      quotaCache = {
+        at: Date.now(),
+        ttl: value ? QUOTA_TTL_MS : QUOTA_FAIL_TTL_MS,
+        value,
+        account: value && typeof value.account === 'string' ? value.account : '',
+      };
     }
     return value;
   })();
-  // finally 里清空句柄，但**返回的是同一个 promise**，所以等待方仍能拿到结果
-  quotaInflight = quotaInflight.finally(() => { quotaInflight = null; });
-  return quotaInflight;
+  quotaInflight = run;
+  /*
+   * 只清自己那一个句柄：作废（换号/签到）之后可能已经发起新一代请求，
+   * 旧请求结束时不能把新句柄清掉，否则并发去重会漏。
+   */
+  run.finally(() => { if (quotaInflight === run) quotaInflight = null; });
+  return run;
 }
 
 /**
@@ -496,13 +540,22 @@ function fetchQuota(timeoutMs) {
  * 失败只缓存 15 秒（成功 60 秒）：上游故障时既不会每次轮询都卡满超时，
  * 恢复后也能很快反映出来。
  */
-export async function bridgeQuota({ force = false } = {}) {
+export async function bridgeQuota({ force = false, expectedAccount = '' } = {}) {
+  const wanted = typeof expectedAccount === 'string' ? expectedAccount.trim() : '';
+  /*
+   * 桌面端换号不会通知控制台；如果缓存里记着 A 账号，而桥现在服务的是 B，
+   * 直接返回缓存就等于把 A 的余额挂在 B 头上。这里在读取前先按账号作废，
+   * 后续走「冷启动」分支取 B 的值（最多等 QUOTA_BLOCK_MS，拿不到就显示 —）。
+   */
+  if (!force && wanted && quotaCache.at > 0 && quotaCache.account && quotaCache.account !== wanted) {
+    invalidateQuotaCache();
+  }
   const age = Date.now() - quotaCache.at;
   if (!force && age < quotaCache.ttl) return quotaCache.value;
 
   // 有旧值就先给旧的 —— 这是「不让慢的上游拖住页面」的关键一步
-  if (!force && quotaCache.at > 0) {
-    fetchQuota(20000).catch(() => {});
+  if (!force && quotaCache.at > 0 && !(wanted && quotaCache.account && quotaCache.account !== wanted)) {
+    fetchQuota(20000, wanted).catch(() => {});
     return quotaCache.value;
   }
 
@@ -510,7 +563,7 @@ export async function bridgeQuota({ force = false } = {}) {
   const limit = force ? 20000 : QUOTA_BLOCK_MS;
   const timedOut = Symbol('timeout');
   const result = await Promise.race([
-    fetchQuota(20000),
+    fetchQuota(20000, wanted),
     new Promise((resolve) => { setTimeout(() => resolve(timedOut), limit); }),
   ]);
   return result === timedOut ? null : result;

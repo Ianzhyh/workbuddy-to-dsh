@@ -5,6 +5,7 @@
  * 因此页面看到的结论与 `tools/doctor.mjs` 完全一致。
  */
 import { spawn, spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { createServer } from 'node:http';
 import { closeSync, existsSync, openSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
 import { join, resolve, sep } from 'node:path';
@@ -26,6 +27,7 @@ import {
   bridgeSetAuthSource,
   credentialStatus,
   diagnose,
+  fileBuildHash,
   invalidateQuotaCache,
   listAccountFiles,
   listAccounts,
@@ -106,6 +108,7 @@ function originAllowed(req) {
 
 // 控制台自身的版本信息（诊断报告要用）。读一次 package.json 就缓存，不每次请求都碰磁盘；
 // 文件缺失或损坏时降级为 '?'，绝不让 /api/overview 因为读不到版本而 500。
+const STARTED_AT = Date.now();
 let consoleVersionCache = null;
 function consoleVersion() {
   if (consoleVersionCache !== null) return consoleVersionCache;
@@ -116,6 +119,32 @@ function consoleVersion() {
     consoleVersionCache = '?';
   }
   return consoleVersionCache;
+}
+
+/**
+ * 控制台自身的构建指纹（服务端 + 页面 + 样式）。
+ *
+ * 与桥同理：插件升级后，旧的 8792 进程会继续提供旧页面/旧接口。页面里
+ * 嵌这个指纹，插件探活时就能判断「端口上的控制台是不是当前磁盘代码」，
+ * 不一致时自动重启（issue #5 的保存回退 / #6 的账号卡片都可能因旧页面而复现）。
+ */
+let consoleBuildCache = null;
+function consoleBuild() {
+  if (consoleBuildCache !== null) return consoleBuildCache;
+  try {
+    const hash = createHash('sha256');
+    for (const file of [
+      fileURLToPath(import.meta.url),
+      join(config.paths.dashboardPublic, 'index.html'),
+      join(config.paths.dashboardPublic, 'style.css'),
+    ]) {
+      hash.update(readFileSync(file));
+    }
+    consoleBuildCache = hash.digest('hex').slice(0, 16);
+  } catch {
+    consoleBuildCache = '';
+  }
+  return consoleBuildCache;
 }
 
 /**
@@ -706,8 +735,18 @@ async function startBridgeAndWait(opts = {}) {
 
   // 已经在跑且账号一致的桥：直接复用，不做注定失败的重复启动
   const before = await bridgeHealth();
+  const expectedBuild = fileBuildHash(config.paths.bridgeScript);
   if (before.running && authFileMatches(before.body, expected)) {
-    return { started: true, reused: true, pid: before.body?.pid ?? null, health: before.body, authFile: expected };
+    /*
+     * 升级只换磁盘脚本，后台的桥仍是旧进程。构建不一致时必须重启一次，
+     * 否则用户升级后继续被旧逻辑服务（思考档位/换号跟随/目录判定全是旧的）。
+     */
+    const runningBuild = before.body?.build || '';
+    if (!expectedBuild || runningBuild === expectedBuild) {
+      return { started: true, reused: true, pid: before.body?.pid ?? null, health: before.body, authFile: expected };
+    }
+    console.log(`桥构建已变化（${runningBuild || '旧版本'} -> ${expectedBuild}），重启桥以加载新代码`);
+    await stopBridgeAndWait();
   }
 
   const result = startBridge(opts);
@@ -765,9 +804,19 @@ async function startBridgeAndWait(opts = {}) {
  */
 async function applyAccountPinCorrection(pin) {
   if (!pin?.changed) return { applied: false, restarted: false, error: null };
+  /*
+   * 钉住状态变了 = 桥可能换了账号。无论这次是否真的重启桥，积分缓存都必须
+   * 作废：否则页面会把上一个账号的余额继续显示在新账号下（issue #6）。
+   */
+  invalidateQuotaCache();
   const health = await bridgeHealth();
   if (!health.running) return { applied: false, restarted: false, error: null };
-  const running = health.body?.authFilePinned || health.body?.authFile;
+  /*
+   * 看**当前生效文件**：桥可能已经跟随桌面换号（authFile=桌面文件），
+   * 此时 authFilePinned 还是旧快照但桥早就不读它了。拿 pinned 判断会误重启
+   * 一个已经正确的桥；只有当前生效文件仍是旧钉住文件时才需要重启。
+   */
+  const running = health.body?.authFile || health.body?.authFilePinned;
   if (pin.previousPin && normPath(running) !== normPath(pin.previousPin)) {
     return { applied: false, restarted: false, error: null };
   }
@@ -934,7 +983,18 @@ function serveStatic(res, pathname) {
     'Cache-Control': 'no-store',
     ...SECURITY_HEADERS,
   });
-  res.end(readFileSync(full));
+  let body = readFileSync(full);
+  /*
+   * 首页注入构建指纹。旧进程的页面没有这个标记（或标记不同），插件据此
+   * 判断 8792 上的是不是当前代码，并在升级后自动重启控制台。
+   */
+  if (rel === 'index.html') {
+    const build = consoleBuild();
+    if (build) {
+      body = Buffer.from(body.toString('utf8').replace('__WB_BUILD__', build), 'utf8');
+    }
+  }
+  res.end(body);
 }
 
 // ── 路由 ────────────────────────────────────────────────────────────────
@@ -1006,14 +1066,55 @@ const server = createServer(async (req, res) => {
       });
     }
 
+    /*
+     * 控制台自述版本/构建 —— 插件用它判断 8792 上的进程是不是当前代码。
+     * 只读且不含任何凭据；旧版本没有这个路由（404），插件按“旧构建”处理。
+     */
+    if (route === '/api/version' && (req.method === 'GET' || req.method === 'HEAD')) {
+      return sendJson(res, 200, {
+        ok: true,
+        version: consoleVersion(),
+        build: consoleBuild(),
+        pid: process.pid,
+        startedAt: new Date(STARTED_AT).toISOString(),
+      });
+    }
+
     if (route === '/api/overview') {
       // 只包含页面真正使用的字段：**不带** model 目录（另有 /api/models），
       // 桥冷启动时抓目录要串行打两个上游端点，不能让徽章陪着一起等。
-      const [health, creds, quota] = await Promise.all([
-        bridgeHealth(),
-        credentialStatus(),
-        bridgeQuota(),
-      ]);
+      /*
+       * 先取 /health（本地、毫秒级），再让积分按**桥当前账号**取。
+       * 顺序不能反过来：桌面端换号后，桥的账号是唯一权威；拿 `effectiveAuthFile`
+       * （.state.json 里的钉住文件）去配积分会出现「账号新、余额旧」（issue #6）。
+       */
+      const health = await bridgeHealth();
+      const bridgeAccount = health.body?.auth?.userId || '';
+      let creds = await credentialStatus();
+      /*
+       * 桥已经跟随桌面换号（来源=desktop），但 `.state.json` 还钉着旧快照：
+       * 这里顺手校正一次，别让「账号页/概览」继续显示旧钉住。只在账号确实
+       * 不一致时做（listAccountFiles 要启动客户端取密钥，不能每轮都跑）。
+       */
+      if (health.running
+        && health.body?.auth?.source === 'desktop'
+        && bridgeAccount
+        && creds.active?.userId
+        && creds.active.userId !== bridgeAccount) {
+        try {
+          const pin = await reconcileAccountPin();
+          if (pin.changed) {
+            await applyAccountPinCorrection(pin);
+            creds = await credentialStatus();
+          }
+        } catch (err) {
+          console.warn(`概览校正账号钉住失败：${err.message}`);
+        }
+      }
+      // 积分在账号校正之后再取：即使桥刚被重启，也拿当前这个账号的余额。
+      const quota = await bridgeQuota({ expectedAccount: bridgeAccount });
+      const expectedBuild = fileBuildHash(config.paths.bridgeScript);
+      const runningBuild = health.body?.build || '';
       const dsh = readDshStatus();
       sendJson(res, 200, {
         bridge: {
@@ -1024,6 +1125,15 @@ const server = createServer(async (req, res) => {
           endpoint: config.bridge.url,
           error: health.error || null,
           upstream: health.body?.auth?.endpoint || '',
+          // 桥**实际生效**的账号与来源。页面必须用它来显示「账号」，
+          // 不能拿桌面登录文件代替（来源可能是 plugin，二者会不同）。
+          auth: health.body?.auth || null,
+          credentialSource: health.body?.credential?.source || health.body?.auth?.source || '',
+          desktopUserId: health.body?.credential?.desktopUserId || '',
+          build: runningBuild,
+          expectedBuild,
+          // 空 build = 旧桥（没有这个字段）；与本地脚本不一致 = 升级后旧进程还在跑
+          staleBuild: !!(expectedBuild && runningBuild !== expectedBuild),
           authFile: health.body?.authFile || effectiveAuthFile(),
           selectedAuthFile: effectiveAuthFile(),
           // 桥自述的进程信息：用于在页面上显示 PID 与运行时长
@@ -1054,7 +1164,7 @@ const server = createServer(async (req, res) => {
           autoCheckinEnabled: health.body?.autoCheckinEnabled === true,
         },
         // 控制台自身版本：诊断报告头部要用，避免用户报障时说不清是哪个版本
-        console: { version: consoleVersion(), node: process.version },
+        console: { version: consoleVersion(), build: consoleBuild(), pid: process.pid, node: process.version },
         credentials: creds,
         quota,
         dsh: {
@@ -1919,18 +2029,13 @@ function startConsoleServer() {
       console.warn(`账号钉住状态校正失败（不影响启动）：${err.message}`);
     }
 
-    // 桥若已在跑就直接复用，避免重复绑定端口
-    const existing = await bridgeHealth();
-    if (existing.running) {
-      console.log(`桥地址            ->  ${config.bridge.url}/v1（已在运行，复用）`);
-      console.log('仅监听回环地址，Ctrl+C 退出。');
-      return;
-    }
-
-    console.log('正在启动桥服务…');
+    /*
+     * 桥若已在跑就直接复用；但从上一个版本升级后，端口上的进程是**旧代码**，
+     * 必须按构建指纹重启一次（startBridgeAndWait 内部处理）。
+     */
     const result = await startBridgeAndWait();
     if (result.started) {
-      console.log(`桥地址            ->  ${config.bridge.url}/v1（已就绪，PID ${result.pid}）`);
+      console.log(`桥地址            ->  ${config.bridge.url}/v1（${result.reused ? '已在运行，复用' : '已就绪'}，PID ${result.pid}）`);
     } else {
       console.log(`桥启动失败        ->  ${result.error || result.warning || '未知原因'}`);
       console.log('可在页面上点「启动桥服务」重试。');

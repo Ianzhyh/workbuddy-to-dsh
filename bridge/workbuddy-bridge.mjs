@@ -37,6 +37,26 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { spawn } from 'node:child_process';
 import { waitDrain } from './wait-drain.mjs';
 
+/**
+ * 本桥源码的构建指纹。
+ *
+ * 为什么需要它：桥是**常驻后台进程**，升级插件/控制台只会换磁盘上的脚本，
+ * 已经在跑的那一个仍然是旧代码。v1.9.6 就踩到了这个坑 —— 插件已经升级，
+ * 但旧桥继续服务，于是目录/思考档位/换号逻辑全是旧的，而面板里看不出原因。
+ *
+ * 指纹取脚本内容（不是 mtime：拷贝/安装会改 mtime，内容却没变；反过来
+ * 内容变了 mtime 也可能被保留）。`/health.build` 暴露它，启动方拿本地脚本
+ * 算出期望值，不一致就自动重启桥。
+ */
+const BRIDGE_SELF_PATH = fileURLToPath(import.meta.url);
+const BRIDGE_BUILD = (() => {
+  try {
+    return createHash('sha256').update(readFileSync(BRIDGE_SELF_PATH)).digest('hex').slice(0, 16);
+  } catch {
+    return '';
+  }
+})();
+
 // ── Static constants (values match the desktop app / official extension) ──
 /**
  * 出站客户端身份。上游按 User-Agent / X-IDE-* / X-Product-Version 校验调用
@@ -875,8 +895,7 @@ const AUTH_DIRS = [
  * serve the wrong account. config.mjs resolves the same way, so both entry
  * points agree.
  */
-function resolveAuthPath() {
-  if (process.env.WORKBUDDY_AUTH_FILE) return process.env.WORKBUDDY_AUTH_FILE;
+function defaultAuthPath() {
   for (const dir of AUTH_DIRS) {
     const preferred = join(dir, 'workbuddy-desktop.info');
     if (existsSync(preferred)) return preferred;
@@ -896,6 +915,11 @@ function resolveAuthPath() {
   return join(AUTH_DIRS[0] || HOME_FOR_AUTH || process.cwd(), 'workbuddy-desktop.info');
 }
 
+function resolveAuthPath() {
+  if (process.env.WORKBUDDY_AUTH_FILE) return process.env.WORKBUDDY_AUTH_FILE;
+  return defaultAuthPath();
+}
+
 /*
  * 多账号切换时，控制台会把桥钉在某个 `.info` 快照上（WORKBUDDY_AUTH_FILE）。
  * 但用户随后在 WorkBuddy 客户端里换号，客户端覆盖的是**它自己的默认登录文件**，
@@ -908,7 +932,16 @@ function resolveAuthPath() {
  */
 const AUTH_FILE_FOLLOW = (() => {
   const raw = String(process.env.WORKBUDDY_AUTH_FILE_FOLLOW || '').trim();
-  return raw && isAbsolute(raw) ? raw : '';
+  if (!raw) return '';
+  /*
+   * `auto` = 跟随客户端自己的默认登录文件。
+   *
+   * 插件拉起桥时只知道 `.state.json` 里的钉住快照，不应该自己再复制一份
+   * 「默认登录文件在哪」的探测逻辑（两套规则迟早漂移）。让桥在这里解析，
+   * 与控制台/配置共用同一套 AUTH_DIRS 顺序。
+   */
+  if (raw.toLowerCase() === 'auto') return defaultAuthPath();
+  return isAbsolute(raw) ? raw : '';
 })();
 const AUTH_FOLLOW_UID = String(process.env.WORKBUDDY_AUTH_FOLLOW_UID || '').trim();
 const AUTH_PINNED_PATH = resolveAuthPath();
@@ -1545,6 +1578,87 @@ async function syncAuthPathFollow() {
   }
 }
 
+/**
+ * 桌面端换号时，把来源从 plugin 带回桌面。
+ *
+ * 真实场景：用户以前用浏览器登录过插件账号（来源因此固定为 plugin），
+ * 后来在 WorkBuddy 客户端里换号。旧实现只让 desktop 来源跟随，于是面板
+ * 显示旧账号/旧余额，桌面登录文件却是新账号 —— issue #6 的「账号是新的、
+ * 积分是旧的」。
+ *
+ * 规则：**客户端换号是更新的用户意图**，桥跟随桌面；用户若随后在面板里
+ * 主动选回「仅插件登录」，记下当前桌面 UID，不再反复抢回来。桌面下一次
+ * 换号时再跟随。环境变量锁定来源时永远不抢。
+ *
+ * 只在 AUTH_FOLLOW_UID（钉住那一刻的桌面账号）与当前桌面账号不同的时候
+ * 触发；单纯令牌刷新（UID 不变）不会改变来源。
+ */
+let adoptedDesktopFollowUid = '';
+const authAdoptProbe = { path: '', mtimeMs: -1, size: -1, uid: '', error: '' };
+async function probeAuthFileUid(path) {
+  if (!path) return '';
+  const probe = path === AUTH_FILE_FOLLOW ? authFollowProbe : authAdoptProbe;
+  try {
+    const st = statSync(path);
+    if (probe.path === path
+      && probe.mtimeMs === st.mtimeMs
+      && probe.size === st.size) {
+      return probe.uid;
+    }
+    const uid = await fileAccountUid(path);
+    Object.assign(probe, {
+      path, mtimeMs: st.mtimeMs, size: st.size, uid, error: '',
+    });
+    return uid;
+  } catch (e) {
+    probe.error = String(e?.message || e).slice(0, 160);
+    return '';
+  }
+}
+
+/** 没有钉住快照时，插件来源也能跟随“客户端自己的默认登录文件”。 */
+function pluginFollowPath() {
+  if (AUTH_FILE_FOLLOW) return AUTH_FILE_FOLLOW;
+  const candidate = defaultAuthPath();
+  const norm = (p) => String(p || '').replace(/\\/g, '/').toLowerCase();
+  // 显式 WORKBUDDY_AUTH_FILE 指向别的快照时，不越过用户的显式选择
+  return norm(AUTH_PINNED_PATH) === norm(candidate) ? candidate : '';
+}
+
+async function probeFollowUidForAdopt() {
+  return probeAuthFileUid(pluginFollowPath());
+}
+
+async function adoptDesktopAfterPluginSwitch() {
+  if (CREDENTIAL_SOURCE_PINNED) return false;
+  const followPath = pluginFollowPath();
+  if (!followPath) return false;
+  if ((await effectiveSource()) !== 'plugin') return false;
+  const followUid = await probeAuthFileUid(followPath);
+  if (!followUid) return false;
+  if (adoptedDesktopFollowUid === followUid) return false;
+  /*
+   * 基线 = 「用户选择插件登录时，桌面端是哪个账号」。
+   *   - 钉住过快照：`.state.json` 记录了那一刻的桌面 UID；
+   *   - 新版本登录/切换来源：source.json 记录了 desktopUid；
+   *   - 老 source.json 没有基线：**只记录当前值，不自动切钱包** ——
+   *     没有证据区分“用户刚换了桌面号”和“桌面刚刷新了令牌”，宁可不猜。
+   */
+  let baseline = AUTH_FOLLOW_UID || credentialSourceMeta.desktopUid;
+  if (!baseline) {
+    try { await setSourcePreference('plugin'); } catch { /* 写不了就仅进程内记住 */ }
+    return false;
+  }
+  if (String(followUid) === String(baseline)) return false;
+  await setSourcePreference('desktop');
+  memoryAuth = null;
+  authFileCache = null;
+  invalidateCatalogCache();
+  adoptedDesktopFollowUid = String(followUid);
+  log('desktop account switched; following desktop instead of the plugin credential', followUid);
+  return true;
+}
+
 async function readStoredAuth() {
   // 先确认"桌面端是否换号"：换号后必须立刻改读桌面登录文件，
   // 否则下面 memoryAuth/authFileCache 会继续供旧账号（issue #6）。
@@ -1644,6 +1758,12 @@ const CREDENTIAL_FAILOVER = (() => {
 })();
 /** 未用 env 锁定时的运行时选择（登录成功后切到 plugin，面板可切回）。 */
 let credentialSourcePreference = null;
+/**
+ * source.json 里除 `source` 之外的元数据：
+ *   - `desktopUid`：选择插件登录那一刻桌面端的账号（换号基线）；
+ *   - `updatedAt`：选择时刻（诊断用）。
+ */
+let credentialSourceMeta = { desktopUid: '', updatedAt: 0 };
 const CREDENTIAL_STORE_MODE = (() => {
   const raw = String(process.env.WORKBUDDY_CREDENTIAL_STORE || '').trim().toLowerCase();
   if (raw === 'memory' || raw === 'dpapi') return raw;
@@ -1684,6 +1804,10 @@ async function effectiveSource() {
   try {
     const parsed = JSON.parse(readFileSync(credentialSourceFile(), 'utf8'));
     if (VALID_SOURCES.has(parsed?.source)) stored = parsed.source;
+    credentialSourceMeta = {
+      desktopUid: typeof parsed?.desktopUid === 'string' ? parsed.desktopUid : '',
+      updatedAt: Date.parse(parsed?.updatedAt) || 0,
+    };
   } catch { /* 没有就是 auto */ }
   /*
    * 上次选了 plugin，但凭据已经不存在（memory 模式重启 / 被手动删掉）：
@@ -1708,13 +1832,27 @@ async function setSourcePreference(source) {
       : 'no plugin credential yet; sign in first');
   }
   credentialSourcePreference = value;
+  /*
+   * 用户在面板里主动选「仅插件登录」：记住**当前桌面账号**作为换号基线，
+   * 避免下一次请求又被自动抢回桌面；桌面下一次换号仍会跟随。
+   */
+  let desktopUid = '';
+  if (value === 'plugin') {
+    adoptedDesktopFollowUid = await probeFollowUidForAdopt();
+    desktopUid = adoptedDesktopFollowUid || '';
+  }
+  credentialSourceMeta = { desktopUid, updatedAt: Date.now() };
   // 来源变了 → 账号/区域可能也变了，模型目录必须重取（后台，不阻塞本请求）。
   invalidateCatalogCache();
   if (credentialStoreMode() === 'memory') return;
   try {
     await withCredentialLock(async () => {
       ensureCredentialDir();
-      writeFileAtomic(credentialSourceFile(), JSON.stringify({ source: value, updatedAt: new Date().toISOString() }, null, 2), 0o600);
+      writeFileAtomic(credentialSourceFile(), JSON.stringify({
+        source: value,
+        updatedAt: new Date().toISOString(),
+        ...(desktopUid ? { desktopUid } : {}),
+      }, null, 2), 0o600);
     });
   } catch (e) {
     // 持久化失败不影响本次进程内的选择（下次启动回到 auto）
@@ -2050,12 +2188,20 @@ function apiKeyAuth() {
 
 async function resolveAuth() {
   if (API_KEY) return apiKeyAuth();
+  /*
+   * 每次解析先确认桌面端是否换号。原先只有 `readStoredAuth()` 会做这件事，
+   * 所以来源是 plugin 时永远发现不了桌面换号（issue #6 的另一半）。
+   */
+  await syncAuthPathFollow();
   const configured = await effectiveSource();
   if (configured === 'api-key') {
     throw new Error('credential source is api-key but CODEBUDDY_API_KEY is not set');
   }
   if (configured === 'desktop') return await readStoredAuth();
-  if (configured === 'plugin') return await readPluginAuth();
+  if (configured === 'plugin') {
+    if (await adoptDesktopAfterPluginSwitch()) return await readStoredAuth();
+    return await readPluginAuth();
+  }
   // auto：桌面端优先（老行为不变），仅在**本地不可用**时回退到插件登录。
   // 上游 401 不会触发中途换号 —— 账户可预测性优先（见 SECURITY 文档）。
   let desktopError;
@@ -7777,6 +7923,18 @@ async function handleRequest(req, res) {
         const a = await resolveAuth();
         region = upstreamRegion(a);
         credential.source = a.source;
+        /*
+         * 桌面登录文件当前是谁：用于面板/插件对照「桥实际使用的账号」。
+         * 来源是 plugin 时 `a` 是插件账号，必须再读一次桌面文件才能发现
+         * 「桌面已换号、桥还在用旧账号」这种不一致（issue #6）。
+         */
+        try {
+          const desktop = a.source === 'desktop' ? a : await readStoredAuth();
+          credential.desktopUserId = desktop.userId || '';
+        } catch (desktopError) {
+          credential.desktopUserId = '';
+          credential.desktopError = String(desktopError?.message || desktopError).slice(0, 200);
+        }
         try {
           credential.pluginCount = credentialStoreMode() === 'memory'
             ? memoryCredentials.size
@@ -7793,6 +7951,7 @@ async function handleRequest(req, res) {
         // 带上 pid：未登录/凭据异常时 stop() 也要能停掉自己的进程（否则用户点停止只会得到一个假错误）
         return json(res, 503, {
           ok: false, error: e.message, authFile: AUTH_PATH, pid: process.pid,
+          build: BRIDGE_BUILD,
           ...(AUTH_PATH !== AUTH_PINNED_PATH ? { authFilePinned: AUTH_PINNED_PATH, authFollow: true } : {}),
           startedAt: new Date(STARTED_AT).toISOString(),
           credential: await credentialStatus(),
@@ -7805,6 +7964,7 @@ async function handleRequest(req, res) {
       return json(res, 200, {
         ok: true,
         pid: process.pid,
+        build: BRIDGE_BUILD,
         startedAt: new Date(STARTED_AT).toISOString(),
         uptimeMs: Date.now() - STARTED_AT,
         auth,
@@ -8028,8 +8188,21 @@ async function handleRequest(req, res) {
 
     if (url.pathname === '/v1/quota') {
       try {
-        const quota = await fetchQuota(await resolveAuth());
-        return json(res, 200, { ok: true, ...quota });
+        /*
+         * 把「这份余额属于哪个账号」一并带回。
+         *
+         * 控制台/插件都有自己的积分缓存；换号后如果只比余额数字，根本看不出
+         * 旧账号的值还挂着（issue #6 的「账号新、余额旧」）。带 account 后，
+         * 缓存可以按身份作废，而不是靠某个进程记得去 invalidate。
+         */
+        const auth = await resolveAuth();
+        const quota = await fetchQuota(auth);
+        return json(res, 200, {
+          ok: true,
+          ...quota,
+          account: auth.userId || auth.uid || '',
+          source: auth.source,
+        });
       } catch (e) {
         return json(res, 502, { ok: false, error: e.message });
       }

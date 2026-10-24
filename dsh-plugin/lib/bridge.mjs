@@ -10,11 +10,27 @@
  * 本模块不 import 任何 dsh API，可被单元测试独立驱动。
  */
 import { spawn } from 'node:child_process';
-import { existsSync, mkdirSync, openSync, closeSync, readSync, renameSync, statSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { existsSync, mkdirSync, openSync, closeSync, readSync, readFileSync, renameSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 
 /** 默认的桥脚本相对项目根的位置。 */
 export const BRIDGE_SCRIPT_REL = join('bridge', 'workbuddy-bridge.mjs');
+
+/**
+ * 桥源码的内容指纹（与桥 `/health.build` 同一算法）。
+ *
+ * 升级只换磁盘脚本，不会杀已经在跑的后台桥进程。没有这道比对，用户升级后
+ * 会继续被**旧代码**服务：目录/思考档位/换号跟随全是旧的，而版本号看起来
+ * 已经是最新（issue #5 的六档位、issue #6 的换号失效都是这个形态）。
+ */
+export function bridgeBuildHash(path) {
+  try {
+    return createHash('sha256').update(readFileSync(path)).digest('hex').slice(0, 16);
+  } catch {
+    return '';
+  }
+}
 
 /**
  * 桥日志滚动上限（与控制台同一口径，见 dashboard/server.mjs）。
@@ -300,6 +316,13 @@ export class BridgeSupervisor {
     this.token = options.token;
     /** 登录文件：来自 .env / 配置；多账号时必须显式指定，否则桥会自己探测。 */
     this.authFile = options.authFile || '';
+    /**
+     * 自动跟随桌面换号：`followAuthFile` 通常是 `'auto'`（由桥解析默认登录文件），
+     * `followUid` 是钉住那一刻该文件里的账号。与控制台拉起桥时注入了同一组
+     * 变量，两套启动路径的行为才不会漂移（issue #6）。
+     */
+    this.followAuthFile = options.followAuthFile || '';
+    this.followUid = options.followUid || '';
     /** 自动签到开关（undefined = 用桥自己的默认值）。 */
     this.autoCheckin = options.autoCheckin;
     this.autoStart = options.autoStart;
@@ -325,6 +348,36 @@ export class BridgeSupervisor {
   }
 
   /**
+   * 当前磁盘上桥脚本的指纹（带 stat 缓存：桥脚本几乎不变，不能每次 probe 都读 500KB）。
+   * 文件不存在或读不出时返回空串 —— 此时**不做**构建比对，避免测试/未安装环境误重启。
+   */
+  expectedBuild() {
+    try {
+      const st = statSync(this.scriptPath);
+      const cache = this.buildCache || (this.buildCache = { at: 0, mtimeMs: -1, size: -1, hash: '' });
+      if (cache.mtimeMs === st.mtimeMs && cache.size === st.size) return cache.hash;
+      const hash = bridgeBuildHash(this.scriptPath);
+      Object.assign(cache, { mtimeMs: st.mtimeMs, size: st.size, hash });
+      return hash;
+    } catch {
+      return '';
+    }
+  }
+
+  /**
+   * 端口上的桥与当前脚本是否同一构建。
+   *
+   * 旧桥没有 `/health.build` → 视为不一致（必须重启一次才能把新逻辑装进去）。
+   * 本地脚本读不出（测试桩 / 脚本丢了）→ 无法判断，不触发重启。
+   */
+  buildDiff(health) {
+    const expected = this.expectedBuild();
+    if (!expected) return { expected: '', actual: String(health?.build || ''), stale: false };
+    const actual = String(health?.build || '');
+    return { expected, actual, stale: actual !== expected };
+  }
+
+  /**
    * 探测桥状态。**不抛错**——把失败翻译成状态。
    * @returns {Promise<{state: 'running'|'stopped'|'unauthenticated'|'degraded'|'unauthorized'|'foreign', health?: object, error?: string}>}
    */
@@ -334,7 +387,14 @@ export class BridgeSupervisor {
       if (!health || health.ok !== true || typeof health.pid !== 'number') {
         return { state: 'foreign', error: '端口上有一个 HTTP 服务，但它不是 workbuddy-bridge' };
       }
-      return { state: 'running', health };
+      const diff = this.buildDiff(health);
+      return {
+        state: 'running',
+        health,
+        bridgeBuild: diff.actual,
+        expectedBuild: diff.expected,
+        staleBuild: diff.stale,
+      };
     } catch (error) {
       if (error?.status === 401) {
         /*
@@ -403,8 +463,31 @@ export class BridgeSupervisor {
 
   async #ensure({ restart, signal, readyTimeoutMs, authFile }) {
     let status = await this.probe(signal);
+    let restartReason = '';
     if (status.state === 'running' && !restart) {
-      return { ok: true, started: false, reused: true, state: 'running', health: status.health };
+      /*
+       * 复用前先核对两件事 —— 任何一件不成立都必须重启，否则用户升级后
+       * 会继续被旧进程服务：
+       *   1. 构建指纹：端口上的是不是当前磁盘脚本（旧桥没有 build 字段）；
+       *   2. 登录文件：端口上的桥是不是按我们想要的账号启动的。
+       */
+      const diff = this.buildDiff(status.health);
+      if (diff.stale) {
+        restartReason = `bridge build changed (${diff.actual || 'unknown'} -> ${diff.expected})`;
+      }
+      const desiredAuth = authFile || this.authFile;
+      if (!restartReason && desiredAuth) {
+        const norm = (p) => String(p || '').replace(/\\/g, '/').toLowerCase();
+        const want = norm(desiredAuth);
+        const seen = [norm(status.health?.authFile), norm(status.health?.authFilePinned)];
+        if (!seen.includes(want)) {
+          restartReason = `bridge auth file changed (${desiredAuth})`;
+        }
+      }
+      if (!restartReason) {
+        return { ok: true, started: false, reused: true, state: 'running', health: status.health };
+      }
+      this.onLog(restartReason + '; restarting bridge');
     }
     if (status.state === 'unauthorized' || status.state === 'foreign') {
       // 端口被别人占着：不抢，如实报错（抢端口比报错危险得多）
@@ -417,7 +500,7 @@ export class BridgeSupervisor {
       // 往下走 start() 只会再起一个实例、撞端口 —— 对用户是个假故障。
       return { ok: false, started: false, reused: true, state: status.state, error: status.error, health: status.health };
     }
-    if (status.state === 'running' && restart) {
+    if (status.state === 'running' && (restart || restartReason)) {
       const stopped = await this.stop(signal);
       if (!stopped.ok) return { ok: false, started: false, reused: false, state: 'running', error: stopped.error };
     }
@@ -486,6 +569,8 @@ export class BridgeSupervisor {
       WORKBUDDY_LOCAL_TOKEN: this.token,
       WORKBUDDY_LOG: '1',
       ...(authFile || this.authFile ? { WORKBUDDY_AUTH_FILE: authFile || this.authFile } : {}),
+      ...(this.followAuthFile ? { WORKBUDDY_AUTH_FILE_FOLLOW: this.followAuthFile } : {}),
+      ...(this.followUid ? { WORKBUDDY_AUTH_FOLLOW_UID: this.followUid } : {}),
       ...(this.autoCheckin === undefined ? {} : { WORKBUDDY_AUTO_CHECKIN: this.autoCheckin ? '1' : '0' }),
       ...this.env,
     };

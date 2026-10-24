@@ -777,6 +777,16 @@ body.dark .wb-root,
       '不可用': 'Unavailable',
       '未验证': 'Unverified',
       '切换中…': 'Switching…',
+      '改用桌面端': 'Use desktop session',
+      '改用桌面端失败：': 'Failed to switch to the desktop session: ',
+      '已改用桌面端账号。': 'Now using the desktop account.',
+      '桥当前在用插件凭据；切回桌面端账号（同一份登录文件）': 'The bridge is using the plugin credential; switch back to the desktop account (same login file)',
+      '已改用桌面端账号；积分稍后按新账号重读。': 'Now using the desktop account; credits will be re-read for it shortly.',
+      '桥进程还是旧构建（升级后旧进程仍在服务），重启桥后新逻辑才会生效':
+        'The running bridge is still the old build (the old process survived the upgrade). Restart it to load the new logic.',
+      '控制台进程还是旧构建（升级后旧进程仍在服务），重启控制台后新页面才会生效':
+        'The running console is still the old build (the old process survived the upgrade). Restart it to load the new UI.',
+      '重启控制台': 'Restart console',
       '切换': 'Switch',
       '剩余': 'Remaining',
       '· 凭据': ' · credential',
@@ -1331,6 +1341,9 @@ body.dark .wb-root,
         (m, dir) => 'Two clients are installed into the same directory: ' + dir
           + ' (the later install overwrites the other\'s resources, so the client runs the wrong build)'],
       [/^账号 (.+) · 剩余 (.+)$/, (m, acct, d) => 'account ' + acct + ' · ' + translateText(d) + ' left'],
+      [/^桌面端当前是 (.+)…，桥实际使用 (.+)…（来源 (.+)）；两者不是同一个钱包$/,
+        (m, desktop, bridge, source) => 'The desktop app is signed in as ' + desktop + '…, but the bridge uses '
+          + bridge + '… (source ' + translateText(source) + '); they are different wallets'],
       [/^(.+) 已响应$/, '$1 responding'],
       [/^(.+) 未监听$/, '$1 not listening'],
       [/^workbuddy 路由已生效（(.+)）· 已注册 (\d+) 个模型$/,
@@ -2709,6 +2722,45 @@ body.dark .wb-root,
         // 这里不能再报「桥没有在运行」，那是假话。
         alerts.push({ tone: 'bad', text: '桥没有在运行 —— 模型调用会失败', action: 'start' });
       }
+      /*
+       * 升级只换脚本，不会杀后台桥。旧进程继续按旧逻辑服务（思考档位、
+       * 换号跟随、目录判定都是旧的），面板却看不出原因。
+       */
+      if (status?.bridge?.staleBuild) {
+        alerts.push({
+          tone: 'warn',
+          text: '桥进程还是旧构建（升级后旧进程仍在服务），重启桥后新逻辑才会生效',
+          action: 'restart',
+        });
+      }
+      /*
+       * 控制台页面也会被升级落下：旧页面继续渲染旧的账号卡片/积分缓存逻辑。
+       * 自动重启失败（查不到 PID）或关闭了 autoStart 时给出明确入口。
+       */
+      if (status?.console?.state === 'running' && status.console.staleBuild) {
+        alerts.push({
+          tone: 'warn',
+          text: '控制台进程还是旧构建（升级后旧进程仍在服务），重启控制台后新页面才会生效',
+          action: 'console-start',
+        });
+      }
+      /*
+       * 桌面端换号了，但桥还在用插件账号的另一条凭据（或反过来）。
+       * 这不一定错（来源是 plugin 时本该如此），但必须让人看见，
+       * 否则就会把桌面账号当成余额的归属账号（issue #6）。
+       */
+      if (state === 'running'
+        && status?.desktopAccount && status?.bridgeAccount
+        && status.desktopAccount !== status.bridgeAccount
+        && health?.auth?.source !== 'desktop') {
+        alerts.push({
+          tone: 'warn',
+          text: '桌面端当前是 ' + String(status.desktopAccount).slice(0, 8) + '…，桥实际使用 '
+            + String(status.bridgeAccount).slice(0, 8) + '…（来源 '
+            + credentialSourceLabel(health?.auth?.source || '') + '）；两者不是同一个钱包',
+          action: 'follow-desktop',
+        });
+      }
       const pluginMode = credential.effective?.source === 'plugin'
         || credential.source === 'plugin'
         || health?.auth?.source === 'plugin';
@@ -2745,7 +2797,7 @@ body.dark .wb-root,
       // 控制台 /api/overview 的 routeLive 同样是迁移前口径（只认 settings.yaml /
       // profile patch），原生路由它看不见 —— 原生路由已注册时不作为问题提示。
 
-      const ACTION_LABEL = { start: '启动桥', restart: '重启桥', cleanup: '清理旧路由', requests: '查看失败', checkin: '去签到', account: '去登录', websearch: '接入搜索' };
+      const ACTION_LABEL = { start: '启动桥', restart: '重启桥', 'console-start': '重启控制台', 'follow-desktop': '改用桌面端', cleanup: '清理旧路由', requests: '查看失败', checkin: '去签到', account: '去登录', websearch: '接入搜索' };
       const alertAction = (action) => {
         if (action === 'account') onOpenTab('accounts');
         else if (action === 'requests' || action === 'checkin') onOpenTab(action);
@@ -3297,13 +3349,31 @@ body.dark .wb-root,
           h(Card, { title: '账号' }, h(Loading, { text: '正在读取登录账号…' })),
           loginCard);
       }
+      /**
+       * 当前桌面账号已是「选中的文件」但桥还在用插件凭据时，账号页显示
+       * 「已选（未生效）」，却没有切换按钮 —— 用户无处可点。这里补一条
+       * 直接把凭据来源切回桌面端的路径（不动登录文件、不重启桥）。
+       */
+      const useDesktopSource = async () => {
+        setWorking('desktop-source');
+        setMessage('');
+        const res = await postJson('/workbuddy/login/source', { source: 'desktop' });
+        setWorking('');
+        if (res.data?.ok) {
+          setPluginRefreshKey((k) => k + 1);
+          setMessage('已改用桌面端账号；积分稍后按新账号重读。');
+          await reloadStatus();
+          notifyAuthChanged();
+        } else {
+          setMessage('切换失败：' + (res.data?.error || res.status));
+        }
+      };
       const switchTo = async (name, { forceDesktop = false } = {}) => {
         setWorking(name);
         setMessage('');
         const res = await postJson(CONSOLE_API + '/account/switch', { file: name });
         setWorking('');
-        if (res.data?.switched) {
-          /*
+        if (res.data?.switched) {          /*
            * 切桌面账号会重启桥；如果来源还停在 plugin，这个桌面账号依旧不会生效
            * （插件 active 可能是另一个账号）。用户点的是"用这个桌面账号"，
            * 所以把来源一起切到 desktop，避免"切了但没生效"。
@@ -3546,7 +3616,15 @@ body.dark .wb-root,
                   a.hidden ? h(Pill, { tone: '', text: '已隐藏' }) : null),
                 h('div', { className: 'wb-account-primary' },
                   h(Btn, { disabled: saving, onClick: () => startEdit(a) }, '改名'),
-                  a.active ? null : h(Btn, { disabled: !!working || busy || !a.usable, onClick: () => switchTo(a.name, { forceDesktop: true }), title: a.error || '' }, working === a.name ? '切换中…' : '切换'),
+                  (!a.active || (effectiveSource === 'plugin' && !desktopEffective))
+                    ? h(Btn, {
+                      disabled: !!working || busy || !a.usable,
+                      onClick: () => (a.active ? useDesktopSource() : switchTo(a.name, { forceDesktop: true })),
+                      title: a.error || (a.active ? '桥当前在用插件凭据；切回桌面端账号（同一份登录文件）' : ''),
+                    }, working === (a.active ? 'desktop-source' : a.name)
+                      ? '切换中…'
+                      : (a.active ? '改用桌面端' : '切换'))
+                    : null,
                   pluginFor && !(pluginFor.active && effectiveSource === 'plugin')
                     ? h(Btn, {
                       disabled: working === 'plugin:' + pluginFor.uid,
@@ -5743,6 +5821,10 @@ body.dark .wb-root,
             const res = await postJson('/workbuddy/console', { action: 'start' });
             if (!res.data?.ok) setError('控制台启动失败：' + (res.data?.result?.error || res.data?.error || res.status));
             else setToast('控制台已就绪：' + (res.data?.url || ''));
+          } else if (action === 'follow-desktop') {
+            const res = await postJson('/workbuddy/login/source', { source: 'desktop' });
+            if (!res.data?.ok) setError('改用桌面端失败：' + (res.data?.error || res.status));
+            else setToast('已改用桌面端账号。');
           } else if (action === 'cleanup') {
             const res = await postJson('/workbuddy/migrate', {});
             setToast(res.data?.ok ? '旧路由已清理（带备份）' : '清理失败：' + (res.data?.error || res.status));
