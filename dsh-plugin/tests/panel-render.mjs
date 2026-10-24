@@ -984,9 +984,9 @@ try {
           problems.push(`保存 body 的 params 不对：${JSON.stringify(body.params)}`);
         }
       }
-      if (!/已保存/.test(textState.alert) || !/新会话/.test(textState.alert)) problems.push('统一保存后没有“已保存 / 新会话生效”反馈');
+      if (!/已保存/.test(textState.alert) || !/下一轮/.test(textState.alert)) problems.push('统一保存后没有“已保存 / 下一轮请求生效”反馈');
       if (!saveState || saveState.text !== '已保存' || saveState.disabled !== true) problems.push('保存后按钮没有变成禁用的「已保存」');
-      if (!/当前配置（新会话生效）：/.test(textState.text)) problems.push('保存后没有显示当前配置值');
+      if (!/当前配置：/.test(textState.text)) problems.push('保存后没有显示当前配置值');
       if (!/思考强度 Max/.test(textState.text)) problems.push('保存后当前思考强度没有保持 Max');
       if (/未保存的修改：/.test(textState.text)) problems.push('保存后仍显示“未保存的修改”');
 
