@@ -984,9 +984,9 @@ try {
           problems.push(`保存 body 的 params 不对：${JSON.stringify(body.params)}`);
         }
       }
-      if (!/已保存并即时生效/.test(textState.alert)) problems.push('统一保存后没有“已保存并即时生效”反馈');
+      if (!/已保存/.test(textState.alert) || !/新会话/.test(textState.alert)) problems.push('统一保存后没有“已保存 / 新会话生效”反馈');
       if (!saveState || saveState.text !== '已保存' || saveState.disabled !== true) problems.push('保存后按钮没有变成禁用的「已保存」');
-      if (!/当前生效：/.test(textState.text)) problems.push('保存后没有显示当前生效值');
+      if (!/当前配置（新会话生效）：/.test(textState.text)) problems.push('保存后没有显示当前配置值');
       if (!/思考强度 Max/.test(textState.text)) problems.push('保存后当前思考强度没有保持 Max');
       if (/未保存的修改：/.test(textState.text)) problems.push('保存后仍显示“未保存的修改”');
 
@@ -1023,7 +1023,7 @@ try {
       }
       values = await tokenValues();
       if (values[0] !== '600K') problems.push(`保存后输入框没有保持 600K（实际「${values[0]}」）`);
-      if (!/已保存并即时生效/.test(textState.alert)) problems.push('保存 600K 后没有成功提示');
+      if (!/已保存/.test(textState.alert)) problems.push('保存 600K 后没有成功提示');
       const badge = await page.cdp.evaluate(`(() => {
         const row = [...document.querySelectorAll('.wb-table tbody tr')].find((r) => !r.classList.contains('wb-detail-row') && (r.children[1] ? r.children[1].textContent : '').includes('deepseek-v4.1-flash'));
         return row ? row.innerText : '';
@@ -1185,14 +1185,14 @@ try {
       if (!(await clickSave())) problems.push('最终保存前找不到「保存修改」按钮');
       await sleep(900);
       textState = await readText();
-      if (!/已保存并即时生效/.test(textState.alert)) problems.push('最终保存后没有恢复即时生效提示');
+      if (!/已保存/.test(textState.alert)) problems.push('最终保存后没有成功提示');
       await setTokenInput(1, '64K');
       await stubSave({ 'deepseek-v4.1-flash': 600000 }, { 'deepseek-v4.1-flash': { temperature: 0.7, maxTokens: 64000, reasoningEffort: 'max' } });
       await sleep(200);
       if (!(await clickSave())) problems.push('最终 64K 保存前找不到「保存修改」按钮');
       await sleep(900);
       textState = await readText();
-      if (!/已保存并即时生效/.test(textState.alert)) problems.push('最终 64K 保存后没有即时生效提示');
+      if (!/已保存/.test(textState.alert)) problems.push('最终 64K 保存后没有成功提示');
       values = await tokenValues();
       if (values[0] !== '600K' || values[1] !== '64K') problems.push(`最终截图状态不是 600K / 64K（${JSON.stringify(values)}）`);
 

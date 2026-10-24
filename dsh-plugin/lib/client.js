@@ -1189,6 +1189,11 @@ body.dark .wb-root,
       'temperature 需要是 0–2 之间的数字': 'temperature must be a number between 0 and 2',
       '保存修改': 'Save changes',
       '当前生效：': 'Currently effective: ',
+      '当前配置（新会话生效）：': 'Current configuration (applies to new sessions): ',
+      '已打开的会话保持创建时的上下文预算；新会话或重选模型后按新值生效。':
+        'Open sessions keep the context budget captured when they were created; new sessions or reselecting the model use the new value.',
+      '已保存。模型选择器已刷新；已打开的会话保持创建时的上下文预算，新会话/重选模型后生效。':
+        'Saved. The model picker has been refreshed; open sessions keep the context budget captured at creation — new sessions or reselecting the model use the new value.',
       '未保存的修改：': 'Unsaved changes: ',
       '有未保存的修改 —— 点「保存修改」后才会用于本插件发出的请求。':
         'You have unsaved changes — click Save changes to apply them to requests from this plugin.',
@@ -4776,7 +4781,7 @@ body.dark .wb-root,
         }
         setMessage(res.data.applied === false
           ? '已保存。此 dsh 版本不支持即时刷新 —— 重启一次 dsh 后生效。'
-          : '已保存并即时生效。');
+          : '已保存。模型选择器已刷新；已打开的会话保持创建时的上下文预算，新会话/重选模型后生效。');
         reload();
         prefsApi.reload();
         return true;
@@ -5361,7 +5366,9 @@ body.dark .wb-root,
                                 ]))
                               : null,
                             h('p', { className: 'wb-note' },
-                              '输入/输出改完自动保存（滑块松开、输入框失焦/回车）；采样参数点「保存修改」。')),
+                              '输入/输出改完自动保存（滑块松开、输入框失焦/回车）；采样参数点「保存修改」。'),
+                            h('p', { className: 'wb-note' },
+                              '已打开的会话保持创建时的上下文预算；新会话或重选模型后按新值生效。')),
                           h('div', { className: 'wb-token-section', style: { marginTop: '12px' } },
                             h('div', { className: 'wb-token-head' },
                               h('span', { className: 'wb-label' }, '采样参数')),
@@ -5417,7 +5424,7 @@ body.dark .wb-root,
                               ? h('p', { className: 'wb-note wb-token-problem' }, '请先修正标红的输入。')
                               : state.dirty
                                 ? h('p', { className: 'wb-note' }, t('未保存的修改：'), changeBits.join(' · '))
-                                : h('p', { className: 'wb-note' }, t('当前生效：'), currentBits.join(' · ')),
+                                : h('p', { className: 'wb-note' }, t('当前配置（新会话生效）：'), currentBits.join(' · ')),
                             h('div', { className: 'wb-actions', style: { marginTop: '2px' } },
                               h(Btn, {
                                 sm: true,
