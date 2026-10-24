@@ -48,6 +48,20 @@ function sanitizeModelParams(input) {
 }
 
 /**
+ * 上下文预算入参：0 / 空 = 清除覆盖（跟随官方默认），否则要求正整数。
+ * 上下文的**上限收敛**仍由 adapter 按模型做（这里不拿目录值拒绝，
+ * 否则和“先存意图、目录回来后自然生效”的既有语义冲突）。
+ */
+function readContextWindow(raw) {
+  if (raw === null || raw === undefined || raw === '' || raw === 0 || raw === '0') return { value: 0 };
+  const n = Number(raw);
+  if (!Number.isSafeInteger(n) || n <= 0 || n > 10_000_000) {
+    return { error: 'contextWindow 需要是正整数（tokens），或 0 表示跟随官方默认' };
+  }
+  return { value: n };
+}
+
+/**
  * @param {object} deps
  * @param {() => object} deps.snapshot 运行态快照
  * @param {() => object} deps.supervisor 桥管理器
@@ -382,26 +396,65 @@ export function createRouteTable(deps) {
             const current = (typeof deps.readPrefs === 'function' ? deps.readPrefs() : null)
               || { visible: null, hideAll: false, contextWindowByModel: {}, paramsByModel: {} };
             /*
-             * 每模型上下文预算：面板详情里每个模型有自己的滑块，按模型 id 存。
-             * 它和"显示哪些模型"、每模型默认参数都正交，单独提交、即时生效。
+             * 面板的「上下文窗口（Token）」表单：输入 + 输出一次提交。
+             *
+             * 必须排在两个单字段分支**前面**：旧实现的单字段分支各自只看一个
+             * 字段，组合请求会落进 params 分支、把 contextWindow 静默吞掉。
+             * 这里一次落盘、一次广播，避免“输入存了、输出没存”的半套状态。
+             */
+            if (typeof body?.model === 'string'
+              && Object.prototype.hasOwnProperty.call(body, 'contextWindow')
+              && Object.prototype.hasOwnProperty.call(body, 'params')) {
+              const model = body.model;
+              const parsed = readContextWindow(body.contextWindow);
+              if (parsed.error) return sendJson(res, 400, { ok: false, error: parsed.error });
+              const cleaned = body.params === null ? null : sanitizeModelParams(body.params);
+              /*
+               * 输入/输出共享窗口只做建议，不在服务端硬拒绝：官方模型本身
+               * 就可能给“默认输入 300K + 输出上限 384K”的组合。是否可用
+               * 以上游实际限制为准，面板会提示但不阻断。
+               */
+              const contextWindowByModel = { ...(current.contextWindowByModel || {}) };
+              if (parsed.value > 0) contextWindowByModel[model] = parsed.value;
+              else delete contextWindowByModel[model];
+              const paramsByModel = { ...(current.paramsByModel || {}) };
+              if (cleaned) paramsByModel[model] = cleaned;
+              else delete paramsByModel[model];
+              // 先落盘再应用：写失败时不要留下“内存里已生效、重启后又变回去”的状态。
+              onWritePrefs({
+                visible: current.visible,
+                hideAll: current.hideAll === true,
+                includeUnofficial: current.includeUnofficial === true,
+                contextWindowByModel,
+                paramsByModel,
+              });
+              if (typeof adapter.setContextWindows === 'function') adapter.setContextWindows(contextWindowByModel);
+              if (typeof adapter.setModelParams === 'function') adapter.setModelParams(paramsByModel);
+              // 预算参与 dsh 的容量解析，参数参与 resolveModel；一次广播让两者都重算。
+              const applied = notifyAdaptersUpdated();
+              return sendJson(res, 200, {
+                ok: true,
+                model,
+                contextWindow: parsed.value,
+                params: paramsByModel[model] || null,
+                contextWindowByModel,
+                paramsByModel,
+                applied,
+              });
+            }
+            /*
+             * 每模型上下文预算：面板详情里每个模型有自己的输入/输出。
+             * 它和"显示哪些模型"、每模型默认参数都正交；单字段分支保留给
+             * 旧客户端 / 脚本，新面板走上面的组合分支。
              * `contextWindow: 0` = 清除该模型的覆盖，回到官方默认/桥目录值。
              */
             if (typeof body?.model === 'string'
               && Object.prototype.hasOwnProperty.call(body, 'contextWindow')
               && !Object.prototype.hasOwnProperty.call(body, 'params')) {
               const model = body.model;
-              let value = 0;
-              const raw = body.contextWindow;
-              if (raw !== null && raw !== '' && raw !== 0 && raw !== '0') {
-                const n = Number(raw);
-                if (!Number.isSafeInteger(n) || n <= 0 || n > 10_000_000) {
-                  return sendJson(res, 400, {
-                    ok: false,
-                    error: 'contextWindow 需要是正整数（tokens），或 0 表示跟随官方默认',
-                  });
-                }
-                value = n;
-              }
+              const parsed = readContextWindow(body.contextWindow);
+              if (parsed.error) return sendJson(res, 400, { ok: false, error: parsed.error });
+              const value = parsed.value;
               const contextWindowByModel = { ...(current.contextWindowByModel || {}) };
               if (value > 0) contextWindowByModel[model] = value;
               else delete contextWindowByModel[model];

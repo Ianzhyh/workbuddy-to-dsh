@@ -11,13 +11,16 @@
  *      配置进 patch（defaultMaxTokens 等），adapter 在组装 payload 时按
  *      "调用方显式 > 插件默认 > 不发" 的优先级合并。
  *
+ *   偏好的**稳定位置**是 `<DSH_HOME>/workbuddy-model-prefs.json`；旧版本
+ *   写在插件安装目录，读取时自动迁移，避免重装/清缓存后静默丢偏好。
+ *
  *   node --test dsh-plugin/tests/model-prefs.test.mjs
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, writeFileSync, existsSync, readFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync, existsSync, readFileSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
 
 import { WorkBuddyAdapter } from '../lib/adapter.mjs';
 import { toAdapterModels, toDirectory } from '../lib/models.mjs';
@@ -233,6 +236,64 @@ test('model-visibility：上下文预算按模型保存，互不影响且不被�
   const bad = await run('POST', { model: 'model-b', contextWindow: -1 });
   assert.equal(bad.status, 400);
   assert.deepEqual(adapter.contextWindowsSnapshot(), { 'model-b': 300000 });
+});
+
+test('model-visibility：Token 表单一次保存输入+输出，原子写且互不覆盖', async () => {
+  const { createRouteTable } = await import('../lib/routes.mjs');
+  const adapter = makeAdapter();
+  let current = { visible: null, hideAll: false, includeUnofficial: false, contextWindowByModel: {}, paramsByModel: {} };
+  const writes = [];
+  const routes = createRouteTable({
+    adapter,
+    readPrefs: () => current,
+    onWritePrefs: (next) => { current = next; writes.push(next); },
+    notifyAdaptersUpdated: () => true,
+  });
+  const route = routes.find((r) => r.path === '/workbuddy/model-visibility');
+  const run = async (body) => {
+    let status = 0;
+    let raw = '';
+    const res = { writeHead(c) { status = c; }, write(c) { raw += String(c); }, end(c) { if (c) raw += String(c); }, on() {}, off() {} };
+    await route.handler({
+      url: '/workbuddy/model-visibility',
+      method: 'POST',
+      headers: { 'x-workbuddy-panel': '1' },
+      async *[Symbol.asyncIterator]() { yield Buffer.from(JSON.stringify(body)); },
+    }, res);
+    return { status, body: JSON.parse(raw || '{}') };
+  };
+
+  // 一次请求同时写入预算与参数：只落盘一次，避免半套状态。
+  const saved = await run({
+    model: 'model-a',
+    contextWindow: 600000,
+    params: { temperature: 0.7, maxTokens: 8000, reasoningEffort: 'high' },
+  });
+  assert.equal(saved.status, 200);
+  assert.equal(saved.body.contextWindow, 600000);
+  assert.deepEqual(saved.body.params, { temperature: 0.7, maxTokens: 8000, reasoningEffort: 'high' });
+  assert.equal(saved.body.applied, true);
+  assert.equal(writes.length, 1, '输入+输出必须一次落盘');
+  assert.deepEqual(writes[0].contextWindowByModel, { 'model-a': 600000 });
+  assert.deepEqual(writes[0].paramsByModel['model-a'], { temperature: 0.7, maxTokens: 8000, reasoningEffort: 'high' });
+  assert.deepEqual(adapter.contextWindowsSnapshot(), { 'model-a': 600000 });
+  assert.deepEqual(adapter.modelParamsSnapshot()['model-a'], { temperature: 0.7, maxTokens: 8000, reasoningEffort: 'high' });
+
+  // 0 + null = 同时恢复自动；两项都清掉，不留残值。
+  const cleared = await run({ model: 'model-a', contextWindow: 0, params: null });
+  assert.equal(cleared.status, 200);
+  assert.deepEqual(adapter.contextWindowsSnapshot(), {});
+  assert.equal(adapter.modelParamsSnapshot()['model-a'], undefined);
+  assert.deepEqual(cleared.body.contextWindowByModel, {});
+  assert.deepEqual(cleared.body.paramsByModel, {});
+
+  // 输入/输出共享窗口不在路由硬拒绝（官方默认可能就是这样）；两项都写入。
+  const shared = await run({ model: 'model-b', contextWindow: 10000, params: { maxTokens: 10000 } });
+  assert.equal(shared.status, 200);
+  assert.equal(shared.body.contextWindow, 10000);
+  assert.equal(shared.body.params.maxTokens, 10000);
+  assert.equal(current.contextWindowByModel['model-b'], 10000);
+  assert.equal(current.paramsByModel['model-b'].maxTokens, 10000);
 });
 
 test('model-visibility：每模型默认参数保存后能读回，且不被显示设置冲掉', async () => {
@@ -522,7 +583,7 @@ test('stream：选择器选的 reasoningEffort 必须翻成上游 reasoning_effo
   assert.equal(c2.get().reasoning_effort, 'low', '配置的默认等级应下发');
 });
 
-// ── 偏好文件的持久化（.model-prefs.json）─────────────────────────────
+// ── 偏好文件的持久化（DSH_HOME，旧插件目录自动迁移）──────────────────
 
 test('readModelPrefs/writeModelPrefs：持久化且对损坏文件健壮', async () => {
   // 这里不直接 import 插件内部函数（它们绑定 PLUGIN_DIR），而是从 apply 的
@@ -544,4 +605,43 @@ test('readModelPrefs/writeModelPrefs：持久化且对损坏文件健壮', async
     rmSync(dir, { recursive: true, force: true });
   }
   assert.ok(!existsSync(join(dir, '.model-prefs.json')), '清理后不应残留');
+});
+
+test('readModelPrefsFrom：旧插件目录的偏好在读取时迁移到 DSH_HOME', async () => {
+  /*
+   * 用户实测：面板里把 deepseek 调到 1M，重装/清缓存后静默回到 300K。
+   * 旧文件在插件安装目录旁（node_modules 内），会被包管理器清掉。
+   * 现在默认写 DSH_HOME；读到旧位置更新的文件时必须复制一份过去。
+   */
+  const { readModelPrefsFrom, writeModelPrefsTo } = await import('../lib/index.js');
+  const dir = mkdtempSync(join(tmpdir(), 'wb-prefs-migrate-'));
+  const stable = join(dir, 'dsh', 'workbuddy-model-prefs.json');
+  const legacy = join(dir, 'plugin', '.model-prefs.json');
+  try {
+    mkdirSync(dirname(legacy), { recursive: true });
+    writeFileSync(legacy, JSON.stringify({
+      contextWindowByModel: { 'deepseek-v4.1-flash': 1000000 },
+      paramsByModel: {},
+      at: 10,
+    }), 'utf8');
+
+    const read = readModelPrefsFrom([stable, legacy]);
+    assert.equal(read?.contextWindowByModel?.['deepseek-v4.1-flash'], 1000000);
+    assert.ok(existsSync(stable), '旧位置必须迁移到稳定位置');
+    assert.equal(
+      JSON.parse(readFileSync(stable, 'utf8')).contextWindowByModel['deepseek-v4.1-flash'],
+      1000000,
+      '迁移内容必须保留 1M 偏好',
+    );
+
+    // 稳定位置写入后优先读它（新 at 覆盖旧文件）。
+    writeModelPrefsTo([stable, legacy], {
+      visible: ['model-a'], hideAll: false, includeUnofficial: false,
+      contextWindowByModel: {}, paramsByModel: {},
+    });
+    const next = readModelPrefsFrom([stable, legacy]);
+    assert.deepEqual(next.visible, ['model-a'], '稳定位置更新后应优先读取');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

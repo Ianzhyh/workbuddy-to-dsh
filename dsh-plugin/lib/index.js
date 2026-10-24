@@ -57,31 +57,25 @@ const PLUGIN_DIR = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 /**
- * 面板勾选的模型显示偏好（哪些模型出现在 dsh 选择器里）。
+ * 面板偏好的**稳定位置**：`<DSH_HOME>/workbuddy-model-prefs.json`。
  *
- * 为什么不存 .state.json：那份文件由**控制台**单写者维护（它有进程内缓存，
- * 外部写入会让缓存悄悄过期），而控制台没有"模型显示"这个概念。这是插件
- * 自己的功能，存自己的小文件最干净 —— 与控制台零耦合，也不会在 vendor
- * 分发形态下写脏仓库根。
- *
- * 文件位于插件目录旁（安装形态下是 profile 的 node_modules 内），与插件
- * 同生命周期；git 安装到 node_modules 里写文件是常见做法（pnpm 不清理）。
+ * 旧版本写在插件目录旁（安装形态下是 profile 的 node_modules 内）。重装
+ * 插件或清 pnpm 缓存会把那个文件一起抹掉，用户会静默回到官方默认（实测
+ * 场景：面板里把 deepseek 调到 1M，重装后又变回 300K）。因此默认写
+ * DSH_HOME；插件目录里的旧文件在读取时自动迁移过来。
  */
-const MODEL_PREFS_PATH = join(PLUGIN_DIR, '.model-prefs.json');
-/**
- * 写入回退位置。
- *
- * 插件目录在部分安装形态下是**只读**的（包管理器的工作副本、受管设备）。
- * 原实现写失败被 `catch {}` 静默吞掉，用户看到「已保存」，重开面板却是默认值
- * —— 正是 issue #5 最后一段的形态（保存显示设置后勾选恢复默认）。
- * 因此：优先写插件目录；失败时写 `<DSH_HOME>/workbuddy-model-prefs.json`；
- * 两者都失败就抛错，让接口如实返回“没保存”，不再骗人。
- */
-const MODEL_PREFS_FALLBACK = join(
+const MODEL_PREFS_PATH = join(
   process.env.DSH_HOME || join(homedir(), '.dsh'),
   'workbuddy-model-prefs.json',
 );
-const modelPrefsPaths = () => [MODEL_PREFS_PATH, MODEL_PREFS_FALLBACK];
+/**
+ * 旧位置（只读 + 迁移，不再作为首选写入位置）。
+ *
+ * 兼容已安装用户的旧文件：读取时若它比稳定位置新，就复制一份到 DSH_HOME；
+ * 写入时仅在稳定位置不可写时才回退到这里（至少不让用户这次保存丢失）。
+ */
+const LEGACY_MODEL_PREFS_PATH = join(PLUGIN_DIR, '.model-prefs.json');
+const modelPrefsPaths = () => [MODEL_PREFS_PATH, LEGACY_MODEL_PREFS_PATH];
 
 /** 解析一份偏好文件；格式不对返回 null（由调用方继续尝试回退位置）。 */
 function parseModelPrefs(raw) {
@@ -112,40 +106,57 @@ function parseModelPrefs(raw) {
     // 每模型上下文预算（缺条目 = 跟随官方默认/桥目录）
     contextWindowByModel,
     paramsByModel,
-    /** 写入时刻：两处文件都存在时（插件目录 + DSH_HOME 回退）取更新的那份。 */
+    /** 写入时刻：稳定位置与旧插件目录都有一份时取更新的那份。 */
     at: Number(j.at) || 0,
   };
 }
 
 /**
- * 读取面板保存的模型显示偏好。
+ * 从一组候选路径读取偏好（按 `at` 取最新），并在需要时把旧位置迁移到
+ * 首个路径（稳定位置）。导出给测试用；生产调用 `readModelPrefs()`。
  *
- * 返回 `{ visible, hideAll }`，或 `null`（= 没有偏好，跟随配置的 allow/deny）。
  * **`visible: []` 与"没有偏好"必须分开**：前者是用户点了"全不选"，意思是
  * 一个都不显示；后者是"没设置过"，意思是全显示。旧实现把两者混为一谈，
  * 于是"全不选 → 保存"后 dsh 里反而全部还在。
  */
-function readModelPrefs() {
+export function readModelPrefsFrom(paths) {
   let best = null;
-  for (const file of modelPrefsPaths()) {
+  let bestFile = '';
+  for (const file of paths) {
     if (!existsSync(file)) continue;
     try {
       const parsed = parseModelPrefs(readFileSync(file, 'utf8'));
       if (!parsed) continue;
-      /*
-       * 插件目录与 DSH_HOME 回退可能都有一份（例如插件目录先可写、后来
-       * 变只读）。按写入时刻取**更新**的那份，不能无条件相信主路径上的旧文件。
-       */
-      if (!best || (parsed.at || 0) > (best.at || 0)) best = parsed;
+      // 两处都有一份时（旧插件目录 + 新 DSH_HOME），按写入时刻取更新的一份。
+      if (!best || (parsed.at || 0) > (best.at || 0)) {
+        best = parsed;
+        bestFile = file;
+      }
     } catch { /* 损坏：尝试下一个位置 */ }
+  }
+  if (best && bestFile !== paths[0]) {
+    /*
+     * 旧位置（插件目录）的偏好更新：复制到稳定位置。重装/清缓存后旧文件
+     * 会消失，但稳定位置的副本还在，用户不会静默回到默认值。
+     * 迁移失败不阻断读取：本次仍用旧文件，下次再试。
+     */
+    try {
+      writeModelPrefsTo([paths[0]], best);
+    } catch (error) {
+      console.warn(`[workbuddy] 模型偏好迁移到 ${paths[0]} 失败：${error?.message || error}`);
+    }
   }
   return best;
 }
 
-/** 写偏好。`null` = 清除偏好（恢复到配置的 allow/deny）。两处都写不了会抛错。 */
-function writeModelPrefs(prefs) {
+/**
+ * 写入一组候选路径（首个成功即返回）。
+ * 导出给测试用；生产调用 `writeModelPrefs()`。
+ * `prefs === null` = 清除偏好（删除所有候选文件）。
+ */
+export function writeModelPrefsTo(paths, prefs) {
   if (prefs === null) {
-    for (const file of modelPrefsPaths()) {
+    for (const file of paths) {
       try { if (existsSync(file)) unlinkSync(file); } catch { /* 尽力清理 */ }
     }
     return;
@@ -165,14 +176,14 @@ function writeModelPrefs(prefs) {
   // 显示"未设置"且没有每模型参数/上下文预算 → 没有可存的东西，删文件更干净
   if (visible === null && !hideAll && !includeUnofficial
     && !Object.keys(contextWindowByModel).length && !Object.keys(paramsByModel).length) {
-    for (const file of modelPrefsPaths()) {
+    for (const file of paths) {
       try { if (existsSync(file)) unlinkSync(file); } catch { /* 尽力清理 */ }
     }
     return;
   }
   const body = `${JSON.stringify({ visible, hideAll, includeUnofficial, contextWindowByModel, paramsByModel, at: Date.now() }, null, 2)}\n`;
   let firstError = null;
-  for (const file of modelPrefsPaths()) {
+  for (const file of paths) {
     try {
       mkdirSync(dirname(file), { recursive: true });
       writeFileSync(file, body, 'utf8');
@@ -182,6 +193,16 @@ function writeModelPrefs(prefs) {
     }
   }
   throw new Error(`模型显示设置无法落盘：${firstError?.message || '未知原因'}`);
+}
+
+/** 读取面板偏好（稳定位置优先，旧位置自动迁移）。 */
+export function readModelPrefs() {
+  return readModelPrefsFrom(modelPrefsPaths());
+}
+
+/** 写偏好（稳定位置优先，失败才回退旧位置；两处都失败会抛错）。 */
+export function writeModelPrefs(prefs) {
+  return writeModelPrefsTo(modelPrefsPaths(), prefs);
 }
 
 /**
