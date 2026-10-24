@@ -754,6 +754,19 @@ try {
     return { rowsBefore, options: sel.options.length };
   })()`);
   if (!probeFilter || probeFilter.options < 3) problems.push('模型页没有可用性筛选项');
+  // 筛选测完恢复「全部」：后面的详情/来源徽章断言要看 deepseek 这个补全模型，
+  // 它已被体检成"可用"，留在「只看未测」里会被隐藏。
+  await page.cdp.evaluate(`(() => {
+    const sel = [...document.querySelectorAll('select.wb-select')].find((s) => [...s.options].some((o) => /只看不可用/.test(o.textContent)));
+    if (!sel) return;
+    const all = [...sel.options].find((o) => /^全部/.test(o.textContent));
+    if (all) { sel.value = all.value; sel.dispatchEvent(new Event('change', { bubbles: true })); }
+  })()`);
+  await sleep(500);
+
+  // 上下文长度入口：已改为每个模型单独设置，顶部只提示去详情里调
+  const contextHint = await page.cdp.evaluate(`(() => document.body.innerText.includes('上下文长度按模型单独设置'))()`);
+  if (!contextHint) problems.push('模型页没有提示“上下文长度按模型单独设置”');
 
   // "太紧凑"的机器判据：模型表在标准宽度下**不该需要横向滚动**，
   // 操作列的按钮也不该竖着堆（那正是上一版被挤扁的样子）
@@ -785,10 +798,15 @@ try {
 
   // 模型详情必须**紧跟被点的那一行**展开（不是挂到整张表下面）
   const detailTarget = await page.cdp.evaluate(`(() => {
-    const rows = [...document.querySelectorAll('.wb-table tbody tr')];
-    const row = rows.find((r) => [...r.querySelectorAll('.wb-btn')].some((b) => /详情|ⓘ/.test(b.textContent)));
+    const rows = [...document.querySelectorAll('.wb-table tbody tr')].filter((r) => !r.classList.contains('wb-detail-row'));
+    /*
+     * 指定 deepseek（国际版目录漏掉、按实测补全的那个）：详情里的「官方目录未列」
+     * 「实测档位来源」「默认 temperature」和 max_tokens 上限都是针对它的断言。
+     */
+    const row = rows.find((r) => (r.children[1] ? r.children[1].textContent : '').includes('deepseek-v4.1-flash'))
+      || rows.find((r) => [...r.querySelectorAll('.wb-btn')].some((b) => /详情|ⓘ/.test(b.textContent)));
     if (!row) return null;
-    const id = (row.children[0].textContent || '').replace(' ★', '').trim();
+    const id = (row.children[1] ? row.children[1].textContent : '').replace(' ★', '').trim();
     const btn = [...row.querySelectorAll('.wb-btn')].find((b) => /详情|ⓘ/.test(b.textContent));
     btn.click();
     return { id };
@@ -804,10 +822,15 @@ try {
       const box = rows[idx].querySelector('.wb-detail');
       return {
         found: true,
-        prevId: prev ? (prev.children[0].textContent || '').replace(' ★', '').trim() : null,
+        prevId: prev ? (prev.children[1].textContent || '').replace(' ★', '').trim() : null,
         isLast: idx === rows.length - 1,
         text: box ? box.innerText : '',
         width: box ? Math.round(box.getBoundingClientRect().width) : 0,
+        // 每个模型的 max_tokens 输入框上限必须跟着该模型官方值走
+        maxTokenMax: (() => {
+          const inputs = box ? box.querySelectorAll('input[type="number"]') : [];
+          return inputs[1] ? inputs[1].getAttribute('max') : null;
+        })(),
       };
     })()`);
     if (!inline.found) problems.push('点「详情」没有展开任何内容');
@@ -815,12 +838,198 @@ try {
       if (inline.prevId !== detailTarget.id) {
         problems.push(`详情没有紧跟被点的模型行（点了 ${detailTarget.id}，详情却在 ${inline.prevId} 下面）`);
       }
-      for (const needle of ['模型 ID', '上下文 / 输出', '多模态', '计费倍率']) {
+      for (const needle of ['模型 ID', '上下文 / 输出', '多模态', '计费倍率', '官方默认 temperature', '官方目录未列（实测补全）']) {
         if (!inline.text.includes(needle)) problems.push(`模型详情缺少「${needle}」`);
       }
       if (inline.width < 200) problems.push(`模型详情宽度异常（${inline.width}px）`);
+      if (inline.maxTokenMax !== '128000') {
+        problems.push(`max_tokens 输入框没有按当前模型上限设置 max（实际 ${inline.maxTokenMax}，应为 128000）`);
+      }
       console.log(`模型详情：点 ${detailTarget.id} → 紧跟其下展开（${inline.width}px 宽${inline.isLast ? '，位于表尾' : ''}）`);
-      // 留一张"详情紧跟行"的证据图
+      /*
+       * 每模型默认参数的交互回归（用户实测反馈）：
+       *   1. 思考强度选 Max 后，下拉和“当前思考强度”必须立刻变，不能还停在
+       *      “官方默认（high）”（上方详情里的“官方默认档位”则本来就该保持 high，
+       *      它是官方默认值，不是当前选择）；
+       *   2. 温度/上限乱填要有即时校验、保存按钮禁用、明确的“未保存”提示；
+       *   3. 合法值保存后要在眼前看到“已保存”和当前生效值。
+       */
+      const effortPicked = await page.cdp.evaluate(`(() => {
+        const box = document.querySelector('.wb-detail');
+        const select = box ? [...box.querySelectorAll('select')].find((s) => [...s.options].some((o) => /跟随官方默认/.test(o.textContent))) : null;
+        if (!select) return false;
+        select.value = 'max';
+        select.dispatchEvent(new Event('change', { bubbles: true }));
+        return true;
+      })()`);
+      await sleep(400);
+      if (!effortPicked) problems.push('详情里找不到思考强度下拉');
+      else {
+        const effortState = await page.cdp.evaluate(`(() => {
+          const box = document.querySelector('.wb-detail');
+          const trigger = [...box.querySelectorAll('.wb-dropdown-trigger')].find((b) => /Max|跟随官方默认|低|高/.test(b.textContent));
+          const save = [...box.querySelectorAll('.wb-btn')].find((b) => /保存修改|已保存|保存为该模型默认/.test(b.textContent));
+          return {
+            trigger: trigger ? trigger.textContent : '',
+            text: box.innerText,
+            save: save ? save.textContent : '',
+            disabled: save ? save.disabled : null,
+            className: save ? save.className : '',
+          };
+        })()`);
+        if (!/Max/.test(effortState.trigger)) problems.push(`思考强度选 Max 后下拉仍显示「${effortState.trigger}」`);
+        if (!/思考强度 Max/.test(effortState.text)) problems.push('思考强度选 Max 后合计状态没有同步');
+        if (!/未保存的修改：/.test(effortState.text)) problems.push('思考强度改动后没有“未保存”提示');
+        if (effortState.save !== '保存修改') problems.push(`思考强度改动后保存按钮文案不对（${effortState.save}）`);
+        if (effortState.disabled !== false) problems.push('思考强度改动后保存按钮被错误禁用');
+        if (!/primary/.test(effortState.className)) problems.push('有未保存改动时保存按钮没有高亮');
+      }
+      const setNumberInput = (index, value) => page.cdp.evaluate(`(() => {
+        const box = document.querySelector('.wb-detail');
+        const input = box ? box.querySelectorAll('input[type="number"]')[${index}] : null;
+        if (!input) return false;
+        const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+        setter.call(input, ${JSON.stringify(String(value))});
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        return true;
+      })()`);
+      const readParamState = () => page.cdp.evaluate(`(() => {
+        const box = document.querySelector('.wb-detail');
+        const save = [...box.querySelectorAll('.wb-btn')].find((b) => /保存修改|已保存|保存为该模型默认/.test(b.textContent));
+        return { text: box.innerText, save: save ? save.textContent : '', disabled: save ? save.disabled : null };
+      })()`);
+
+      // 温度越界：必须红字说明 + 禁止保存
+      await setNumberInput(0, 5);
+      await sleep(300);
+      let paramState = await readParamState();
+      if (!/temperature 需要是 0–2 之间的数字/.test(paramState.text)) problems.push('temperature 越界时没有即时校验提示');
+      if (paramState.disabled !== true) problems.push('temperature 越界时保存按钮仍可点');
+      // 改成合法值：错误消失、按钮恢复
+      await setNumberInput(0, 0.7);
+      await sleep(300);
+      paramState = await readParamState();
+      if (/temperature 需要是 0–2 之间的数字/.test(paramState.text)) problems.push('temperature 改回合法值后错误提示仍在');
+      if (paramState.disabled !== false) problems.push('temperature 合法但保存按钮仍禁用');
+
+      // 输出上限超过该模型官方值：必须拒绝，并按模型上限提示
+      await setNumberInput(1, 999999);
+      await sleep(300);
+      paramState = await readParamState();
+      if (!/max_tokens 不能超过该模型官方上限 128K/.test(paramState.text)) problems.push('max_tokens 超过模型上限时没有即时校验提示');
+      if (paramState.disabled !== true) problems.push('max_tokens 超过模型上限时保存按钮仍可点');
+      await setNumberInput(1, 64000);
+      await sleep(300);
+      paramState = await readParamState();
+      if (/max_tokens 不能超过该模型官方上限/.test(paramState.text)) problems.push('max_tokens 改回合法值后错误提示仍在');
+      if (paramState.disabled !== false) problems.push('max_tokens 合法但保存按钮仍禁用');
+
+      // 保存：桩返回保存后的参数，面板要即时显示“已保存 / 当前生效”
+      await page.cdp.evaluate(`window.__setRoute('/workbuddy/model-visibility', {
+        ok: true, model: 'deepseek-v4.1-flash',
+        params: { temperature: 0.7, maxTokens: 64000, reasoningEffort: 'max' },
+        paramsByModel: { 'deepseek-v4.1-flash': { temperature: 0.7, maxTokens: 64000, reasoningEffort: 'max' } },
+        contextWindowByModel: {},
+        unset: true, visible: null, hideAll: false, includeUnofficial: false, deny: [], applied: true,
+      })`);
+      const clickedSave = await page.cdp.evaluate(`(() => {
+        const box = document.querySelector('.wb-detail');
+        const save = box ? [...box.querySelectorAll('.wb-btn')].find((b) => b.textContent === '保存修改') : null;
+        if (!save) return false;
+        save.click();
+        return true;
+      })()`);
+      await sleep(900);
+      if (!clickedSave) problems.push('准备好合法参数后找不到“保存修改”按钮');
+      else {
+        const savedState = await page.cdp.evaluate(`(() => {
+          const box = document.querySelector('.wb-detail');
+          const save = [...box.querySelectorAll('.wb-btn')].find((b) => /保存修改|已保存|保存为该模型默认/.test(b.textContent));
+          return {
+            text: box.innerText,
+            save: save ? save.textContent : '',
+            disabled: save ? save.disabled : null,
+            alerts: [...document.querySelectorAll('.wb-alert')].map((el) => el.innerText).join('\\n'),
+          };
+        })()`);
+        if (!/已保存该模型的默认参数/.test(savedState.alerts)) problems.push('保存后没有“已保存该模型的默认参数”反馈');
+        if (savedState.save !== '已保存') problems.push(`保存后按钮没有变成“已保存”（${savedState.save}）`);
+        if (savedState.disabled !== true) problems.push('保存后“已保存”按钮仍可重复点击');
+        if (!/当前生效：/.test(savedState.text)) problems.push('保存后没有显示当前生效值');
+        if (!/思考强度 Max/.test(savedState.text)) problems.push('保存后当前思考强度没有保持 Max');
+        if (/未保存的修改：/.test(savedState.text)) problems.push('保存后仍显示“未保存的修改”');
+        console.log('每模型默认参数：Max 即时回显、非法值拦截、保存后反馈正常');
+      }
+      /*
+       * 上下文长度必须**按模型**调：滑块只出现在当前模型详情里，档位来自该模型
+       * 自己的目录（300K / 600K / 1M），拖动后 POST { model, contextWindow }。
+       */
+      const ctxBefore = await page.cdp.evaluate(`(() => {
+        const box = document.querySelector('.wb-detail');
+        const input = box ? box.querySelector('.wb-context-control input[type="range"]') : null;
+        const labels = box ? [...box.querySelectorAll('.wb-context-tick-label')].map((el) => el.textContent) : [];
+        return input ? { value: input.value, max: input.max, labels } : null;
+      })()`);
+      if (!ctxBefore) problems.push('模型详情里没有「上下文长度」滑块');
+      else {
+        for (const label of ['自动', '300K', '600K', '1M']) {
+          if (!ctxBefore.labels.includes(label)) problems.push(`上下文滑块缺少「${label}」档位（实际：${ctxBefore.labels.join(' / ')}）`);
+        }
+        await page.cdp.evaluate(`(() => window.__setRoute('/workbuddy/model-visibility', {
+          ok: true,
+          paramsByModel: { 'deepseek-v4.1-flash': { temperature: 0.7, maxTokens: 64000, reasoningEffort: 'max' } },
+          contextWindowByModel: { 'deepseek-v4.1-flash': 600000 },
+          unset: true, visible: null, hideAll: false, includeUnofficial: false, deny: [], applied: true,
+        }))()`);
+        const beforeCtxReqs = await page.cdp.evaluate('window.__reqs.length');
+        const slid = await page.cdp.evaluate(`(() => {
+          const box = document.querySelector('.wb-detail');
+          const input = box ? box.querySelector('.wb-context-control input[type="range"]') : null;
+          if (!input) return false;
+          // 0=自动，1=300K，2=600K，3=1M；原生 setter 才能触发 React onChange
+          const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+          setter.call(input, '2');
+          input.dispatchEvent(new Event('input', { bubbles: true }));
+          input.dispatchEvent(new Event('change', { bubbles: true }));
+          return true;
+        })()`);
+        /*
+         * 保存后的目录重拉：真实路由会按每模型 map 重新映射 contextWindow。
+         * 桩不会自己变，这里同步改一份，截图里表格和滑块才一致。
+         */
+        await page.cdp.evaluate(`(() => {
+          const route = window.__routes && window.__routes['/workbuddy/models'];
+          if (!route) return;
+          const payload = JSON.parse(JSON.stringify(route));
+          const target = (payload.models || []).find((m) => m.id === 'deepseek-v4.1-flash');
+          if (target) target.contextWindow = 600000;
+          window.__setRoute('/workbuddy/models', payload);
+        })()`);
+        await sleep(900);
+        const ctxAfter = await page.cdp.evaluate(`(() => {
+          const box = document.querySelector('.wb-detail');
+          const value = box ? box.querySelector('.wb-context-value') : null;
+          return {
+            posts: window.__reqs.slice(${beforeCtxReqs}).filter((r) => r.path === '/workbuddy/model-visibility' && r.method === 'POST'),
+            value: value ? value.textContent : '',
+            message: [...document.querySelectorAll('.wb-alert')].map((el) => el.innerText).join('\\n'),
+          };
+        })()`);
+        if (!slid) problems.push('找不到模型详情里的上下文滑块');
+        if (!ctxAfter.posts.length) problems.push('拖动上下文滑块后没有发出 POST');
+        else {
+          const body = ctxAfter.posts.at(-1).body || {};
+          if (body.model !== 'deepseek-v4.1-flash' || body.contextWindow !== 600000) {
+            problems.push(`上下文滑块的 POST body 不对：${JSON.stringify(body)}`);
+          }
+        }
+        if (!/600K/.test(ctxAfter.value)) problems.push(`上下文滑块没有回显 600K（实际「${ctxAfter.value}」）`);
+        if (!/已保存 deepseek-v4\.1-flash 的上下文长度：600K/.test(ctxAfter.message)) {
+          problems.push('上下文滑块保存后没有成功提示');
+        }
+        console.log(`上下文滑块（按模型）：${ctxBefore.labels.length} 个刻度，拖到 600K → POST { model, contextWindow } 成功`);
+      }
+      // 留一张"详情紧跟行"的证据图（此时展示保存后的状态）
       const detailShot = await page.cdp.send('Page.captureScreenshot', { format: 'png', captureBeyondViewport: true });
       writeFileSync(join(OUT_DIR, 'plugin-panel-models-detail.png'), Buffer.from(detailShot.result.data, 'base64'));
     }
@@ -829,10 +1038,14 @@ try {
       const table = document.querySelector('.wb-table');
       const badges = [...document.querySelectorAll('.wb-badge')];
       const raw = document.body.innerText.includes('badge:');
-      return { count: badges.length, sample: badges[0] ? badges[0].textContent : '', hasRawSpec: raw };
+      const labels = badges.map((b) => b.textContent);
+      return { count: badges.length, sample: badges[0] ? badges[0].textContent : '', hasRawSpec: raw, labels };
     })()`);
     if (badgeState.hasRawSpec) problems.push('模型列表里出现了 badge: 原始规格（应当已结构化成徽章）');
     if (!badgeState.count) problems.push('模型列表没有渲染促销徽章');
+    if (!badgeState.labels.includes('实测补全')) {
+      problems.push('补全模型没有标出「实测补全」来源（用户会误以为国际版档位没取到）');
+    }
     else console.log(`模型徽章：${badgeState.count} 个（例：${badgeState.sample}）`);
     // 多模态标记必须是看得懂的文字，不许再用 🖼 这类字符
     const imageMark = await page.cdp.evaluate(`(() => {
@@ -1544,6 +1757,19 @@ async function verifyNarrow() {
           cols: grid ? getComputedStyle(grid).gridTemplateColumns.split(' ').filter(Boolean).length : 0,
           fields: detail ? detail.querySelectorAll('.wb-detail-item').length : 0,
           text: detail ? detail.innerText : '',
+          ctx: (() => {
+            // #5 的上下文长度滑块：窄到 400px 时也必须完整可见、整块不横向溢出
+            const wrap = document.querySelector('.wb-context-control');
+            if (!wrap) return null;
+            const input = wrap.querySelector('input[type="range"]');
+            const rect = input.getBoundingClientRect();
+            const block = wrap.closest('.wb-context-block');
+            return {
+              right: Math.round(rect.right),
+              width: Math.round(rect.width),
+              rowOverflow: block ? Math.max(0, block.scrollWidth - block.clientWidth) : 0,
+            };
+          })(),
         };
       })()`);
       if (fit400.docOverflow > 2) problems.push(`400px 视口横向溢出 ${fit400.docOverflow}px`);
@@ -1553,7 +1779,12 @@ async function verifyNarrow() {
       if (fit400.cols !== 1) problems.push(`400px 详情应单列（实际 ${fit400.cols} 列）`);
       if (fit400.fields < 12) problems.push(`400px 详情字段只有 ${fit400.fields} 个（应 >=12）`);
       if (!fit400.text.includes('service info not found')) problems.push('400px 体检失败详情没有错误原因');
-      console.log(`400px 模型：卡片=${fit400.card}，详情 ${fit400.detailW}/${fit400.scrollW}px，字段 ${fit400.fields}，滚动 ${fit400.overflow}px，列 ${fit400.cols}`);
+      if (!fit400.ctx) problems.push('400px 下找不到「上下文长度」下拉');
+      else {
+        if (fit400.ctx.right > 400 - 1) problems.push(`400px 下上下文长度下拉超出视口（右缘 ${fit400.ctx.right}px）`);
+        if (fit400.ctx.rowOverflow > 2) problems.push(`400px 上下文长度行横向溢出 ${fit400.ctx.rowOverflow}px`);
+      }
+      console.log(`400px 模型：卡片=${fit400.card}，详情 ${fit400.detailW}/${fit400.scrollW}px，字段 ${fit400.fields}，滚动 ${fit400.overflow}px，列 ${fit400.cols}，上下文滑块 ${fit400.ctx ? fit400.ctx.width + 'px' : '缺失'}`);
     } catch (error) {
       problems.push(`400px 场景失败：${error.message}`);
     } finally {

@@ -382,6 +382,7 @@ body.dark .wb-root,
 .wb-dropdown{position:relative;display:inline-block;min-width:0}
 .wb-dropdown-trigger{display:inline-flex;align-items:center;justify-content:space-between;gap:6px;background:var(--dsw-alias-bg-module-platform,light-dark(#ffffff,#202226));color:var(--dsw-alias-label-primary,light-dark(#0f1115,#f9fafb));border:.5px solid var(--dsw-alias-border-l2,light-dark(#0000001f,#ffffff2e));border-radius:8px;padding:4px 8px;font:inherit;font-size:12px;cursor:pointer;transition:all var(--wb-anim-fast);min-width:110px;max-width:280px;text-align:left}
 .wb-dropdown-trigger:hover{background:var(--dsw-alias-interactive-bg-hover,light-dark(#2631480f,#ffffff14))}
+.wb-dropdown-trigger:disabled{opacity:.55;cursor:not-allowed;background:transparent}
 .wb-dropdown-trigger:focus-visible{outline:2px solid var(--dsw-alias-brand-primary,#6366f1);outline-offset:1px}
 .wb-dropdown-arrow{font-size:9px;color:var(--dsw-alias-label-tertiary,#adb2b8);margin-left:auto;transition:transform var(--wb-anim-fast);flex:none}
 .wb-dropdown.open .wb-dropdown-arrow{transform:rotate(180deg)}
@@ -395,6 +396,28 @@ body.dark .wb-root,
 .wb-dropdown-item{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:5px 8px;border-radius:6px;font-size:12px;cursor:pointer;color:var(--dsw-alias-label-primary,light-dark(#0f1115,#f9fafb));transition:background-color var(--wb-anim-fast);user-select:none;border:0;background:transparent;width:100%;text-align:left;font:inherit}
 .wb-dropdown-item:hover{background:var(--dsw-alias-interactive-bg-hover,light-dark(#2631480f,#ffffff14))}
 .wb-dropdown-item.on{background:var(--dsw-alias-interactive-bg-active,light-dark(#2631481a,#ffffff24));font-weight:600}
+/* 上下文长度：滑块 + 刻度。官方 GUI 是连续滑杆，这里按**目录里真实存在的档位**
+   吸附（自动 / 300K / 600K / 1M…），既不会滑出一个模型不支持的中间值，也保留
+   一眼能看懂的梯度。 */
+.wb-context-block{display:flex;flex-direction:column;gap:2px;margin-bottom:10px;min-width:0}
+.wb-context-slider-head{display:flex;align-items:center;gap:10px;flex-wrap:wrap;min-width:0}
+.wb-context-value{font-size:12px;font-weight:600;color:var(--dsw-alias-label-primary,light-dark(#0f1115,#f9fafb));min-width:72px;font-variant-numeric:tabular-nums}
+.wb-context-control{display:flex;flex-direction:column;gap:1px;flex:1 1 260px;min-width:200px;max-width:430px}
+.wb-range{-webkit-appearance:none;appearance:none;width:100%;height:18px;margin:0;background:transparent;cursor:pointer}
+.wb-range::-webkit-slider-runnable-track{height:4px;border-radius:999px;background:linear-gradient(to right,var(--dsw-alias-brand-primary,#6366f1) 0%,var(--dsw-alias-brand-primary,#6366f1) var(--wb-pct,0%),var(--dsw-alias-border-l2,light-dark(#0000001f,#ffffff2e)) var(--wb-pct,0%),var(--dsw-alias-border-l2,light-dark(#0000001f,#ffffff2e)) 100%)}
+.wb-range::-webkit-slider-thumb{-webkit-appearance:none;appearance:none;width:14px;height:14px;border-radius:50%;background:var(--dsw-alias-bg-module-platform,light-dark(#fff,#202226));border:2px solid var(--dsw-alias-brand-primary,#6366f1);margin-top:-5px;box-shadow:0 1px 3px light-dark(rgba(0,0,0,.18),rgba(0,0,0,.45));transition:transform var(--wb-anim-fast)}
+.wb-range::-webkit-slider-thumb:hover{transform:scale(1.12)}
+.wb-range:focus-visible{outline:2px solid var(--dsw-alias-brand-primary,#6366f1);outline-offset:3px;border-radius:999px}
+.wb-range:disabled{opacity:.55;cursor:not-allowed}
+.wb-range::-moz-range-track{height:4px;border-radius:999px;background:var(--dsw-alias-border-l2,light-dark(#0000001f,#ffffff2e))}
+.wb-range::-moz-range-progress{height:4px;border-radius:999px;background:var(--dsw-alias-brand-primary,#6366f1)}
+.wb-range::-moz-range-thumb{width:14px;height:14px;border-radius:50%;background:var(--dsw-alias-bg-module-platform,light-dark(#fff,#202226));border:2px solid var(--dsw-alias-brand-primary,#6366f1);box-shadow:0 1px 3px light-dark(rgba(0,0,0,.18),rgba(0,0,0,.45))}
+.wb-context-ticks{position:relative;height:17px;margin:0 7px;font-size:11px;color:var(--dsw-alias-label-secondary,light-dark(#61666b,#cfd3d6));overflow:hidden}
+.wb-context-tick-mark{position:absolute;top:-1px;width:1px;height:4px;background:var(--dsw-alias-border-l2,light-dark(#0000001f,#ffffff2e));transform:translateX(-50%)}
+.wb-context-tick-label{position:absolute;top:4px;transform:translateX(-50%);white-space:nowrap;font-variant-numeric:tabular-nums;line-height:12px}
+.wb-context-tick-label.first{left:0!important;transform:none}
+.wb-context-tick-label.last{left:auto!important;right:0;transform:none}
+.wb-context-tick-label.on{color:var(--dsw-alias-label-primary,light-dark(#0f1115,#f9fafb));font-weight:600}
 .wb-check{display:inline-flex;align-items:center;gap:5px;font-size:12.5px;color:var(--dsw-alias-label-secondary,light-dark(#61666b,#cfd3d6));white-space:nowrap;cursor:pointer;user-select:none}
 .wb-log{margin:0;max-height:360px;overflow:auto;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11.5px;line-height:17px;white-space:pre-wrap;overflow-wrap:anywhere;color:var(--dsw-alias-label-secondary,light-dark(#61666b,#cfd3d6));background:var(--dsw-alias-interactive-bg-hover,light-dark(#26314808,#00000028));border-radius:8px;padding:8px 10px;border:.5px solid var(--dsw-alias-border-l1,light-dark(#0000000a,#ffffff0f))}
 .wb-chat{display:flex;flex-direction:column;gap:8px;max-height:420px;overflow:auto;padding:4px 2px;min-width:0}
@@ -1124,6 +1147,75 @@ body.dark .wb-root,
       '显示官方目录外的模型': 'Show models outside the official catalog',
       '当前：全部显示（含官方目录外）': 'Current: everything is shown (including models outside the official catalog)',
       '当前：官方模型全部显示（扩展模型隐藏）': 'Current: all official models are shown (extended models are hidden)',
+      '上下文长度': 'Context length',
+      '自动（官方默认）': 'Auto (official default)',
+      '官方默认': 'Official default',
+      '跟随官方默认': 'Follow official default',
+      '未公开': 'not published',
+      '官方未公开（不下发）': 'not published (omitted)',
+      '实测补全': 'Measured',
+      '目录补全': 'Supplemented',
+      '实测档位': 'Measured levels',
+      '官方目录未列（实测补全）': 'Not in official catalog (measured supplement)',
+      '官方默认 temperature': 'Official default temperature',
+      'temperature（温度）': 'temperature',
+      'max_tokens（输出上限）': 'max_tokens (output limit)',
+      '常用温度：': 'Common values: ',
+      '稳定 0.2': 'Stable 0.2',
+      '均衡 0.7': 'Balanced 0.7',
+      '创作 1.0': 'Creative 1.0',
+      '适合代码、提取等需要稳定复现的任务': 'For coding, extraction, and other tasks that need stable, reproducible output',
+      '日常对话与问答': 'Everyday chat and Q&A',
+      '写作、头脑风暴等需要发散的场景': 'Writing, brainstorming, and other tasks that benefit from variety',
+      'temperature：0–2，越低越稳定（代码 / 提取 0–0.3），越高越发散（创作 1.0+）。':
+        'temperature: 0–2. Lower is more stable (0–0.3 for coding / extraction); higher is more varied (1.0+ for creative work).',
+      '三个参数各管一件事：temperature 控制回答的发散程度，max_tokens 控制输出长度，思考强度控制回答前的思考深度。':
+        'Each parameter controls one thing: temperature controls how varied the answer is, max_tokens controls output length, and reasoning effort controls how deeply the model thinks before answering.',
+      'temperature / max_tokens / 思考强度三项互相独立；只改一项不会影响另外两项。':
+        'temperature / max_tokens / reasoning effort are independent; changing one does not affect the other two.',
+      'max_tokens 需要是正整数': 'max_tokens must be a positive integer',
+      'temperature 需要是 0–2 之间的数字': 'temperature must be a number between 0 and 2',
+      '保存修改': 'Save changes',
+      '当前生效：': 'Currently effective: ',
+      '未保存的修改：': 'Unsaved changes: ',
+      '有未保存的修改 —— 点「保存修改」后才会用于本插件发出的请求。':
+        'You have unsaved changes — click Save changes to apply them to requests from this plugin.',
+      '点「保存修改」后才会用于本插件发出的请求。':
+        'Click Save changes to apply them to requests from this plugin.',
+      '未保存：': 'Not saved: ',
+      '官方默认档位': 'Official default level',
+      '官方目录的默认值；下方选择其他档位会覆盖它，但不会改这里':
+        'The default from the official catalog; choosing another level below overrides it but does not change this value.',
+      '当前区域的官方目录没有列出它；模型与思考档位按本地实测补全，所以档位可能和官方 GUI 不同':
+        'The official catalog for this region does not list it; the model and reasoning levels are supplemented from local measurements, so they may differ from the official GUI.',
+      '当前区域的官方目录没有列出它；条目按实测补全':
+        'The official catalog for this region does not list it; this entry is supplemented from local measurements.',
+      '上游未提供档位表；这些档位来自本地实测':
+        'The upstream does not provide a level table; these levels come from local measurements.',
+      '当前区域的官方目录没有列出它；模型能力与档位由本项目按实测补全，所以可能和官方 GUI 的列表不同':
+        'The official catalog for this region does not list it; the model capabilities and reasoning levels are supplemented from local measurements, so they may differ from the official GUI.',
+      'WorkBuddy 官方目录给出的默认采样温度；留空时插件不下发该字段，由上游使用这个默认值':
+        'The default sampling temperature from the WorkBuddy official catalog; when blank, the plugin does not send this field and the upstream uses this default.',
+      '当前区域的官方目录没有提供该模型的默认温度（常见于目录未列的补全模型）':
+        'The official catalog for this region does not provide a default temperature for this model (common for supplemented models not in the catalog).',
+      '上游目录未提供档位表；这些档位来自本地实测（可能比官方 GUI 展示的多），也是 dsh 选择器里的候选':
+        'The upstream catalog provides no level table; these levels come from local measurements (they may be more than the official GUI shows) and are the candidates in the dsh picker.',
+      '上游未提供档位表；按默认三档兜底（low / medium / high）':
+        'The upstream provides no level table; falling back to low / medium / high.',
+      '这些参数只作用于本插件发给上游的请求，不会修改 WorkBuddy 客户端。':
+        'These parameters only affect requests this plugin sends upstream; they do not change the WorkBuddy client.',
+      '上下文长度按模型单独设置：点模型行的「详情」，在滑块里选择该模型自己的官方档位；表里的「上下文 / 输出」显示实际生效值。':
+        'Context length is configured per model: open Details on a model row and use the slider to pick that model\'s official options. The Context / output column shows the effective value.',
+      '拖动后自动保存；「自动」= 跟随官方默认 / 桥配置（每个模型独立）。':
+        'Saves automatically after dragging; "Auto" follows the official default / bridge setting (per model).',
+      '该模型没有提供可选的上下文档位，只能跟随桥目录。':
+        'This model provides no selectable context options; it can only follow the bridge catalog value.',
+      '每个模型的上下文长度在「详情」里单独调（按该模型官方档位和上限）':
+        'Set context length per model in Details (using that model\'s official options and maximum).',
+      '已恢复为自动：各模型使用官方默认上下文长度。':
+        'Restored to auto: each model uses its official default context length.',
+      '已恢复为自动。此 dsh 版本不支持即时刷新 —— 重启一次 dsh 后生效。':
+        'Restored to auto. This dsh version does not support live refresh — it takes effect after one dsh restart.',
       '可用模型列表': 'Available models',
       '官方未上架': 'Not in official catalog',
       '网关目录里有，但 WorkBuddy 官方模型选择器未列出；默认不进 dsh 选择器，可先体检再手动显示':
@@ -1136,6 +1228,8 @@ body.dark .wb-root,
         'Present in the gateway catalog but not listed by WorkBuddy\'s official model picker; use the probe to confirm it actually works.',
       '上游目录未提供，由本项目按实测补全': 'Not in the upstream catalog; supplemented from local measurements',
       'dsh 没有上下文档位选择器；这里显示实际生效值': 'dsh has no context-window selector; this is the effective value.',
+      '这里显示实际生效值（可在上方「上下文长度」统一调整；超过模型上限时自动按上限）':
+        'This is the effective value (adjust Context length above; values above the model maximum are clamped).',
       'dsh 没有上下文档位选择器；这里显示实际生效值，官方默认与可选档位见下两行':
         'dsh has no context-window selector; this is the effective value. The official default and options are shown below.',
       '官方默认上下文': 'Official default context',
@@ -1470,6 +1564,33 @@ body.dark .wb-root,
           + ' / ' + fail + ' failed — until the red ones are fixed, models will not appear.'],
       [/^已保存并即时生效：dsh 选择器现在显示 (\d+) 个模型。$/,
         'Saved and applied immediately: the dsh picker now shows $1 models.'],
+      [/^上下文长度已更新为 (.+)：各模型超过自身上限时自动按上限。$/,
+        'Context length updated to $1: values above each model\'s maximum are clamped automatically.'],
+      [/^已保存 (.+) 的上下文长度：(.+)。$/, 'Saved context length for $1: $2.'],
+      [/^已恢复 (.+) 的官方默认上下文长度。$/, 'Restored the official default context length for $1.'],
+      [/^留空 = 使用 WorkBuddy 默认：temperature = (.+)；max_tokens = 该模型官方输出上限 (.+)；思考强度 = 模型默认档位。清空后保存即恢复默认。$/,
+        'Leave blank to use the WorkBuddy default: temperature = $1; max_tokens = this model\'s official output limit $2; reasoning effort = model default. Clear and save to restore defaults.'],
+      [/^未保存：max_tokens 不能超过该模型官方上限 (.+)$/,
+        'Not saved: max_tokens cannot exceed this model\'s official output limit of $1'],
+      [/^max_tokens 不能超过该模型官方上限 (.+)$/,
+        'max_tokens cannot exceed this model\'s official output limit of $1'],
+      [/^不能超过该模型官方上限 (.+)$/,
+        'Cannot exceed this model\'s official output limit of $1'],
+      [/^官方默认 (.+)$/, 'Official default $1'],
+      [/^官方默认（(.+)）$/, 'Official default ($1)'],
+      [/^跟随官方默认（(.+)）$/, 'Follow official default ($1)'],
+      [/^思考强度：越高思考越深、响应越慢、消耗越多；下拉档位来自官方目录，「(.+)」= 不覆盖，使用模型默认档位。$/,
+        (m, label) => 'Reasoning effort: higher means deeper thinking, slower responses, and more quota use. '
+          + `Levels come from the official catalog; "${translateText(label)}" means no override and uses the model default.`],
+      [/^当前思考强度：(.+)（覆盖官方默认 (.+)）$/,
+        'Current reasoning effort: $1 (overrides official default $2)'],
+      [/^当前思考强度：跟随官方默认（(.+)）$/, 'Current reasoning effort: follow official default ($1)'],
+      [/^当前思考强度：跟随官方默认$/, 'Current reasoning effort: follow official default'],
+      [/^思考强度：低更快更省；中\/高\/Max 思考更深、更慢、更耗。「(.+)」= 不单独覆盖，使用官方默认档位。$/,
+        (m, label) => 'Reasoning effort: low is faster and cheaper; medium / high / Max think deeper, slower, and use more quota. '
+          + `"${translateText(label)}" means no separate override; the official default applies.`],
+      [/^已保存为 (.+)。此 dsh 版本不支持即时刷新 —— 重启一次 dsh 后生效。$/,
+        'Saved as $1. This dsh version does not support live refresh — it takes effect after one dsh restart.'],
       [/^已保存（(\d+) 个模型）。此 dsh 版本不支持即时刷新 —— 重启一次 dsh 后生效。$/,
         'Saved ($1 models). This dsh version does not support live refresh — it takes effect after one dsh restart.'],
       [/^已保存：未勾选任何模型 —— dsh 选择器将不显示 WorkBuddy 模型（重新勾选即可恢复）。$/,
@@ -1829,6 +1950,13 @@ body.dark .wb-root,
       if (v >= 1000) return (v / 1000).toFixed(1) + 'k';
       return String(v);
     };
+    /** 上下文档位的人话写法：600000 → 600K，1000000 → 1M（去掉无意义的 .0）。 */
+    const fmtContextLength = (n) => {
+      const v = Number(n) || 0;
+      if (v >= 1_000_000) return String(Number((v / 1_000_000).toFixed(1))) + 'M';
+      if (v >= 1000) return String(Number((v / 1000).toFixed(1))) + 'K';
+      return String(v);
+    };
     const fmtMetricValue = (metric, val) => {
       if (metric === 'calls') return fmtInt(val) + ' 次';
       if (metric === 'tokens') return fmtTokens(val);
@@ -2097,7 +2225,7 @@ body.dark .wb-root,
      * 内部同步渲染 <select className="wb-select wb-hidden-select"> 保证自动化测试 100% 兼容。
      */
     function DropdownSelect(props) {
-      const { value, onChange, options, placeholder, style, className } = props;
+      const { value, onChange, options, placeholder, style, className, disabled } = props;
       const [open, setOpen] = useState(false);
       const [dropUp, setDropUp] = useState(false);
       const wrapRef = useRef(null);
@@ -2120,6 +2248,7 @@ body.dark .wb-root,
       }, [open]);
 
       const toggle = () => {
+        if (disabled) return;
         if (!open && wrapRef.current && typeof window !== 'undefined') {
           try {
             const rect = wrapRef.current.getBoundingClientRect();
@@ -2140,6 +2269,7 @@ body.dark .wb-root,
           ref: selectRef,
           className: 'wb-select wb-hidden-select',
           value: String(value),
+          disabled: disabled === true,
           onChange: (e) => {
             if (onChange) onChange(e);
           },
@@ -2155,6 +2285,7 @@ body.dark .wb-root,
           className: 'wb-dropdown-trigger',
           onClick: toggle,
           title: currentLabel,
+          disabled: disabled === true,
           ...(currentRaw ? { 'data-wb-raw': '' } : {}),
         },
           h('span', { style: { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } },
@@ -4200,6 +4331,12 @@ body.dark .wb-root,
       const [visibility, setVisibility] = useState(null);   // null = 跟随配置（全部显示）
       const [hideAll, setHideAll] = useState(false);
       const [includeUnofficial, setIncludeUnofficial] = useState(false); // 是否显示官方目录外
+      // 每模型上下文预算草稿：`{ [modelId]: tokens }`（0 = 跟随官方默认/桥目录）。
+      // dsh 的容量是**按模型**解析的，所以这里也按模型存，不再有全局值。
+      const [contextDrafts, setContextDrafts] = useState({});
+      const [contextSavingModel, setContextSavingModel] = useState('');
+      // 滑块拖动时先即时预览，松手/停顿后才提交，避免每跨一格都打一次 POST
+      const contextCommitTimer = useRef(null);
       const [denied, setDenied] = useState([]);             // 配置 modelDeny 排除的模型
       const [prefsLoaded, setPrefsLoaded] = useState(false);
       const [prefsDirty, setPrefsDirty] = useState(false);
@@ -4217,6 +4354,9 @@ body.dark .wb-root,
           setPrefsLoaded(true);
         }
       }, [prefsApi.data, prefsLoaded]);
+      useEffect(() => () => {
+        if (contextCommitTimer.current) clearTimeout(contextCommitTimer.current);
+      }, []);
       const isVisible = (id) => {
         if (denied.includes(id)) return false;
         if (hideAll) return false;
@@ -4268,6 +4408,132 @@ body.dark .wb-root,
           setMessage('保存失败：' + (res.data?.error || res.status));
         }
       };
+      /*
+       * 每模型上下文长度：滑块的可选点 = 「自动」+ 该模型官方目录里的真实档位
+       * （再加上官方默认/上限/当前值，避免老桥缺字段时滑不到）。不同模型各存
+       * 各的，不会再出现一个全局值把 200K 的模型也标成 1M。
+       */
+      const savedContextFor = (id) => {
+        const n = Number(prefsApi.data?.contextWindowByModel?.[id]);
+        return Number.isSafeInteger(n) && n > 0 ? n : 0;
+      };
+      const contextValueFor = (id) => (
+        Object.prototype.hasOwnProperty.call(contextDrafts, id)
+          ? contextDrafts[id]
+          : savedContextFor(id)
+      );
+      const contextOptionsFor = (m) => {
+        const selected = contextValueFor(m.id);
+        const values = new Set();
+        const add = (raw) => {
+          const n = Number(raw);
+          if (Number.isSafeInteger(n) && n > 0) values.add(n);
+        };
+        for (const n of Array.isArray(m.contextWindowOptions) ? m.contextWindowOptions : []) add(n);
+        add(m.contextWindowDefault);
+        add(m.contextWindowMax);
+        add(m.contextWindow);
+        add(selected);
+        const autoValue = Number(m.contextWindowAuto) > 0 ? Number(m.contextWindowAuto)
+          : (Number(m.contextWindowDefault) > 0 ? Number(m.contextWindowDefault)
+            : (Number(m.contextWindow) > 0 ? Number(m.contextWindow) : 0));
+        return [
+          {
+            value: 0,
+            label: t('自动'),
+            full: autoValue ? `${t('自动')} (${fmtContextLength(autoValue)})` : t('自动（官方默认）'),
+          },
+          ...[...values].sort((a, b) => a - b).map((n) => ({
+            value: n,
+            label: fmtContextLength(n),
+            full: fmtContextLength(n),
+          })),
+        ];
+      };
+      const saveModelContext = async (id, value) => {
+        setContextSavingModel(id);
+        const res = await postJson('/workbuddy/model-visibility', { model: id, contextWindow: value });
+        setContextSavingModel('');
+        if (res.data?.ok) {
+          // 草稿保留（值等于已保存值），避免 prefsApi.reload 回来前滑块跳回旧值
+          setMessage(value > 0
+            ? `已保存 ${id} 的上下文长度：${fmtContextLength(value)}。`
+            : `已恢复 ${id} 的官方默认上下文长度。`);
+          reload(); // 表格/详情里的"上下文"是实际生效值，需要重拉目录映射
+          prefsApi.reload();
+        } else {
+          // 失败时丢掉草稿，滑块回到已保存值（与后端一致）
+          setContextDrafts((prev) => {
+            const next = { ...prev };
+            delete next[id];
+            return next;
+          });
+          setMessage('保存失败：' + (res.data?.error || res.status));
+        }
+      };
+      const previewModelContext = (id, value) => {
+        if (contextSavingModel) return;
+        if (value === contextValueFor(id)) return;
+        setContextDrafts((prev) => ({ ...prev, [id]: value }));
+        if (contextCommitTimer.current) clearTimeout(contextCommitTimer.current);
+        contextCommitTimer.current = setTimeout(() => {
+          contextCommitTimer.current = null;
+          saveModelContext(id, value);
+        }, 320);
+      };
+      /** 单个模型的上下文滑块（详情里用；每个模型各自一套档位）。 */
+      const renderContextSlider = (m) => {
+        const options = contextOptionsFor(m);
+        if (options.length <= 1) {
+          return h('p', { className: 'wb-note', style: { margin: '10px 0 0' } },
+            '该模型没有提供可选的上下文档位，只能跟随桥目录。');
+        }
+        const selected = contextValueFor(m.id);
+        const index = Math.max(0, options.findIndex((o) => o.value === selected));
+        const current = options[index] || options[0];
+        const pct = options.length > 1 ? (index / (options.length - 1)) * 100 : 0;
+        const tickStep = Math.max(1, Math.ceil((options.length - 1) / 3));
+        const saving = contextSavingModel === m.id;
+        return h('div', { className: 'wb-context-block', style: { marginTop: '10px' } },
+          h('div', { className: 'wb-context-slider-head' },
+            h('span', { className: 'wb-label' }, '上下文长度'),
+            h('span', { className: 'wb-context-value' }, current.full),
+            h('div', { className: 'wb-context-control' },
+              h('input', {
+                className: 'wb-range',
+                type: 'range',
+                min: '0',
+                max: String(options.length - 1),
+                step: '1',
+                value: String(index),
+                disabled: saving,
+                style: { '--wb-pct': pct + '%' },
+                'aria-label': '上下文长度',
+                'aria-valuetext': current.full,
+                onChange: (e) => {
+                  const option = options[Number(e.target.value)];
+                  if (option) previewModelContext(m.id, option.value);
+                },
+              }),
+              h('div', { className: 'wb-context-ticks' },
+                options.map((option, i) => {
+                  const left = options.length > 1 ? (i / (options.length - 1)) * 100 : 0;
+                  const showLabel = i === 0 || i === options.length - 1 || i === index || i % tickStep === 0;
+                  return h(Fragment, { key: String(option.value) },
+                    h('span', { className: 'wb-context-tick-mark', style: { left: left + '%' } }),
+                    showLabel
+                      ? h('span', {
+                        className: 'wb-context-tick-label'
+                          + (i === 0 ? ' first' : '')
+                          + (i === options.length - 1 ? ' last' : '')
+                          + (i === index ? ' on' : ''),
+                        style: { left: left + '%' },
+                      }, option.label)
+                      : null);
+                })))),
+          h('p', { className: 'wb-note', style: { margin: '4px 0 0' } },
+            saving ? '保存中…' : '拖动后自动保存；「自动」= 跟随官方默认 / 桥配置（每个模型独立）。'));
+      };
       // ── 每模型默认参数（温度 / 输出上限 / 思考强度）────────────────────
       // 全局只能配一份默认值，但用户对不同模型的期待不同（写代码要低温、
       // 聊天要高温）。dsh 自身只记「模型 + 档位」，温度这类参数没有地方存。
@@ -4294,8 +4560,11 @@ body.dark .wb-root,
         }
         if (String(draft.maxTokens ?? '').trim() !== '') {
           const n = Number(draft.maxTokens);
-          if (Number.isInteger(n) && n > 0) params.maxTokens = n;
-          else problems.push('max_tokens 需要是正整数');
+          const cap = Number(models.find((m) => m.id === id)?.maxTokens) || 0;
+          if (Number.isInteger(n) && n > 0 && (!cap || n <= cap)) params.maxTokens = n;
+          else if (Number.isInteger(n) && n > 0 && cap && n > cap) {
+            problems.push(`max_tokens 不能超过该模型官方上限 ${fmtContextLength(cap)}`);
+          } else problems.push('max_tokens 需要是正整数');
         }
         if (problems.length) {
           setMessage('未保存：' + problems.join('；'));
@@ -4511,6 +4780,10 @@ body.dark .wb-root,
                 onChange: (e) => { setIncludeUnofficial(e.target.checked); setPrefsDirty(true); },
               }),
               t('显示官方目录外的模型'), `（${unofficialCount}）`))),
+        // 上下文长度不再做全局设置：dsh 的容量本来就按模型解析，每个模型
+        // 有自己的官方档位和上限。这里只提示入口，实际滑块在模型详情里。
+        h('p', { className: 'wb-note', style: { margin: '0 0 10px' } },
+          '上下文长度按模型单独设置：点模型行的「详情」，在滑块里选择该模型自己的官方档位；表里的「上下文 / 输出」显示实际生效值。'),
         denied.length
           ? h('p', { className: 'wb-note', style: { margin: '0 0 8px' } },
             '配置里有模型被 modelDeny 排除，它们不会出现在 dsh 选择器里（面板里勾选也不生效）。')
@@ -4522,7 +4795,8 @@ body.dark .wb-root,
               // 列数压到 7 列：显示勾选 + 模型 + 名称 + 上下文/输出 + 倍率 + 体检 + 操作。
               // 显示勾选决定该模型是否出现在 dsh 的模型选择器里（保存后即时生效）。
               h('th', { title: '勾选 = 出现在 dsh 的模型选择器里（保存后生效）' }, '显示'),
-              h('th', null, '模型'), h('th', null, '名称'), h('th', { className: 'num' }, '上下文 / 输出'),
+              h('th', null, '模型'), h('th', null, '名称'),
+              h('th', { className: 'num', title: '每个模型的上下文长度在「详情」里单独调（按该模型官方档位和上限）' }, '上下文 / 输出'),
               h('th', { className: 'num' }, '倍率'), h('th', null, '体检'), h('th', { className: 'wb-actions-col' }, '操作'))),
             h('tbody', null, visible.flatMap((m) => {
               const probe = resultOf(m.id);
@@ -4552,12 +4826,27 @@ body.dark .wb-root,
                   // 「推理」徽章与「图片」并列：有推理能力就标（档位细节在详情里，
                   // 列表行只做"能不能"的一眼判断，避免把六个档位名塞进一行）。
                   m.reasoning ? h('span', { className: 'wb-badge', title: '支持推理（可以选择思考强度）' }, '推理') : null,
+                  /*
+                   * 档位来源必须一眼可见：国际版目录漏掉的模型是按实测补全的，
+                   * 档位可能比官方 GUI 多（用户正是拿它和国内版对比时困惑的）。
+                   * 工具提示写清“官方目录未列 / 本地实测”，详情里还有完整解释。
+                   */
+                  m.supplemented
+                    ? h('span', {
+                      className: 'wb-badge',
+                      title: m.reasoning && m.effortsSource === 'measured'
+                        ? '当前区域的官方目录没有列出它；模型与思考档位按本地实测补全，所以档位可能和官方 GUI 不同'
+                        : '当前区域的官方目录没有列出它；条目按实测补全',
+                    }, m.reasoning && m.effortsSource === 'measured' ? '实测补全' : '目录补全')
+                    : (m.reasoning && m.effortsSource === 'measured'
+                      ? h('span', { className: 'wb-badge', title: '上游未提供档位表；这些档位来自本地实测' }, '实测档位')
+                      : null),
                   badgesOf(m).map((b, bi) => h('span', {
                     key: bi,
                     className: 'wb-badge',
                     style: b.color ? { background: b.color + '22', color: b.color, borderColor: b.color + '55' } : undefined,
                   }, b.label))),
-                h('td', { className: 'num' }, (m.contextWindow ? fmtTokens(m.contextWindow) : '—') + ' / ' + (m.maxTokens ? fmtTokens(m.maxTokens) : '—')),
+                h('td', { className: 'num' }, (m.contextWindow ? fmtContextLength(m.contextWindow) : '—') + ' / ' + (m.maxTokens ? fmtContextLength(m.maxTokens) : '—')),
                 h('td', { className: 'num' }, m.free ? '免费' : (m.credits === null || m.credits === undefined ? '—' : String(m.credits))),
                 h('td', null, probe
                   ? h(Pill, {
@@ -4597,26 +4886,30 @@ body.dark .wb-root,
                         h(DetailItem, {
                           label: '上下文 / 输出',
                           value: `${fmtInt(m.contextWindow)} / ${fmtInt(m.maxTokens)} tokens`,
-                          hint: 'dsh 没有上下文档位选择器；这里显示实际生效值',
+                          hint: '这里显示实际生效值（可在上方「上下文长度」统一调整；超过模型上限时自动按上限）',
                         }),
                         h(DetailItem, {
                           label: '官方上下文',
                           value: [
-                            m.contextWindowDefault ? `${t('默认')} ${fmtTokens(m.contextWindowDefault)}` : '',
+                            m.contextWindowDefault ? `${t('默认')} ${fmtContextLength(m.contextWindowDefault)}` : '',
                             Array.isArray(m.contextWindowOptions) && m.contextWindowOptions.length
-                              ? `${t('可选')} ${m.contextWindowOptions.map((n) => fmtTokens(n)).join(' / ')}`
+                              ? `${t('可选')} ${m.contextWindowOptions.map((n) => fmtContextLength(n)).join(' / ')}`
                               : '',
                             m.contextWindowMax && m.contextWindowMax !== m.contextWindow
-                              ? `${t('上限')} ${fmtTokens(m.contextWindowMax)}`
+                              ? `${t('上限')} ${fmtContextLength(m.contextWindowMax)}`
                               : '',
                           ].filter(Boolean).join(' · ') || '—',
                         }),
                         h(DetailItem, {
                           label: '官方模型列表',
-                          value: m.official === true ? '在列' : (m.official === false ? '未上架（扩展）' : '未判定'),
-                          hint: m.official === false
-                            ? '网关目录里有，但 WorkBuddy 官方模型选择器未列出；能否实际调用以体检为准'
-                            : (m.supplemented ? '上游目录未提供，由本项目按实测补全' : undefined),
+                          value: m.supplemented
+                            ? '官方目录未列（实测补全）'
+                            : (m.official === true ? '在列' : (m.official === false ? '未上架（扩展）' : '未判定')),
+                          hint: m.supplemented
+                            ? '当前区域的官方目录没有列出它；模型能力与档位由本项目按实测补全，所以可能和官方 GUI 的列表不同'
+                            : (m.official === false
+                              ? '网关目录里有，但 WorkBuddy 官方模型选择器未列出；能否实际调用以体检为准'
+                              : undefined),
                         }),
                         h(DetailItem, { label: '计费倍率', value: m.free ? '免费' : (m.credits === null || m.credits === undefined ? '未知' : String(m.credits)) }),
                         h(DetailItem, { label: '多模态', value: m.images ? '支持图片' : '纯文本' }),
@@ -4640,12 +4933,25 @@ body.dark .wb-root,
                           hint: m.reasoning && Array.isArray(m.efforts) && m.efforts.length
                             ? (m.effortsSource === 'upstream'
                               ? '档位来自上游目录 reasoning.supportedEfforts（与 WorkBuddy 官方 GUI 一致）；这也是 dsh 选择器里的候选'
-                              : '上游未给档位表，按本地实测兜底；这也是 dsh 选择器里的候选')
+                              : (m.effortsSource === 'measured'
+                                ? '上游目录未提供档位表；这些档位来自本地实测（可能比官方 GUI 展示的多），也是 dsh 选择器里的候选'
+                                : '上游未提供档位表；按默认三档兜底（low / medium / high）'))
                             : undefined,
                         }),
                         m.reasoning && m.defaultEffort
-                          ? h(DetailItem, { label: '默认档位', value: m.defaultEffort })
+                          ? h(DetailItem, {
+                            label: '官方默认档位',
+                            value: m.defaultEffort,
+                            hint: '官方目录的默认值；下方选择其他档位会覆盖它，但不会改这里',
+                          })
                           : null,
+                        h(DetailItem, {
+                          label: '官方默认 temperature',
+                          value: m.defaultTemperature != null ? String(m.defaultTemperature) : t('未公开'),
+                          hint: m.defaultTemperature != null
+                            ? 'WorkBuddy 官方目录给出的默认采样温度；留空时插件不下发该字段，由上游使用这个默认值'
+                            : '当前区域的官方目录没有提供该模型的默认温度（常见于目录未列的补全模型）',
+                        }),
                         m.onlyReasoning
                           ? h(DetailItem, { label: '调用方式', value: '纯思考模型（不接受非思考调用）' })
                           : null,
@@ -4658,6 +4964,8 @@ body.dark .wb-root,
                             : '未测',
                         }),
                         h(DetailItem, { label: '标签', value: tagsOf(m).join(' · ') || '—' })),
+                      // 每个模型自己的上下文滑块：档位/上限都按这个模型来。
+                      renderContextSlider(m),
                       badgesOf(m).length
                         ? h('div', { style: { marginTop: '8px' } },
                           h('span', { className: 'wb-note', style: { margin: '0 8px 0 0' } }, '活动：'),
@@ -4671,29 +4979,167 @@ body.dark .wb-root,
                       m.description ? h('p', { className: 'wb-note', style: { margin: '8px 0 0' } }, m.description) : null,
                       (() => {
                         const p = paramsFor(m.id);
+                        const savedParams = prefsApi.data?.paramsByModel?.[m.id] || {};
+                        const draft = paramDrafts[m.id];
                         const levels = Array.isArray(m.efforts)
                           ? m.efforts.filter(Boolean)
                           : (m.reasoning ? ['low', 'medium', 'high'] : []);
-                        return h('div', { style: { marginTop: '10px', display: 'flex', gap: '8px', flexWrap: 'wrap', alignItems: 'center' } },
-                          h('span', { className: 'wb-label' }, '该模型默认参数'),
-                          h('input', {
-                            className: 'wb-input', type: 'number', min: '0', max: '2', step: '0.1', placeholder: 'temperature',
-                            value: p.temperature ?? '', style: { width: '110px' },
-                            onChange: (e) => editParam(m.id, 'temperature', e.target.value),
-                          }),
-                          h('input', {
-                            className: 'wb-input', type: 'number', min: '1', step: '1', placeholder: 'max_tokens',
-                            value: p.maxTokens ?? '', style: { width: '120px' },
-                            onChange: (e) => editParam(m.id, 'maxTokens', e.target.value),
-                          }),
+                        const outputCap = m.maxTokens ? fmtContextLength(m.maxTokens) : t('未知');
+                        const effortDefaultLabel = m.defaultEffort ? `跟随官方默认（${m.defaultEffort}）` : '跟随官方默认';
+                        const defaultTempText = m.defaultTemperature != null
+                          ? `${t('官方默认')} ${m.defaultTemperature}`
+                          : t('官方未公开（不下发）');
+                        /*
+                         * 即时校验 + 未保存状态。
+                         *
+                         * 旧实现只在点保存时才检查；输入框平时看起来什么都收，
+                         * 用户不知道值是否合法、是否已经生效。这里每帧校验：
+                         * 非法时说明原因并禁用保存；有差异时明确标出“未保存”。
+                         * 比较的是**草稿 vs 已保存**，所以把值改回原样会重新变干净。
+                         */
+                        const normParam = (v) => (v === undefined || v === null ? '' : String(v));
+                        const tempDirty = !!draft && normParam(draft.temperature) !== normParam(savedParams.temperature);
+                        const maxDirty = !!draft && normParam(draft.maxTokens) !== normParam(savedParams.maxTokens);
+                        const effortDirty = !!draft
+                          && normParam(draft.reasoningEffort) !== normParam(savedParams.reasoningEffort);
+                        const paramsDirty = tempDirty || maxDirty || effortDirty;
+                        const paramProblems = [];
+                        if (String(p.temperature ?? '').trim() !== '') {
+                          const value = Number(p.temperature);
+                          if (!Number.isFinite(value) || value < 0 || value > 2) {
+                            paramProblems.push('temperature 需要是 0–2 之间的数字');
+                          }
+                        }
+                        if (String(p.maxTokens ?? '').trim() !== '') {
+                          const value = Number(p.maxTokens);
+                          if (!Number.isInteger(value) || value <= 0) paramProblems.push('max_tokens 需要是正整数');
+                          else if (m.maxTokens && value > m.maxTokens) {
+                            paramProblems.push(`max_tokens 不能超过该模型官方上限 ${fmtContextLength(m.maxTokens)}`);
+                          }
+                        }
+                        const selectedEffort = p.reasoningEffort || '';
+                        const selectedEffortLabel = selectedEffort
+                          ? t(EFFORT_LABELS[selectedEffort] || selectedEffort)
+                          : '';
+                        // 常用温度：数字本身不足以让用户会填，给场景 + 一键填入。
+                        const tempPresets = [
+                          { value: '0.2', label: '稳定 0.2', hint: '适合代码、提取等需要稳定复现的任务' },
+                          { value: '0.7', label: '均衡 0.7', hint: '日常对话与问答' },
+                          { value: '1.0', label: '创作 1.0', hint: '写作、头脑风暴等需要发散的场景' },
+                        ];
+                        return h(Fragment, null,
+                          h('div', { style: { marginTop: '10px', display: 'flex', gap: '8px', flexWrap: 'wrap', alignItems: 'center' } },
+                            h('span', { className: 'wb-label' }, '该模型默认参数'),
+                            h('span', { className: 'wb-label' }, 'temperature'),
+                            h('input', {
+                              className: 'wb-input', type: 'number', min: '0', max: '2', step: '0.1',
+                              placeholder: m.defaultTemperature != null ? `官方默认 ${m.defaultTemperature}` : '官方默认',
+                              'aria-label': 'temperature（温度）',
+                              value: p.temperature ?? '', style: { width: '100px' },
+                              onChange: (e) => editParam(m.id, 'temperature', e.target.value),
+                            }),
+                            h('span', { className: 'wb-label' }, 'max_tokens'),
+                            h('input', {
+                              className: 'wb-input', type: 'number', min: '1', step: '1',
+                              // 上限跟着当前模型走：填超了上游会 400，不能等保存后
+                              // 才发现。留空时的默认值也直接写进占位符。
+                              max: m.maxTokens ? String(m.maxTokens) : undefined,
+                              title: m.maxTokens ? `不能超过该模型官方上限 ${fmtContextLength(m.maxTokens)}` : undefined,
+                              placeholder: `官方默认 ${outputCap}`, 'aria-label': 'max_tokens（输出上限）',
+                              value: p.maxTokens ?? '', style: { width: '130px' },
+                              onChange: (e) => editParam(m.id, 'maxTokens', e.target.value),
+                            }),
+                            levels.length
+                              ? h('span', { className: 'wb-label' }, '思考强度')
+                              : null,
+                            levels.length
+                              ? h(DropdownSelect, {
+                                value: p.reasoningEffort || '',
+                                onChange: (e) => editParam(m.id, 'reasoningEffort', e.target.value),
+                                options: [{ value: '', label: effortDefaultLabel }, ...levels.map((id) => ({ value: id, label: EFFORT_LABELS[id] || id }))],
+                              })
+                              : null,
+                            h(Btn, {
+                              primary: paramsDirty && !paramProblems.length,
+                              disabled: savingParams === m.id || !paramsDirty || paramProblems.length > 0,
+                              onClick: () => saveModelParams(m.id),
+                            }, savingParams === m.id ? '保存中…' : (paramsDirty ? '保存修改' : '已保存'))),
+                          /*
+                           * 三个控件各管什么，必须在控件旁边说清楚。旧版只把
+                           * 思考强度做成一个没有标题的下拉，用户根本不知道它是
+                           * 干什么的；解释又埋在最下面，被视口裁掉。
+                           */
+                          h('p', { className: 'wb-note', style: { margin: '6px 0 0' } },
+                            '三个参数各管一件事：temperature 控制回答的发散程度，max_tokens 控制输出长度，思考强度控制回答前的思考深度。'),
                           levels.length
-                            ? h(DropdownSelect, {
-                              value: p.reasoningEffort || '',
-                              onChange: (e) => editParam(m.id, 'reasoningEffort', e.target.value),
-                              options: [{ value: '', label: '默认' }, ...levels.map((id) => ({ value: id, label: EFFORT_LABELS[id] || id }))],
-                            })
+                            ? h('p', { className: 'wb-note', style: { margin: '2px 0 0' } },
+                              `思考强度：低更快更省；中/高/Max 思考更深、更慢、更耗。「${effortDefaultLabel}」= 不单独覆盖，使用官方默认档位。`)
                             : null,
-                          h(Btn, { disabled: savingParams === m.id, onClick: () => saveModelParams(m.id) }, savingParams === m.id ? '保存中…' : '保存为该模型默认'));
+                          /*
+                           * 保存反馈必须在**用户眼前**：顶部 Alert 在长详情上方，
+                           * 用户在下面改值看不到。这里把三个参数合成**一行实时状态**：
+                           *   - 有改动 → “未保存的修改：…”（值跟着输入/下拉实时变）；
+                           *   - 无改动 → “当前生效：…”；
+                           * 思考强度也放进这一行 —— 用户改完下拉能立刻在同一行看到变化，
+                           * 不会因为下方单独一行被视口裁掉而以为“上面的没变”。
+                           * 非法值另外用红字说明，保存按钮同时禁用。
+                           */
+                          paramProblems.length
+                            ? h('p', { className: 'wb-note', style: { margin: '2px 0 0', color: 'light-dark(#a40e26,#ffb3ad)' } },
+                              '未保存：' + paramProblems.join('；'))
+                            : null,
+                          h('p', { className: 'wb-note', style: { margin: '2px 0 0' } },
+                            paramsDirty ? '未保存的修改：' : '当前生效：',
+                            'temperature ',
+                            p.temperature === '' || p.temperature == null ? defaultTempText : String(p.temperature),
+                            ' · ',
+                            'max_tokens ',
+                            p.maxTokens === '' || p.maxTokens == null
+                              ? `${t('官方默认')} ${outputCap}`
+                              : String(p.maxTokens),
+                            levels.length ? ' · ' : '',
+                            levels.length ? t('思考强度') : '',
+                            levels.length ? ' ' : '',
+                            levels.length
+                              ? (selectedEffort ? selectedEffortLabel : effortDefaultLabel)
+                              : '',
+                            '。'),
+                          paramsDirty && !paramProblems.length
+                            ? h('p', { className: 'wb-note', style: { margin: '2px 0 0' } },
+                              '点「保存修改」后才会用于本插件发出的请求。')
+                            : null,
+                          /*
+                           * 用户最容易误解的一点：以为改思考强度会连带改温度/输出上限。
+                           * 三者是独立的请求参数，必须明说。
+                           */
+                          h('p', { className: 'wb-note', style: { margin: '2px 0 0' } },
+                            'temperature / max_tokens / 思考强度三项互相独立；只改一项不会影响另外两项。'),
+                          /*
+                           * 温度只给输入框，用户仍然不知道填多少。这里给常见场景的
+                           * 一键值 + 一句范围说明；点按钮只填入草稿，仍需点保存，
+                           * 与这一整行的“保存为该模型默认”保持一致。
+                           */
+                          h('div', { className: 'wb-actions', style: { marginTop: '6px' } },
+                            h('span', { className: 'wb-note', style: { margin: 0 } }, '常用温度：'),
+                            tempPresets.map((preset) => h(Btn, {
+                              key: preset.value,
+                              sm: true,
+                              title: preset.hint,
+                              onClick: () => editParam(m.id, 'temperature', preset.value),
+                            }, preset.label))),
+                          h('p', { className: 'wb-note', style: { margin: '2px 0 0' } },
+                            'temperature：0–2，越低越稳定（代码 / 提取 0–0.3），越高越发散（创作 1.0+）。'),
+                          /*
+                           * 这三项很容易被误解成“WorkBuddy 客户端的设置”。实际上它们
+                           * 只改变本插件发给上游的请求；留空时完全不发该字段，由上游
+                           * 官方默认决定。官方默认温度能拿到就显示具体值，拿不到就
+                           * 如实写“未公开”，不编数字；max_tokens 给出目录里的官方
+                           * 输出上限，便于判断填多少。
+                           */
+                          h('p', { className: 'wb-note', style: { margin: '2px 0 0' } },
+                            '这些参数只作用于本插件发给上游的请求，不会修改 WorkBuddy 客户端。'),
+                          h('p', { className: 'wb-note', style: { margin: '2px 0 0' } },
+                            `留空 = 使用 WorkBuddy 默认：temperature = ${defaultTempText}；max_tokens = 该模型官方输出上限 ${outputCap}；思考强度 = 模型默认档位。清空后保存即恢复默认。`));
                       })(),
                       h('div', { className: 'wb-actions', style: { marginTop: '10px' } },
                         h(Btn, { onClick: () => onUseModel(m.id) }, '用这个模型对话 →'),

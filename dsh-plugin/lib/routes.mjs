@@ -348,9 +348,14 @@ export function createRouteTable(deps) {
           // 返回**归一化后**的目录（contextWindow/maxTokens/images/free…），
           // 不退上游原始字段名（context_window/max_output_tokens）：
           // 面板与其它消费者只认一种形状，免得两处各说一套。
+          // contextWindow 是实际生效值（该模型的面板预算优先，按模型上限收敛）。
           sendJson(res, 200, {
             ok: true,
-            models: toDirectory(catalog),
+            models: toDirectory(catalog, {
+              contextWindows: typeof adapter.contextWindowsSnapshot === 'function'
+                ? adapter.contextWindowsSnapshot()
+                : {},
+            }),
             at: adapter.catalogCache.at,
             error: adapter.catalogError || '',
             // staleMs>0 = 这次强制刷新失败、退回旧缓存：面板要能如实说"你看到的是旧目录"
@@ -375,7 +380,45 @@ export function createRouteTable(deps) {
             if (!guard(req)) return sendJson(res, 403, { ok: false, error: 'missing x-workbuddy-panel header' });
             const body = await readJsonBody(req);
             const current = (typeof deps.readPrefs === 'function' ? deps.readPrefs() : null)
-              || { visible: null, hideAll: false, paramsByModel: {} };
+              || { visible: null, hideAll: false, contextWindowByModel: {}, paramsByModel: {} };
+            /*
+             * 每模型上下文预算：面板详情里每个模型有自己的滑块，按模型 id 存。
+             * 它和"显示哪些模型"、每模型默认参数都正交，单独提交、即时生效。
+             * `contextWindow: 0` = 清除该模型的覆盖，回到官方默认/桥目录值。
+             */
+            if (typeof body?.model === 'string'
+              && Object.prototype.hasOwnProperty.call(body, 'contextWindow')
+              && !Object.prototype.hasOwnProperty.call(body, 'params')) {
+              const model = body.model;
+              let value = 0;
+              const raw = body.contextWindow;
+              if (raw !== null && raw !== '' && raw !== 0 && raw !== '0') {
+                const n = Number(raw);
+                if (!Number.isSafeInteger(n) || n <= 0 || n > 10_000_000) {
+                  return sendJson(res, 400, {
+                    ok: false,
+                    error: 'contextWindow 需要是正整数（tokens），或 0 表示跟随官方默认',
+                  });
+                }
+                value = n;
+              }
+              const contextWindowByModel = { ...(current.contextWindowByModel || {}) };
+              if (value > 0) contextWindowByModel[model] = value;
+              else delete contextWindowByModel[model];
+              // 先落盘再应用：写失败时不要留下“内存里已生效、重启后又变回去”的状态。
+              onWritePrefs({
+                visible: current.visible,
+                hideAll: current.hideAll === true,
+                includeUnofficial: current.includeUnofficial === true,
+                contextWindowByModel,
+                paramsByModel: current.paramsByModel || {},
+              });
+              if (typeof adapter.setContextWindows === 'function') adapter.setContextWindows(contextWindowByModel);
+              // 预算只影响元数据，不换目录，但仍要广播：dsh 用它重新解析
+              // 每个模型的容量（token meter 的占用分母）。
+              const applied = notifyAdaptersUpdated();
+              return sendJson(res, 200, { ok: true, model, contextWindow: value, contextWindowByModel, applied });
+            }
             /*
              * 每模型默认参数：与"显示哪些"分开保存（同一份 prefs 文件的不同字段）。
              * `params: null` = 清除该模型的默认参数；其余字段做白名单校验。
@@ -386,14 +429,19 @@ export function createRouteTable(deps) {
               const cleaned = body.params === null ? null : sanitizeModelParams(body.params);
               if (cleaned) paramsByModel[model] = cleaned;
               else delete paramsByModel[model];
-              if (typeof adapter.setModelParams === 'function') adapter.setModelParams(paramsByModel);
+              // 先落盘再应用：写失败时不要留下“内存里已生效、重启后又变回去”的状态。
               onWritePrefs({
                 visible: current.visible,
                 hideAll: current.hideAll === true,
                 includeUnofficial: current.includeUnofficial === true,
+                contextWindowByModel: current.contextWindowByModel || {},
                 paramsByModel,
               });
-              return sendJson(res, 200, { ok: true, model, params: paramsByModel[model] || null, paramsByModel });
+              if (typeof adapter.setModelParams === 'function') adapter.setModelParams(paramsByModel);
+              return sendJson(res, 200, {
+                ok: true, model, params: paramsByModel[model] || null, paramsByModel,
+                contextWindowByModel: current.contextWindowByModel || {},
+              });
             }
             /*
              * 「显示官方目录外的模型」：与 visible/hideAll 正交。
@@ -418,10 +466,15 @@ export function createRouteTable(deps) {
                 visible: current.visible,
                 hideAll: current.hideAll === true,
                 includeUnofficial,
+                contextWindowByModel: current.contextWindowByModel || {},
                 paramsByModel: current.paramsByModel || {},
               });
               const applied = notifyAdaptersUpdated();
-              return sendJson(res, 200, { ok: true, includeUnofficial, applied });
+              return sendJson(res, 200, {
+                ok: true, includeUnofficial,
+                contextWindowByModel: current.contextWindowByModel || {},
+                applied,
+              });
             }
             /*
              * 三种显示意图，必须分开建模（旧实现只认 `visible` 数组）：
@@ -442,11 +495,14 @@ export function createRouteTable(deps) {
                 visible: null,
                 hideAll: false,
                 includeUnofficial,
+                contextWindowByModel: current.contextWindowByModel || {},
                 paramsByModel: current.paramsByModel || {},
               });
               const applied = notifyAdaptersUpdated();
               return sendJson(res, 200, {
-                ok: true, unset: true, visible: null, hideAll: false, includeUnofficial, count: 0, applied,
+                ok: true, unset: true, visible: null, hideAll: false, includeUnofficial,
+                contextWindowByModel: current.contextWindowByModel || {},
+                count: 0, applied,
               });
             }
             const visible = Array.isArray(body?.visible) ? body.visible.map(String).filter(Boolean) : [];
@@ -458,6 +514,7 @@ export function createRouteTable(deps) {
               visible,
               hideAll,
               includeUnofficial,
+              contextWindowByModel: current.contextWindowByModel || {},
               paramsByModel: current.paramsByModel || {},
             });
             // 广播 llm/adapters-updated：dsh 的模型选择器**不轮询**目录，只认这个
@@ -469,6 +526,7 @@ export function createRouteTable(deps) {
               visible,
               hideAll,
               includeUnofficial,
+              contextWindowByModel: current.contextWindowByModel || {},
               count: hideAll ? 0 : visible.length,
               applied,
             });
@@ -488,6 +546,13 @@ export function createRouteTable(deps) {
             hideAll: current2 ? current2.hideAll === true : false,
             /** 是否把官方目录外的模型也放进 dsh 选择器 */
             includeUnofficial: current2 ? current2.includeUnofficial === true : false,
+            /**
+             * 每模型上下文预算（`{ [modelId]: tokens }`；缺条目 = 跟随官方默认）。
+             * 实际生效值按各模型上限收敛，见 /workbuddy/models 的 contextWindow。
+             */
+            contextWindowByModel: typeof adapter.contextWindowsSnapshot === 'function'
+              ? adapter.contextWindowsSnapshot()
+              : (current2?.contextWindowByModel || {}),
             /** 每模型默认参数（面板详情里编辑） */
             paramsByModel: typeof adapter.modelParamsSnapshot === 'function'
               ? adapter.modelParamsSnapshot()

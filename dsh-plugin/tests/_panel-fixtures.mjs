@@ -55,8 +55,10 @@ export const FIXTURES = {
      * 排序也特意覆盖三种形态：全档 / 无档位字段（老桥） / 显式空数组（网关不接）。
      */
     directory: [
-      { id: 'deepseek-v4.1-flash', name: 'Deepseek-V4.1-Flash', contextWindow: 300000, maxTokens: 128000, contextWindowDefault: 300000, contextWindowOptions: [300000, 600000, 1000000], contextWindowMax: 1000000, effortsSource: 'upstream', defaultEffort: 'high', official: true, images: true, reasoning: true, efforts: ['low', 'high', 'max'], onlyReasoning: true, credits: 0.11, free: false, vendor: 'f', tags: ['craft'], badges: [] },
-      { id: 'glm-5.3', name: 'GLM-5.3', contextWindow: 300000, maxTokens: 48000, contextWindowDefault: 300000, contextWindowOptions: [300000, 600000, 1000000], contextWindowMax: 1000000, effortsSource: 'upstream', defaultEffort: 'high', official: true, images: true, reasoning: true, efforts: ['low', 'high', 'max'], onlyReasoning: true, credits: 0.79, free: false, vendor: 'e', tags: ['craft'], badges: [] },
+      // 国际版目录漏掉的补全模型（与真实情况一致）：official=null、supplemented=true，
+      // 档位来自本地实测（6 档），默认 temperature 上游未提供。
+      { id: 'deepseek-v4.1-flash', name: 'Deepseek-V4.1-Flash', contextWindow: 300000, maxTokens: 128000, contextWindowDefault: 300000, contextWindowOptions: [300000, 600000, 1000000], contextWindowMax: 1000000, defaultTemperature: null, effortsSource: 'measured', defaultEffort: 'high', official: null, supplemented: true, images: true, reasoning: true, efforts: ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'], onlyReasoning: true, credits: 0.11, free: false, vendor: 'f', tags: ['craft'], badges: [] },
+      { id: 'glm-5.3', name: 'GLM-5.3', contextWindow: 300000, maxTokens: 48000, contextWindowDefault: 300000, contextWindowOptions: [300000, 600000, 1000000], contextWindowMax: 1000000, defaultTemperature: 0.7, effortsSource: 'upstream', defaultEffort: 'high', official: true, images: true, reasoning: true, efforts: ['low', 'high', 'max'], onlyReasoning: true, credits: 0.79, free: false, vendor: 'e', tags: ['craft'], badges: [] },
       // 没有 efforts 字段：老桥 / 上游未给档位 → 面板提示"按低/中/高三档兜底"
       { id: 'kimi-k3', name: 'Kimi-K3', contextWindow: 960000, maxTokens: 32000, images: false, reasoning: true, efforts: null, onlyReasoning: false, credits: 0.35, free: false, vendor: 'v', tags: ['craft'], badges: [] },
       // 带促销徽章的样例：既让"徽章要渲染成带色标记"这条断言在离线模式下也成立，
@@ -167,7 +169,9 @@ export const FIXTURES = {
  * （用户实拍才发现）。桩的形状与真实契约不一致时，验收会在错误的地方变绿。
  */
 FIXTURES.models.models = FIXTURES.status.directory.map((m) => ({
-  id: m.id, name: m.name, contextWindow: m.contextWindow, maxTokens: m.maxTokens,
+  id: m.id, name: m.name, contextWindow: m.contextWindow,
+  contextWindowAuto: m.contextWindowAuto ?? m.contextWindow,
+  maxTokens: m.maxTokens,
   credits: m.credits, images: m.images, free: m.free, vendor: m.vendor,
   // 推理能力：与 lib/models.mjs 的 toDirectory 输出**逐字段对齐**（含 null /
   // 空数组的区分语义）—— 少一个字段，模型页的「推理」徽章与详情档位就渲染不出来，
@@ -178,6 +182,7 @@ FIXTURES.models.models = FIXTURES.status.directory.map((m) => ({
   contextWindowDefault: m.contextWindowDefault ?? null,
   contextWindowOptions: m.contextWindowOptions ?? [],
   contextWindowMax: m.contextWindowMax ?? null,
+  defaultTemperature: m.defaultTemperature ?? null,
   effortsSource: m.effortsSource ?? null,
   defaultEffort: m.defaultEffort ?? null,
   canDisableThinking: m.canDisableThinking === true,
@@ -302,6 +307,7 @@ export function harnessHtml(fixtures) {
 window.__errors = [];
 window.addEventListener('error', (e) => window.__errors.push(String(e.message)));
 window.__calls = [];
+window.__reqs = [];
 window.__hits = {};
 window.__dialogs = [];
 window.confirm = function (message) { window.__dialogs.push(String(message)); return window.__confirmAnswer !== false; };
@@ -311,7 +317,15 @@ window.confirm = function (message) { window.__dialogs.push(String(message)); re
   window.fetch = function (input, init) {
     const url = typeof input === 'string' ? input : (input && input.url) || '';
     const path = String(url).replace(/^https?:\\/\\/[^/]+/, '').split('?')[0];
-    try { window.__calls.push([path, (init && init.method) || 'GET']); } catch (e) { /* ignore */ }
+    try {
+      const method = (init && init.method) || 'GET';
+      window.__calls.push([path, method]);
+      let parsed = null;
+      if (init && typeof init.body === 'string') {
+        try { parsed = JSON.parse(init.body); } catch (e) { parsed = null; }
+      }
+      window.__reqs.push({ path, method, body: parsed });
+    } catch (e) { /* ignore */ }
     if (!(path in ROUTES)) return original.apply(this, arguments); // 未命中：透传真实网络
     // firstStatus：模拟「刷新页面时宿主还没挂上路由」的 404 窗口 —— 第一次 404，
     // 之后正常。用来钉住「404 必须自动重试、不能把红字挂一分钟」这条回归。
@@ -436,6 +450,12 @@ export function buildRoutes(data) {
       };
     })(),
     '/workbuddy/models': data.models,
+    // 模型显示偏好 + 上下文预算：面板模型页启动时会读它；没有这条时
+    // 面板会走 404 兜底（默认值），上下文下拉的初始状态就扫不到。
+    '/workbuddy/model-visibility': {
+      ok: true, unset: true, visible: null, hideAll: false,
+      includeUnofficial: false, contextWindowByModel: {}, paramsByModel: {}, deny: [],
+    },
     // 插件登录（第二条凭据来源）：给一条已登录的插件账号，让账号页的
     // 来源选择 / 账号行 / 按钮文案都进入 i18n 验收（空态由别的用例覆盖）。
     '/workbuddy/login': {

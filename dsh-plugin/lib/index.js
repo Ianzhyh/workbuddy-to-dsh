@@ -91,8 +91,16 @@ function parseModelPrefs(raw) {
     ? j.paramsByModel
     : {};
   const hasDisplay = Array.isArray(j.visible) || j.hideAll === true || typeof j.includeUnofficial === 'boolean';
+  // 每模型上下文预算（缺条目 = 跟随官方默认）
+  const contextWindowByModel = {};
+  if (j.contextWindowByModel && typeof j.contextWindowByModel === 'object' && !Array.isArray(j.contextWindowByModel)) {
+    for (const [id, raw] of Object.entries(j.contextWindowByModel)) {
+      const n = Number(raw);
+      if (id && Number.isSafeInteger(n) && n > 0) contextWindowByModel[id] = n;
+    }
+  }
   // 只有"每个模型的默认参数"、没有显示偏好时也要能读回来
-  if (!hasDisplay && !Object.keys(paramsByModel).length) return null;
+  if (!hasDisplay && !Object.keys(contextWindowByModel).length && !Object.keys(paramsByModel).length) return null;
   const visible = Array.isArray(j.visible) ? j.visible.map(String).filter(Boolean) : null;
   return {
     // visible=null 且 hideAll=false = 显示跟随配置（"恢复全部"就是写这个状态）
@@ -101,6 +109,8 @@ function parseModelPrefs(raw) {
     hideAll: j.hideAll === true || (Array.isArray(j.visible) && visible.length === 0 && j.hideAll !== false),
     // 是否把"官方目录外"的模型也放进 dsh 选择器（默认 false）
     includeUnofficial: j.includeUnofficial === true,
+    // 每模型上下文预算（缺条目 = 跟随官方默认/桥目录）
+    contextWindowByModel,
     paramsByModel,
     /** 写入时刻：两处文件都存在时（插件目录 + DSH_HOME 回退）取更新的那份。 */
     at: Number(j.at) || 0,
@@ -144,14 +154,23 @@ function writeModelPrefs(prefs) {
   const visible = Array.isArray(prefs?.visible) ? prefs.visible.map(String).filter(Boolean) : null;
   const hideAll = prefs?.hideAll === true;
   const includeUnofficial = prefs?.includeUnofficial === true;
-  // 显示"未设置"且没有每模型参数 → 没有可存的东西，删文件更干净
-  if (visible === null && !hideAll && !includeUnofficial && !Object.keys(paramsByModel).length) {
+  const contextWindowByModel = {};
+  const rawContext = prefs?.contextWindowByModel;
+  if (rawContext && typeof rawContext === 'object' && !Array.isArray(rawContext)) {
+    for (const [id, raw] of Object.entries(rawContext)) {
+      const n = Number(raw);
+      if (id && Number.isSafeInteger(n) && n > 0) contextWindowByModel[id] = n;
+    }
+  }
+  // 显示"未设置"且没有每模型参数/上下文预算 → 没有可存的东西，删文件更干净
+  if (visible === null && !hideAll && !includeUnofficial
+    && !Object.keys(contextWindowByModel).length && !Object.keys(paramsByModel).length) {
     for (const file of modelPrefsPaths()) {
       try { if (existsSync(file)) unlinkSync(file); } catch { /* 尽力清理 */ }
     }
     return;
   }
-  const body = `${JSON.stringify({ visible, hideAll, includeUnofficial, paramsByModel, at: Date.now() }, null, 2)}\n`;
+  const body = `${JSON.stringify({ visible, hideAll, includeUnofficial, contextWindowByModel, paramsByModel, at: Date.now() }, null, 2)}\n`;
   let firstError = null;
   for (const file of modelPrefsPaths()) {
     try {
@@ -913,11 +932,15 @@ export function apply(ctx, rawConfig = {}) {
     if (savedPrefs.paramsByModel && Object.keys(savedPrefs.paramsByModel).length) {
       adapter.setModelParams(savedPrefs.paramsByModel);
     }
+    if (savedPrefs.contextWindowByModel && Object.keys(savedPrefs.contextWindowByModel).length) {
+      adapter.setContextWindows(savedPrefs.contextWindowByModel);
+    }
     state.modelVisibility = {
       source: 'prefs',
       allow: savedPrefs.visible,
       hideAll: savedPrefs.hideAll,
       includeUnofficial: savedPrefs.includeUnofficial === true,
+      contextWindowByModel: savedPrefs.contextWindowByModel || {},
       paramsByModel: savedPrefs.paramsByModel || {},
     };
     log(savedPrefs.hideAll
@@ -1355,7 +1378,7 @@ export function apply(ctx, rawConfig = {}) {
         modelDeny: config.modelDeny,
       },
       route: { ...state.route },
-      directory: toDirectory(catalog),
+      directory: toDirectory(catalog, { contextWindows: adapter.contextWindowsSnapshot() }),
       catalogAt: adapter.catalogCache.at ? new Date(adapter.catalogCache.at).toISOString() : null,
       catalogError: adapter.catalogError || '',
       legacy: { found: state.legacy.found, files: state.legacy.files, cleaned: state.legacy.cleaned },

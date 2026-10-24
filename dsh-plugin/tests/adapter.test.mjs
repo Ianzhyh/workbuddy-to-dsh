@@ -99,15 +99,15 @@ test('listModels / resolveModel 使用桥目录的元数据', async () => {
       provider: 'workbuddy',
       id: 'stub-model',
       name: 'Stub Model · ×0.11',
-      description: '上下文 128k · 输出 8192 · 图片',
+      description: '上下文 128K · 输出 8192 · 图片',
       inputModalities: ['text', 'image'],
     });
     assert.equal(models[1].name, 'Stub Free · 免费');
-    assert.equal(models[1].description, '上下文 32k · 输出 4096');
+    assert.equal(models[1].description, '上下文 32K · 输出 4096');
     const resolved = await adapter.resolveModel('workbuddy', 'stub-model');
     assert.equal(resolved.context.contextWindow, 128000);
     assert.equal(resolved.name, 'Stub Model · ×0.11');
-    assert.equal(resolved.description, '上下文 128k · 输出 8192 · 图片');
+    assert.equal(resolved.description, '上下文 128K · 输出 8192 · 图片');
     assert.equal(resolved.defaultMaxTokens, 8192);
     assert.equal(adapter.providerInfo('workbuddy').id, 'workbuddy');
     assert.equal(adapter.providerRetryPolicy().mode, 'normal');

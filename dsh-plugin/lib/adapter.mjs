@@ -37,6 +37,17 @@ export const EFFORT_NAMES = {
 const EFFORT_ORDER = Object.keys(EFFORT_NAMES);
 const KNOWN_EFFORTS = new Set(EFFORT_ORDER);
 
+/** 每模型上下文预算：只留非空 id + 正整数 tokens。 */
+function normalizeContextWindows(input) {
+  const out = {};
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return out;
+  for (const [id, raw] of Object.entries(input)) {
+    const n = Number(raw);
+    if (id && Number.isSafeInteger(n) && n > 0) out[id] = n;
+  }
+  return out;
+}
+
 /**
  * 老桥（没有 `reasoning_efforts` 字段）时的兜底档位。
  *
@@ -596,6 +607,12 @@ export class WorkBuddyAdapter {
     };
     this.defaults = options.defaults || {};
     /**
+     * 面板为**每个模型**单独设置的上下文预算（`{ [modelId]: tokens }`）。
+     * 没有条目 = 跟随桥目录里的官方默认；dsh 的适配器契约只有一个
+     * `contextWindow`，但那是**每模型**解析的，所以可以按模型给不同的值。
+     */
+    this.contextWindows = normalizeContextWindows(options.contextWindows);
+    /**
      * 每个模型自己的默认参数（`{ [modelId]: { temperature, maxTokens, reasoningEffort } }`）。
      * 优先级：调用方显式 > 该模型默认 > 全局配置默认 > 不发。
      */
@@ -867,6 +884,22 @@ export class WorkBuddyAdapter {
     };
   }
 
+  /**
+   * 运行时更新**每模型**的上下文预算（面板详情里拖动后即时生效）。
+   *
+   * 条目缺失 = 跟随桥目录里的值（官方默认或 `.env`）。目录本身不需要重取：
+   * 它只是元数据，下一次 listModels/resolveModel 会用新预算重新映射；
+   * 宿主收到 adapters-updated 后会重新解析每个模型的容量。
+   */
+  setContextWindows(map) {
+    this.contextWindows = normalizeContextWindows(map);
+  }
+
+  /** 当前生效的每模型上下文预算快照。 */
+  contextWindowsSnapshot() {
+    return { ...this.contextWindows };
+  }
+
   /** 运行时更新「每模型默认参数」（面板保存后即时生效，无需重建适配器）。 */
   setModelParams(map) {
     this.modelParams = map && typeof map === 'object' && !Array.isArray(map) ? map : {};
@@ -902,7 +935,11 @@ export class WorkBuddyAdapter {
     const keep = saved && saved.provider === provider && typeof saved.model === 'string'
       ? [saved.model]
       : [];
-    return toAdapterModels(catalog, { ...this.filter, keep }).map((m) => ({
+    return toAdapterModels(catalog, {
+      ...this.filter,
+      keep,
+      contextWindows: this.contextWindows,
+    }).map((m) => ({
       provider,
       id: m.id,
       name: m.name,
@@ -955,7 +992,7 @@ export class WorkBuddyAdapter {
     }
     const hit = catalog.find((m) => m && m.id === model);
     if (!hit) return { provider, id: model, name: model };
-    const [mapped] = toAdapterModels([hit]);
+    const [mapped] = toAdapterModels([hit], { contextWindows: this.contextWindows });
     let levels = Array.isArray(mapped?.reasoningEfforts)
       ? [...mapped.reasoningEfforts]
       : (mapped?.reasoning ? [...FALLBACK_EFFORTS] : []);
@@ -979,12 +1016,38 @@ export class WorkBuddyAdapter {
     if (mapped?.reasoning && savedEffort && KNOWN_EFFORTS.has(savedEffort) && !levels.includes(savedEffort)) {
       levels = [...levels, savedEffort].sort((a, b) => EFFORT_ORDER.indexOf(a) - EFFORT_ORDER.indexOf(b));
     }
-    // defaultEffort 必须在列表里（dsh 会校验）：优先上游默认，再退 medium/high，再退化到最强档
+    /*
+     * dsh 的 resolveCall 会把这里的 `defaultMaxTokens` / `reasoning.defaultEffort`
+     * **物化进请求参数**（config.maxTokens / reasoningEffort），之后 stream() 看到
+     * 的就是“调用方显式给了值”。所以这里必须返回**面板保存的每模型默认值**，
+     * 而不是只返回上游目录的默认；否则「保存为该模型默认」在 dsh 里会被
+     * dsh 自己的物化值盖掉，界面显示已保存、实际请求却没变。
+     */
+    const perModel = this.modelParams?.[model] && typeof this.modelParams[model] === 'object'
+      ? this.modelParams[model]
+      : {};
+    const configuredMaxTokens = Number(perModel.maxTokens) > 0
+      ? Number(perModel.maxTokens)
+      : (Number(this.defaults.maxTokens) > 0 ? Number(this.defaults.maxTokens) : 0);
+    const modelMaxOutput = Number(mapped?.maxTokens) > 0 ? Number(mapped.maxTokens) : 0;
+    // 用户填的上限不能超过该模型官方输出上限；超了上游会 400。这里收敛后再交给
+    // dsh 物化（dsh 会把它当成调用方显式值，所以必须在这里就钳好）。
+    const defaultMaxTokens = modelMaxOutput && configuredMaxTokens > modelMaxOutput
+      ? modelMaxOutput
+      : (configuredMaxTokens || mapped?.maxTokens);
+    // defaultEffort 必须在列表里（dsh 会校验）：每模型默认 > 全局默认 > 上游默认，
+    // 再退 medium/high，最后退化到最强档。
+    const configuredEffort = (typeof perModel.reasoningEffort === 'string' && perModel.reasoningEffort)
+      || (typeof this.defaults.reasoningEffort === 'string' && this.defaults.reasoningEffort)
+      || '';
     const officialDefault = typeof mapped?.defaultReasoningEffort === 'string'
       ? mapped.defaultReasoningEffort
       : '';
-    const defaultEffort = (officialDefault && levels.includes(officialDefault))
-      ? officialDefault
+    const preferredDefault = configuredEffort && levels.includes(configuredEffort)
+      ? configuredEffort
+      : officialDefault;
+    const defaultEffort = (preferredDefault && levels.includes(preferredDefault))
+      ? preferredDefault
       : (['medium', 'high'].find((e) => levels.includes(e)) || levels[levels.length - 1]);
     return {
       provider,
@@ -992,7 +1055,7 @@ export class WorkBuddyAdapter {
       name: mapped?.name || model,
       ...(mapped?.description ? { description: mapped.description } : {}),
       ...(mapped?.contextWindow ? { context: { contextWindow: mapped.contextWindow } } : {}),
-      ...(mapped?.maxTokens ? { defaultMaxTokens: mapped.maxTokens } : {}),
+      ...(defaultMaxTokens ? { defaultMaxTokens } : {}),
       ...(mapped?.inputModalities ? { inputModalities: mapped.inputModalities } : {}),
       ...(levels.length
         ? { reasoning: { efforts: levels.map((id) => ({ id, name: EFFORT_NAMES[id] || id })), defaultEffort } }
@@ -1058,7 +1121,14 @@ export class WorkBuddyAdapter {
       const maxTokens = callerMax
         ? options.maxTokens
         : (Number(perModel.maxTokens) > 0 ? Number(perModel.maxTokens) : this.defaults.maxTokens);
-      if (typeof maxTokens === 'number' && maxTokens > 0) payload.max_tokens = maxTokens;
+      // 最后一道按模型上限收敛：dsh 可能把旧的/手填的更大的值当“显式值”传进来，
+      // 直接发给上游只会 400。目录还没加载时不知道上限，保持原值不猜。
+      const rawHit = this.catalogCache.models.find((m) => m && m.id === model);
+      const modelMaxOutput = Number(rawHit?.max_output_tokens) || 0;
+      const fittedMaxTokens = modelMaxOutput && typeof maxTokens === 'number' && maxTokens > modelMaxOutput
+        ? modelMaxOutput
+        : maxTokens;
+      if (typeof fittedMaxTokens === 'number' && fittedMaxTokens > 0) payload.max_tokens = fittedMaxTokens;
       // 推理强度：选择器里用户选的（options.reasoningEffort）优先；其次该模型的
       // 默认；最后全局默认。都没有就完全不发 —— 上游对未知/无意义参数的容忍度
       // 不一，不猜（与 max_tokens/temperature 同一原则）。

@@ -7304,6 +7304,15 @@ async function fetchCatalog(generation = catalogGeneration) {
            */
           contextDefault: Number(m.contextWindow?.defaultLength) > 0 ? Number(m.contextWindow.defaultLength) : 0,
           contextOptions: normalizeContextLengths(m.contextWindow?.supportedLengths),
+          /*
+           * 官方模型的默认采样温度。上游目录的模型对象里**确实有这个字段**
+           * （见 /health 的 upstreamShape.model），旧实现整个丢掉了 —— 面板
+           * 只能写"官方未公开"，用户无法判断该填多少。`temperature: 0` 是合法值，
+           * 所以用 null 表示"上游没给"，不能拿 0 当缺省。
+           */
+          defaultTemperature: m.temperature != null && Number.isFinite(Number(m.temperature)) && Number(m.temperature) >= 0
+            ? Number(m.temperature)
+            : null,
           images: !!m.supportsImages,
           credits: m.credits,
           // 上游的推理能力标记：supportsReasoning=true 表示该模型接受推理强度控制
@@ -8397,7 +8406,16 @@ async function handleRequest(req, res) {
           ...(m.supportsReasoning ? { supports_reasoning: true } : {}),
           ...(Array.isArray(efforts) ? { reasoning_efforts: efforts } : {}),
           ...(defaultEffort ? { default_reasoning_effort: defaultEffort } : {}),
-          ...(Array.isArray(efforts) ? { reasoning_efforts_source: upstreamEfforts ? 'upstream' : 'measured' } : {}),
+          // 来源必须能分辨三种：官方目录给了 → upstream；按 id 实测过 → measured；
+          // 两者都没有、只能用默认三档 → fallback。面板据此决定是否标「实测档位」。
+          ...(Array.isArray(efforts)
+            ? {
+              reasoning_efforts_source: upstreamEfforts
+                ? 'upstream'
+                : (REASONING_EFFORTS_BY_MODEL[m.id] ? 'measured' : 'fallback'),
+            }
+            : {}),
+          ...(Number.isFinite(m.defaultTemperature) ? { default_temperature: m.defaultTemperature } : {}),
           ...(m.canDisableThinking ? { can_disable_thinking: true } : {}),
           ...(m.onlyReasoning ? { only_reasoning: true } : {}),
           ...(m.official === true ? { official: true } : m.official === false ? { official: false } : {}),

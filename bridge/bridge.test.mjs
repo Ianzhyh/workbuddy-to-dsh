@@ -741,6 +741,8 @@ test('/v1/models：对齐官方 GUI 清单，并直取 supportedEfforts / contex
             { id: 'old-model', name: 'Old Model', maxInputTokens: 64000, maxOutputTokens: 8192, supportsReasoning: true, supportsToolCall: true, reasoning: { supportedEfforts: ['low', 'high'] } },
             // v2 单独挂 chat 标签：官方 GUI 也认，必须算 official
             { id: 'chat-only', name: 'Chat Only', maxInputTokens: 64000, maxOutputTokens: 8192, supportsToolCall: true, tags: ['chat'] },
+            // 支持推理但上游没给档位表、也没有实测记录 → 默认三档，来源必须标 fallback
+            { id: 'fallback-efforts', name: 'Fallback Efforts', maxInputTokens: 64000, maxOutputTokens: 8192, supportsReasoning: true, supportsToolCall: true },
           ],
         },
       }));
@@ -754,6 +756,7 @@ test('/v1/models：对齐官方 GUI 清单，并直取 supportedEfforts / contex
             {
               id: 'glm-5.3', name: 'GLM-5.3', maxInputTokens: 1000000, maxOutputTokens: 131072,
               supportsReasoning: true, onlyReasoning: true, supportsToolCall: true, tags: ['craft'],
+              temperature: 0.7,
               reasoning: { supportedEfforts: ['low', 'high', 'max'] },
               contextWindow: { supportedLengths: [1000000, 300000, 600000] },
             },
@@ -789,7 +792,14 @@ test('/v1/models：对齐官方 GUI 清单，并直取 supportedEfforts / contex
     assert.equal(glm.context_window_default, 300000);
     assert.deepEqual(glm.context_window_options, [300000, 600000, 1000000], '上下文档位排序去重后原样给出');
     assert.equal(glm.context_window_max, 1000000);
+    assert.equal(glm.default_temperature, 0.7, '官方目录里的 temperature 必须原样透出，供面板显示默认值');
     assert.equal(glm.can_disable_thinking, true);
+
+    const fallbackEfforts = byId.get('fallback-efforts');
+    assert.deepEqual(fallbackEfforts.reasoning_efforts, ['low', 'medium', 'high'],
+      '上游没给档位表、也没实测记录时用默认三档');
+    assert.equal(fallbackEfforts.reasoning_efforts_source, 'fallback',
+      '默认三档不能冒充"实测"；来源必须可分辨');
 
     const old = byId.get('old-model');
     assert.equal(old.official, false, '只在 /v2 出现的模型必须标 official=false');

@@ -20,7 +20,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { WorkBuddyAdapter } from '../lib/adapter.mjs';
-import { toAdapterModels } from '../lib/models.mjs';
+import { toAdapterModels, toDirectory } from '../lib/models.mjs';
 
 const CATALOG = [
   { id: 'model-a', name: 'A', context_window: 100000, max_output_tokens: 8000 },
@@ -39,6 +39,59 @@ function makeAdapter(overrides = {}) {
     ...overrides,
   });
 }
+
+// ── 每模型上下文预算（详情滑块）────────────────────────────────────────
+
+test('setContextWindows：每个模型按自己的上限收敛，互不影响', async () => {
+  /*
+   * dsh 的容量是**按模型**解析的：面板详情里每个模型有自己的滑块。
+   * 给 large 设 400K、small 设 400K 时，上限 600K 的 large 用 400K，
+   * 上限 50K 的 small 必须收敛到 50K，不能虚报容量。
+   */
+  const catalog = [
+    { id: 'small', name: 'S', context_window: 50000, context_window_max: 50000, max_output_tokens: 4000 },
+    { id: 'large', name: 'L', context_window: 200000, context_window_max: 600000, context_window_default: 200000, context_window_options: [200000, 400000, 600000], max_output_tokens: 8000 },
+  ];
+  const adapter = new WorkBuddyAdapter({
+    provider: 'workbuddy', displayName: 'WB',
+    client: { models: async () => ({ data: catalog }) },
+  });
+  adapter.setContextWindows({ large: 400000, small: 400000 });
+  assert.deepEqual(adapter.contextWindowsSnapshot(), { large: 400000, small: 400000 });
+  assert.equal((await adapter.resolveModel('workbuddy', 'large')).context.contextWindow, 400000);
+  assert.equal((await adapter.resolveModel('workbuddy', 'small')).context.contextWindow, 50000,
+    '上限 50K 的模型必须收敛到 50K，不能虚报 400K');
+  // only large 被覆盖时，small 仍跟目录默认（50K）
+  adapter.setContextWindows({ large: 600000 });
+  assert.equal((await adapter.resolveModel('workbuddy', 'small')).context.contextWindow, 50000);
+  const list = await adapter.listModels();
+  assert.match(list.find((m) => m.id === 'large').description, /上下文 600K/,
+    '模型选择器的描述应反映该模型自己的预算');
+
+  // 清除覆盖 = 跟随官方默认（回到目录里的 200K），非法条目被忽略
+  adapter.setContextWindows({ large: 'bad', small: -1 });
+  assert.deepEqual(adapter.contextWindowsSnapshot(), {});
+  assert.equal((await adapter.resolveModel('workbuddy', 'large')).context.contextWindow, 200000);
+});
+
+test('toAdapterModels：contextWindows 按模型生效，只影响容量字段', () => {
+  const catalog = [
+    { id: 'a', context_window: 100000, context_window_max: 300000 },
+    { id: 'b', context_window: 200000, context_window_max: 200000 },
+  ];
+  const models = toAdapterModels(catalog, { contextWindows: { a: 600000, b: 600000 } });
+  assert.deepEqual(models.map((m) => m.contextWindow), [300000, 200000],
+    '每个模型都要按自己的上限收敛');
+  assert.deepEqual(models.map((m) => m.id), ['a', 'b'], '预算不改变可见模型');
+
+  // 只改 a：b 仍跟目录值
+  const onlyA = toAdapterModels(catalog, { contextWindows: { a: 200000 } });
+  assert.deepEqual(onlyA.map((m) => m.contextWindow), [200000, 200000]);
+
+  // 老桥 / 精选兜底没有上限字段：不能拿"当前值"冒充上限把用户的选择按回去
+  const [legacy] = toAdapterModels([{ id: 'legacy', context_window: 100000 }], { contextWindows: { legacy: 600000 } });
+  assert.equal(legacy.contextWindow, 600000);
+});
 
 // ── setFilter：运行时改显示清单 ────────────────────────────────────────
 
@@ -119,6 +172,107 @@ test('model-visibility POST：同时带 includeUnofficial 时不能吞掉 visibl
 
   const toggle = await run({ includeUnofficial: false });
   assert.equal(toggle.body.includeUnofficial, false, '单独切开关仍然可用');
+});
+
+test('model-visibility：上下文预算按模型保存，互不影响且不被显示设置覆盖', async () => {
+  const { createRouteTable } = await import('../lib/routes.mjs');
+  const adapter = makeAdapter();
+  let current = { visible: null, hideAll: false, includeUnofficial: false, contextWindowByModel: {}, paramsByModel: {} };
+  const writes = [];
+  const routes = createRouteTable({
+    adapter,
+    readPrefs: () => current,
+    onWritePrefs: (next) => { current = next; writes.push(next); },
+    notifyAdaptersUpdated: () => true,
+  });
+  const route = routes.find((r) => r.path === '/workbuddy/model-visibility');
+  const run = async (method, body) => {
+    let status = 0;
+    let raw = '';
+    const res = { writeHead(c) { status = c; }, write(c) { raw += String(c); }, end(c) { if (c) raw += String(c); }, on() {}, off() {} };
+    await route.handler({
+      url: '/workbuddy/model-visibility',
+      method,
+      headers: { 'x-workbuddy-panel': '1' },
+      async *[Symbol.asyncIterator]() { yield Buffer.from(JSON.stringify(body || {})); },
+    }, res);
+    return { status, body: JSON.parse(raw || '{}') };
+  };
+
+  // 1) 单独给 model-a 设 600K：只影响这个模型
+  const saved = await run('POST', { model: 'model-a', contextWindow: 600000 });
+  assert.equal(saved.status, 200);
+  assert.equal(saved.body.model, 'model-a');
+  assert.equal(saved.body.contextWindow, 600000);
+  assert.deepEqual(adapter.contextWindowsSnapshot(), { 'model-a': 600000 });
+  assert.equal(writes.at(-1).contextWindowByModel['model-a'], 600000, '预算必须按模型写进偏好文件');
+
+  // 2) 再给 model-b 设 300K：两条互不影响
+  await run('POST', { model: 'model-b', contextWindow: 300000 });
+  assert.deepEqual(adapter.contextWindowsSnapshot(), { 'model-a': 600000, 'model-b': 300000 });
+
+  // 3) 保存显示设置时不能把预算冲掉
+  await run('POST', { visible: ['model-a'], hideAll: false, includeUnofficial: true });
+  assert.deepEqual(adapter.contextWindowsSnapshot(), { 'model-a': 600000, 'model-b': 300000 },
+    '显示设置请求未带预算时应保留每模型的值');
+  assert.deepEqual(writes.at(-1).contextWindowByModel, { 'model-a': 600000, 'model-b': 300000 });
+
+  // 4) 单独切「官方目录外」也不能冲掉预算
+  await run('POST', { includeUnofficial: false });
+  assert.deepEqual(writes.at(-1).contextWindowByModel, { 'model-a': 600000, 'model-b': 300000 });
+
+  // 5) 读取时回显每模型 map
+  const read = await run('GET');
+  assert.deepEqual(read.body.contextWindowByModel, { 'model-a': 600000, 'model-b': 300000 });
+
+  // 6) 0 = 只恢复该模型的官方默认；另一个模型不受影响
+  const reset = await run('POST', { model: 'model-a', contextWindow: 0 });
+  assert.equal(reset.body.contextWindow, 0);
+  assert.deepEqual(adapter.contextWindowsSnapshot(), { 'model-b': 300000 });
+  // 非法值拒绝且不改变当前值
+  const bad = await run('POST', { model: 'model-b', contextWindow: -1 });
+  assert.equal(bad.status, 400);
+  assert.deepEqual(adapter.contextWindowsSnapshot(), { 'model-b': 300000 });
+});
+
+test('model-visibility：每模型默认参数保存后能读回，且不被显示设置冲掉', async () => {
+  const { createRouteTable } = await import('../lib/routes.mjs');
+  const adapter = makeAdapter();
+  let current = { visible: null, hideAll: false, includeUnofficial: false, contextWindowByModel: {}, paramsByModel: {} };
+  const writes = [];
+  const routes = createRouteTable({
+    adapter,
+    readPrefs: () => current,
+    onWritePrefs: (next) => { current = next; writes.push(next); },
+    notifyAdaptersUpdated: () => true,
+  });
+  const route = routes.find((r) => r.path === '/workbuddy/model-visibility');
+  const run = async (method, body) => {
+    let status = 0; let raw = '';
+    const res = { writeHead(c) { status = c; }, write(c) { raw += String(c); }, end(c) { if (c) raw += String(c); }, on() {}, off() {} };
+    await route.handler({
+      url: '/workbuddy/model-visibility', method,
+      headers: { 'x-workbuddy-panel': '1' },
+      async *[Symbol.asyncIterator]() { yield Buffer.from(JSON.stringify(body || {})); },
+    }, res);
+    return { status, body: JSON.parse(raw || '{}') };
+  };
+
+  const saved = await run('POST', { model: 'model-a', params: { temperature: 0.7, maxTokens: 256, reasoningEffort: 'max' } });
+  assert.equal(saved.status, 200);
+  assert.deepEqual(saved.body.paramsByModel['model-a'], { temperature: 0.7, maxTokens: 256, reasoningEffort: 'max' },
+    '三个参数都要保存，不能只存温度');
+  assert.deepEqual(adapter.modelParamsSnapshot()['model-a'], saved.body.paramsByModel['model-a'],
+    '保存后要立即应用到适配器（下一次请求就生效）');
+
+  const read = await run('GET');
+  assert.deepEqual(read.body.paramsByModel['model-a'], saved.body.paramsByModel['model-a'],
+    '重新打开面板必须能读回思考强度等参数');
+
+  // 保存显示设置（visible/hideAll）时不能把每模型参数冲掉
+  await run('POST', { visible: ['model-a'], hideAll: false, includeUnofficial: false });
+  assert.deepEqual(writes.at(-1).paramsByModel['model-a'], saved.body.paramsByModel['model-a'],
+    '保存显示设置后每模型默认参数必须保留');
 });
 
 test('setFilter：不覆盖配置里的 deny（面板只决定"显示哪些"）', async () => {
@@ -243,6 +397,18 @@ test('defaults：没配置默认值时，payload 不含这些字段（不猜参�
 
 // ── toAdapterModels 的 allow/deny 语义（纯函数层） ─────────────────────
 
+test('toDirectory：官方默认温度与思考档位来源原样透出', () => {
+  const [model] = toDirectory([{
+    id: 'm', name: 'M', context_window: 1000, default_temperature: 0.7,
+    supports_reasoning: true, reasoning_efforts: ['low', 'high'], reasoning_efforts_source: 'fallback',
+  }]);
+  assert.equal(model.defaultTemperature, 0.7);
+  assert.equal(model.effortsSource, 'fallback', 'fallback（默认三档）不能被标成 measured');
+  // 0 是合法温度，不能被当成“没给”
+  const [zero] = toDirectory([{ id: 'z', default_temperature: 0 }]);
+  assert.equal(zero.defaultTemperature, 0);
+});
+
 test('toAdapterModels：allow 非空 = 白名单；deny 永远排除', () => {
   const allowOnly = toAdapterModels(CATALOG, { allow: ['model-b'] });
   assert.deepEqual(allowOnly.map((m) => m.id), ['model-b']);
@@ -252,6 +418,48 @@ test('toAdapterModels：allow 非空 = 白名单；deny 永远排除', () => {
 });
 
 // ── 推理等级（reasoning）元数据与下发 ─────────────────────────────────
+
+test('resolveModel：每模型默认参数要反映到 dsh 物化的 defaultMaxTokens/defaultEffort', async () => {
+  /*
+   * dsh 的 resolveCall 会把 defaultMaxTokens / defaultEffort 直接写进请求参数，
+   * stream() 随后把它们当成“调用方显式值”。如果 resolveModel 仍只返回上游
+   * 默认，面板里保存的每模型默认就会被盖掉 —— 界面说已保存，实际请求没变。
+   */
+  const adapter = new WorkBuddyAdapter({
+    provider: 'workbuddy', displayName: 'WB',
+    defaults: { maxTokens: 4096, reasoningEffort: 'high' },
+    client: { models: async () => ({ data: [
+      { id: 'thinker', name: 'Thinker', context_window: 100000, context_window_max: 100000, max_output_tokens: 8192, supports_reasoning: true, reasoning_efforts: ['low', 'high', 'max'], default_reasoning_effort: 'high' },
+    ] }) },
+  });
+  adapter.setModelParams({ thinker: { maxTokens: 512, reasoningEffort: 'low' } });
+  const resolved = await adapter.resolveModel('workbuddy', 'thinker');
+  assert.equal(resolved.defaultMaxTokens, 512, '每模型 maxTokens 必须成为 dsh 的默认输出上限');
+  assert.equal(resolved.reasoning.defaultEffort, 'low', '每模型思考强度必须成为 dsh 的默认档位');
+  assert.ok(resolved.reasoning.efforts.some((e) => e.id === 'low'), '默认档位仍必须在可选列表里');
+
+  // 填超模型上限时必须收敛，而不是原样发给上游吃 400
+  adapter.setModelParams({ thinker: { maxTokens: 999999 } });
+  const clamped = await adapter.resolveModel('workbuddy', 'thinker');
+  assert.equal(clamped.defaultMaxTokens, 8192, '每模型 maxTokens 超过官方上限时必须收敛到上限');
+
+  // stream 里也要兜底：直接调用（不走 dsh 物化）时同样不能超上限
+  let captured = null;
+  adapter.client = {
+    chat: async (payload) => {
+      captured = payload;
+      return { ok: true, body: (async function* () { /* 拿到 payload 即可 */ })() };
+    },
+  };
+  for await (const c of adapter.stream({ model: 'thinker', messages: [{ role: 'user', content: 'hi' }] })) { void c; break; }
+  assert.equal(captured.max_tokens, 8192, 'stream 直调时 per-model maxTokens 也要按模型上限收敛');
+
+  // 没有每模型值时，回落到插件全局默认；全局也不合法时回落到上游默认
+  adapter.setModelParams({});
+  const byGlobal = await adapter.resolveModel('workbuddy', 'thinker');
+  assert.equal(byGlobal.defaultMaxTokens, 4096);
+  assert.equal(byGlobal.reasoning.defaultEffort, 'high');
+});
 
 test('resolveModel：supports_reasoning 的模型必须带 reasoning 元数据（选择器据此显示推理下拉）', async () => {
   const adapter = new WorkBuddyAdapter({

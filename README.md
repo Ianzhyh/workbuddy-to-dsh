@@ -171,7 +171,7 @@ dsh plugin --profile desktop add github:Ianzhyh/workbuddy-to-dsh
 
 # 方式二：release 附件（tgz 安装包，无构建、无需 allowBuilds 授权）
 #   从 GitHub Releases 下载 dsh-plugin-workbuddy-<版本>.tgz 后：
-dsh plugin --profile desktop add ./dsh-plugin-workbuddy-1.9.7.tgz
+dsh plugin --profile desktop add ./dsh-plugin-workbuddy-1.9.8.tgz
 
 # 方式三：从源码（插件在 dsh-plugin/ 子目录，接第 1 步的 git clone）
 dsh plugin --profile desktop add workbuddy-to-dsh/dsh-plugin
@@ -507,7 +507,7 @@ dsh plugin --profile desktop add <本仓库路径>/dsh-plugin
 | 最近请求 | 逐条请求明细（时间 / 模型 / 流式与否 / 耗时 / token / 积分 / 结果），**失败标红**并显示上游错误码，**点失败标签可一键复制错误详情**；支持**模型筛选** +「仅看失败」+ 40 / 100 / 200 条叠加，可**暂停自动刷新**、**导出当前筛选的 CSV**；只含元数据，不含对话内容 |
 | 每日签到 | 查看今日签到状态与连续天数，一键领取；**每日自动签到**默认开启（桥自带定时器，**不开控制台、不调模型也会签**；签完即停，不做多余的检测），失败会留痕、可关闭 |
 | 环境诊断 | 逐项检查，**按优先级排序**——红色项不解决，模型就不会出现；含客户端安装布局体检（国内版 + 国际版被装进同一目录会被点名并给出修法） |
-| 可用模型 | **默认只把 WorkBuddy 官方模型选择器列出的模型放进 dsh**（与官方 GUI 一致）；网关注册但官方未上架的模型标「官方未上架」，默认不进 dsh，可先体检再在「显示官方目录外的模型」里勾选。含上下文（官方默认 / 可选档位 / 上限）、输出上限、**消耗倍率**与**实测成本**；思考档位优先取上游目录的 `reasoning.supportedEfforts`（官方 GUI 的低/高/极致 = low/high/max），上游没给时才用本地实测表。支持体检、一键取消勾选不可用、同步可用模型到 dsh、手动刷新目录；点 **ⓘ** 看模型详情；导出 CSV |
+| 可用模型 | **默认只把 WorkBuddy 官方模型选择器列出的模型放进 dsh**（与官方 GUI 一致）；网关注册但官方未上架的模型标「官方未上架」，默认不进 dsh，可先体检再在「显示官方目录外的模型」里勾选。含上下文（官方默认 / 可选档位 / 上限）、输出上限、**消耗倍率**与**实测成本**；**每个模型的上下文长度在详情里用滑块单独调**（档位取该模型官方目录的 300K / 600K / 1M，拖动后自动保存，按该模型上限收敛）；模型详情可设**每模型的默认 temperature / max_tokens / 思考强度**（留空 = 官方默认，官方默认温度直接显示，max_tokens 不得超过该模型上限）；思考档位优先取上游目录的 `reasoning.supportedEfforts`（官方 GUI 的低/高/极致 = low/high/max），上游没给时才用本地实测表。支持体检、一键取消勾选不可用、同步可用模型到 dsh、手动刷新目录；点 **ⓘ** 看模型详情；导出 CSV |
 | 对话测试 | **多轮对话**（带上下文）、按轮次分段、显示本轮 token / 扣分 / 耗时、回答可复制；流式输出可随时停止；附带桥日志（可按关键字过滤 / 只看错误 / 只看本次启动 / 清空） |
 | 客户端接入 | 桥的两套协议地址与本地令牌（**点一下即复制**），以及各客户端的完整配置片段与**如实的兼容性分档**（已实测 / 协议兼容 / 不支持）；「复制全部配置」一次抄走 |
 
@@ -578,7 +578,7 @@ copy .env.example .env
 | `DASHBOARD_PORT` | `8792` | 控制台端口 |
 | `WORKBUDDY_APP_EXECUTABLE` | 自动探测 | WorkBuddy 客户端路径 |
 | `WORKBUDDY_AUTH_FILE` | 自动定位 | 登录文件；多账号时务必显式指定 |
-| `WORKBUDDY_CONTEXT_WINDOW` | 官方默认（多为 `300000`） | dsh 没有上下文档位选择器；这里可钉到官方可选档（如 `600000` / `1000000`，不超过模型上限） |
+| `WORKBUDDY_CONTEXT_WINDOW` | 官方默认（多为 `300000`） | dsh 的上下文容量按模型解析。**推荐在插件「模型 → 详情 → 上下文长度」里按模型单独调**（即时生效，优先于本变量）；本变量作为面板「自动」时的桥端默认值，也供不使用面板的其它 OpenAI 客户端使用，可钉到 `600000` / `1000000`（不超过模型上限） |
 | `WORKBUDDY_ANTHROPIC_MODEL` | `glm-5.3` | Claude Code 的模型名映射到哪个真实模型（也可直接填上游真实 id） |
 | `WORKBUDDY_ANTHROPIC_FAST_MODEL` | `glm-5.3-flash` | Claude Code 后台任务（标题生成、文件摘要）用的小快模型 |
 

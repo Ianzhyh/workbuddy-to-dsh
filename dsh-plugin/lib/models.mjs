@@ -22,12 +22,12 @@ export function isChatModel(id) {
   return !NON_CHAT_PATTERNS.some((re) => re.test(String(id)));
 }
 
-/** 目录里的数字 → 短文本：1_000_000 → 1M，128_000 → 128k，8192 → 8192。 */
+/** 目录里的数字 → 短文本：1_000_000 → 1M，128_000 → 128K，8192 → 8192。 */
 function shortCount(n) {
   const value = Number(n);
   if (!Number.isFinite(value) || value <= 0) return '';
   if (value >= 1_000_000) return `${Math.round(value / 100_000) / 10}M`;
-  if (value >= 10_000) return `${Math.round(value / 1000)}k`;
+  if (value >= 10_000) return `${Math.round(value / 1000)}K`;
   return String(value);
 }
 
@@ -38,6 +38,33 @@ function normalizeLengths(list) {
 }
 
 /**
+ * 该模型已知的上下文上限：显式上限 > 官方可选档最大值。
+ *
+ * **不拿当前声明值当上限**：老桥 / 精选兜底目录可能没有 `context_window_max`，
+ * 此时把“当前值”当上限会让用户选了 600K 却被悄悄按回 300K；与 `.env`
+ * 覆盖的旧语义（不知道上限就不收敛）保持一致。
+ */
+function contextMaxOf(model) {
+  const explicit = Number(model?.context_window_max || model?.contextWindowMax) || 0;
+  const options = normalizeLengths(model?.context_window_options || model?.contextWindowOptions);
+  return Math.max(explicit, ...options, 0);
+}
+
+/**
+ * dsh 实际使用的上下文容量。
+ *
+ * 优先级：该模型的面板偏好 > 桥目录里的 `context_window`（可能已被 .env 覆盖）> 0。
+ * 偏好是**按模型**传入的；这里只负责按该模型已知的上限收敛 —— 给 300K 的
+ * 模型设 1M 也不会让它虚报容量。
+ */
+export function effectiveContextWindow(model, override = 0) {
+  const current = Number(model?.context_window || model?.contextWindow) || 0;
+  const wanted = Number(override) > 0 ? Number(override) : current;
+  const max = contextMaxOf(model);
+  return max && wanted > max ? max : wanted;
+}
+
+/**
  * 模型的一句话简介，给 dsh 的模型选择器用。
  *
  * `LlmModelInfo.description` 是契约允许的字段，但 dsh 的**选择器不展示目录里的
@@ -45,10 +72,10 @@ function normalizeLengths(list) {
  * 文字，30 个模型在选择器里就只剩名字 —— 面板里能看到的上下文、倍率、多模态、
  * 推理能力全都看不见。这里把目录已有的数字拼成一句，两处口径天然同源。
  */
-export function describeModel(model) {
+export function describeModel(model, contextOverride = 0) {
   const bits = [];
-  const context = shortCount(model?.context_window || model?.contextWindow);
-  const maxContext = shortCount(model?.context_window_max || model?.maxContextWindow);
+  const context = shortCount(effectiveContextWindow(model, contextOverride));
+  const maxContext = shortCount(contextMaxOf(model));
   if (context) bits.push(`上下文 ${context}${maxContext && maxContext !== context ? `（上限 ${maxContext}）` : ''}`);
   const output = shortCount(model?.max_output_tokens || model?.maxTokens);
   if (output) bits.push(`输出 ${output}`);
@@ -79,10 +106,11 @@ export function modelCostLabel(model) {
  * 见 bridge 的 REASONING_EFFORTS_BY_MODEL）。没有它就不声明推理 —— 老桥没有
  * 这个字段时退回"低/中/高"三档兜底（adapter 里做，见 FALLBACK_EFFORTS）。
  * @param {object} model 桥上 `/v1/models` 的一项
+ * @param {{ contextWindow?: number }} [options] 面板选择的上下文预算（0 = 跟随目录）
  */
-export function toAdapterModel(model) {
+export function toAdapterModel(model, options = {}) {
   const id = String(model.id);
-  const contextWindow = Number(model.context_window || model.contextWindow || 0) || undefined;
+  const contextWindow = effectiveContextWindow(model, options.contextWindow) || undefined;
   const maxTokens = Number(model.max_output_tokens || model.maxTokens || 0) || undefined;
   const images = model.supports_images === true || model.images === true;
   // 推理能力：桥以 supports_reasoning（上游 supportsReasoning 的透传）标记；
@@ -102,7 +130,9 @@ export function toAdapterModel(model) {
   return {
     id,
     name: cost ? baseName + ' · ' + cost : baseName,
-    ...(describeModel(model) ? { description: describeModel(model) } : {}),
+    ...(describeModel(model, options.contextWindow)
+      ? { description: describeModel(model, options.contextWindow) }
+      : {}),
     ...(contextWindow ? { contextWindow } : {}),
     ...(maxTokens ? { maxTokens } : {}),
     ...(contextWindowDefault ? { contextWindowDefault } : {}),
@@ -114,7 +144,7 @@ export function toAdapterModel(model) {
     ...(typeof model.default_reasoning_effort === 'string' && model.default_reasoning_effort
       ? { defaultReasoningEffort: model.default_reasoning_effort }
       : {}),
-    ...(model.reasoning_efforts_source === 'upstream' || model.reasoning_efforts_source === 'measured'
+    ...(['upstream', 'measured', 'fallback'].includes(model.reasoning_efforts_source)
       ? { reasoningEffortsSource: model.reasoning_efforts_source }
       : {}),
     ...(model.official === true ? { official: true } : model.official === false ? { official: false } : {}),
@@ -155,13 +185,19 @@ export function toAdapterModels(catalog, filter = {}) {
     if (raw.official === false && !includeUnofficial && !allow.has(raw.id) && !kept) continue;
     if (seen.has(raw.id)) continue;
     seen.add(raw.id);
-    out.push(toAdapterModel(raw));
+    // 上下文预算按模型 id 取：每个模型有自己的官方档位和上限，不能全局一刀切。
+    out.push(toAdapterModel(raw, { contextWindow: filter?.contextWindows?.[raw.id] }));
   }
   return out;
 }
 
-/** 桥侧的完整目录（含 credits / vendor 等展示字段），给面板与工具用。 */
-export function toDirectory(catalog) {
+/**
+ * 桥侧的完整目录（含 credits / vendor 等展示字段），给面板与工具用。
+ * `contextWindow` 是**实际生效值**（该模型的面板偏好优先）；`contextWindowAuto`
+ * 是桥目录里的自动值（官方默认 / .env），官方默认/可选档另列。
+ * @param {{ contextWindows?: Record<string, number> }} [options]
+ */
+export function toDirectory(catalog, options = {}) {
   return (catalog || [])
     .filter((m) => m && typeof m.id === 'string' && isChatModel(m.id))
     .map((m) => {
@@ -194,18 +230,24 @@ export function toDirectory(catalog) {
       return {
         id: m.id,
         name: String(m.name || m.id),
-        contextWindow: Number(m.context_window || 0) || null,
+        contextWindow: effectiveContextWindow(m, options.contextWindows?.[m.id]) || null,
+        // 桥目录里的「自动」值（官方默认，或 .env 的全局覆盖），不受面板每模型偏好影响
+        contextWindowAuto: Number(m.context_window || 0) || null,
         maxTokens: Number(m.max_output_tokens || 0) || null,
         // 官方 GUI 的上下文档位：默认预算 / 可选档 / 模型上限
         contextWindowDefault: Number(m.context_window_default || 0) || null,
         contextWindowOptions: normalizeLengths(m.context_window_options),
         contextWindowMax: Number(m.context_window_max || 0) || null,
+        // 官方默认采样温度（上游目录的 temperature；null = 上游没给）
+        defaultTemperature: m.default_temperature != null && Number.isFinite(Number(m.default_temperature))
+          ? Number(m.default_temperature)
+          : null,
         images: m.supports_images === true,
         // 推理：reasoning=是否支持；efforts=实测档位（null=未知/无此字段，[]=实测无档）
         reasoning,
         efforts,
         // 档位来源：upstream = 官方目录 supportedEfforts；measured = 本地实测表
-        effortsSource: m.reasoning_efforts_source === 'upstream' || m.reasoning_efforts_source === 'measured'
+        effortsSource: ['upstream', 'measured', 'fallback'].includes(m.reasoning_efforts_source)
           ? m.reasoning_efforts_source
           : null,
         defaultEffort: typeof m.default_reasoning_effort === 'string' ? m.default_reasoning_effort : null,
