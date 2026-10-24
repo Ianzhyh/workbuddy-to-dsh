@@ -569,6 +569,18 @@ export async function bridgeQuota({ force = false, expectedAccount = '' } = {}) 
   return result === timedOut ? null : result;
 }
 
+/** 桥的轻量身份快照（`/v1/identity`）：不抓目录、不打上游，供前端 2 秒轮询。 */
+export async function bridgeIdentity(timeoutMs = 4000) {
+  try {
+    const res = await bridgeFetch('/v1/identity', timeoutMs);
+    if (!res.ok) return null;
+    const body = await res.json().catch(() => null);
+    return body && body.ok ? body : null;
+  } catch {
+    return null;
+  }
+}
+
 /** 桥的本地用量账本（只含元数据：模型、耗时、token 数）。 */
 export async function bridgeUsage(days = 7, hours = false) {
   try {

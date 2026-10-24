@@ -13,6 +13,7 @@ import { fileURLToPath } from 'node:url';
 import config, { bridgeEnv } from '../config.mjs';
 import {
   bridgeHealth,
+  bridgeIdentity,
   bridgeModels,
   bridgeQuota,
   bridgeRequests,
@@ -1088,8 +1089,19 @@ const server = createServer(async (req, res) => {
       });
     }
 
-    if (route === '/api/overview') {
-      // 只包含页面真正使用的字段：**不带** model 目录（另有 /api/models），
+    /*
+     * 轻量身份端点：浏览器每 2 秒问一次「桥现在服务谁」，账号/构建一变就
+     * 立刻重拉概览、账号与模型目录。不能等 20/60/120 秒的整页轮询 ——
+     * 切号后页面必须当场换成新账号，而不是把上一个账号的余额继续摆着。
+     */
+    if (route === '/api/identity' && (req.method === 'GET' || req.method === 'HEAD')) {
+      const identity = await bridgeIdentity(4000);
+      return sendJson(res, 200, identity
+        ? { ok: true, ...identity }
+        : { ok: false, error: 'bridge identity unavailable' });
+    }
+
+    if (route === '/api/overview') {      // 只包含页面真正使用的字段：**不带** model 目录（另有 /api/models），
       // 桥冷启动时抓目录要串行打两个上游端点，不能让徽章陪着一起等。
       /*
        * 先取 /health（本地、毫秒级），再让积分按**桥当前账号**取。

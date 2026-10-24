@@ -782,6 +782,7 @@ body.dark .wb-root,
       '改用桌面端': 'Use desktop session',
       '改用桌面端失败：': 'Failed to switch to the desktop session: ',
       '已改用桌面端账号。': 'Now using the desktop account.',
+      '检测到账号已切换，正在刷新…': 'Account change detected; refreshing…',
       '桥当前在用插件凭据；切回桌面端账号（同一份登录文件）': 'The bridge is using the plugin credential; switch back to the desktop account (same login file)',
       '已改用桌面端账号；积分稍后按新账号重读。': 'Now using the desktop account; credits will be re-read for it shortly.',
       '桥进程还是旧构建（升级后旧进程仍在服务），重启桥后新逻辑才会生效':
@@ -1689,6 +1690,19 @@ body.dark .wb-root,
     }
 
     /**
+     * 账号身份变化的全局通知：所有已挂载的 useJson 收到后立刻重拉一次。
+     *
+     * 为什么不是只刷新概览：切号后积分（概览）、模型目录、账号列表、签到、
+     * 用量都换了归属；等各自的 8~120 秒轮询就是在显示上一个账号的数据。
+     */
+    const identityListeners = new Set();
+    function notifyIdentityChanged() {
+      for (const listener of [...identityListeners]) {
+        try { listener(); } catch (e) { /* 单个面板失败不影响其它 */ }
+      }
+    }
+
+    /**
      * 轮询式取数；enabled=false 时完全不请求（面板切走就停）。
      * 定时器**还受页面可见性门控**：页面隐藏时暂停，变回可见时先补一次再继续
      * （见 {@link watchPageVisibility}）。
@@ -1755,6 +1769,14 @@ body.dark .wb-root,
         }
         setState((s) => ({ ...s, loading: true }));
         reload();
+        /*
+         * 身份变了就重拉。身份轮询自己（/identity）不订阅，否则会自激。
+         * 这是“切号立刻生效”的客户端半边：宿主端每 2 秒发现一次换号，
+         * 这里收到通知后所有面板在同一帧重取。
+         */
+        const watchIdentity = !String(path).includes('/identity');
+        const onIdentityChanged = () => { reload(); };
+        if (watchIdentity) identityListeners.add(onIdentityChanged);
         // 定时器不常驻：可见时才挂上。这样"不可见"就等价于停轮询，而不是
         // 让定时器空转（空转在一个开着的后台标签页里会一直跑下去）。
         let timer = null;
@@ -1780,6 +1802,7 @@ body.dark .wb-root,
           alive.current = false;
           stopTimer();
           if (unwatch) unwatch();
+          if (watchIdentity) identityListeners.delete(onIdentityChanged);
           if (retryTimer.current) { clearTimeout(retryTimer.current); retryTimer.current = null; }
         };
         // opts.refreshKey：调用方给的"该重拉了"信号（值变化 → effect 重跑 → 重新拉取）。
@@ -5785,6 +5808,38 @@ body.dark .wb-root,
         }
       }, []);
       const { data: status, reload: reloadStatus } = useJson('/workbuddy/status', { interval: 8000 });
+      /*
+       * 轻量身份轮询：2 秒一次，只读「桥现在服务谁」。账号一变立刻通知所有
+       * 已挂载面板重拉 —— 不必等状态 8 秒、模型 120 秒、账号 60 秒的轮询。
+       */
+      const { data: identity } = useJson('/workbuddy/identity', { interval: 2000 });
+      const identityKeyRef = useRef('');
+      useEffect(() => {
+        if (!identity?.ok) return;
+        const key = [
+          identity.pid,
+          identity.build,
+          identity.auth?.source,
+          identity.auth?.userId,
+          identity.auth?.enterpriseId,
+          identity.auth?.tenantId,
+          identity.desktopUserId,
+        ].join('|');
+        const previous = identityKeyRef.current;
+        identityKeyRef.current = key;
+        if (!previous) {
+          // 首帧：如果状态快照里的账号与身份端点不一致（挂载瞬间刚好换号），补一次
+          const statusAccount = status?.bridge?.health?.auth?.userId || '';
+          if (statusAccount && identity.auth?.userId && statusAccount !== identity.auth.userId) {
+            notifyIdentityChanged();
+          }
+          return;
+        }
+        if (key !== previous) {
+          setToast('检测到账号已切换，正在刷新…');
+          notifyIdentityChanged();
+        }
+      }, [identity, status?.bridge?.health?.auth?.userId]);
       /**
        * 桥当前登录账号 —— 作为模型目录的 refreshKey（见 ChatPanel 内的说明）。
        * 没有旧账号信息可比时（旧宿主/桥未跑）给 undefined，refreshKey 退化无效。

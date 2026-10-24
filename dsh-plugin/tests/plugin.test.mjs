@@ -381,9 +381,9 @@ test('apply() 装配：注册 llm 路由、5 个工具、命令、HTTP 路由', 
     }
     assert.equal(calls.commands.length, 1);
     assert.equal(calls.commands[0].name, 'workbuddy');
-    assert.equal(calls.routes.length, 22, 'HTTP 数据面应有 22 条路由（21 条 exact + 1 条 console-api 前缀）');
+    assert.equal(calls.routes.length, 23, 'HTTP 数据面应有 23 条路由（22 条 exact + 1 条 console-api 前缀）');
     assert.deepEqual(calls.routes.map((r) => r.path).sort(), [
-      '/workbuddy/bridge', '/workbuddy/checkin', '/workbuddy/console', '/workbuddy/console-api', '/workbuddy/log',
+      '/workbuddy/bridge', '/workbuddy/checkin', '/workbuddy/console', '/workbuddy/console-api', '/workbuddy/identity', '/workbuddy/log',
       '/workbuddy/login', '/workbuddy/login/active', '/workbuddy/login/cancel', '/workbuddy/login/logout',
       '/workbuddy/login/poll', '/workbuddy/login/source', '/workbuddy/login/start',
       '/workbuddy/migrate', '/workbuddy/model-visibility', '/workbuddy/models', '/workbuddy/quota', '/workbuddy/requests', '/workbuddy/status', '/workbuddy/usage',

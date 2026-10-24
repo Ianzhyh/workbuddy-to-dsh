@@ -207,6 +207,11 @@ export class BridgeClient {
     return this.#json('/health', { signal, timeoutMs: 4000 });
   }
 
+  /** `GET /v1/identity`：极轻的「现在是谁」，用于账号切换即时刷新（不抓目录）。 */
+  accountIdentity(signal) {
+    return this.#json('/v1/identity', { signal, timeoutMs: 4000 });
+  }
+
   /** `GET /`：仅用于确认端口上跑的确实是 workbuddy-bridge。 */
   identity(signal) {
     return this.#json('/', { signal, timeoutMs: 4000 });

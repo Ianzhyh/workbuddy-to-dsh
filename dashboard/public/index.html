@@ -884,6 +884,7 @@ const I18N_EN = {
   '取消': 'Cancel',
   '刷新中…': 'Refreshing…',
   '正在刷新全部面板…': 'Refreshing all panels…',
+  '检测到账号或桥已切换，正在刷新…': 'Account or bridge change detected; refreshing…',
 
   // ---- 通用词 ----
   '加载中…': 'Loading…',
@@ -2194,6 +2195,7 @@ const I18N_RULES_EN = [
   [/^新进程启动失败，仍在复用旧进程（PID (.+)）$/, 'New process failed to start; still reusing the old one (PID $1)'],
   [/^桥已在运行（PID (.+)）$/, 'Bridge already running (PID $1)'],
   [/^已刷新全部面板（(.+)）$/, 'All panels refreshed ($1)'],
+  [/^已按新账号刷新（(.+)）$/, 'Refreshed for the new account at $1'],
 
   // 对话面板
   [/^本轮发送 (\d+) 条消息 · 约 (\d+) 字符（建议清空对话）$/,
@@ -2851,9 +2853,46 @@ function singleFlight(fn) {
   };
 }
 
+/**
+ * 身份轮询（2 秒一次，极轻量）。
+ *
+ * `/api/identity` 只问桥「现在服务谁」+ 构建指纹，不抓目录、不打上游。账号
+ * 或桥进程一变，立刻重拉概览/账号/模型/签到 —— 不能等 20~120 秒的整页轮询，
+ * 否则切号后页面仍把上一个账号的余额、UID 摆在眼前。
+ */
+let lastIdentityKey = '';
+let identityPolling = false;
+async function pollIdentity() {
+  if (identityPolling) return;
+  identityPolling = true;
+  try {
+    const d = await api('/api/identity');
+    if (!d || d.ok === false) return;
+    const key = [
+      d.pid, d.build, d.auth && d.auth.source, d.auth && d.auth.userId,
+      d.auth && d.auth.enterpriseId, d.auth && d.auth.tenantId, d.desktopUserId,
+    ].join('|');
+    const previous = lastIdentityKey;
+    lastIdentityKey = key;
+    if (!previous) {
+      // 首帧：页面可能刚好在换号期间加载，状态快照与身份端点不一致时补一次
+      const snapshotAccount = lastOverview && lastOverview.bridge && lastOverview.bridge.auth
+        && lastOverview.bridge.auth.userId;
+      if (!snapshotAccount || snapshotAccount === (d.auth && d.auth.userId)) return;
+    } else if (key === previous) {
+      return;
+    }
+    setMsg('检测到账号或桥已切换，正在刷新…');
+    await Promise.all([
+      loadOverview(), loadModels(), loadAccounts(), loadPluginLogin(), loadCheckin(),
+    ]);
+    setMsg('已按新账号刷新（' + fmtTime(Date.now()) + '）', 'good');
+  } catch { /* 桥未运行：下一轮再试 */ }
+  finally { identityPolling = false; }
+}
+
 /** 一次刷新覆盖全部数据面板；日志仍只在面板展开时读。 */
-async function refreshAll() {
-  const btn = $('refreshBtn');
+async function refreshAll() {  const btn = $('refreshBtn');
   if (btn.disabled) return;
   btn.disabled = true;
   const label = btn.innerHTML;
@@ -9216,6 +9255,8 @@ initPanelFadeIn(); // 必须在下面首次取数之前挂上，否则第一帧�
  * 它自带幂等保护，重复调用无害。
  */
 const pollers = [
+  // 账号/桥换代必须“当场”反映：极轻的身份端点，2 秒一次
+  { every: 2000, run: pollIdentity },
   {
     every: 20000,
     run() {

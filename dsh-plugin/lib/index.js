@@ -1667,6 +1667,37 @@ export function apply(ctx, rawConfig = {}) {
   }
 
   // ── 7. 后台把桥与控制台拉起来（不阻塞插件加载） ────────────────────────
+  /**
+   * 后台身份监听：每 2 秒问桥“现在是谁”，账号一变就立刻作废目录/积分并
+   * 通知 dsh 选择器。不能只靠面板打开时的 8 秒轮询 —— 用户切号后马上发
+   * 消息也必须落到新账号上（模型目录/档位也是账号相关的）。
+   */
+  let identityPolling = false;
+  async function pollBridgeIdentity() {
+    if (identityPolling) return;
+    identityPolling = true;
+    try {
+      const identity = await client.accountIdentity(AbortSignal.timeout(4000));
+      if (!identity?.ok) return;
+      const probe = {
+        state: 'running',
+        health: {
+          ok: true,
+          pid: identity.pid,
+          build: identity.build,
+          auth: identity.auth,
+          credential: {
+            source: identity.auth?.source || '',
+            desktopUserId: identity.desktopUserId || '',
+          },
+        },
+      };
+      reconcileBridgeProcess(probe);
+      reconcileAccount(probe);
+    } catch { /* 桥没跑 / 还没登录：下一轮再试 */ }
+    finally { identityPolling = false; }
+  }
+
   if (config.autoStart) {
     void (async () => {
       try {
@@ -1688,6 +1719,16 @@ export function apply(ctx, rawConfig = {}) {
       } catch (error) {
         log('自动启动桥失败', error);
       }
+      /*
+       * 无论这一次桥是否就绪都开始监听：登录/换号可能稍后发生。
+       * 2 秒是本机 /v1/identity 的成本（只 stat + 解码 token，不抓目录）。
+       */
+      const timer = setInterval(pollBridgeIdentity, 2000);
+      timer.unref?.();
+      if (typeof ctx.effect === 'function') {
+        ctx.effect(() => () => clearInterval(timer), 'workbuddy.identity-watch');
+      }
+      pollBridgeIdentity();
     })();
   }
   if (config.consoleAutoStart) {

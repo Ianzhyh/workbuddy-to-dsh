@@ -114,6 +114,19 @@ export function createRouteTable(deps) {
     },
     {
       kind: 'exact',
+      path: '/workbuddy/identity',
+      async handler(req, res) {
+        if (readOnly(req, res)) return;
+        try {
+          const identity = await client.accountIdentity(AbortSignal.timeout(4000));
+          sendJson(res, 200, { ok: true, ...identity });
+        } catch (error) {
+          sendJson(res, 200, { ok: false, error: String(error?.message || error) });
+        }
+      },
+    },
+    {
+      kind: 'exact',
       path: '/workbuddy/web-search/enable',
       async handler(req, res) {
         if (req.method !== 'POST') return sendJson(res, 405, { ok: false, error: `${req.method} not allowed` });

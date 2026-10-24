@@ -1109,10 +1109,18 @@ test('目录缓存：桌面换号后必须作废上一个账号的模型目录',
   try {
     const first = await (await fetch(`${bridge.baseUrl}/v1/models?all=1`, { headers: auth })).json();
     assert.ok(first.data.some((m) => m.id === 'model-a'), '初始目录必须来自账号 A');
+    const identityA = await (await fetch(`${bridge.baseUrl}/v1/identity`, { headers: auth })).json();
+    assert.equal(identityA.auth?.userId, 'catalog-a');
+    assert.ok(identityA.build, '/v1/identity 必须带构建指纹，供前端识别桥换代');
+    assert.ok(identityA.auth?.changedAt, '/v1/identity 必须带身份版本时间');
 
     stubModels.splice(0, stubModels.length, 'model-b');
     writeFileSync(followPath, JSON.stringify(authFileFor('catalog-b')));
     await waitUid('catalog-b');
+
+    const identityB = await (await fetch(`${bridge.baseUrl}/v1/identity`, { headers: auth })).json();
+    assert.equal(identityB.auth?.userId, 'catalog-b');
+    assert.notEqual(identityB.auth?.changedAt, identityA.auth?.changedAt, '换号后身份版本必须变化');
 
     const second = await (await fetch(`${bridge.baseUrl}/v1/models?all=1`, { headers: auth })).json();
     const ids = second.data.map((m) => m.id);

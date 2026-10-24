@@ -179,11 +179,18 @@ paths:
                       type: object
                       properties:
                         id: { type: string }
+  /v1/identity:
+    get:
+      summary: 极轻身份快照（只解析凭据，不抓目录、不打上游）
+      description: 面板每 2 秒轮询；`auth.changedAt` / `pid` / `build` 变化即代表账号或桥进程换代，前端应立刻重拉账号、积分与模型目录。
+      responses:
+        '200': { description: 当前来源、账号、desktopUserId、构建指纹与 changedAt }
+        '503': { description: 凭据读不出来（带错误原因与 pid/build） }
   /v1/quota:
     get:
       summary: 积分余额（带缓存，TTL 由 WORKBUDDY_QUOTA_TTL_MS 控制）
       responses:
-        '200': { description: 余额与套餐 }
+        '200': { description: 余额与套餐；`account` / `source` 标明这份余额属于哪个账号 }
   /v1/usage:
     get:
       summary: 本地用量聚合（按天 / 按模型）

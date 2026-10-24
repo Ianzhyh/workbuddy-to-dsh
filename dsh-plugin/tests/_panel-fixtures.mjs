@@ -418,6 +418,23 @@ export function buildRoutes(data) {
   const routes = {
     // checkin 固定成"今日未签到"，好让概览页的待办提醒可断言（真实数据取决于今天签没签）
     '/workbuddy/status': { ...data.status, checkin: { status: { todayCheckedIn: false, streakDays: 3, todayCredit: 0 }, auto: { auto: true } } },
+    // 轻量身份端点：面板每 2 秒轮询；桩里必须存在，否则会被当成旧宿主/接口缺失。
+    '/workbuddy/identity': (() => {
+      const h = data.status.bridge.health;
+      return {
+        ok: true,
+        pid: h.pid,
+        build: 'fixture-build',
+        auth: {
+          source: h.auth.source,
+          userId: h.auth.userId,
+          endpoint: h.auth.endpoint,
+          expiresAt: h.auth.expiresAt,
+          changedAt: new Date(Date.now() - 60_000).toISOString(),
+        },
+        desktopUserId: h.credential?.desktopUserId || '',
+      };
+    })(),
     '/workbuddy/models': data.models,
     // 插件登录（第二条凭据来源）：给一条已登录的插件账号，让账号页的
     // 来源选择 / 账号行 / 按钮文案都进入 i18n 验收（空态由别的用例覆盖）。

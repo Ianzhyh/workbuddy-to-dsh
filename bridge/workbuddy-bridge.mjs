@@ -2286,7 +2286,43 @@ function apiKeyAuth() {
   };
 }
 
-async function resolveAuth() {
+/**
+ * 当前凭据身份的“版本”：账号/来源/区域一变就更新 `changedAt`。
+ *
+ * 面板/客户端不必等 8~20 秒的整页轮询：轮询一个极轻的 `/v1/identity`，发现
+ * `changedAt` 变了就立刻重拉账号、积分与模型目录。账号切换必须**当场生效**，
+ * 而不是等下一次目录 TTL 或余额缓存过期。
+ */
+let authIdentity = { key: '', changedAt: 0, source: '', userId: '', enterpriseId: '', tenantId: '' };
+function identityKeyOf(auth) {
+  return [
+    auth?.source || '',
+    auth?.userId || auth?.uid || '',
+    auth?.enterpriseId || '',
+    auth?.tenantId || '',
+    auth?.endpoint || '',
+    auth?.domain || '',
+  ].join('\u0000');
+}
+function noteAuthIdentity(auth) {
+  const key = identityKeyOf(auth);
+  if (key === authIdentity.key) return;
+  const previous = authIdentity.key;
+  authIdentity = {
+    key,
+    changedAt: Date.now(),
+    source: auth?.source || '',
+    userId: auth?.userId || auth?.uid || '',
+    enterpriseId: auth?.enterpriseId || '',
+    tenantId: auth?.tenantId || '',
+  };
+  if (previous) {
+    log('auth identity changed', `${authIdentity.source}:${authIdentity.userId || '?'}`);
+  }
+}
+
+/** 内部解析 + 记录身份版本；对外只暴露 {@link resolveAuth}。 */
+async function resolveAuthInner() {
   if (API_KEY) return apiKeyAuth();
   /*
    * 每次解析凭据前确认桌面端是否换号。原先只有 readStoredAuth() 会做这件事，
@@ -2325,6 +2361,12 @@ async function resolveAuth() {
     err.code = 'NO_CREDENTIAL';
     throw err;
   }
+}
+
+async function resolveAuth() {
+  const auth = await resolveAuthInner();
+  noteAuthIdentity(auth);
+  return auth;
 }
 
 /**
@@ -8037,6 +8079,48 @@ async function handleRequest(req, res) {
       });
     }
 
+    /*
+     * 极轻的身份端点：只解析凭据并返回「现在是谁」，不抓目录、不打上游。
+     * 面板每 2 秒轮询它，身份版本一变就立刻重拉账号/积分/模型目录。
+     */
+    if (url.pathname === '/v1/identity') {
+      try {
+        const a = await resolveAuth();
+        let desktopUserId = '';
+        try {
+          const desktop = a.source === 'desktop' ? a : await readStoredAuth();
+          desktopUserId = desktop.userId || '';
+        } catch { /* 桌面文件读不出：只报桥自己的身份 */ }
+        return json(res, 200, {
+          ok: true,
+          pid: process.pid,
+          build: BRIDGE_BUILD,
+          startedAt: new Date(STARTED_AT).toISOString(),
+          authFile: AUTH_PATH,
+          ...(AUTH_PATH !== AUTH_PINNED_PATH ? { authFilePinned: AUTH_PINNED_PATH, authFollow: true } : {}),
+          auth: {
+            source: a.source,
+            userId: a.userId || a.uid || '',
+            enterpriseId: a.enterpriseId || '',
+            tenantId: a.tenantId || '',
+            endpoint: a.endpoint || '',
+            expiresAt: a.expiresAt ? new Date(a.expiresAt).toISOString() : '',
+            changedAt: authIdentity.changedAt ? new Date(authIdentity.changedAt).toISOString() : '',
+          },
+          desktopUserId,
+        });
+      } catch (e) {
+        return json(res, 503, {
+          ok: false,
+          error: e.message,
+          pid: process.pid,
+          build: BRIDGE_BUILD,
+          authFile: AUTH_PATH,
+          ...(AUTH_PATH !== AUTH_PINNED_PATH ? { authFilePinned: AUTH_PINNED_PATH, authFollow: true } : {}),
+        });
+      }
+    }
+
     if (url.pathname === '/health') {
       let auth = null;
       let region = '';
@@ -8081,6 +8165,7 @@ async function handleRequest(req, res) {
           endpoint: a.endpoint,
           expiresAt: a.expiresAt ? new Date(a.expiresAt).toISOString() : '',
           expired: a.expiresAt ? a.expiresAt < Date.now() : false,
+          changedAt: authIdentity.changedAt ? new Date(authIdentity.changedAt).toISOString() : '',
         };
       } catch (e) {
         // 带上 pid：未登录/凭据异常时 stop() 也要能停掉自己的进程（否则用户点停止只会得到一个假错误）
