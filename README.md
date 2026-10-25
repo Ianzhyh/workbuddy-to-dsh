@@ -134,7 +134,7 @@ dsh plugin --profile desktop add github:Ianzhyh/workbuddy-to-dsh
   CCR 把别家的 API **注入** Claude Code；本项目把 Claude Code 等**发给 WorkBuddy 的
   模型额度导出**成标准 API——两者互补而非竞争。
 - **与 WorkBuddy2API 集群（社区 20+ 同目标项目）的差异**：本项目刻意保持
-  **单账号 · 不落明文凭据 · 零运行时依赖 · 单文件自包含**（桌面凭据现取现解；
+  **单账号 · 不落明文凭据 · 零运行时依赖 · 自包含**（桌面凭据现取现解；
   插件登录凭据以 DPAPI + AES-GCM 加密保存）；不支持也不计划支持多账号池化与
   任务自动化——如果你的需求是后者，社区里已有更对口的工具。
 - 上游协议是**未公开接口**：所有同类项目都在同一片雷区里，失效与修复是常态。
@@ -171,7 +171,7 @@ dsh plugin --profile desktop add github:Ianzhyh/workbuddy-to-dsh
 
 # 方式二：release 附件（tgz 安装包，无构建、无需 allowBuilds 授权）
 #   从 GitHub Releases 下载 dsh-plugin-workbuddy-<版本>.tgz 后：
-dsh plugin --profile desktop add ./dsh-plugin-workbuddy-1.11.0.tgz
+dsh plugin --profile desktop add ./dsh-plugin-workbuddy-1.12.0.tgz
 
 # 方式三：从源码（插件在 dsh-plugin/ 子目录，接第 1 步的 git clone）
 dsh plugin --profile desktop add workbuddy-to-dsh/dsh-plugin
@@ -472,6 +472,7 @@ node tools\connect.mjs apply codex --model glm-5.3
 | 模型注册 | 运行时注册 provider `workbuddy`，**不写任何配置文件** | 控制台写 `settings.yaml` + profile patch |
 | 模型增删 | 动态跟随上游目录，改完即生效 | 需要重新勾选并保存 |
 | 上下文 / 输出 | **模型详情顶部可编辑**：输入/输出并排，滑块 + 数值框，留空 = 自动，Token 改完自动保存 | 只能改 `.env` 的 `WORKBUDDY_CONTEXT_WINDOW`（全局默认） |
+| 活动倍率 | 解析上游 `schedule`：夜间免费（hy4）23:00–08:00 自动显示免费/0，夜间折扣（glm）显示折后倍率，过期活动自动隐藏；dsh/面板/控制台同源 | 静态倍率，需自己看公告 |
 | 桥的启停 | 插件自动复用/拉起 | 控制台按钮，或 `启动.cmd` |
 | 数据界面 | **dsh 设置页（9 个标签页）** + 控制台网页，两边同步 | 只有控制台网页 |
 | 网页搜索 | **启动后自动接入（默认）**，概览顶部独立状态卡 + 一键接入/恢复；令牌写独立引用，不覆盖 DeepSeek key | 需手动改 dsh 的 `web-search-deepseek` 配置 |

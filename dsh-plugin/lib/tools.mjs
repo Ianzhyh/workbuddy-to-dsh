@@ -142,6 +142,9 @@ export function createTools(deps) {
             ? '推理（档位未实测）'
             : (efforts.length ? `推理（${efforts.length} 档：${efforts.join('/')}）` : '推理（网关暂未接）'));
         }
+        // 当前正在生效的促销（夜间免费 / 夜间折扣）：倍率已经是折后值，
+        // 这行让 agent 能解释“为什么现在是免费/0.395”。
+        if (m.promotion_active === true && m.badge) bits.push(`促销 ${m.badge}（进行中）`);
         // 上游的 vendor 是单字母内部代号（f/e），对用户没有意义，不显示
         lines.push(`- ${m.id}（${m.name || m.id}）：${bits.join('，')}`);
       }

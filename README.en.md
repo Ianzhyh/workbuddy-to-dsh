@@ -92,7 +92,7 @@ request ledger when the host exposes them, otherwise a clearly-labelled estimate
   Complementary, not competing.
 - **vs the WorkBuddy2API cluster (20+ projects)**: this one deliberately stays
   **single-account · no plaintext credentials · zero runtime dependencies ·
-  single-file bridge** (desktop credentials are read on demand; plugin-sign-in
+  self-contained bridge** (desktop credentials are read on demand; plugin-sign-in
   credentials are stored with DPAPI + AES-GCM); no multi-account pooling, no task
   automation.
 
@@ -141,8 +141,8 @@ instead of the DeepSeek wallet.
 
 ## Highlights
 
-- **Zero runtime dependencies** — the bridge is a single self-contained file
-  (`bridge/workbuddy-bridge.mjs`).
+- **Zero runtime dependencies** — the bridge is a self-contained Node script
+  (`bridge/workbuddy-bridge.mjs` plus a tiny promotion-schedule helper).
 - **No plaintext credentials on disk** — desktop AtRest keys are fetched via
   `ELECTRON_RUN_AS_NODE` on demand; plugin-sign-in credentials are stored as
   DPAPI-protected AES-GCM envelopes. Plaintext tokens stay in memory only.
@@ -150,6 +150,9 @@ instead of the DeepSeek wallet.
   instead of the DeepSeek wallet; the plugin stores the bridge token in a separate
   credential reference, self-tests the full chain, respects explicit user settings,
   and exposes `workbuddy_web_search` as a fallback that bypasses dsh search config.
+- **Time-aware promotions** — nightly free/discount windows are evaluated from the
+  upstream `schedule` (timezone, daily windows, validity dates), so rates switch at
+  23:00/08:00 instead of staying static; expired campaigns disappear everywhere.
 - **Three protocols**, streaming, tool calls, multi-turn tool results.
   Codex speaks the OpenAI **Responses** protocol, which is *not* chat/completions —
   the bridge contains a real conversion layer (`/v1/responses`), so there is no

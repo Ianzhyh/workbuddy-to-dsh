@@ -64,7 +64,7 @@ export const FIXTURES = {
       // 带促销徽章的样例：既让"徽章要渲染成带色标记"这条断言在离线模式下也成立，
       // 也顺带验证「同名套餐/徽章」的展示
       { id: 'hy3', name: 'HY3', contextWindow: 131072, maxTokens: 8192, images: false, reasoning: false, efforts: null, onlyReasoning: false, credits: 0, free: true, vendor: 'j', tags: ['craft', 'badge:限时免费:#FF0000'], badges: [{ label: '限时免费', color: '#FF0000' }] },
-      { id: 'hy4-preview', name: 'Hy4 preview', contextWindow: 960000, maxTokens: 64000, images: true, reasoning: true, efforts: ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'], onlyReasoning: true, credits: 0, free: true, vendor: 'j', tags: ['badge:夜间免费:#FF0000'], badges: [{ label: '夜间免费', color: '#FF0000' }] },
+      { id: 'hy4-preview', name: 'Hy4 preview', contextWindow: 960000, maxTokens: 64000, images: true, reasoning: true, efforts: ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'], onlyReasoning: true, credits: 0, free: true, promotionActive: true, promotionText: '每晚 23:00—次日 8:00 享免费额度。', promotionUntil: '2026-11-01T00:00:00+08:00', promotionFactor: 0, vendor: 'j', tags: ['badge:夜间免费:#FF0000'], badges: [{ label: '夜间免费', color: '#FF0000' }] },
       // 显式空数组：桥实测"一个档都不收"（网关暂时不接）→ 面板提示"暂无可选档位"
       { id: 'glm-5v-turbo', name: 'GLM-5v-Turbo', contextWindow: 200000, maxTokens: 64000, images: true, reasoning: true, efforts: [], onlyReasoning: false, credits: 0.71, free: false, vendor: 'e', tags: [], badges: [], official: false },
     ],
@@ -189,6 +189,12 @@ FIXTURES.models.models = FIXTURES.status.directory.map((m) => ({
   supplemented: m.supplemented === true,
   // tags 要洗干净（`badge:标签:#色` 已拆进 badges）；模型页的促销徽章靠 badges 渲染
   tags: (m.tags || []).filter((t) => !/^badge:/.test(t)), badges: m.badges,
+  // 与 toDirectory 的输出对齐：活动状态要能进面板表格/详情
+  promotionActive: m.promotionActive === true,
+  promotionText: m.promotionText || '',
+  promotionTextEn: m.promotionTextEn || '',
+  promotionUntil: m.promotionUntil || '',
+  promotionFactor: typeof m.promotionFactor === 'number' ? m.promotionFactor : null,
   description: '',
 }));
 

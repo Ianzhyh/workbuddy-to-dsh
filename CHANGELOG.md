@@ -17,6 +17,27 @@
 
 只支持最近 2 个 minor 版本。
 
+## [1.12.0] - 2026-10-25
+
+### Added
+
+- **活动倍率按时间窗实时计算**：解析上游 `modelPromotions.schedule` 的
+  `daily` / `timezone` / `validFrom` / `validUntil`，不再只看 `discount.factor`：
+  - 夜间免费（`hy4-preview`）每天 23:00–08:00 显示「免费」/倍率 0，08:00 恢复原价；
+  - 夜间折扣（`glm-5.2`）23:00–7:50 显示折后倍率（0.395），白天回原价；
+  - 过期活动（`step-5-preview` / `space-bunny`）自动隐藏徽章，不再误标免费；
+  - 支持跨午夜、多时段、日期范围（如 `hy3` 限免到 11/1）和自定义时区。
+- 模型对象新增 `promotion_active` / `promotion_text` / `promotion_until` /
+  `promotion_factor`；dsh 选择器、插件面板、控制台和 `workbuddy_models`
+  工具统一显示「进行中/未生效」与活动说明。
+
+### Fixed
+
+- **静态 `free` 误报**：旧实现把 `discount.factor === 0` 当成“当前免费”，导致
+  夜间免费模型白天也显示免费、夜间折扣从不打折、过期活动仍挂徽章。
+- **过期 tags 漏回**：桥输出模型时重建促销 `badge:` tags，过期活动不会从上游
+  `tags` 里再次露出来；`dsh` 模型名也会按当前有效倍率显示 `免费` / `×0.395`。
+
 ## [1.11.0] - 2026-10-25
 
 ### Added

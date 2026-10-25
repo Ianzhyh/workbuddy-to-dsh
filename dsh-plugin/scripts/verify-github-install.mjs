@@ -126,6 +126,7 @@ try {
   // ── 4. 宿主入口与运行时文件（安装后的相对路径必须都对）
   const required = [
     'bridge/workbuddy-bridge.mjs',
+    'bridge/promotions.mjs',
     'dashboard/server.mjs',
     'dashboard/public/index.html',
     'dashboard/public/style.css',
@@ -136,6 +137,7 @@ try {
     'dsh-plugin/lib/client.js',
     'dsh-plugin/lib/packageNames.mjs',
     'dsh-plugin/vendor/bridge/workbuddy-bridge.mjs',
+    'dsh-plugin/vendor/bridge/promotions.mjs',
   ];
   const missing = required.filter((rel) => !existsSync(join(installedDir, rel)));
   check(missing.length === 0, '根包包含全部运行时文件', missing.length ? `缺少 ${missing.join(', ')}` : `${required.length} 项齐全`);
@@ -167,6 +169,7 @@ try {
     'lib/packageNames.mjs',
     'scripts/preflight.mjs',
     'vendor/bridge/workbuddy-bridge.mjs',
+    'vendor/bridge/promotions.mjs',
     'vendor/dashboard/server.mjs',
     'vendor/config.mjs',
   ];

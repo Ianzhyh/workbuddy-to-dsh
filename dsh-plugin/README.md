@@ -107,6 +107,7 @@ dsh 设置页与控制台网页是**两个前端、一个后端**，所以天然
 |---|---|
 | **原生模型路由** | `ctx.llm.registerAdapter(['workbuddy'], …)` —— 模型直接出现在 dsh 模型选择器里，**不写 settings.yaml**，也不依赖 `llm-pi-ai` |
 | **动态模型目录** | 模型列表每次向桥要（带 1 分钟缓存），上游加/减模型不必改配置、不必重启 |
+| **活动倍率** | 解析上游 `schedule`：夜间免费/折扣到点自动切换倍率，过期活动自动隐藏；dsh 选择器、插件面板、控制台同源 |
 | **桥的生命周期** | 启动时复用已在跑的桥，没跑就按配置拉起；桥仍是**独立进程**，控制台、`start-bridge.cmd`、其它 OpenAI 客户端照旧可用 |
 | **控制台的生命周期** | 同样复用/拉起 `dashboard/server.mjs`，让它常驻；dsh 里一个链接就进完整控制台（不会自动弹浏览器窗口） |
 | **6 个工具** | `workbuddy_status` / `workbuddy_models` / `workbuddy_usage` / `workbuddy_checkin` / `workbuddy_web_search`（原生搜索兜底）/ `workbuddy_bridge`（后者 `action=console` 可确保控制台在跑） |
@@ -546,7 +547,15 @@ npm run panel:check                    # 上面两个一起跑
 
 ## 修复记录（都补了回归测试）
 
-### 1.11.0（本轮）
+### 1.12.0（本轮）
+
+| 症状 | 根因 | 修法 / 回归 |
+|---|---|---|
+| 夜间免费模型白天也显示免费；夜间折扣到点仍显示原价；过期活动还挂着「限免」 | 旧代码只看 `discount.factor`，不解析上游 `schedule`；`free` 是静态标记 | 新增 `bridge/promotions.mjs`：按 daily/timezone/validFrom/validUntil 计算生效倍率；hy4 夜间 0、08:00 回 0.29，glm 夜间 0.395；过期活动隐藏。回归：`promotions.test.mjs`、`bridge-promotions.test.mjs`、`models-promotion.test.mjs` |
+| 上游 `tags` 里的旧 `badge:` 会把过期活动带回来 | 直接透传 tags | 输出模型时重建促销 tags，只保留当前有效的徽章。回归：`bridge-promotions.test.mjs` |
+| dsh 选择器/面板/控制台/工具看不到“活动是否进行中” | 只有 `free`/`badge` 两个静态字段 | 新增 `promotion_active/text/until/factor`；模型名按有效倍率显示，界面标「进行中/未生效」，详情显示活动说明与截止时间。回归：`models-promotion.test.mjs`、`panel-render.mjs` |
+
+### 1.11.0
 
 | 症状 | 根因 | 修法 / 回归 |
 |---|---|---|

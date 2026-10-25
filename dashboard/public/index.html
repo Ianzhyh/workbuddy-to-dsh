@@ -1924,6 +1924,13 @@ const I18N_TERMS_EN = {
   '夜间免费': 'Free at night',
   '夜间折扣': 'Night discount',
   '错峰使用': 'Off-peak use',
+  // 活动时间窗状态（模型表/详情）
+  '促销进行中': 'Promotion active',
+  '促销未生效': 'Promotion scheduled',
+  '（进行中）': ' (active)',
+  '（未生效）': ' (not active)',
+  '促销说明': 'Promotion details',
+  '促销截止': 'Promotion ends',
 };
 
 /** 把已知专有名词按**子串**替换掉（整串查表 / 规则之后的最后一道）。 */
@@ -5998,12 +6005,22 @@ function renderModelTable(models, registered) {
       const r = probePending.has(m.id) ? null : probeResults[m.id];
       const probeOk = r ? (r.ok ? '1' : '0') : '';
       const probeMs = r && Number.isFinite(Number(r.ms)) ? String(Number(r.ms)) : '';
-      // 免费状态与促销标签合并成一个标签：hy3 这类行不该同时出现「免费 限时免费」
-      const promoLabel = m.badge || (m.free ? '免费' : '');
-      const rateCell = m.free
-        ? '<span class="tag promo">' + escapeAttr(promoLabel) + '</span>'
-        : (typeof m.credits === 'number' ? m.credits : '—')
-          + (m.badge ? ' <span class="tag promo">' + escapeAttr(m.badge) + '</span>' : '');
+      /*
+       * 倍率列显示**当前生效值**（桥按 schedule 算）：夜间免费时是「免费」，
+       * 夜间折扣时是折后倍率，白天/过期则是原价或不显示活动。
+       * 活动名单独放一枚小标签；「未生效」也保留（方便看今晚几点开始），
+       * 已过期且 activeOnly 的活动桥不会下发 badge，自然会消失。
+       */
+      const promoTitle = m.badge
+        ? ((m.promotion_active ? '促销进行中' : '促销未生效')
+          + (m.promotion_text ? '：' + m.promotion_text : ''))
+        : '';
+      const promoTag = m.badge
+        ? ' <span class="tag promo" title="' + escapeAttr(promoTitle) + '">'
+          + escapeAttr(m.badge) + '</span>'
+        : '';
+      const rateText = m.free ? '免费' : (typeof m.credits === 'number' ? m.credits : '—');
+      const rateCell = rateText + promoTag;
       return '<tr data-model-id="' + escapeAttr(m.id) + '" data-model-name="' + escapeAttr(m.name || '')
         + '" data-free="' + (m.free ? '1' : '') + '" data-credits="'
         + (typeof m.credits === 'number' ? m.credits : '') + '" data-probe-ok="' + probeOk
@@ -6241,7 +6258,9 @@ function modelDetailHtml(m) {
   if (Number(m.context_window)) add('上下文（精确）', fmtNum(m.context_window), { mono: true });
   if (Number(m.max_output_tokens)) add('最大输出（精确）', fmtNum(m.max_output_tokens), { mono: true });
   if (typeof m.credits === 'number') add('倍率', m.credits === 0 ? '免费' : '×' + m.credits, { mono: true });
-  if (m.badge) add('促销', m.badge);
+  if (m.badge) add('促销', m.badge + (m.promotion_active ? '（进行中）' : '（未生效）'));
+  if (m.promotion_text) add('促销说明', m.promotion_text);
+  if (m.promotion_until) add('促销截止', m.promotion_until);
   const cost = costFor(m.id);
   if (cost.text !== '—') add('实测成本', cost.text, { mono: true });
   if (p) {

@@ -82,6 +82,10 @@ export function describeModel(model, contextOverride = 0) {
   // 积分倍率放到模型名后面（见 modelCostLabel），描述里不再重复一遍
   if (model?.supports_images === true || model?.images === true) bits.push('图片');
   if (model?.supports_reasoning === true || model?.supportsReasoning === true || model?.reasoning === true) bits.push('推理');
+  // 只标“正在生效”的折扣：白天的“夜间免费”只是活动名，不能让选择器
+  // 误以为现在免费。价格本身已经由 credits/free 字段表达。
+  const promoActive = model?.promotion_active === true || model?.promotionActive === true;
+  if (promoActive && model?.badge) bits.push(`促销 ${String(model.badge)}`);
   return bits.join(' · ');
 }
 
@@ -257,8 +261,14 @@ export function toDirectory(catalog, options = {}) {
         supplemented: m.supplemented === true,
         // 只推理模型（上游 only_reasoning）：面板据此提示"这是纯思考模型"。
         onlyReasoning: m.only_reasoning === true,
+        // 桥已经按当前促销时段算好有效倍率/free；面板直接显示，不再自己算时间。
         credits: typeof m.credits === 'number' ? m.credits : null,
         free: m.free === true,
+        promotionActive: m.promotion_active === true,
+        promotionText: typeof m.promotion_text === 'string' ? m.promotion_text : '',
+        promotionTextEn: typeof m.promotion_text_en === 'string' ? m.promotion_text_en : '',
+        promotionUntil: typeof m.promotion_until === 'string' ? m.promotion_until : '',
+        promotionFactor: typeof m.promotion_factor === 'number' ? m.promotion_factor : null,
         // 上游的厂商标识是单字母代码（f/j/v/e…），不是名字；原样保留但由界面
         // 标注为"标识"，免得被当成厂商名
         vendor: m.vendor ? String(m.vendor) : null,

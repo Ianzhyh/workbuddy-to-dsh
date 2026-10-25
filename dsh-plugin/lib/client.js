@@ -1316,6 +1316,11 @@ body.dark .wb-root,
       '上游未给档位表，按本地实测兜底；这也是 dsh 选择器里的候选':
         'The upstream reported no level table; locally measured levels are used as a fallback. These are the candidates in the dsh picker.',
       '免费': 'Free',
+      '促销': 'Promotion',
+      '促销截止': 'Promotion ends',
+      '促销进行中': 'Promotion active',
+      '（进行中）': ' (active)',
+      '（未生效）': ' (not active)',
       /*
        * 上游促销徽章的**已知**标签（藏在 `tags` 里的 `badge:限时免费:#FF0000`）。
        * 与控制台词条表里那两条保持一致 —— 未知徽章不翻（那是数据，
@@ -1431,6 +1436,13 @@ body.dark .wb-root,
       '夜间免费': 'Free at night',
       '夜间折扣': 'Night discount',
       '错峰使用': 'Off-peak use',
+      // 活动状态（详情/徽章 tooltip）
+      '促销进行中': 'Promotion active',
+      '促销未生效': 'Promotion scheduled',
+      '促销说明': 'Promotion details',
+      '促销截止': 'Promotion ends',
+      '（进行中）': ' (active)',
+      '（未生效）': ' (not active)',
     };
 
     /** 把已知专有名词按**子串**替换掉（整串查表 / 规则之后的最后一道）。 */
@@ -5192,8 +5204,14 @@ body.dark .wb-root,
                   badgesOf(m).map((b, bi) => h('span', {
                     key: bi,
                     className: 'wb-badge',
+                    title: b.label === m.badge && (m.promotionText || m.promotionActive)
+                      ? [m.promotionText, m.promotionActive ? t('（进行中）') : t('（未生效）')].filter(Boolean).join('；')
+                      : undefined,
                     style: b.color ? { background: b.color + '22', color: b.color, borderColor: b.color + '55' } : undefined,
-                  }, b.label))),
+                  }, b.label)),
+                  m.promotionActive
+                    ? h('span', { className: 'wb-badge', title: m.promotionText || '促销进行中' }, t('进行中'))
+                    : null),
                 h('td', { className: 'num' },
                   (effectiveContextForTable(m) ? fmtContextLength(effectiveContextForTable(m)) : '—') + ' / '
                     + (effectiveOutputForTable(m) ? fmtContextLength(effectiveOutputForTable(m)) : '—'),
@@ -5516,6 +5534,16 @@ body.dark .wb-root,
                               : undefined),
                         }),
                         h(DetailItem, { label: '计费倍率', value: m.free ? '免费' : (m.credits === null || m.credits === undefined ? '未知' : String(m.credits)) }),
+                        m.badge
+                          ? h(DetailItem, {
+                            label: '促销',
+                            value: m.badge + (m.promotionActive ? t('（进行中）') : t('（未生效）')),
+                            hint: m.promotionText || undefined,
+                          })
+                          : null,
+                        m.promotionUntil
+                          ? h(DetailItem, { label: '促销截止', value: m.promotionUntil })
+                          : null,
                         h(DetailItem, { label: '多模态', value: m.images ? '支持图片' : '纯文本' }),
                         /*
                          * 推理能力一行要能分辨**三种**情形（这块最容易含糊）：

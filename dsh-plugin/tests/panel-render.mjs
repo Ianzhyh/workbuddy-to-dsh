@@ -1328,6 +1328,9 @@ try {
     if (!badgeState.labels.includes('实测补全')) {
       problems.push('补全模型没有标出「实测补全」来源（用户会误以为国际版档位没取到）');
     }
+    if (!badgeState.labels.includes('进行中')) {
+      problems.push('生效中的促销没有显示「进行中」徽章');
+    }
     else console.log(`模型徽章：${badgeState.count} 个（例：${badgeState.sample}）`);
     // 多模态标记必须是看得懂的文字，不许再用 🖼 这类字符
     const imageMark = await page.cdp.evaluate(`(() => {

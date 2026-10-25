@@ -36,6 +36,7 @@ import { createCipheriv, createDecipheriv, createHash, randomBytes, randomUUID, 
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { spawn } from 'node:child_process';
 import { waitDrain } from './wait-drain.mjs';
+import { applyPromotion, groupPromotions } from './promotions.mjs';
 
 /**
  * 本桥源码的构建指纹。
@@ -7054,7 +7055,11 @@ async function fetchCatalog(generation = catalogGeneration) {
     let auth = await resolveAuth();
     const shape = { paths: catalogPathsFor(), sources: {}, model: [] };
     const merged = new Map();
-    const promotions = new Map(); // modelId → 徽章文案（如「Free now」）
+    /**
+     * modelId → 促销规则数组。一个模型可以有多条规则（例如 glm-5.2 的
+     * 夜间五折 + 白天原价两段），所以不能像旧实现那样只留最后一条。
+     */
+    const promotions = new Map();
     // `/v3/config` 是官方模型选择器的真源；单独留下 models/agents 用来标 official。
     let productModels = [];
     let productAgents = [];
@@ -7168,24 +7173,14 @@ async function fetchCatalog(generation = catalogGeneration) {
             enabled: p.enabled,
             kind: p.kind,
             models: p.modelIds,
+            // 诊断用：活动时间窗/文案。真正是否生效由 promotions.mjs 现算，
+            // 这样 23:00/08:00 切换时不必等目录重新抓取。
+            schedule: p.schedule,
+            hover: p.hover,
           }));
-          for (const p of promos) {
-            if (!p || typeof p !== 'object' || p.enabled === false) continue;
-            // badge 可能是字符串，也可能是 {text,color} 这类对象
-            let label = p.badge;
-            if (label && typeof label === 'object') {
-              label = label.text || label.label || label.name || label.value || '';
-            }
-            if (!label && typeof p.discount === 'number' && p.discount > 0) {
-              label = `-${p.discount}%`;
-            }
-            if (typeof label !== 'string' || !label) continue;
-            // discount.factor === 0（或 discountedCredits 为 "0x"）表示该模型当前免费
-            const free = p.discount?.factor === 0
-              || /^0x$/i.test(String(p.discount?.discountedCredits || ''));
-            for (const mid of (Array.isArray(p.modelIds) ? p.modelIds : [])) {
-              if (typeof mid === 'string') promotions.set(mid, { label, free });
-            }
+          for (const [modelId, rules] of groupPromotions(promos)) {
+            const existing = promotions.get(modelId) || [];
+            promotions.set(modelId, [...existing, ...rules]);
           }
         }
       } catch (e) {
@@ -7239,8 +7234,9 @@ async function fetchCatalog(generation = catalogGeneration) {
       }
       // 倍率**不猜**：本区域目录没给这个模型，就说明不知道该区域的定价。
       // 早前直接套用 FEATURED 的值（那是国内实测），会把国际版的免费模型
-      // 标成 0.11——除非促销明确说它免费（factor 0），否则一律留空。
-      const promo = promotions.get(f.id);
+      // 标成 0.11——除非促销明确说它免费，否则一律留空。促销规则照存，
+      // 由输出层按当前时间算（夜间活动不会整天显示免费）。
+      const promotionRules = promotions.get(f.id) || [];
       merged.set(f.id, {
         id: f.id,
         name: f.name,
@@ -7248,7 +7244,7 @@ async function fetchCatalog(generation = catalogGeneration) {
         maxOutputTokens: f.maxOutput,
         ...(f.images ? { supportsImages: true } : {}),
         ...(f.supportsReasoning ? { supportsReasoning: true } : {}),
-        ...(promo?.free ? { credits: 0 } : {}),
+        ...(promotionRules.length ? { promotionRules } : {}),
         _supplemented: true,
       });
       shape.supplemented = [...(shape.supplemented || []), f.id];
@@ -7314,7 +7310,12 @@ async function fetchCatalog(generation = catalogGeneration) {
             ? Number(m.temperature)
             : null,
           images: !!m.supportsImages,
+          // 基础倍率；真正展示给客户端的是按当前促销时段算出的有效倍率，
+          // 见 /v1/models 的输出层。
           credits: m.credits,
+          ...(Array.isArray(promotions.get(m.id)) && promotions.get(m.id).length
+            ? { promotionRules: promotions.get(m.id) }
+            : {}),
           // 上游的推理能力标记：supportsReasoning=true 表示该模型接受推理强度控制
           //（选择器要据此显示"推理等级"下拉）；onlyReasoning 表示该模型只能以
           // 推理模式使用。不上报数据里的这两个字段，插件就无法给模型声明
@@ -7345,8 +7346,6 @@ async function fetchCatalog(generation = catalogGeneration) {
           descriptionZh: m.descriptionZh,
           descriptionEn: m.descriptionEn,
           isDefault: m.isDefault,
-          badge: promotions.get(m.id)?.label,
-          free: promotions.get(m.id)?.free === true,
         })),
         // 诊断用：各端点的命中数量与模型字段名
         shape,
@@ -8367,8 +8366,24 @@ async function handleRequest(req, res) {
         }));
       }
 
+      // 促销是否生效按“现在”算，而不是目录抓取那一刻：夜间免费/折扣在
+      // 23:00、08:00 切换时，只要客户端重新拉目录就能看到新价格。
+      const promoNow = new Date();
       const list = models.map((m) => {
-        const credits = creditsOf(m);
+        const promo = applyPromotion({
+          baseCredits: creditsOf(m),
+          promotions: m.promotionRules,
+          now: promoNow,
+        });
+        const credits = promo.credits;
+        // 上游 tags 里混着旧促销徽章；这里只保留有效的那一个，过期活动
+        // （step-5-preview / space-bunny）不会继续以 badge: 形式露出来。
+        const tags = Array.isArray(m.tags)
+          ? m.tags.filter((tag) => !/^badge:/.test(String(tag)))
+          : [];
+        if (promo.badge) {
+          tags.push(`badge:${promo.badge}${promo.badgeColor ? `:${promo.badgeColor}` : ''}`);
+        }
         /*
          * 档位：只在目录说"支持推理"时才给。
          *   1. 上游给了 `reasoning.supportedEfforts`（官方 GUI 的档位表）→ 原样用；
@@ -8421,11 +8436,16 @@ async function handleRequest(req, res) {
           ...(m.official === true ? { official: true } : m.official === false ? { official: false } : {}),
           ...(m.supplemented ? { supplemented: true } : {}),
           ...(m.vendor ? { vendor: m.vendor } : {}),
-          ...(Array.isArray(m.tags) && m.tags.length ? { tags: m.tags } : {}),
+          ...(tags.length ? { tags } : {}),
           ...(m.descriptionZh ? { description_zh: m.descriptionZh } : {}),
           ...(m.descriptionEn ? { description_en: m.descriptionEn } : {}),
-          ...(m.badge ? { badge: m.badge } : {}),
-          ...(m.free ? { free: true } : {}),
+          ...(promo.badge ? { badge: promo.badge } : {}),
+          ...(promo.free ? { free: true } : {}),
+          ...(promo.promotionActive ? { promotion_active: true } : {}),
+          ...(promo.promotionText ? { promotion_text: promo.promotionText } : {}),
+          ...(promo.promotionTextEn ? { promotion_text_en: promo.promotionTextEn } : {}),
+          ...(promo.promotionUntil ? { promotion_until: promo.promotionUntil } : {}),
+          ...(Number.isFinite(promo.promotionFactor) ? { promotion_factor: promo.promotionFactor } : {}),
         };
       });
       // staleMs 只在「刷新失败、退回过期缓存」时出现；成功时不带这个字段
