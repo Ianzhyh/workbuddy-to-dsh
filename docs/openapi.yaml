@@ -19,7 +19,7 @@ components:
     bearerAuth:
       type: http
       scheme: bearer
-      description: WORKBUDDY_LOCAL_TOKEN（管理面 / 默认钥匙），或 WORKBUDDY_CLIENT_KEYS 中登记的客户端 key（仅聊天 / 模型 / 用量读取；管理端点只接受 local）
+      description: WORKBUDDY_LOCAL_TOKEN（管理面 / 默认钥匙），或 WORKBUDDY_CLIENT_KEYS 中登记的客户端 key（仅聊天 / 模型 / 用量读取；管理端点与视频接口只接受 local）
     apiKeyHeader:
       type: apiKey
       in: header
@@ -65,6 +65,51 @@ components:
         temperature: { type: number }
         top_p: { type: number }
         stop_sequences: { type: array, items: { type: string } }
+    VideoRequest:
+      type: object
+      description: |
+        Miora 视频生成请求。mode 可显式指定，也可按是否带 first_frame / references 自动推断。
+        first_frame 支持绝对本地路径、miora fileKey、公网 https URL、base64 data URI；
+        input_reference 是 first_frame 的 OpenAI 风格别名。
+      properties:
+        mode: { type: string, enum: [text, frame, reference] }
+        prompt: { type: string, maxLength: 8000 }
+        duration: { type: number, exclusiveMinimum: 0 }
+        resolution: { type: string }
+        aspect_ratio: { type: string, pattern: '^[0-9]{1,2}:[0-9]{1,2}$' }
+        first_frame: { type: string }
+        input_reference: { type: string }
+        last_frame: { type: string }
+        references:
+          type: array
+          items: { type: string }
+    Video:
+      type: object
+      properties:
+        id: { type: string }
+        object: { type: string, const: video }
+        status: { type: string, enum: [queued, in_progress, completed, failed, cancelled] }
+        upstream_status: { type: string }
+        created_at: { type: [integer, 'null'], description: 提交时间（秒）；查询响应为 null }
+        model: { type: [string, 'null'] }
+        provider: { type: [string, 'null'] }
+        mode: { type: [string, 'null'] }
+        seconds: { type: [number, 'null'] }
+        resolution: { type: [string, 'null'] }
+        aspect_ratio: { type: [string, 'null'] }
+        result_files:
+          type: array
+          description: 上游原始产物字段（通常含 signedUrl / mimeType / fileKey）
+          items: { type: object, additionalProperties: true }
+        output:
+          type: [object, 'null']
+          properties:
+            url: { type: string }
+            urls: { type: array, items: { type: string } }
+        error:
+          type: [object, 'null']
+          properties:
+            message: { type: string }
 paths:
   /v1/chat/completions:
     post:
@@ -125,6 +170,61 @@ paths:
         '429': { description: WorkBuddy 搜索限流（code 15001），带 Retry-After }
         '502': { description: 上游/登录态错误 }
         '504': { description: 搜索超时 }
+  /v1/videos:
+    post:
+      summary: 提交 Miora 视频生成（文生视频 / 首尾帧 / 参考图）
+      description: |
+        异步任务：成功返回 202，之后用 GET /v1/videos/{id} 查询。
+        提交成功即按 WorkBuddy 账号积分计费；401 只会换临时 key 重试一次，
+        429/5xx 不自动重试，避免重复计费。只接受本地管理令牌（local token）。详见 docs/VIDEO-GENERATION.md。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/VideoRequest' }
+      responses:
+        '202':
+          description: 已提交
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Video' }
+        '400': { description: 参数错误（不会提交上游） }
+        '401': { description: 登录态不可用，或临时 key 申请失败 }
+        '403': { description: 只接受本地管理令牌；client key 返回 VIDEO_LOCAL_TOKEN_REQUIRED }
+        '429': { description: Miora 限流，带 Retry-After }
+        '502': { description: Miora 不可用 / 上游拒绝 }
+  /v1/videos/{video_id}:
+    get:
+      summary: 查询视频任务状态
+      parameters:
+        - name: video_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: 当前任务状态（pending 归一到 queued，processing 归一到 in_progress）
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Video' }
+        '400': { description: video_id 非法 }
+        '401': { description: 登录态不可用 }
+        '403': { description: client key 不可用（仅 local token） }
+        '404': { description: 上游没有该任务 }
+        '502': { description: Miora 不可用 }
+  /v1/videos/{video_id}/content:
+    get:
+      summary: 跳转到已完成视频的签名 URL
+      parameters:
+        - name: video_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '302': { description: Location 指向上游 https 签名 URL（有时效） }
+        '403': { description: client key 不可用（仅 local token） }
+        '409': { description: 任务未完成或没有产物 }
+        '404': { description: 上游没有该任务 }
   /v1/messages:
     post:
       summary: Anthropic Messages 兼容（Claude Code 直连）

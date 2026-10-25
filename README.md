@@ -85,6 +85,7 @@ dsh 的模型选择器里，日常需要的接入、管理、监控、运维能�
 | 对话测试 | 多轮流式对话，按轮次显示 token / 扣分 / 耗时，附桥日志 |
 | 每日签到 | 自动签到（不开控制台也会签）+ 手动领取 |
 | 同时服务其它客户端 | 桥讲 OpenAI / Anthropic / Responses 三套协议 —— Claude Code、Codex、opencode、Cherry Studio 等直接接入 |
+| 视频生成（本地 API） | 文生视频 / 首尾帧 / 参考图三种模式，异步提交 + 查询 + 下载跳转；走 WorkBuddy 账号积分，详见 [`docs/VIDEO-GENERATION.md`](docs/VIDEO-GENERATION.md) |
 | 中英双语 | 控制台与 dsh 设置页（9 个标签页）全部双语，右上角 `EN` / `中` 切换 |
 
 **在 dsh 里直接装**：设置 → 插件 → 添加插件，填
@@ -587,6 +588,13 @@ Web search provider 把接口地址指到桥后，搜索走 WorkBuddy 账号、*
 上游比 OpenAI 规范更严的地方（`developer` 角色、`tool_choice` 只认字符串、首条必须
 是 `system`）都在同一次归一化里处理；缺的能力（embedding）明确返回 501 而不是伪造。
 详见 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)。
+
+视频生成另走 WorkBuddy 的 Miora 产品网关：桥暴露 `POST /v1/videos`、
+`GET /v1/videos/{id}` 与 `GET /v1/videos/{id}/content`，支持**文生视频、首尾帧、
+参考图**三种模式。提交是异步的（`202` + 轮询查询），提交成功即按账号积分计费；
+临时 key 只驻内存，401 才换 key 重试一次，429/5xx 不自动重提以免重复扣费。
+视频接口只接受本地管理令牌（普通 client key 仅聊天）；配置、参数、计费边界与实测
+结论见 [`docs/VIDEO-GENERATION.md`](docs/VIDEO-GENERATION.md)。
 
 ---
 

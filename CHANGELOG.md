@@ -17,6 +17,20 @@
 
 只支持最近 2 个 minor 版本。
 
+## [Unreleased]
+
+### Added
+
+- **文生视频 / 图生视频接口**：桥新增 `POST /v1/videos`、`GET /v1/videos/{id}`、
+  `GET /v1/videos/{id}/content`，走 WorkBuddy 桌面端同款 Miora 网关：
+  - 支持文生视频、首帧（可选尾帧）生视频、参考图生视频三种模式；
+  - 图片输入支持绝对本地路径、miora fileKey、公网 https URL、base64 data URI；
+  - 异步提交（202）+ 状态查询；临时 key 只驻内存，401 换 key 重试一次，
+    429/5xx 不自动重试以避免重复计费；
+  - 配额与安全边界见 [`docs/VIDEO-GENERATION.md`](docs/VIDEO-GENERATION.md)。
+- OpenAPI 契约新增 `VideoRequest` / `Video` 与三条视频路径；`.env.example`
+  新增可选的 `WORKBUDDY_MIORA_BASE`。
+
 ## [1.12.0] - 2026-10-25
 
 ### Added

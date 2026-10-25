@@ -37,6 +37,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { spawn } from 'node:child_process';
 import { waitDrain } from './wait-drain.mjs';
 import { applyPromotion, groupPromotions } from './promotions.mjs';
+import { submitVideo, queryVideo, MioraVideoError } from './miora-video.mjs';
 
 /**
  * 本桥源码的构建指纹。
@@ -134,6 +135,7 @@ const CHAT_PATH = '/v2/chat/completions';
  */
 const SEARCH_PATH = '/agenttool/v1/search';
 const SEARCH_BASE_OVERRIDE = String(process.env.WORKBUDDY_SEARCH_BASE || '').replace(/\/+$/, '');
+const VIDEO_BASE_OVERRIDE = String(process.env.WORKBUDDY_MIORA_BASE || '').trim().replace(/\/+$/, '');
 const SEARCH_VERSION_OVERRIDE = String(process.env.WORKBUDDY_SEARCH_VERSION || '').trim();
 const SEARCH_TIMEOUT_MS = numEnv('WORKBUDDY_SEARCH_TIMEOUT_MS', 20_000, { min: 1000 });
 const SEARCH_DEFAULT_MAX_RESULTS = numEnv('WORKBUDDY_SEARCH_MAX_RESULTS', 8, { min: 1, max: 10, integer: true });
@@ -3181,6 +3183,106 @@ function searchVersionFor(auth) {
     return pluginClientVersion(auth.region === 'global' ? 'global' : 'cn');
   }
   return APP_VERSION;
+}
+
+// ── Miora 视频生成（文生视频 / 首尾帧 / 参考图）────────────────────────
+const VIDEO_TASK_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/;
+
+function respondVideoError(res, err) {
+  const status = err instanceof MioraVideoError ? err.status : (Number(err?.status) || 502);
+  const headers = err?.retryAfter ? { 'Retry-After': String(err.retryAfter) } : {};
+  if (status >= 500) log('video failed', status, err?.code || '', shortError(err?.message || err, 200));
+  return json(res, status, {
+    error: {
+      message: `workbuddy-bridge: ${shortError(err?.message || err, 300)}`,
+      type: status === 429 ? 'rate_limit_error' : 'video_generation_error',
+      code: err?.code || 'VIDEO_ERROR',
+    },
+  }, headers);
+}
+
+async function videoAuth() {
+  try {
+    return { auth: await resolveAuth() };
+  } catch (e) {
+    return {
+      error: {
+        status: 401,
+        body: {
+          error: {
+            message: `workbuddy-bridge: ${shortError(e?.message || e, 300)}`,
+            type: 'authentication_error',
+            code: 'VIDEO_NO_CREDENTIAL',
+          },
+        },
+      },
+    };
+  }
+}
+
+async function handleVideoSubmit(req, res) {
+  let raw;
+  try {
+    raw = await readBody(req);
+  } catch (e) {
+    if (e.code === 'BODY_TOO_LARGE') {
+      return rejectTooLarge(req, res, 'openai', 'video request body too large');
+    }
+    throw e;
+  }
+  let body;
+  try { body = JSON.parse(raw); }
+  catch {
+    return json(res, 400, {
+      error: { message: 'workbuddy-bridge: invalid JSON body', type: 'invalid_request', code: 'VIDEO_INVALID_INPUT' },
+    });
+  }
+
+  const resolved = await videoAuth();
+  if (resolved.error) return json(res, resolved.error.status, resolved.error.body);
+  try {
+    const video = await submitVideo(resolved.auth, body, { baseUrl: VIDEO_BASE_OVERRIDE || undefined });
+    log(`video submit id=${video.id} mode=${video.mode} status=${video.status}`);
+    return json(res, 202, video, { 'Cache-Control': 'no-store' });
+  } catch (e) {
+    return respondVideoError(res, e);
+  }
+}
+
+async function handleVideoLookup(req, res, pathname) {
+  const rest = pathname.slice('/v1/videos/'.length);
+  const wantsContent = rest.endsWith('/content');
+  const rawId = wantsContent ? rest.slice(0, -'/content'.length) : rest;
+  let id;
+  try { id = decodeURIComponent(rawId); }
+  catch { return json(res, 400, { error: { message: 'workbuddy-bridge: malformed video id', type: 'invalid_request', code: 'VIDEO_INVALID_INPUT' } }); }
+  if (!VIDEO_TASK_ID_RE.test(id)) {
+    return json(res, 400, { error: { message: 'workbuddy-bridge: malformed video id', type: 'invalid_request', code: 'VIDEO_INVALID_INPUT' } });
+  }
+
+  const resolved = await videoAuth();
+  if (resolved.error) return json(res, resolved.error.status, resolved.error.body);
+  try {
+    const video = await queryVideo(resolved.auth, id, { baseUrl: VIDEO_BASE_OVERRIDE || undefined });
+    if (!wantsContent) return json(res, 200, video, { 'Cache-Control': 'no-store' });
+    if (video.status !== 'completed' || !video.output?.url) {
+      return json(res, 409, {
+        error: {
+          message: `workbuddy-bridge: video ${id} is ${video.status}; no downloadable output yet`,
+          type: 'video_not_ready',
+          code: 'VIDEO_NOT_READY',
+        },
+      });
+    }
+    res.writeHead(302, {
+      Location: video.output.url,
+      'Cache-Control': 'no-store',
+      ...SECURITY_HEADERS,
+    });
+    return res.end();
+  } catch (e) {
+    return respondVideoError(res, e);
+  }
 }
 
 /**
@@ -8096,6 +8198,22 @@ async function handleRequest(req, res) {
     }
 
     /*
+     * 视频接口能读本机绝对路径图片、且提交会消耗账号积分 —— 和聊天不是同一类
+     * 能力。client key 按设计是“仅聊天”，不能借视频接口越权读文件或花积分。
+     */
+    const videoRequest = url.pathname === '/v1/videos' || url.pathname.startsWith('/v1/videos/');
+    if (videoRequest && requestScope.getStore()?.client !== 'local') {
+      return json(res, 403, {
+        error: {
+          message: 'workbuddy-bridge: video generation requires the local token '
+            + '(client keys are chat-only)',
+          type: 'video_forbidden',
+          code: 'VIDEO_LOCAL_TOKEN_REQUIRED',
+        },
+      });
+    }
+
+    /*
      * 极轻的身份端点：只解析凭据并返回「现在是谁」，不抓目录、不打上游。
      * 面板每 2 秒轮询它，身份版本一变就立刻重拉账号/积分/模型目录。
      */
@@ -8507,6 +8625,14 @@ async function handleRequest(req, res) {
       } catch (e) {
         return json(res, 502, { ok: false, error: e.message });
       }
+    }
+
+    // ── Miora 视频生成（计费能力，提交是异步的）─────────────────────────
+    if (url.pathname === '/v1/videos' && req.method === 'POST') {
+      return handleVideoSubmit(req, res);
+    }
+    if (url.pathname.startsWith('/v1/videos/') && req.method === 'GET') {
+      return handleVideoLookup(req, res, url.pathname);
     }
 
     // ── WorkBuddy 原生网页搜索（不经过 DeepSeek）────────────────────────
@@ -9589,7 +9715,7 @@ async function handleRequest(req, res) {
     if (url.pathname === '/' ) {
       return json(res, 200, {
         service: 'workbuddy-bridge',
-        usage: 'POST /v1/chat/completions · POST /v1/messages (Anthropic) · POST /v1/responses (Codex) · GET /v1/models · GET /v1/usage · GET /v1/requests · GET /v1/quota · GET /v1/checkin · POST /v1/auth/device (device-code login) · GET /v1/auth/credentials · GET /v1/auth/source · GET /health',
+        usage: 'POST /v1/chat/completions · POST /v1/messages (Anthropic) · POST /v1/responses (Codex) · POST /v1/videos · GET /v1/videos/{id} · GET /v1/models · GET /v1/usage · GET /v1/requests · GET /v1/quota · GET /v1/checkin · POST /v1/auth/device (device-code login) · GET /v1/auth/credentials · GET /v1/auth/source · GET /health',
         featured: FEATURED.map((m) => m.id),
       });
     }
@@ -9627,6 +9753,7 @@ if (process.argv.includes('--check')) {
   // 精选列表按区域过滤 —— 日志里列一个当前区域**不提供**的模型，会让人以为
   // "桥明明认识它、为什么 /v1/models 里没有"（诊断日志的可信度就靠这点）
   lines.push(`models          ${FEATURED.filter((m) => featuredAllowedIn(m, checkRegion)).map((m) => m.id).join(', ')}`);
+  lines.push(`video           POST /v1/videos (Miora ${VIDEO_BASE_OVERRIDE || 'public.miora.qq.com'})`);
   console.log(lines.join('\n'));
   process.exit(authOk || API_KEY ? 0 : 1);
 }
@@ -9651,6 +9778,7 @@ server.listen(PORT, HOST, async () => {
   console.log(`auth       : ${API_KEY ? 'API key (CODEBUDDY_API_KEY)' : `desktop session ${who}`}`);
   // 同上：精选列表按区域过滤（国际版别在日志里列 v4-pro —— 那个区域不提供它）
   console.log(`models     : ${FEATURED.filter((m) => featuredAllowedIn(m, region)).map((m) => m.id).join(', ')}  (all models: /v1/models?all=1)`);
+  console.log(`video      : POST /v1/videos (Miora ${VIDEO_BASE_OVERRIDE || 'public.miora.qq.com'})`);
   /*
    * 只在**开了**的时候说一句：默认行为（丢弃思维链）不需要每次都提醒，
    * 但既然有人开了这个开关，就要让他一眼看到"确实生效了"——
