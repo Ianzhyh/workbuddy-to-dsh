@@ -3221,6 +3221,7 @@ async function videoAuth() {
 }
 
 async function handleVideoSubmit(req, res) {
+  const startedAt = Date.now();
   let raw;
   try {
     raw = await readBody(req);
@@ -3242,9 +3243,17 @@ async function handleVideoSubmit(req, res) {
   if (resolved.error) return json(res, resolved.error.status, resolved.error.body);
   try {
     const video = await submitVideo(resolved.auth, body, { baseUrl: VIDEO_BASE_OVERRIDE || undefined });
+    recordRequest({
+      model: 'video', kind: 'video', stream: false, ms: Date.now() - startedAt,
+      ok: true, status: 202, code: null,
+    });
     log(`video submit id=${video.id} mode=${video.mode} status=${video.status}`);
     return json(res, 202, video, { 'Cache-Control': 'no-store' });
   } catch (e) {
+    recordRequest({
+      model: 'video', kind: 'video', stream: false, ms: Date.now() - startedAt,
+      ok: false, status: e?.status || 502, code: e?.code || null, error: e?.message || String(e),
+    });
     return respondVideoError(res, e);
   }
 }
@@ -6712,7 +6721,7 @@ function recentRequests(limit = 50) {
   return rows.map((r) => ({
     t: r.t,
     model: r.model || '',
-    ...(r.kind === 'search' ? { kind: 'search' } : {}),
+    ...(r.kind === 'search' || r.kind === 'video' ? { kind: r.kind } : {}),
     ...(r.probe === true ? { probe: true } : {}),
     stream: r.stream === true,
     ms: Number(r.ms) || 0,
@@ -6777,9 +6786,12 @@ function summarizeUsage(days = 7, opts = {}) {
   // 那是「这次没扣到」，不是「没数据」。
   // searches / searchFailed 与模型调用分开：搜索不消耗模型 tokens/积分，
   // 混进 calls 会让「调用次数」和平均耗时对不上模型账。
+  // videos / videoFailed 同理：视频提交按次计费，但不回报 token；单独一列，
+  // 才能和模型调用、网页搜索放在同一张账本里而不互相污染。
   let total = {
     calls: 0, promptTokens: 0, completionTokens: 0, ms: 0,
     credit: 0, creditCalls: 0, failed: 0, searches: 0, searchFailed: 0,
+    videos: 0, videoFailed: 0,
   };
 
   const ensureDay = (ts) => {
@@ -6788,7 +6800,7 @@ function summarizeUsage(days = 7, opts = {}) {
     if (!bucket) {
       bucket = {
         day, calls: 0, promptTokens: 0, completionTokens: 0, credit: 0, creditCalls: 0,
-        searches: 0, searchFailed: 0, byModel: new Map(),
+        searches: 0, searchFailed: 0, videos: 0, videoFailed: 0, byModel: new Map(),
       };
       byDay.set(day, bucket);
     }
@@ -6801,7 +6813,7 @@ function summarizeUsage(days = 7, opts = {}) {
     if (!bucket) {
       bucket = {
         key, calls: 0, promptTokens: 0, completionTokens: 0, credit: 0, creditCalls: 0,
-        searches: 0, searchFailed: 0, byModel: new Map(),
+        searches: 0, searchFailed: 0, videos: 0, videoFailed: 0, byModel: new Map(),
       };
       byHour.set(key, bucket);
     }
@@ -6809,16 +6821,19 @@ function summarizeUsage(days = 7, opts = {}) {
   };
   // 老账本没有 kind；model=web-search 是 v1.9.4 起的稳定标记。
   const isSearchRow = (row) => row.kind === 'search' || row.model === 'web-search';
+  const isVideoRow = (row) => row.kind === 'video';
 
   for (const r of rows) {
     if (r.t < since) continue;
     const isSearch = isSearchRow(r);
+    const isVideo = isVideoRow(r);
     // 体检失败是“探测结果”，不是用户请求事故：不进失败数/失败列表。
     if (r.probe === true && r.ok === false) continue;
 
     // 失败的请求单独归类：它没有 token、没有扣分，混进成功率会误导
     if (r.ok === false) {
-      if (isSearch) total.searchFailed += 1;
+      if (isVideo) total.videoFailed += 1;
+      else if (isSearch) total.searchFailed += 1;
       else total.failed += 1;
       failures.push({
         t: r.t,
@@ -6828,13 +6843,25 @@ function summarizeUsage(days = 7, opts = {}) {
         status: Number(r.status) || 0,
         code: r.code ?? null,
         error: shortError(r.error),
-        kind: isSearch ? 'search' : 'call',
+        kind: isVideo ? 'video' : (isSearch ? 'search' : 'call'),
       });
-      if (isSearch) {
+      if (isVideo) {
+        ensureDay(r.t).videoFailed += 1;
+        const h = ensureHour(r.t);
+        if (h) h.videoFailed += 1;
+      } else if (isSearch) {
         ensureDay(r.t).searchFailed += 1;
         const h = ensureHour(r.t);
         if (h) h.searchFailed += 1;
       }
+      continue;
+    }
+
+    if (isVideo) {
+      total.videos += 1;
+      ensureDay(r.t).videos += 1;
+      const h = ensureHour(r.t);
+      if (h) h.videos += 1;
       continue;
     }
 
@@ -6915,7 +6942,7 @@ function summarizeUsage(days = 7, opts = {}) {
       // 补出来的空桶也要带 `byModel: []`，形状与真实桶一致 —— 前端不必分支判空
       const h = byHour.get(key) || {
         key, calls: 0, promptTokens: 0, completionTokens: 0, credit: 0, creditCalls: 0,
-        searches: 0, searchFailed: 0, byModel: new Map(),
+        searches: 0, searchFailed: 0, videos: 0, videoFailed: 0, byModel: new Map(),
       };
       hours.push({ ...h, byModel: [...h.byModel.values()].sort((a, b) => b.credit - a.credit) });
     }

@@ -320,3 +320,20 @@ test('未完成任务的 /content 返回 409；畸形 id 返回 400', async () =
   assert.equal(bad.status, 400);
   assert.equal((await bad.json()).error.code, 'VIDEO_INVALID_INPUT');
 });
+
+test('账本：视频提交单独计数，不污染模型调用/tokens/积分', async () => {
+  const ledger = await (await get('/v1/requests?limit=50')).json();
+  const rows = ledger.requests.filter((row) => row.kind === 'video');
+  assert.ok(rows.length >= 4, `视频提交应进账本，实际 ${rows.length} 条`);
+  assert.ok(rows.some((row) => row.ok === true), '成功提交应进账本');
+  assert.ok(rows.some((row) => row.ok === false), '失败的视频提交也要留痕');
+  assert.ok(rows.every((row) => row.model === 'video'));
+
+  const usage = await (await get('/v1/usage?days=1')).json();
+  assert.ok(usage.total.videos >= 4, `成功提交应计入 videos，实际 ${usage.total.videos}`);
+  assert.ok(usage.total.videoFailed >= 1, `失败提交应计入 videoFailed，实际 ${usage.total.videoFailed}`);
+  assert.equal(usage.total.calls, 0, '视频不能混进模型调用次数');
+  assert.equal(usage.total.promptTokens + usage.total.completionTokens, 0, '视频没有模型 token');
+  assert.equal(usage.models.some((model) => model.model === 'video'), false, '模型排行不应出现 video');
+  assert.ok(usage.failures.some((failure) => failure.kind === 'video'), '失败列表要能区分视频');
+});

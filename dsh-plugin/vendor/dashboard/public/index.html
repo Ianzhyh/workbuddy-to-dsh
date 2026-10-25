@@ -939,9 +939,14 @@ const I18N_EN = {
   '调用次数': 'Calls',
   '搜索次数': 'Search calls',
   '搜索失败': 'Search failures',
+  '视频提交': 'Video submissions',
+  '视频失败': 'Video failures',
   '不计入模型调用/积分': 'excluded from model calls / credit',
+  '不计入模型调用/tokens': 'excluded from model calls / tokens',
   '搜索调用不计入模型调用、tokens 与积分；本地账本只覆盖本桥流量，与上游余额/其它客户端不是同一口径。':
     'Search calls are excluded from model calls, tokens, and credit. The local ledger covers only this bridge and is not the same scope as the upstream balance or other clients.',
+  '视频提交按次计费，但上游不回报 token/积分；单独计数，积分以上游余额为准。本地账本只覆盖本桥流量，与上游余额/其它客户端不是同一口径。':
+    'Video submissions are billed per job but do not report tokens or credit; they are counted separately, and credit should be read from the upstream balance. The local ledger covers only this bridge and is not the same scope as the upstream balance or other clients.',
   '当前桥版本较旧，搜索调用仍计入调用次数；重启桥后可按新口径拆分。本地账本只覆盖本桥流量，与上游余额/其它客户端不是同一口径。':
     'The running bridge is older, so search calls are still counted as calls. Restart the bridge to split them. The local ledger covers only this bridge and is not the same scope as the upstream balance or other clients.',
   '输入 tokens': 'Input tokens',
@@ -4041,7 +4046,7 @@ function toWeekBuckets(days) {
     const key = ymd(cur);
     const b = {
       day: key, calls: 0, promptTokens: 0, completionTokens: 0, credit: 0, creditCalls: 0,
-      searches: 0, searchFailed: 0, byModel: new Map(),
+      searches: 0, searchFailed: 0, videos: 0, videoFailed: 0, byModel: new Map(),
     };
     buckets.push(b);
     index.set(key, b);
@@ -4050,7 +4055,7 @@ function toWeekBuckets(days) {
   for (const d of list) {
     const b = index.get(ymd(mondayOf(d.day)));
     if (!b) continue;
-    for (const k of ['calls', 'promptTokens', 'completionTokens', 'credit', 'creditCalls', 'searches', 'searchFailed']) {
+    for (const k of ['calls', 'promptTokens', 'completionTokens', 'credit', 'creditCalls', 'searches', 'searchFailed', 'videos', 'videoFailed']) {
       b[k] += Number(d[k]) || 0;
     }
     for (const m of (Array.isArray(d.byModel) ? d.byModel : [])) {
@@ -4245,9 +4250,12 @@ function renderUsage() {
   const searches = Number(t.searches) || 0;
   const searchFailed = Number(t.searchFailed) || 0;
   const hasSearchMetric = Number.isFinite(Number(t.searches));
+  const videos = Number(t.videos) || 0;
+  const videoFailed = Number(t.videoFailed) || 0;
+  const hasVideoMetric = Number.isFinite(Number(t.videos));
   const emptyTotal = Boolean(u && u.total)
     && Number(t.calls) === 0 && Number(t.failed) === 0
-    && searches === 0 && searchFailed === 0;
+    && searches === 0 && searchFailed === 0 && videos === 0 && videoFailed === 0;
   if (!u || !u.total || emptyTotal) {
     box.innerHTML = '<div class="empty">暂无数据（桥未运行或还没有请求过）。</div>';
     return;
@@ -4273,6 +4281,9 @@ function renderUsage() {
       (hasSearchMetric
         ? card('搜索次数', String(searches), '不计入模型调用/积分', true)
         : '') +
+      (hasVideoMetric
+        ? card('视频提交', String(videos), '不计入模型调用/tokens', true)
+        : '') +
       card('输入 tokens', fmtNum(t.promptTokens), '') +
       card('输出 tokens', fmtNum(t.completionTokens), '') +
       card('平均耗时', avg + ' ms', '', true) +
@@ -4283,10 +4294,16 @@ function renderUsage() {
       (searchFailed > 0
         ? card('搜索失败', String(searchFailed), '不计入模型调用/积分', true)
         : '') +
+      (videoFailed > 0
+        ? card('视频失败', String(videoFailed), '不计入模型调用/tokens', true)
+        : '') +
     '</div>' +
     '<p class="hint">' + (hasSearchMetric
       ? '搜索调用不计入模型调用、tokens 与积分；本地账本只覆盖本桥流量，与上游余额/其它客户端不是同一口径。'
-      : '当前桥版本较旧，搜索调用仍计入调用次数；重启桥后可按新口径拆分。本地账本只覆盖本桥流量，与上游余额/其它客户端不是同一口径。') + '</p>';
+      : '当前桥版本较旧，搜索调用仍计入调用次数；重启桥后可按新口径拆分。本地账本只覆盖本桥流量，与上游余额/其它客户端不是同一口径。')
+      + (hasVideoMetric
+        ? '<br>视频提交按次计费，但上游不回报 token/积分；单独计数，积分以上游余额为准。本地账本只覆盖本桥流量，与上游余额/其它客户端不是同一口径。'
+        : '') + '</p>';
 
   // 趋势图（R10.1）：指标由 #trendMetric、粒度由 #trendGran 决定。
   // 空态 / 单桶由 buildTrendChart 自己处理（不画空轴）。

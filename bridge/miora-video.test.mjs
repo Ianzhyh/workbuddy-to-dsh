@@ -253,6 +253,111 @@ test('提交：上游 200+failed 映射成明确的不会重试的拒绝', async
   assert.equal(submitCalls, 1);
 });
 
+test('提交：HTTP 200 但 code 非 0 也不能当成功解包', async () => {
+  const fetchImpl = async (url) => {
+    if (String(url).endsWith('/v2/api-keys')) {
+      return jsonResponse(200, {
+        code: 0,
+        data: { key: 'ck_t_code', expires_at: new Date(Date.now() + 900_000).toISOString() },
+      });
+    }
+    if (String(url).endsWith('/video/submit')) {
+      return jsonResponse(200, { code: 1002, failed: false, httpStatus: 400, message: 'MODEL_NOT_ALLOWED' });
+    }
+    throw new Error(`unexpected ${url}`);
+  };
+
+  await assert.rejects(
+    () => submitVideo(AUTH, { prompt: 'x' }, { fetchImpl, baseUrl: BASE }),
+    (err) => {
+      assert.equal(err.code, 'VIDEO_UPSTREAM_REJECTED');
+      assert.equal(err.status, 400);
+      assert.match(err.message, /MODEL_NOT_ALLOWED/);
+      return true;
+    },
+  );
+});
+
+test('提交：业务 400 藏在 HTTP 200 的 message 里时也要映射成 400', async () => {
+  const fetchImpl = async (url) => {
+    if (String(url).endsWith('/v2/api-keys')) {
+      return jsonResponse(200, {
+        code: 0,
+        data: { key: 'ck_t_nested', expires_at: new Date(Date.now() + 900_000).toISOString() },
+      });
+    }
+    if (String(url).endsWith('/video/submit')) {
+      // 真机实测形状：代理 HTTP 200 + failed，真正的 status/code 只在 message 里。
+      return jsonResponse(200, {
+        failed: true,
+        message: 'upstream video-submit failed: status=400 code=14407 msg=unsupported video duration: 3 seconds, supported range: 4-15 seconds',
+      });
+    }
+    throw new Error(`unexpected ${url}`);
+  };
+
+  await assert.rejects(
+    () => submitVideo(AUTH, { prompt: 'x', duration: 3 }, { fetchImpl, baseUrl: BASE }),
+    (err) => {
+      assert.equal(err.code, 'VIDEO_UPSTREAM_REJECTED');
+      assert.equal(err.status, 400);
+      assert.match(err.message, /supported range: 4-15 seconds/);
+      return true;
+    },
+  );
+});
+
+test('提交：外层 502 包裹的业务 400 也要还原成 400', async () => {
+  const fetchImpl = async (url) => {
+    if (String(url).endsWith('/v2/api-keys')) {
+      return jsonResponse(200, {
+        code: 0,
+        data: { key: 'ck_t_outer', expires_at: new Date(Date.now() + 900_000).toISOString() },
+      });
+    }
+    if (String(url).endsWith('/video/submit')) {
+      return jsonResponse(502, {
+        failed: true,
+        message: 'upstream video-submit failed: status=400 code=14407 msg=unsupported video resolution: 720p, supported values: [768P 2K]',
+      });
+    }
+    throw new Error(`unexpected ${url}`);
+  };
+
+  await assert.rejects(
+    () => submitVideo(AUTH, { prompt: 'x', resolution: '720p' }, { fetchImpl, baseUrl: BASE }),
+    (err) => {
+      assert.equal(err.code, 'VIDEO_UPSTREAM_REJECTED');
+      assert.equal(err.status, 400);
+      assert.match(err.message, /768P/);
+      return true;
+    },
+  );
+});
+
+test('临时 key：429/403 不能被笼统报成登录失败', async () => {
+  const rateLimited = async () => jsonResponse(429, { code: 15001, msg: 'too many keys' }, { 'retry-after': '9' });
+  await assert.rejects(
+    () => submitVideo(AUTH, { prompt: 'x' }, { fetchImpl: rateLimited, baseUrl: BASE }),
+    (err) => {
+      assert.equal(err.code, 'VIDEO_RATE_LIMITED');
+      assert.equal(err.status, 429);
+      assert.equal(err.retryAfter, 9);
+      return true;
+    },
+  );
+
+  const forbidden = async () => jsonResponse(403, { code: 14003, msg: 'no video scope' });
+  await assert.rejects(
+    () => submitVideo(AUTH, { prompt: 'x' }, { fetchImpl: forbidden, baseUrl: BASE }),
+    (err) => {
+      assert.equal(err.code, 'VIDEO_SCOPE_DENIED');
+      assert.equal(err.status, 403);
+      return true;
+    },
+  );
+});
+
 test('查询：任务不存在返回 404，失败任务保留 errorMessage', async () => {
   const fetchImpl = async (url) => {
     if (String(url).endsWith('/v2/api-keys')) {

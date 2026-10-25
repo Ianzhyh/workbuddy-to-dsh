@@ -618,6 +618,8 @@ export const BRIDGE_ENV_PASSTHROUGH = Object.freeze([
   'WORKBUDDY_SEARCH_VERSION',
   'WORKBUDDY_SEARCH_TIMEOUT_MS',
   'WORKBUDDY_SEARCH_MAX_RESULTS',
+  // 视频生成（Miora）
+  'WORKBUDDY_MIORA_BASE',
 ]);
 
 export function collectBridgeExtraEnv(projectEnv = {}, env = process.env) {
@@ -1525,7 +1527,7 @@ export function apply(ctx, rawConfig = {}) {
           log(`注册工具 ${definition.name} 失败`, error);
         }
       }
-      log(`已注册 ${count} 个工具（workbuddy_status/models/usage/checkin/web_search/bridge）`);
+      log(`已注册 ${count} 个工具（workbuddy_status/models/usage/checkin/web_search/video/bridge）`);
     });
   }
 

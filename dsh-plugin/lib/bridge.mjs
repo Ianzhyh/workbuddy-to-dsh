@@ -267,6 +267,35 @@ export class BridgeClient {
     });
   }
 
+  /**
+   * `POST /v1/videos`：提交 Miora 视频任务（异步，成功即计费）。
+   *
+   * 超时只覆盖“提交并拿到任务 id”这一段；生成本身不在这里等。
+   */
+  videoSubmit({ prompt, mode, firstFrame, lastFrame, references, duration, resolution, aspectRatio, signal } = {}) {
+    const body = {};
+    if (typeof prompt === 'string' && prompt.trim()) body.prompt = prompt.trim();
+    if (mode) body.mode = mode;
+    if (firstFrame) body.first_frame = firstFrame;
+    if (lastFrame) body.last_frame = lastFrame;
+    if (Array.isArray(references) && references.length) body.references = references;
+    if (duration !== undefined) body.duration = duration;
+    if (resolution) body.resolution = resolution;
+    if (aspectRatio) body.aspect_ratio = aspectRatio;
+    return this.#json('/v1/videos', {
+      method: 'POST',
+      body,
+      signal,
+      // 桥侧提交超时 390s（与官方客户端一致）；工具侧略长，避免客户端先放弃。
+      timeoutMs: 400_000,
+    });
+  }
+
+  /** `GET /v1/videos/{id}`：查询任务状态；completed 时带 `output.url(s)`。 */
+  videoStatus(id, signal) {
+    return this.#json(`/v1/videos/${encodeURIComponent(id)}`, { signal, timeoutMs: 45_000 });
+  }
+
   // ── 插件登录（第二条凭据来源）─────────────────────────────────────────
   /** 凭据来源状态（桌面端/插件、存储模式、生效来源）—— 不含任何令牌。 */
   authSource(signal) {

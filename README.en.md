@@ -154,7 +154,8 @@ instead of the DeepSeek wallet.
   videos through WorkBuddy's Miora gateway, exposed as async `/v1/videos` endpoints
   (`202` submit, `GET /v1/videos/{id}` query, `/content` redirect). The temporary key
   stays in memory; only a 401 triggers one key refresh, and 429/5xx are never retried
-  automatically to avoid double billing. See
+  automatically to avoid double billing. dsh agents can call
+  `workbuddy_generate_video` and `workbuddy_video_status` directly. See
   [`docs/VIDEO-GENERATION.md`](docs/VIDEO-GENERATION.md).
 - **Time-aware promotions** — nightly free/discount windows are evaluated from the
   upstream `schedule` (timezone, daily windows, validity dates), so rates switch at

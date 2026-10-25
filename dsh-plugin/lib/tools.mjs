@@ -26,6 +26,35 @@ function textTool({ name, description, parameters, execute, timeoutMs }) {
 const fmtTokens = (n) => (Number(n) >= 1000 ? `${(Number(n) / 1000).toFixed(1)}k` : String(Number(n) || 0));
 
 /**
+ * 视频接口错误 → 模型能直接转述给用户的话。
+ * 提交失败最怕 agent 自动重试：那可能重复计费，所以文案必须明确“不要重提”。
+ */
+function videoFailureText(error, action) {
+  const status = Number(error?.status) || 0;
+  const message = String(error?.message || error || '').slice(0, 300);
+  if (status === 403) {
+    return '视频接口只接受本地管理令牌（client key 仅聊天）。检查插件是否用 WORKBUDDY_LOCAL_TOKEN 连桥，或重启桥。';
+  }
+  if (status === 401) {
+    return '视频请求失败：本地桥令牌或 WorkBuddy 登录态不可用。先确认桥在运行且已登录，再重试。';
+  }
+  if (status === 429) {
+    return `视频${action === 'submit' ? '提交' : '查询'}被 Miora 限流：${message || 'HTTP 429'}。`
+      + '不要重复提交（任务可能已经创建）；稍后先调用 workbuddy_video_status 查已有任务。';
+  }
+  if (status === 400) {
+    return `视频请求被拒绝：${message || '参数不合法'}。按提示修改参数或内容，不要原样重试。`;
+  }
+  if (status === 404) {
+    return `没有找到这个视频任务：${message || 'unknown id'}。确认 id 来自 workbuddy_generate_video 的返回。`;
+  }
+  if (/ECONNREFUSED|fetch failed|socket hang up/i.test(message)) {
+    return '视频请求失败：本地桥未运行。先调用 workbuddy_bridge（action=start），再重试。';
+  }
+  return `视频${action === 'submit' ? '提交' : '查询'}失败：${message || '未知错误'}`;
+}
+
+/**
  * 构造这套工具。
  *
  * @param {object} deps
@@ -167,7 +196,12 @@ export function createTools(deps) {
       const days = Math.min(Math.max(Number(args?.days) || 7, 1), 90);
       const usage = await client.usage({ days });
       const total = usage?.total || {};
-      const lines = [`最近 ${days} 天：调用 ${total.calls || 0} 次，失败 ${total.failed || 0} 次，`
+      const videos = Number(total.videos) || 0;
+      const videoFailed = Number(total.videoFailed) || 0;
+      const videoText = (videos || videoFailed)
+        ? `，视频提交 ${videos} 次${videoFailed ? `（失败 ${videoFailed}）` : ''}`
+        : '';
+      const lines = [`最近 ${days} 天：调用 ${total.calls || 0} 次，失败 ${total.failed || 0} 次${videoText}，`
         + `输入 ${fmtTokens(total.promptTokens)} / 输出 ${fmtTokens(total.completionTokens)} tokens，`
         + `消耗积分 ${typeof total.credit === 'number' ? total.credit.toFixed(2) : '0'}，平均耗时 ${total.calls ? Math.round((total.ms || 0) / total.calls) : 0} ms`];
       const models = (usage?.models || []).slice(0, 12);
@@ -282,6 +316,114 @@ export function createTools(deps) {
     },
   });
 
+  /*
+   * 视频生成工具（Miora）。
+   *
+   * 视频是**高积分计费**能力，而且上游是异步任务：提交只返回任务 id，
+   * 生成可能持续几分钟。所以拆成 submit / status 两个工具，避免一次工具调用
+   * 阻塞十几分钟；同时用文案明确“同一需求不要重复提交”，防止 agent 自动重试
+   * 造成重复扣费。
+   */
+  const videoSubmitTool = textTool({
+    name: 'workbuddy_generate_video',
+    description:
+      '用 WorkBuddy 的 Miora 生成视频：支持文生视频、首帧（可选尾帧）生视频、参考图生视频。'
+      + '这是高积分计费操作，**只在用户明确要求生成视频时调用**；同一需求只提交一次。'
+      + '提交是异步的：本工具返回任务 id，之后用 workbuddy_video_status 查询；'
+      + '不要因为等待时间长就重复提交（会重复扣费）。',
+    parameters: {
+      type: 'object',
+      properties: {
+        prompt: { type: 'string', description: '视频描述；文生视频/参考图必填，首尾帧模式可选（描述运动与镜头）' },
+        mode: { type: 'string', enum: ['text', 'frame', 'reference'], description: '不传时按输入自动推断' },
+        first_frame: { type: 'string', description: '起始帧：绝对本地路径 / 公网 https URL / data URI / miora fileKey' },
+        last_frame: { type: 'string', description: '结束帧（可选），格式同 first_frame' },
+        references: { type: 'array', items: { type: 'string' }, description: '参考图（一张或多张），格式同 first_frame' },
+        duration: { type: 'number', description: '目标时长（秒）。本次实测支持 4–15 秒，3 秒会被上游拒绝' },
+        resolution: { type: 'string', description: '分辨率。本次实测支持 768P / 2K，720p 会被上游拒绝' },
+        aspect_ratio: { type: 'string', description: '画幅，如 16:9 / 9:16 / 1:1' },
+      },
+      additionalProperties: false,
+    },
+    timeoutMs: 410_000,
+    async execute(args, exec) {
+      const references = Array.isArray(args?.references)
+        ? args.references.filter((item) => typeof item === 'string' && item.trim()).map((item) => item.trim())
+        : [];
+      let video;
+      try {
+        video = await client.videoSubmit({
+          prompt: typeof args?.prompt === 'string' ? args.prompt : '',
+          mode: typeof args?.mode === 'string' ? args.mode : '',
+          firstFrame: typeof args?.first_frame === 'string' ? args.first_frame : '',
+          lastFrame: typeof args?.last_frame === 'string' ? args.last_frame : '',
+          references,
+          duration: args?.duration,
+          resolution: typeof args?.resolution === 'string' ? args.resolution : '',
+          aspectRatio: typeof args?.aspect_ratio === 'string' ? args.aspect_ratio : '',
+          signal: exec?.signal,
+        });
+      } catch (error) {
+        return videoFailureText(error, 'submit');
+      }
+      const lines = [
+        `已提交视频任务：${video.id}`,
+        `状态：${video.status}；模式：${video.mode || '-'}${video.model ? `；模型：${video.model}` : ''}`,
+        '提交成功即按 WorkBuddy 账号积分计费。同一需求不要再提交一次。',
+        `生成是异步的，稍后用 workbuddy_video_status 查询（id=${video.id}）；completed 后把返回的 URL 交给用户。`,
+      ];
+      return lines.join('\n');
+    },
+  });
+
+  const videoStatusTool = textTool({
+    name: 'workbuddy_video_status',
+    description:
+      '查询 workbuddy_generate_video 提交的视频任务状态。'
+      + 'queued/in_progress 时告诉用户还在生成，稍后再查，**不要重新提交**；'
+      + 'completed 时返回有时效的下载 URL；failed/cancelled 时返回失败原因。',
+    parameters: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', description: '提交视频时返回的任务 id（upstreamTaskId）' },
+      },
+      required: ['id'],
+      additionalProperties: false,
+    },
+    timeoutMs: 50_000,
+    async execute(args, exec) {
+      const id = typeof args?.id === 'string' ? args.id.trim() : '';
+      if (!id) throw new Error('id 不能为空：请传 workbuddy_generate_video 返回的任务 id');
+      let video;
+      try {
+        video = await client.videoStatus(id, exec?.signal);
+      } catch (error) {
+        return videoFailureText(error, 'status');
+      }
+      const lines = [
+        `任务 ${id}：${video.status}（上游：${video.upstream_status || '-'}）`,
+        `模式：${video.mode || '-'}${video.seconds ? `；时长：${video.seconds}s` : ''}`
+          + `${video.resolution ? `；分辨率：${video.resolution}` : ''}`
+          + `${video.aspect_ratio ? `；画幅：${video.aspect_ratio}` : ''}`,
+      ];
+      if (video.status === 'completed') {
+        const urls = Array.isArray(video.output?.urls) ? video.output.urls : [];
+        if (urls.length) {
+          lines.push('视频已生成。以下签名 URL 有时效，请尽快下载或转存：');
+          for (const url of urls) lines.push(`- ${url}`);
+        } else {
+          lines.push('上游标记完成，但没有返回 https 产物 URL。稍后再查一次，或到 WorkBuddy 客户端查看该任务。');
+        }
+      } else if (video.status === 'failed' || video.status === 'cancelled') {
+        lines.push(`任务未成功：${video.error?.message || '上游未给失败原因'}`);
+        lines.push('不要直接重复提交；先确认失败原因，必要时再生成。');
+      } else {
+        lines.push('仍在生成。稍后再调用本工具查询；不要重新提交，否则会重复计费。');
+      }
+      return lines.join('\n');
+    },
+  });
+
   const bridgeTool = textTool({
     name: 'workbuddy_bridge',
     description:
@@ -330,5 +472,5 @@ export function createTools(deps) {
     },
   });
 
-  return [statusTool, modelsTool, usageTool, checkinTool, webSearchTool, bridgeTool];
+  return [statusTool, modelsTool, usageTool, checkinTool, webSearchTool, videoSubmitTool, videoStatusTool, bridgeTool];
 }

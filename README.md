@@ -477,7 +477,7 @@ node tools\connect.mjs apply codex --model glm-5.3
 | 桥的启停 | 插件自动复用/拉起 | 控制台按钮，或 `启动.cmd` |
 | 数据界面 | **dsh 设置页（9 个标签页）** + 控制台网页，两边同步 | 只有控制台网页 |
 | 网页搜索 | **启动后自动接入（默认）**，概览顶部独立状态卡 + 一键接入/恢复；令牌写独立引用，不覆盖 DeepSeek key | 需手动改 dsh 的 `web-search-deepseek` 配置 |
-| agent 侧 | 6 个工具（含 `workbuddy_web_search` 原生搜索兜底）+ `/workbuddy` 命令 | 无 |
+| agent 侧 | 8 个工具（含 `workbuddy_web_search` 原生搜索兜底、`workbuddy_generate_video` / `workbuddy_video_status` 视频生成与查询）+ `/workbuddy` 命令 | 无 |
 
 概览**最上方**的「网页搜索」独立卡片会按「配置 + 桥存活 + 令牌匹配」显示是否真的
 可用（不再藏在「操作」里；旧宿主没上报状态时也会显示重启提示与手动入口）。插件启动、
@@ -489,7 +489,9 @@ node tools\connect.mjs apply codex --model glm-5.3
 
 即使 dsh 内置搜索仍指向 DeepSeek（或 key 失效），agent 还可以用
 `workbuddy_web_search` 工具直接走桥的 WorkBuddy 原生搜索，不依赖 dsh 的搜索配置。
-详见
+视频同理：dsh 里可以直接让 agent 调用 `workbuddy_generate_video` 提交（文生视频 /
+首尾帧 / 参考图），再用 `workbuddy_video_status` 查询；提交是计费动作，工具文案会明确
+提醒不要重复提交。详见
 [`dsh-plugin/README.md`](dsh-plugin/README.md#让-dsh-的网页搜索走-workbuddy不消耗-deepseek-钱包)。
 
 ```sh

@@ -25,9 +25,15 @@
   `GET /v1/videos/{id}/content`，走 WorkBuddy 桌面端同款 Miora 网关：
   - 支持文生视频、首帧（可选尾帧）生视频、参考图生视频三种模式；
   - 图片输入支持绝对本地路径、miora fileKey、公网 https URL、base64 data URI；
+  - 实测约束：时长 4–15 秒、分辨率 768P / 2K（3 秒 / 720p 会被上游拒绝，桥原样映射为 400）；
+  - 真机验证：`minimax-h3-iOA` 生成 4 秒 / 768P 视频，101 秒出片，MP4（H.264+AAC，1344×768）可播放；
   - 异步提交（202）+ 状态查询；临时 key 只驻内存，401 换 key 重试一次，
     429/5xx 不自动重试以避免重复计费；
+  - 视频提交进本地账本（`kind=video`），控制台用量页单列「视频提交/视频失败」，
+    不污染模型调用与 tokens；
   - 配额与安全边界见 [`docs/VIDEO-GENERATION.md`](docs/VIDEO-GENERATION.md)。
+- **dsh 视频工具**：新增 `workbuddy_generate_video`（提交，异步返回任务 id）与
+  `workbuddy_video_status`（查询/取下载 URL），工具文案明确高积分计费且禁止重复提交。
 - OpenAPI 契约新增 `VideoRequest` / `Video` 与三条视频路径；`.env.example`
   新增可选的 `WORKBUDDY_MIORA_BASE`。
 

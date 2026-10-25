@@ -23,7 +23,9 @@ const TEMP_KEY_TTL_MS = 15 * 60 * 1000;
 const TEMP_KEY_REFRESH_SKEW_MS = 60 * 1000;
 const IMAGE_MAX_BYTES = 10 * 1024 * 1024;
 const TEMP_KEY_TIMEOUT_MS = 10_000;
-const SUBMIT_TIMEOUT_MS = 90_000;
+// 与官方 miora MCP 的 MIORA_SUBMIT_HTTP_TIMEOUT_MS 一致：提交接口是异步的，
+// 正常几秒返回；把预算放足，避免上游慢时桥先放弃、任务 id 丢失却已计费。
+const SUBMIT_TIMEOUT_MS = 390_000;
 const QUERY_TIMEOUT_MS = 30_000;
 
 const EXT_TO_MIME = new Map([
@@ -297,26 +299,42 @@ function retryAfterSeconds(headers) {
   return delta > 0 ? delta : null;
 }
 
+function statusFromMessage(message) {
+  const match = /\bstatus=(\d{3})\b/.exec(String(message || ''));
+  return match ? Number(match[1]) : 0;
+}
+
 function upstreamFailure(status, body, path, retryAfter = null) {
   const code = body?.code ?? body?.error?.code ?? null;
   const message = shortMessage(body?.message ?? body?.msg ?? body?.error?.message) || `Miora ${path} failed (HTTP ${status}).`;
-  if (status === 401) {
+  /*
+   * Miora 的 submit 代理有时用外层 2xx/5xx 包住上游的业务错误，
+   * 真正的状态码只写在 message 里：`upstream video-submit failed: status=400 ...`。
+   * 不解析它就会把「时长/分辨率不支持」这种明确的 400 误报成 502。
+   * 外层 401/403/429 是网关自己的鉴权/限流，优先保留，不去猜内层。
+   */
+  const embeddedStatus = statusFromMessage(message);
+  const effectiveStatus = embeddedStatus
+    && (status >= 500 || (status >= 200 && status < 300))
+    ? embeddedStatus
+    : status;
+  if (effectiveStatus === 401) {
     return new MioraVideoError('VIDEO_AUTH', 'Miora rejected the temporary key. Check the current login and retry.', {
       status: 401,
       upstreamCode: code,
     });
   }
-  if (status === 403) {
+  if (effectiveStatus === 403) {
     return new MioraVideoError('VIDEO_SCOPE_DENIED', message, { status: 403, upstreamCode: code });
   }
-  if (status === 429) {
+  if (effectiveStatus === 429) {
     return new MioraVideoError('VIDEO_RATE_LIMITED', message, {
       status: 429,
       retryAfter,
       upstreamCode: code,
     });
   }
-  if (status === 400 || status === 422) {
+  if (effectiveStatus === 400 || effectiveStatus === 422) {
     return new MioraVideoError('VIDEO_UPSTREAM_REJECTED', message, { status: 400, upstreamCode: code });
   }
   return new MioraVideoError('VIDEO_UPSTREAM', message, { status: 502, upstreamCode: code });
@@ -374,11 +392,25 @@ async function requestClientTempKey(auth, options) {
   try { body = await response.json(); } catch { /* 非 JSON 按下述错误处理 */ }
   const key = body?.data?.key;
   if (!response.ok || body?.code !== 0 || typeof key !== 'string' || !key.startsWith('ck_t_')) {
-    throw new MioraVideoError(
-      'VIDEO_AUTH',
-      shortMessage(body?.msg ?? body?.message) || `could not obtain a temporary Miora key (HTTP ${response.status}).`,
-      { status: response.status === 401 ? 401 : 502, upstreamCode: body?.code ?? null },
-    );
+    const message = shortMessage(body?.msg ?? body?.message)
+      || `could not obtain a temporary Miora key (HTTP ${response.status}).`;
+    if (response.status === 429) {
+      throw new MioraVideoError('VIDEO_RATE_LIMITED', message, {
+        status: 429,
+        retryAfter: retryAfterSeconds(response.headers),
+        upstreamCode: body?.code ?? null,
+      });
+    }
+    if (response.status === 403) {
+      throw new MioraVideoError('VIDEO_SCOPE_DENIED', message, {
+        status: 403,
+        upstreamCode: body?.code ?? null,
+      });
+    }
+    throw new MioraVideoError('VIDEO_AUTH', message, {
+      status: response.status === 401 ? 401 : 502,
+      upstreamCode: body?.code ?? null,
+    });
   }
   return {
     key,
@@ -438,6 +470,10 @@ async function mioraPost(auth, path, body, options, retried = false) {
   }
   const failed = bodyFailure(parsed);
   if (failed) throw upstreamFailure(Number(failed.httpStatus) || response.status, failed, path);
+  // 有些网关用 HTTP 200 + 非 0 code 表达失败（没有 failed 字段）；不能当成成功解包。
+  if (typeof parsed.code === 'number' && parsed.code !== 0) {
+    throw upstreamFailure(Number(parsed.httpStatus) || response.status, parsed, path);
+  }
   return unwrapEnvelope(parsed);
 }
 

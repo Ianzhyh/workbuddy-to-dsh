@@ -110,7 +110,7 @@ dsh 设置页与控制台网页是**两个前端、一个后端**，所以天然
 | **活动倍率** | 解析上游 `schedule`：夜间免费/折扣到点自动切换倍率，过期活动自动隐藏；dsh 选择器、插件面板、控制台同源 |
 | **桥的生命周期** | 启动时复用已在跑的桥，没跑就按配置拉起；桥仍是**独立进程**，控制台、`start-bridge.cmd`、其它 OpenAI 客户端照旧可用 |
 | **控制台的生命周期** | 同样复用/拉起 `dashboard/server.mjs`，让它常驻；dsh 里一个链接就进完整控制台（不会自动弹浏览器窗口） |
-| **6 个工具** | `workbuddy_status` / `workbuddy_models` / `workbuddy_usage` / `workbuddy_checkin` / `workbuddy_web_search`（原生搜索兜底）/ `workbuddy_bridge`（后者 `action=console` 可确保控制台在跑） |
+| **8 个工具** | `workbuddy_status` / `workbuddy_models` / `workbuddy_usage` / `workbuddy_checkin` / `workbuddy_web_search`（原生搜索兜底）/ `workbuddy_generate_video`（文生视频 / 首尾帧 / 参考图）/ `workbuddy_video_status` / `workbuddy_bridge`（后者 `action=console` 可确保控制台在跑） |
 | **斜杠命令** | `/workbuddy status\|models\|usage\|checkin\|console\|websearch\|start\|stop\|restart\|cleanup` |
 | **dsh 里的设置页** | 设置 → **WorkBuddy**，9 个标签页 = 控制台的全部功能：概览（含网页搜索状态 / 自动接入 / 一键接入、待办提醒与诊断报告）/ 账号（切换）/ 用量（趋势图 + 积分排行 + CSV）/ 请求（筛选 + CSV）/ 签到（领取 + 自动开关）/ 诊断 / 模型（体检 + 详情）/ 对话测试（多轮流式）/ 日志（过滤 + 清空） |
 | **旧路由迁移** | 首次加载自动清掉 `llm-pi-ai.providers.workbuddy` 手写路由（**先备份**），否则两条同名路由会撞名 |
@@ -411,6 +411,8 @@ dsh 的 `web-search-deepseek` 分节：`baseURL=http://127.0.0.1:8790/v1`、
 | `workbuddy_usage` | 最近 N 天调用次数、tokens、积分、失败数 |
 | `workbuddy_checkin` | 签到状态；`claim=true` 立即领取 |
 | `workbuddy_web_search` | 直接走桥的 WorkBuddy 原生搜索；dsh 内置搜索 401/未接入时的兜底 |
+| `workbuddy_generate_video` | 提交 Miora 视频任务（文生视频 / 首尾帧 / 参考图）。**高积分计费**，异步返回任务 id；同一需求不要重复提交 |
+| `workbuddy_video_status` | 查询视频任务；completed 返回有时效的下载 URL，processing 时明确提示不要重提 |
 | `workbuddy_bridge` | `status` / `start` / `stop` / `restart` 桥；`console` 确保控制台在跑并返回地址 |
 
 ```
@@ -509,7 +511,7 @@ npm run panel:check                    # 上面两个一起跑
 | 控制台复用 | 控制台已在 8792 运行（首页结构标记匹配）→ 插件判定 `running` 并复用，不再拉起第二个 |
 | 原生路由 | `route.registered=true provider=workbuddy`，目录 30 个模型 |
 | **真实模型调用** | 以 `provider: workbuddy` + `model: deepseek-v4.1-flash` 跑通一次真实 agent 轮次，返回「桥已接通。」；桥日志同时出现该请求 |
-| 工具 | 6 个工具注册进当前会话并返回真实数据（状态/模型/用量/签到/搜索/桥） |
+| 工具 | 8 个工具注册进当前会话并返回真实数据（状态/模型/用量/签到/搜索/视频生成/视频状态/桥） |
 | 设置页渲染（场景 1：全部可用） | 无头浏览器加载真实客户端半边：注册契约（`name`/`slots.inject`/模块级 `inject`）逐项断言；**9 个标签页逐个点开**且都有预期内容；趋势图 SVG、模型表行数、「启动控制台」确实发出 POST；无页面错误（截图 `docs/plugin-panel*.png`） |
 | **溢出防护** | 每个标签页都跑横向溢出检查（`scrollWidth > clientWidth` 即失败）；夹具故意塞进真实机器出现的长路径 / 多账号 / 长域名。靠 `box-sizing:border-box` + 内容驱动列宽 + 分层 `overflow-wrap` 策略钉死 |
 | **表格布局（窄列场景 3）** | 在 **620px**（比设置页常见宽度还窄）跑一遍：逐表检查**单元格盒子互不重叠**、内容不宽于格子、单元格不被压到 34px 以下、视口无横向溢出；账号页另外要求卡片内无任何元素溢出/被裁。这套断言正是"7 列挤成一团 + 胶囊压住邻居"那张截图的机器可判定形式 |

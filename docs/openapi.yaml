@@ -74,8 +74,8 @@ components:
       properties:
         mode: { type: string, enum: [text, frame, reference] }
         prompt: { type: string, maxLength: 8000 }
-        duration: { type: number, exclusiveMinimum: 0 }
-        resolution: { type: string }
+        duration: { type: number, exclusiveMinimum: 0, description: 本次实测支持 4–15 秒；3 秒会被上游拒绝 }
+        resolution: { type: string, description: 本次实测支持 768P / 2K；720p 会被上游拒绝 }
         aspect_ratio: { type: string, pattern: '^[0-9]{1,2}:[0-9]{1,2}$' }
         first_frame: { type: string }
         input_reference: { type: string }

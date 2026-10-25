@@ -1,0 +1,131 @@
+/**
+ * 视频工具的 agent 侧合约：
+ *   1. 提交只做“拿任务 id”，不在工具里阻塞等待出片；
+ *   2. 失败文案必须阻止 agent 盲目重提（视频提交会重复计费）；
+ *   3. 查询工具把 completed / processing / failed 三种状态讲清楚。
+ */
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+
+import { createTools } from '../lib/tools.mjs';
+
+function makeTools(videoSubmit, videoStatus) {
+  return createTools({
+    snapshot: async () => ({}),
+    supervisor: { probe: async () => ({ state: 'stopped' }) },
+    consoleSupervisor: {},
+    adapter: {},
+    client: { videoSubmit, videoStatus },
+  });
+}
+
+const tool = (name, videoSubmit, videoStatus) => makeTools(videoSubmit, videoStatus)
+  .find((item) => item.name === name);
+
+test('视频工具：注册生成与查询两个入口', () => {
+  const tools = makeTools(async () => ({}), async () => ({}));
+  assert.deepEqual(
+    tools.filter((item) => item.name.includes('video')).map((item) => item.name).sort(),
+    ['workbuddy_generate_video', 'workbuddy_video_status'],
+  );
+  const submit = tools.find((item) => item.name === 'workbuddy_generate_video');
+  assert.equal(submit.parameters.type, 'object');
+  assert.equal(submit.parameters.additionalProperties, false);
+  const status = tools.find((item) => item.name === 'workbuddy_video_status');
+  assert.deepEqual(status.parameters.required, ['id']);
+});
+
+test('生成工具：映射参数，返回任务 id 并明确不要重复提交', async () => {
+  let seen;
+  const submit = tool('workbuddy_generate_video', async (args) => {
+    seen = args;
+    return { id: 'task-1', status: 'queued', mode: 'reference', model: 'miora-video' };
+  });
+  const output = await submit.execute({
+    prompt: '  same character waving  ',
+    mode: 'reference',
+    references: [' file/abc ', 'https://cdn.example/ref.png '],
+    duration: 5,
+    resolution: '720p',
+    aspect_ratio: '9:16',
+  });
+  assert.equal(seen.prompt, '  same character waving  ');
+  assert.deepEqual(seen.references, ['file/abc', 'https://cdn.example/ref.png']);
+  assert.equal(seen.duration, 5);
+  assert.equal(seen.resolution, '720p');
+  assert.equal(seen.aspectRatio, '9:16');
+  assert.match(output, /task-1/);
+  assert.match(output, /积分计费/);
+  assert.match(output, /不要.*再提交/);
+  assert.match(output, /workbuddy_video_status/);
+});
+
+test('生成工具：429/401/400/桥未运行都给可执行结论，且不暗示重提', async () => {
+  const failed = (status, message = 'boom') => tool('workbuddy_generate_video', async () => {
+    const error = new Error(message);
+    if (status) error.status = status;
+    throw error;
+  });
+
+  const limited = await failed(429, 'too many requests').execute({ prompt: 'x' });
+  assert.match(limited, /限流/);
+  assert.match(limited, /不要重复提交/);
+  assert.match(limited, /workbuddy_video_status/);
+
+  const unauthorized = await failed(401, 'login expired').execute({ prompt: 'x' });
+  assert.match(unauthorized, /登录态/);
+
+  const forbidden = await failed(403, 'local token required').execute({ prompt: 'x' });
+  assert.match(forbidden, /本地管理令牌/);
+
+  const rejected = await failed(400, 'CONTENT_SAFETY').execute({ prompt: 'x' });
+  assert.match(rejected, /被拒绝/);
+  assert.match(rejected, /不要原样重试/);
+
+  const down = await failed(0, 'fetch failed').execute({ prompt: 'x' });
+  assert.match(down, /桥未运行/);
+});
+
+test('查询工具：completed 返回有时效 URL，processing 不催重提，failed 给原因', async () => {
+  const completed = tool('workbuddy_video_status', async () => ({}), async (id) => {
+    assert.equal(id, 'task-1');
+    return {
+      status: 'completed',
+      upstream_status: 'completed',
+      mode: 'text',
+      seconds: 5,
+      resolution: '720p',
+      output: { url: 'https://cdn.example/v.mp4', urls: ['https://cdn.example/v.mp4'] },
+    };
+  });
+  const done = await completed.execute({ id: ' task-1 ' });
+  assert.match(done, /completed/);
+  assert.match(done, /https:\/\/cdn\.example\/v\.mp4/);
+  assert.match(done, /有时效/);
+
+  const processing = tool('workbuddy_video_status', async () => ({}), async () => ({
+    status: 'in_progress', upstream_status: 'processing',
+  }));
+  const waiting = await processing.execute({ id: 'task-2' });
+  assert.match(waiting, /仍在生成/);
+  assert.match(waiting, /不要重新提交/);
+
+  const failed = tool('workbuddy_video_status', async () => ({}), async () => ({
+    status: 'failed', upstream_status: 'failed', error: { message: 'render failed' },
+  }));
+  const errorText = await failed.execute({ id: 'task-3' });
+  assert.match(errorText, /render failed/);
+  assert.match(errorText, /不要直接重复提交/);
+});
+
+test('查询工具：404 与空 id 都给人话', async () => {
+  const missing = tool('workbuddy_video_status', async () => ({}), async () => {
+    const error = new Error('no such task');
+    error.status = 404;
+    throw error;
+  });
+  assert.match(await missing.execute({ id: 'missing' }), /没有找到/);
+
+  const empty = tool('workbuddy_video_status', async () => ({}), async () => ({}));
+  await assert.rejects(empty.execute({ id: '  ' }), /id 不能为空/);
+});
