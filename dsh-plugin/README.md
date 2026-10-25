@@ -109,9 +109,9 @@ dsh 设置页与控制台网页是**两个前端、一个后端**，所以天然
 | **动态模型目录** | 模型列表每次向桥要（带 1 分钟缓存），上游加/减模型不必改配置、不必重启 |
 | **桥的生命周期** | 启动时复用已在跑的桥，没跑就按配置拉起；桥仍是**独立进程**，控制台、`start-bridge.cmd`、其它 OpenAI 客户端照旧可用 |
 | **控制台的生命周期** | 同样复用/拉起 `dashboard/server.mjs`，让它常驻；dsh 里一个链接就进完整控制台（不会自动弹浏览器窗口） |
-| **5 个工具** | `workbuddy_status` / `workbuddy_models` / `workbuddy_usage` / `workbuddy_checkin` / `workbuddy_bridge`（后者 `action=console` 可确保控制台在跑） |
+| **6 个工具** | `workbuddy_status` / `workbuddy_models` / `workbuddy_usage` / `workbuddy_checkin` / `workbuddy_web_search`（原生搜索兜底）/ `workbuddy_bridge`（后者 `action=console` 可确保控制台在跑） |
 | **斜杠命令** | `/workbuddy status\|models\|usage\|checkin\|console\|websearch\|start\|stop\|restart\|cleanup` |
-| **dsh 里的设置页** | 设置 → **WorkBuddy**，9 个标签页 = 控制台的全部功能：概览（含网页搜索状态 / 一键接入、待办提醒与诊断报告）/ 账号（切换）/ 用量（趋势图 + 积分排行 + CSV）/ 请求（筛选 + CSV）/ 签到（领取 + 自动开关）/ 诊断 / 模型（体检 + 详情）/ 对话测试（多轮流式）/ 日志（过滤 + 清空） |
+| **dsh 里的设置页** | 设置 → **WorkBuddy**，9 个标签页 = 控制台的全部功能：概览（含网页搜索状态 / 自动接入 / 一键接入、待办提醒与诊断报告）/ 账号（切换）/ 用量（趋势图 + 积分排行 + CSV）/ 请求（筛选 + CSV）/ 签到（领取 + 自动开关）/ 诊断 / 模型（体检 + 详情）/ 对话测试（多轮流式）/ 日志（过滤 + 清空） |
 | **旧路由迁移** | 首次加载自动清掉 `llm-pi-ai.providers.workbuddy` 手写路由（**先备份**），否则两条同名路由会撞名 |
 
 ---
@@ -273,17 +273,35 @@ npm run release:check      # = vendor:check + 单测 + 独立分发演练（发�
 桥内置了 WorkBuddy 原生搜索：`POST /v1/web_search`，以及 `/v1/messages` 对
 `web_search_20250305` 的兼容分支。dsh 自带的搜索 provider 可以被指向桥。
 
-**一键配置（推荐）**：打开 **设置 → WorkBuddy → 概览 → 操作 → 一键接入 WorkBuddy 搜索**，
-或在输入框运行 `/workbuddy websearch`。插件会确保桥在跑，然后把 dsh 的
+**默认自动接入（开箱即用，issue #7）**：插件启动、桥就绪后会自动把 dsh 的
 `web-search-deepseek` 接口地址指到本地桥，并把桥本地令牌写进一个**独立的凭据引用**
 `WORKBUDDY_SEARCH_BRIDGE_KEY` —— **不会覆盖**你已有的 `DEEPSEEK_API_KEY`，也不会把
-令牌写进 settings/patch 文件。写完会用 dsh 自己的 web 服务真搜一次：面板/命令会明确显示
-“自检通过”或具体失败原因，不需要再去桥日志里猜。
+令牌写进 settings/patch 文件。不需要打开面板、不需要记命令。
 
-概览顶部有独立的「网页搜索」状态卡；**没接入时会在「需要你动手」里高亮提醒**，并给出
+自动接入有明确边界：
+
+- **用户显式选过后端就不动**：只要你在 dsh 的网页搜索设置里写过 `baseURL` / API key /
+  `searchProvider`，插件一律不覆盖，只提示可用「一键接入」切换；
+- **桥没好就先等**：桥没启动、没登录时不会写半套配置，等桥就绪后自动补上；
+- **漂移自愈**：已经接好但桥换了端口 / 本地令牌轮换，启动时自动改指向，不用重新点；
+- **可反悔**：点「恢复接入前配置」会还原 dsh 搜索分节与独立凭据引用，并**关闭自动接入**，
+  下次启动不会又接回去。想一开始就关闭自动接入：设置 `WORKBUDDY_AUTO_WEB_SEARCH=0`。
+
+手动入口仍保留：**设置 → WorkBuddy → 概览 → 操作 → 一键接入 WorkBuddy 搜索**，或
+在输入框运行 `/workbuddy websearch`。写完会用 dsh 自己的 web 服务真搜一次：面板/命令会
+明确显示“自检通过”或具体失败原因，不需要再去桥日志里猜。
+
+概览**最上方**有独立的「网页搜索」卡（不藏在「操作」里；旧宿主未上报状态时也会显示
+重启提示与手动入口）；**没接入时还会在「需要你动手」里高亮提醒**，并给出
 「接入搜索」按钮。状态只读配置/凭据/桥存活，不消耗搜索额度；接入后会显示最近一次自检
 的时间与来源数，并提供「重新检测」「恢复接入前配置」。一键接入前会快照 dsh 的搜索分节，
-恢复时只还原该分节与独立凭据引用，不触碰 `DEEPSEEK_API_KEY`。
+恢复时只还原该分节与独立凭据引用，不触碰 `DEEPSEEK_API_KEY`。自动接入成功时卡片会注明
+「已自动接入，无需手动配置」；自动失败会显示原因并保留手动按钮。
+
+**dsh 内置搜索坏掉时也有兜底**：插件注册了 `workbuddy_web_search` 工具，直接调用桥的
+`/v1/web_search`，不经过 dsh 的搜索配置。即使 dsh 那边仍指向 DeepSeek、key 401 或配置被
+换掉，agent 也能用这个工具拿到 WorkBuddy 的原生搜索结果。对 agent 说「用
+workbuddy_web_search 搜……」即可；`workbuddy_status` 也会报告内置搜索是否已接桥。
 
 验证提示词（贴进 dsh 对话即可）：
 
@@ -391,6 +409,7 @@ dsh 的 `web-search-deepseek` 分节：`baseURL=http://127.0.0.1:8790/v1`、
 | `workbuddy_models` | 列出当前真正可用的模型（可过滤、可强制刷新） |
 | `workbuddy_usage` | 最近 N 天调用次数、tokens、积分、失败数 |
 | `workbuddy_checkin` | 签到状态；`claim=true` 立即领取 |
+| `workbuddy_web_search` | 直接走桥的 WorkBuddy 原生搜索；dsh 内置搜索 401/未接入时的兜底 |
 | `workbuddy_bridge` | `status` / `start` / `stop` / `restart` 桥；`console` 确保控制台在跑并返回地址 |
 
 ```
@@ -489,7 +508,7 @@ npm run panel:check                    # 上面两个一起跑
 | 控制台复用 | 控制台已在 8792 运行（首页结构标记匹配）→ 插件判定 `running` 并复用，不再拉起第二个 |
 | 原生路由 | `route.registered=true provider=workbuddy`，目录 30 个模型 |
 | **真实模型调用** | 以 `provider: workbuddy` + `model: deepseek-v4.1-flash` 跑通一次真实 agent 轮次，返回「桥已接通。」；桥日志同时出现该请求 |
-| 工具 | 5 个工具注册进当前会话并返回真实数据（状态/模型/用量/签到/桥） |
+| 工具 | 6 个工具注册进当前会话并返回真实数据（状态/模型/用量/签到/搜索/桥） |
 | 设置页渲染（场景 1：全部可用） | 无头浏览器加载真实客户端半边：注册契约（`name`/`slots.inject`/模块级 `inject`）逐项断言；**9 个标签页逐个点开**且都有预期内容；趋势图 SVG、模型表行数、「启动控制台」确实发出 POST；无页面错误（截图 `docs/plugin-panel*.png`） |
 | **溢出防护** | 每个标签页都跑横向溢出检查（`scrollWidth > clientWidth` 即失败）；夹具故意塞进真实机器出现的长路径 / 多账号 / 长域名。靠 `box-sizing:border-box` + 内容驱动列宽 + 分层 `overflow-wrap` 策略钉死 |
 | **表格布局（窄列场景 3）** | 在 **620px**（比设置页常见宽度还窄）跑一遍：逐表检查**单元格盒子互不重叠**、内容不宽于格子、单元格不被压到 34px 以下、视口无横向溢出；账号页另外要求卡片内无任何元素溢出/被裁。这套断言正是"7 列挤成一团 + 胶囊压住邻居"那张截图的机器可判定形式 |
@@ -527,7 +546,17 @@ npm run panel:check                    # 上面两个一起跑
 
 ## 修复记录（都补了回归测试）
 
-### 1.10.0 / 1.10.1（本轮）
+### 1.11.0（本轮）
+
+| 症状 | 根因 | 修法 / 回归 |
+|---|---|---|
+| 插件装了，但搜索仍走 DeepSeek/401；「一键接入」藏在「操作」按钮堆里没人发现 | 一键接入需要用户自己找到；真实 dsh 的 settings 服务没有 `get(ns)`，旧代码把已配置的搜索误判成“不可用”，自动接入也被跳过 | 启动后自动接入；概览最上方独立「网页搜索」卡；`workbuddy_web_search` 兜底工具；统一用 `describe()` 读配置。回归：`web-search-auto.test.mjs`、`web-search-auto-apply.test.mjs`、`panel-render.mjs` |
+| 自动接入后重启 dsh，「恢复接入前配置」消失 | 原配置快照只存在内存里 | 无快照时只摘掉插件写入的桥地址/凭据引用并退出自动接入，保留用户其它字段。回归：`web-search-config.test.mjs`、auto-apply 恢复用例 |
+| 首次启动时 settings 服务尚未挂载，自动接入永久 waiting | 只尝试一次就放弃 | 等待并随身份轮询重试；读配置失败按未知处理，绝不“当作没配过”去覆盖。回归：`decideWebSearchAutoSetup` 用例 |
+
+![在 dsh 中经 WorkBuddy 原生搜索成功](../docs/issue-7-search-fixed.png)
+
+### 1.10.0 / 1.10.1
 
 > 1.10.1 仅修正“上下文预算何时生效”的文案与文档，不改变 adapter 行为：
 > 保存后**下一轮请求**按新预算解析；用量弹层的分母可能还是上一轮快照，

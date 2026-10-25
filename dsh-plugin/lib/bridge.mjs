@@ -249,6 +249,24 @@ export class BridgeClient {
     return this.#json('/v1/checkin', { method: claim ? 'POST' : 'GET', signal, timeoutMs: 20000 });
   }
 
+  /**
+   * `POST /v1/web_search`：WorkBuddy 原生网页搜索（不走 DeepSeek）。
+   *
+   * @param {{ query: string, maxResults?: number, allowedDomains?: string[], freshness?: string, signal?: AbortSignal }} options
+   */
+  webSearch({ query, maxResults = 5, allowedDomains, freshness, signal } = {}) {
+    const body = { query, max_results: maxResults };
+    if (Array.isArray(allowedDomains) && allowedDomains.length) body.allowed_domains = allowedDomains;
+    if (freshness) body.freshness = freshness;
+    return this.#json('/v1/web_search', {
+      method: 'POST',
+      body,
+      signal,
+      // 搜索上游本身是模型侧检索，20s 内没回基本就是网关卡住；给足但不无限等。
+      timeoutMs: 45_000,
+    });
+  }
+
   // ── 插件登录（第二条凭据来源）─────────────────────────────────────────
   /** 凭据来源状态（桌面端/插件、存储模式、生效来源）—— 不含任何令牌。 */
   authSource(signal) {

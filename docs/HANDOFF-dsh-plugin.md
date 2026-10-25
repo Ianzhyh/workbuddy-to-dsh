@@ -148,7 +148,7 @@ dsh-plugin/
     consoleApi.mjs      CONSOLE_API_ALLOWLIST + createConsoleApiHandler（前缀透传、
                         面板头校验、SSE 逐块转发、503/502 可行动提示）
     models.mjs          桥目录 → 归一化模型（toDirectory/toAdapterModels/pickDefaultModel）
-    tools.mjs           5 个工具（统一 textTool 形态：execute 返回字符串 + render 成文本块）
+    tools.mjs           6 个工具（统一 textTool 形态：execute 返回字符串 + render 成文本块）
     routes.mjs          /workbuddy/* 路由表（9 条 exact + 1 条 prefix）+ mountRoutes；
                         usage/log 支持 DELETE（清账本走桥、清日志截断 bridge.log）
     legacy.mjs          旧路由文本手术：locate/stripProviderBlock（缩进级删除、

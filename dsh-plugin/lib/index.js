@@ -40,8 +40,14 @@ import { createTools } from './tools.mjs';
 import { createRouteTable, mountRoutes } from './routes.mjs';
 import {
   configureWorkBuddyWebSearch,
+  decideWebSearchAutoSetup,
   deriveWebSearchReadiness,
   deriveWebSearchStatus,
+  hasExplicitSearchOverride,
+  looksLikeManagedSearchConfig,
+  markWorkBuddyWebSearchOptOut,
+  readWebSearchConfig,
+  resetWorkBuddyWebSearchOverrides,
   restoreWorkBuddyWebSearch,
   snapshotWorkBuddyWebSearch,
   verifyWorkBuddyWebSearch,
@@ -367,6 +373,14 @@ export const DEFAULTS = {
   authFile: '',
   /** 每日自动签到：undefined = 用桥的默认值（开）。 */
   autoCheckin: undefined,
+  /**
+   * 启动时自动把 dsh 的网页搜索接到 WorkBuddy（issue #7）。
+   *
+   * 只在「用户没显式选过后端」时生效；用户手写过 baseURL / key / provider
+   * 就完全不碰。想永久关掉自动接入：点面板的「恢复接入前配置」，或把这里
+   * 设为 false。
+   */
+  autoWebSearch: true,
   autoStart: true,
   autoStartTimeoutMs: 30_000,
   /** 控制台（数据界面）也由插件复用/拉起：dsh 里给个入口就够了，不重复造仪表盘。 */
@@ -451,6 +465,7 @@ export function resolveConfig(raw = {}) {
     autoCheckin: cfg.autoCheckin === undefined || cfg.autoCheckin === null
       ? undefined
       : asBool(cfg.autoCheckin, undefined),
+    autoWebSearch: asBool(cfg.autoWebSearch, DEFAULTS.autoWebSearch),
     autoStart: asBool(cfg.autoStart, DEFAULTS.autoStart),
     autoStartTimeoutMs: Number(cfg.autoStartTimeoutMs) || DEFAULTS.autoStartTimeoutMs,
     consoleAutoStart: asBool(cfg.consoleAutoStart, DEFAULTS.consoleAutoStart),
@@ -701,6 +716,7 @@ export function apply(ctx, rawConfig = {}) {
   if (!explicit.has('autoCheckin') && (projectEnv.WORKBUDDY_AUTO_CHECKIN ?? process.env.WORKBUDDY_AUTO_CHECKIN) !== undefined) {
     config.autoCheckin = asBool(projectEnv.WORKBUDDY_AUTO_CHECKIN ?? process.env.WORKBUDDY_AUTO_CHECKIN, true);
   }
+  reconcile('autoWebSearch', 'WORKBUDDY_AUTO_WEB_SEARCH', (raw, fallback) => asBool(raw, fallback));
 
   // 桥的上游身份/超时/11128/预校验等逃生门：`.env` 里写了必须真的到桥。
   const bridgeExtraEnv = collectBridgeExtraEnv(projectEnv, process.env);
@@ -805,6 +821,20 @@ export function apply(ctx, rawConfig = {}) {
      * 对外只暴露 summary（baseURL/apiKeyRef/provider），绝不回传 credential。
      */
     webSearchPrevious: null,
+    /**
+     * 自动接入（issue #7）的进度。只放元数据，不含令牌与搜索词：
+     *   pending / waiting / configuring / done / failed / skipped / opted-out / disabled
+     */
+    webSearchAuto: {
+      enabled: config.autoWebSearch,
+      status: 'pending',
+      reason: '',
+      at: 0,
+      nextAt: 0,
+      error: '',
+      mode: '',
+      inflight: false,
+    },
   };
 
   /**
@@ -1177,7 +1207,7 @@ export function apply(ctx, rawConfig = {}) {
    * 只读 settings/credentials，不发搜索请求（status 每 8 秒轮询，不能顺带
    * 消耗搜索额度）。真正的一键配置会再跑一次 verifyWorkBuddyWebSearch。
    */
-  async function webSearchStatus({ bridgeState = 'stopped' } = {}) {
+  async function readWebSearchStatus({ bridgeState = 'stopped' } = {}) {
     const expectedBaseURL = `${supervisor.baseUrl}/v1`;
     const settings = ctx.get('settings');
     const credentials = ctx.get('credentials');
@@ -1200,7 +1230,13 @@ export function apply(ctx, rawConfig = {}) {
       reason: 'unavailable',
       revert,
     };
-    if (!settings || typeof settings.get !== 'function') {
+    /*
+     * 真实 dsh 的 settings 服务**没有 `get(ns)`**：只有 describe/update/
+     * replace。旧代码在这一步判 `typeof settings.get !== 'function'`，于是
+     * 明明配置好了也永远显示“不可用”，面板只能退化成操作区里的一个按钮。
+     */
+    const config = readWebSearchConfig(settings);
+    if (!settings || config.source === 'none') {
       return {
         ...unavailable,
         ...deriveWebSearchReadiness({
@@ -1211,14 +1247,8 @@ export function apply(ctx, rawConfig = {}) {
         }),
       };
     }
-
-    let section;
-    let webSection;
-    try {
-      section = settings.get('web-search-deepseek');
-      webSection = settings.get('web');
-    } catch (error) {
-      const base = { ...unavailable, available: true, reason: 'error', error: String(error?.message || error) };
+    if (config.error) {
+      const base = { ...unavailable, available: true, reason: 'error', error: '读取 dsh 搜索配置失败' };
       return {
         ...base,
         ...deriveWebSearchReadiness({
@@ -1229,7 +1259,7 @@ export function apply(ctx, rawConfig = {}) {
         }),
       };
     }
-    if (section === undefined) {
+    if (!config.available) {
       const base = { ...unavailable, available: true, reason: 'namespace-missing' };
       return {
         ...base,
@@ -1241,6 +1271,9 @@ export function apply(ctx, rawConfig = {}) {
         }),
       };
     }
+
+    const section = config.section;
+    const webSection = config.webSection;
 
     const apiKeyRef = typeof section?.apiKeyEnv === 'string' ? section.apiKeyEnv : '';
     const literalKey = typeof section?.apiKey === 'string' && section.apiKey.length > 0;
@@ -1276,11 +1309,42 @@ export function apply(ctx, rawConfig = {}) {
       expectedBaseURL,
       keyConfigured,
     });
+    const managed = looksLikeManagedSearchConfig({ section, webSection, expectedBaseURL });
+    // describe() 拿不到 user 层时 explicit 保持 null = 未知；自动接入会等下一轮，
+    // 不会把“不知道”当成“用户没配过”。
+    const explicit = config.searchUser === null
+      ? null
+      : hasExplicitSearchOverride({
+        section: config.searchUser,
+        webSection: config.webUser || {},
+        expectedBaseURL,
+      });
+
+    /*
+     * 没有内存快照时仍允许撤销：只要当前配置带着本插件的指纹
+     * （本机桥地址 + 插件专用凭据引用），就能安全地只摘掉我们写的那几项。
+     * 这是自动接入之后重启 dsh 的常见路径 —— 快照没了，但用户仍应能反悔。
+     */
+    const revertState = state.webSearchPrevious?.ok
+      ? {
+        available: true,
+        mode: 'snapshot',
+        at: new Date(state.webSearchPrevious.at).toISOString(),
+        previous: state.webSearchPrevious.summary,
+      }
+      : {
+        available: managed,
+        mode: managed ? 'clear' : 'none',
+        previous: managed ? { baseURL: '', apiKeyRef: '', hadLiteralKey: false, provider: 'deepseek-official' } : null,
+      };
+
     return {
       available: true,
       expectedBaseURL,
       keyConfigured,
-      revert,
+      managed,
+      explicit,
+      revert: revertState,
       ...status,
       ...deriveWebSearchReadiness({
         status,
@@ -1289,6 +1353,23 @@ export function apply(ctx, rawConfig = {}) {
         verification: state.webSearchVerify,
         expectedBaseURL,
       }),
+    };
+  }
+
+  /** 搜索状态 + 自动接入进度（面板轮询只走这个入口）。 */
+  async function webSearchStatus(options = {}) {
+    const status = await readWebSearchStatus(options);
+    const auto = state.webSearchAuto;
+    return {
+      ...status,
+      auto: {
+        enabled: auto.enabled === true,
+        status: auto.status,
+        reason: auto.reason,
+        mode: auto.mode,
+        error: auto.error,
+        at: auto.at ? new Date(auto.at).toISOString() : '',
+      },
     };
   }
 
@@ -1391,6 +1472,7 @@ export function apply(ctx, rawConfig = {}) {
         consoleUrl: consoleSupervisor.url,
         projectRoot,
         autoStart: config.autoStart,
+        autoWebSearch: config.autoWebSearch,
         consoleAutoStart: config.consoleAutoStart,
         migrateLegacy: config.migrateLegacy,
         logPath: supervisor.logPath,
@@ -1443,7 +1525,7 @@ export function apply(ctx, rawConfig = {}) {
           log(`注册工具 ${definition.name} 失败`, error);
         }
       }
-      log(`已注册 ${count} 个工具（workbuddy_status/models/usage/checkin/bridge）`);
+      log(`已注册 ${count} 个工具（workbuddy_status/models/usage/checkin/web_search/bridge）`);
     });
   }
 
@@ -1631,9 +1713,19 @@ export function apply(ctx, rawConfig = {}) {
    * 多个窗口同时点按钮时复用同一个在途任务：重复写配置没有意义，还会重复
    * 触发真实搜索自检、消耗搜索额度。
    */
-  function enableWebSearch() {
+  function enableWebSearch({ auto = false, reason = '' } = {}) {
     if (webSearchEnableInflight) return webSearchEnableInflight;
+    const runReason = reason || (auto ? 'auto' : 'manual');
     webSearchEnableInflight = (async () => {
+      state.webSearchAuto = {
+        ...state.webSearchAuto,
+        enabled: config.autoWebSearch,
+        status: 'configuring',
+        mode: auto ? 'auto' : 'manual',
+        reason: runReason,
+        at: Date.now(),
+        error: '',
+      };
       syncBridgeAccountConfig();
       const ready = await supervisor.ensure({ readyTimeoutMs: config.autoStartTimeoutMs });
       if (!ready.ok) throw new Error(ready.error || ready.state || 'bridge is not ready');
@@ -1661,27 +1753,194 @@ export function apply(ctx, rawConfig = {}) {
       });
       // 用 dsh 自己的 web 服务跑一次，令牌/桥/热更任何一环不对都会在这里暴露。
       const verification = await runWebSearchVerify();
+      const failed = verification.verified === false;
+      state.webSearchAuto = {
+        ...state.webSearchAuto,
+        enabled: config.autoWebSearch,
+        status: failed ? 'failed' : 'done',
+        mode: auto ? 'auto' : 'manual',
+        reason: failed ? 'verify' : runReason,
+        at: Date.now(),
+        error: failed ? verification.verifyError || '' : '',
+        // 自检失败不无限重试：桥/登录修好后由面板或下一次启动再试。
+        nextAt: failed ? Date.now() + 300_000 : 0,
+      };
       log('web search configured -> bridge', result.baseURL,
         verification.verified === true ? `verified sources=${verification.sourceCount}`
           : verification.verified === false ? `verify failed: ${verification.verifyError}`
             : 'verification skipped (no web service)');
       return { ...result, ...verification };
-    })().finally(() => { webSearchEnableInflight = null; });
+    })().catch((error) => {
+      // 写配置/自检失败也要落地状态：否则面板会一直显示“配置中”，
+      // 用户既不知道失败，也不知道可以重试。
+      state.webSearchAuto = {
+        ...state.webSearchAuto,
+        enabled: config.autoWebSearch,
+        status: 'failed',
+        reason: 'error',
+        error: String(error?.message || error),
+        at: Date.now(),
+        nextAt: Date.now() + 60_000,
+      };
+      throw error;
+    }).finally(() => { webSearchEnableInflight = null; });
     return webSearchEnableInflight;
   }
 
-  /** 把 dsh 的搜索配置恢复到第一次一键接入前的快照。 */
+  /**
+   * 启动时自动接入（issue #7）。
+   *
+   * 目标不是“替用户做决定”，而是消除「插件装了、搜索却还走 DeepSeek 并 401」
+   * 这个默认坏状态：
+   *   - 用户显式选过后端（baseURL / key / provider）→ 一律不动；
+   *   - 桥还没起来 / 没登录 → 先等，后面由身份轮询再触发；
+   *   - 已经接好但桥令牌变了 / 端口换了 → 自愈（只在我们自己写过的配置上）；
+   *   - 用户点过「恢复接入前配置」→ 记 opted-out，不再自动接回。
+   */
+  async function maybeAutoConfigureWebSearch(trigger = 'startup') {
+    const auto = state.webSearchAuto;
+    if (!config.autoWebSearch) {
+      if (auto.status !== 'disabled') {
+        state.webSearchAuto = { ...auto, enabled: false, status: 'disabled', reason: 'disabled', at: Date.now() };
+      }
+      return;
+    }
+    if (auto.inflight) return;
+    if (auto.status === 'done' || auto.status === 'opted-out') return;
+    if (Date.now() < (auto.nextAt || 0)) return;
+
+    auto.inflight = true;
+    const wait = (reason, ms) => {
+      state.webSearchAuto = {
+        ...state.webSearchAuto,
+        enabled: true,
+        status: 'waiting',
+        reason,
+        at: Date.now(),
+        nextAt: Date.now() + ms,
+        inflight: false,
+      };
+    };
+    try {
+      // 没有桥脚本（未安装完整分发包 / 单测空目录）就不要探测：自动接入
+      // 必须建立在「这个插件真的能拉起或复用桥」之上。
+      if (!existsSync(supervisor.scriptPath)) return;
+      const settings = ctx.get('settings');
+      const credentials = ctx.get('credentials');
+      if (!settings || !credentials) {
+        // settings/credentials 通常比插件晚几十毫秒挂载；5 秒后由身份轮询补试，
+        // 不必让用户对着“等待中”等 15 秒。
+        wait('services', 5_000);
+        return;
+      }
+      const probe = await supervisor.probe();
+      const status = await readWebSearchStatus({ bridgeState: probe.state });
+      /*
+       * `explicit` 为 null = describe() 还拿不到 user 层（宿主服务未就绪/太旧）。
+       * 此时不能假设用户没配过，也不该立刻放弃：先等，等到了再判断。
+       */
+      if (status.explicit !== true && status.explicit !== false) {
+        wait('settings', 5_000);
+        return;
+      }
+      const decision = decideWebSearchAutoSetup({
+        enabled: true,
+        status,
+        explicitOverride: status.explicit === true,
+        managed: status.managed === true,
+        bridgeState: probe.state,
+      });
+      if (decision.action === 'wait') {
+        wait(decision.reason, 15_000);
+        return;
+      }
+      if (decision.action === 'skip') {
+        state.webSearchAuto = {
+          ...state.webSearchAuto,
+          enabled: true,
+          status: decision.reason === 'configured' ? 'done' : 'skipped',
+          reason: decision.reason,
+          at: Date.now(),
+          nextAt: 0,
+          error: '',
+          inflight: false,
+        };
+        if (decision.reason === 'explicit') {
+          log('web search auto setup skipped: user has an explicit search configuration');
+        }
+        return;
+      }
+
+      // 保持 inflight：enableWebSearch 可能要跑 30s（冷启动桥）+ 20s 自检，
+      // 期间身份轮询不能另起一条自动接入流程。
+      state.webSearchAuto = {
+        ...state.webSearchAuto,
+        enabled: true,
+        status: 'configuring',
+        reason: decision.reason,
+        at: Date.now(),
+        error: '',
+        inflight: true,
+      };
+      log(`web search auto setup (${trigger}): ${decision.reason}`);
+      const result = await enableWebSearch({ auto: true, reason: decision.reason });
+      log(result.verified === false
+        ? `web search auto setup failed: ${result.verifyError}`
+        : `web search auto setup done${result.verified === true ? ` (sources=${result.sourceCount})` : ''}`);
+    } catch (error) {
+      state.webSearchAuto = {
+        ...state.webSearchAuto,
+        enabled: true,
+        status: 'failed',
+        reason: 'error',
+        error: String(error?.message || error),
+        at: Date.now(),
+        nextAt: Date.now() + 60_000,
+        inflight: false,
+      };
+      log('web search auto setup failed', error);
+    } finally {
+      if (state.webSearchAuto.inflight) state.webSearchAuto = { ...state.webSearchAuto, inflight: false };
+    }
+  }
+
+  /**
+   * 恢复 dsh 的搜索配置。
+   *
+   * 两条路：
+   *   - 本次会话点过接入 → 用内存快照精确恢复原分节与原凭据；
+   *   - 自动接入后重启过 dsh（快照已随内存丢失）→ 只摘掉本插件写进去的字段。
+   * 两条路都会留下“用户选择”标记，避免下次启动又被自动接回去。
+   */
   async function revertWebSearch() {
+    const settings = ctx.get('settings');
+    const credentials = ctx.get('credentials');
     const previous = state.webSearchPrevious;
-    if (!previous?.ok) throw new Error('没有可恢复的接入前配置');
-    const result = await restoreWorkBuddyWebSearch({
-      settings: ctx.get('settings'),
-      credentials: ctx.get('credentials'),
-      snapshot: previous,
-    });
+    let result;
+    if (previous?.ok) {
+      result = await restoreWorkBuddyWebSearch({ settings, credentials, snapshot: previous });
+      const optOut = await markWorkBuddyWebSearchOptOut({ settings });
+      result = { ...result, optOut };
+    } else {
+      result = await resetWorkBuddyWebSearchOverrides({
+        settings,
+        credentials,
+        expectedBaseURL: `${supervisor.baseUrl}/v1`,
+      });
+      result = { ...result, optOut: { marked: true, reason: 'clear' } };
+    }
     state.webSearchPrevious = null;
+    state.webSearchAuto = {
+      ...state.webSearchAuto,
+      status: 'opted-out',
+      reason: 'reverted',
+      mode: '',
+      at: Date.now(),
+      nextAt: 0,
+      error: '',
+    };
     state.webSearchVerify = { at: 0, verified: null, sourceCount: null, error: '', baseURL: '' };
-    log('web search configuration restored', result.summary?.baseURL || '(unset)');
+    log('web search configuration restored', result.optOut?.marked ? '(auto setup disabled)' : '');
     return result;
   }
 
@@ -1738,6 +1997,9 @@ export function apply(ctx, rawConfig = {}) {
       };
       reconcileBridgeProcess(probe);
       reconcileAccount(probe);
+      // 桥在、登录也在：如果启动时还没自动接入（例如登录比插件晚），
+      // 这里补一次；状态机内部有节流与去重，不会每 2 秒写配置。
+      void maybeAutoConfigureWebSearch('identity');
     } catch { /* 桥没跑 / 还没登录：下一轮再试 */ }
     finally { identityPolling = false; }
   }
@@ -1757,6 +2019,7 @@ export function apply(ctx, rawConfig = {}) {
            */
           adapter.warmup().catch(() => {});
           log(`桥已就绪：${supervisor.baseUrl}/v1（pid ${result.health?.pid}${result.reused ? '，复用已有实例' : '，本次新拉起'}）`);
+          void maybeAutoConfigureWebSearch('bridge-ready');
         } else {
           log(`桥未能就绪：${result.error}`);
         }
@@ -1788,6 +2051,12 @@ export function apply(ctx, rawConfig = {}) {
       }
     })();
   }
+
+  /*
+   * 启动即尝试自动接入搜索（issue #7）。放在 `autoStart` 分支之外：
+   * 桥可能是上一次 dsh 留下的、或由控制台/用户手工拉起的，这时同样该接。
+   */
+  void maybeAutoConfigureWebSearch('startup');
 
   log(`插件已加载：projectRoot=${projectRoot || '(未找到)'} bridge=${supervisor.baseUrl} console=${consoleSupervisor.url} provider=${state.route.provider}`);
   return { supervisor, consoleSupervisor, client, adapter, state, snapshot };

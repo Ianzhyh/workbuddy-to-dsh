@@ -1,6 +1,6 @@
 {
   "name": "workbuddy-to-dsh",
-  "version": "1.10.1",
+  "version": "1.11.0",
   "private": false,
   "description": "把 WorkBuddy 的模型（桌面端登录或插件内浏览器授权）经本地桥暴露为 OpenAI 兼容接口，供 DeepSeek Harness 或任意 OpenAI 客户端调用。根包即 dsh bundle：dsh「添加插件」填 github:Ianzhyh/workbuddy-to-dsh 可直装；发布到 npm 后也可填 workbuddy-to-dsh。",
   "type": "module",

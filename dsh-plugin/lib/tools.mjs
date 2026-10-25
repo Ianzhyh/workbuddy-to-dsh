@@ -80,6 +80,21 @@ export function createTools(deps) {
       }
       lines.push(`模型：dsh 侧路由 ${state.route.registered ? '已注册' : '未注册'}（provider=${state.config.provider}），桥目录 ${state.directory.length} 个可用模型`);
       if (state.route.error) lines.push(`  注册失败：${state.route.error}`);
+      /*
+       * 搜索接入状态要在状态工具里可见：用户报「搜不到 / 401」时，agent 先看这里
+       * 就能分清是 dsh 内置搜索没接桥，还是桥本身没登录，而不是盲猜。
+       */
+      const ws = state.webSearch;
+      if (ws) {
+        const ready = ws.ready === true || (ws.ready === undefined && ws.configured === true);
+        lines.push(ready
+          ? `网页搜索：已接入 WorkBuddy（dsh 内置搜索走桥${ws.lastVerifyFailed ? `；上次自检失败：${ws.lastVerifyError || '未知错误'}` : ''}）`
+          : `网页搜索：dsh 内置搜索未接入 WorkBuddy（${ws.reason || 'unknown'}）${ws.auto?.status ? `；自动接入：${ws.auto.status}${ws.auto.reason ? `/${ws.auto.reason}` : ''}` : ''}`);
+        if (!ready) {
+          lines.push('  修法：插件概览的「网页搜索」卡点「一键接入」，或运行 /workbuddy websearch；');
+          lines.push('  临时兜底：直接调用 `workbuddy_web_search` 工具，它不依赖 dsh 内置搜索配置。');
+        }
+      }
       const con = state.console || {};
       lines.push(`控制台：${con.state === 'running' ? `${con.url}（数据界面在这里：逐条请求 / 趋势图 / CSV / 账号切换 / 签到 / 诊断）` : `未运行${con.error ? `（${con.error}）` : ''}`}`);
       if (state.legacy?.found) lines.push(`注意：检测到旧的 llm-pi-ai workbuddy 路由（${state.legacy.files.join('、')}），与插件重复，建议清理。`);
@@ -208,6 +223,62 @@ export function createTools(deps) {
     },
   });
 
+  /*
+   * 兜底搜索工具（issue #7）。
+   *
+   * dsh 的内置网页搜索是**宿主配置**：它可能仍指向 DeepSeek、key 失效、或者
+   * 被用户换成了别的后端。用户问的是「插件为什么不能像 WorkBuddy 一样搜」——
+   * 除了自动把宿主配置接过来，还必须给 agent 一条不依赖宿主配置的路：
+   * 直接打桥的 `/v1/web_search`，用 WorkBuddy 自己的搜索额度。
+   */
+  const webSearchTool = textTool({
+    name: 'workbuddy_web_search',
+    description:
+      '用 WorkBuddy 原生网页搜索查资料（不经过 DeepSeek，不需要 DeepSeek key）。'
+      + '当 dsh 内置网页搜索报错（例如 401 / api key invalid）、提示未接入，或你想确保搜索走 WorkBuddy 额度时，用这个工具兜底。'
+      + '返回标题、链接与摘要；需要正文时再对结果 URL 做抓取。',
+    parameters: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: '搜索词，至少 2 个字符' },
+        max_results: { type: 'integer', minimum: 1, maximum: 10, description: '返回条数，默认 5' },
+      },
+      required: ['query'],
+      additionalProperties: false,
+    },
+    timeoutMs: 60_000,
+    async execute(args, exec) {
+      const query = typeof args?.query === 'string' ? args.query.trim() : '';
+      if (query.length < 2) throw new Error('query 至少需要 2 个字符');
+      const rawMax = Number(args?.max_results);
+      const maxResults = Number.isFinite(rawMax) ? Math.min(Math.max(Math.trunc(rawMax), 1), 10) : 5;
+      let result;
+      try {
+        result = await client.webSearch({ query, maxResults, signal: exec?.signal });
+      } catch (error) {
+        if (error?.status === 401) {
+          throw new Error('网页搜索失败：本地桥令牌与插件不一致。先重启桥；仍失败就检查 WORKBUDDY_LOCAL_TOKEN。', { cause: error });
+        }
+        if (error?.status === 429) {
+          return `WorkBuddy 搜索被限流了（${error.message || 'HTTP 429'}）。等一会儿再试，或减少搜索次数。`;
+        }
+        if (/ECONNREFUSED|fetch failed|socket hang up/i.test(String(error?.message || ''))) {
+          return '网页搜索失败：本地桥未运行。先调用 workbuddy_bridge（action=start），再重试。';
+        }
+        throw new Error(`网页搜索失败：${error?.message || error}`, { cause: error });
+      }
+      const results = Array.isArray(result?.results) ? result.results : [];
+      if (!results.length) return `WorkBuddy 没有搜到与「${query}」相关的结果。换个关键词或英文关键词再试。`;
+      const lines = [`WorkBuddy 网页搜索（${result.provider || 'workbuddy'}）：${results.length} 条`];
+      results.forEach((item, index) => {
+        lines.push(`${index + 1}. ${item.title || item.url}`);
+        lines.push(`   ${item.url}`);
+        if (item.snippet) lines.push(`   ${item.snippet}`);
+      });
+      return lines.join('\n');
+    },
+  });
+
   const bridgeTool = textTool({
     name: 'workbuddy_bridge',
     description:
@@ -256,5 +327,5 @@ export function createTools(deps) {
     },
   });
 
-  return [statusTool, modelsTool, usageTool, checkinTool, bridgeTool];
+  return [statusTool, modelsTool, usageTool, checkinTool, webSearchTool, bridgeTool];
 }

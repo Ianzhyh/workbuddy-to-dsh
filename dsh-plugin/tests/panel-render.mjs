@@ -670,9 +670,17 @@ try {
   const overviewText = await page.cdp.evaluate("document.querySelector('.wb-root') ? document.querySelector('.wb-root').innerText : ''");
   if (!/今日还没签到/.test(overviewText)) problems.push('概览没有提示「今日还没签到」');
 
-  // 网页搜索：已接入时必须在概览顶部显示状态卡；未接入时必须出现待办提醒 + 接入按钮
+  // 网页搜索：必须是概览最上面的独立一栏（issue #7 的入口不能埋在「操作」里）
+  if (!/网页搜索/.test(overviewText)) problems.push('概览没有「网页搜索」独立卡片');
+  {
+    const searchIdx = overviewText.indexOf('网页搜索');
+    const quotaIdx = overviewText.indexOf('积分余额');
+    if (!(searchIdx >= 0 && quotaIdx >= 0 && searchIdx < quotaIdx)) {
+      problems.push('「网页搜索」卡片必须排在积分卡上面（入口不能藏到下面）');
+    }
+  }
+  // 已接入时必须在概览顶部显示状态卡；未接入时必须出现待办提醒 + 接入按钮
   if (offline || liveStatus?.webSearch?.available === true) {
-    if (!/网页搜索/.test(overviewText)) problems.push('概览没有「网页搜索」状态卡');
     if (!/已接入本地桥/.test(overviewText)) problems.push('网页搜索已接入时状态卡没有显示「已接入本地桥」');
     if (!/恢复接入前配置/.test(overviewText)) problems.push('有可恢复快照时没有「恢复接入前配置」按钮');
 
@@ -705,7 +713,14 @@ try {
     }
     if (!searchAlert.hasAction) problems.push('网页搜索未接入时没有「接入搜索」按钮');
   } else {
-    console.log('实时宿主还没有 webSearch 状态，跳过网页搜索卡片断言');
+    // 旧宿主没有 webSearch 状态：独立卡片仍要在最上面，并给出重启提示与手动入口。
+    if (!/宿主端未上报搜索状态/.test(overviewText)) {
+      problems.push('旧宿主时网页搜索卡片没有说明「宿主端未上报搜索状态」');
+    }
+    if (!/一键接入 WorkBuddy 搜索/.test(overviewText)) {
+      problems.push('旧宿主时网页搜索卡片没有「一键接入 WorkBuddy 搜索」按钮');
+    }
+    console.log('实时宿主还没有 webSearch 状态：已断言独立卡片与重启提示');
   }
   // 失败提醒的期望取决于数据源：离线/旧宿主模式（桩覆盖 requests 通道）必须出现；
   // 实时模式走真宿主快照的 recentFailed（真实账本），没有失败就没有提醒 —— 正确行为。

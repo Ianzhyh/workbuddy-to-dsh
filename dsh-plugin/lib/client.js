@@ -571,6 +571,13 @@ body.dark .wb-root,
       '已接入本地桥': 'Connected to local bridge',
       '未接入（走 DeepSeek）': 'Not connected (uses DeepSeek)',
       '搜索走 WorkBuddy 额度，不消耗 DeepSeek。': 'Search uses WorkBuddy quota, not DeepSeek.',
+      '已自动接入，无需手动配置。': 'Connected automatically; no manual setup is needed.',
+      '宿主端未上报搜索状态': 'The host has not reported web search status',
+      '当前 dsh 进程里的插件宿主端还是旧构建（或网页搜索服务未加载）。完全退出 dsh 再打开后，这里会自动接入并显示搜索状态；现在也可以尝试一键接入。':
+        'The plugin host inside the running dsh process is still an old build (or the web search service is not loaded). Fully quit and reopen dsh to get automatic setup and status here; you can also try the one-click setup now.',
+      '自动接入失败：': 'Automatic setup failed: ',
+      '插件会在桥就绪后自动接入，不必手动点。':
+        'The plugin will connect automatically once the bridge is ready; no need to click.',
       '接入后搜索走 WorkBuddy 额度，不消耗 DeepSeek 钱包；点下面的按钮即可。':
         'After connecting, search uses WorkBuddy quota instead of the DeepSeek wallet; use the button below.',
       '重新接入 WorkBuddy 搜索': 'Reconnect WorkBuddy web search',
@@ -630,11 +637,19 @@ body.dark .wb-root,
         'Failed to read dsh web search settings; check the Diagnose tab for details.',
       '恢复接入前配置': 'Restore previous config',
       '恢复中…': 'Restoring…',
-      '恢复一键接入前保存的 dsh 搜索配置':
-        'Restore the dsh web search configuration saved before one-click setup',
-      '确定恢复接入前的网页搜索配置？只会还原 dsh 设置与独立凭据引用，不会动 DEEPSEEK_API_KEY。':
-        'Restore the web search configuration from before one-click setup? Only dsh settings and the dedicated credential reference are restored; DEEPSEEK_API_KEY is untouched.',
-      '已恢复接入前的搜索配置': 'Restored the previous web search configuration',
+      '恢复接入前的 dsh 搜索配置（并关闭自动接入）':
+        'Restore the previous dsh web search configuration (and turn automatic setup off)',
+      '恢复默认搜索配置': 'Restore default search settings',
+      '摘掉 WorkBuddy 写入的搜索地址与凭据，并关闭自动接入':
+        'Remove the search endpoint and credential written by WorkBuddy, and turn automatic setup off',
+      '当前没有接入前的配置快照。将摘掉 WorkBuddy 写入的搜索地址与独立凭据引用，并关闭自动接入；不会动 DEEPSEEK_API_KEY。确定继续？':
+        'No pre-setup snapshot is available. This removes the search endpoint and dedicated credential reference written by WorkBuddy and turns automatic setup off; DEEPSEEK_API_KEY is untouched. Continue?',
+      '已恢复默认搜索配置（已关闭自动接入）':
+        'Restored the default web search settings (automatic setup is now off)',
+      '确定恢复接入前的网页搜索配置？只会还原 dsh 设置与独立凭据引用，不会动 DEEPSEEK_API_KEY；恢复后不再自动接入。':
+        'Restore the web search configuration from before setup? Only dsh settings and the dedicated credential reference are restored; DEEPSEEK_API_KEY is untouched, and automatic setup stays off.',
+      '已恢复接入前的搜索配置（已关闭自动接入）':
+        'Restored the previous web search configuration (automatic setup is now off)',
       '恢复失败：': 'Restore failed: ',
       '网页搜索需要重新接入：桥令牌已变化':
         'Web search needs reconnecting: the bridge token changed',
@@ -2913,6 +2928,26 @@ body.dark .wb-root,
                   + t('，来源数：') + (search.lastVerifySourceCount ?? 0))
           : t('尚未自检；点「重新检测」验证整条链路。'))
         : '';
+      /*
+       * 自动接入（issue #7）的可见性：默认行为会改 dsh 设置，不能悄悄发生。
+       * - 已自动接好：明确告诉用户不用再点按钮；
+       * - 桥还没就绪：说明会自动发生，不用手动重复点；
+       * - 自动失败：把原因摆出来，并保留下面的手动按钮。
+       */
+      const searchRevertMode = search?.revert?.available
+        ? (search.revert.mode || 'snapshot')
+        : 'none';
+      const searchAuto = search?.auto;
+      const searchAutoNote = searchReady
+        ? (searchAuto?.status === 'done' && searchAuto?.mode === 'auto'
+          ? t('已自动接入，无需手动配置。')
+          : '')
+        : (searchAuto?.status === 'failed'
+          ? t('自动接入失败：') + (searchAuto.error || searchAuto.reason || t('未知错误'))
+          : (searchAuto?.enabled === true
+            && ['pending', 'waiting', 'configuring'].includes(searchAuto.status)
+            ? t('插件会在桥就绪后自动接入，不必手动点。')
+            : ''));
       async function enableSearch() {
         setSearchBusy(true);
         setSearchAction('enable');
@@ -2964,8 +2999,10 @@ body.dark .wb-root,
         }
       }
       async function revertSearch() {
-        if (typeof window.confirm === 'function'
-          && !window.confirm(t('确定恢复接入前的网页搜索配置？只会还原 dsh 设置与独立凭据引用，不会动 DEEPSEEK_API_KEY。'))) return;
+        const confirmText = searchRevertMode === 'clear'
+          ? t('当前没有接入前的配置快照。将摘掉 WorkBuddy 写入的搜索地址与独立凭据引用，并关闭自动接入；不会动 DEEPSEEK_API_KEY。确定继续？')
+          : t('确定恢复接入前的网页搜索配置？只会还原 dsh 设置与独立凭据引用，不会动 DEEPSEEK_API_KEY；恢复后不再自动接入。');
+        if (typeof window.confirm === 'function' && !window.confirm(confirmText)) return;
         setSearchBusy(true);
         setSearchAction('revert');
         setSearchMsg('');
@@ -2974,7 +3011,9 @@ body.dark .wb-root,
             timeoutMs: LONG_REQUEST_TIMEOUT_MS,
           });
           if (res.status >= 200 && res.status < 300 && res.data?.ok) {
-            setSearchMsg(t('已恢复接入前的搜索配置'));
+            setSearchMsg(searchRevertMode === 'clear'
+              ? t('已恢复默认搜索配置（已关闭自动接入）')
+              : t('已恢复接入前的搜索配置（已关闭自动接入）'));
             reload();
           } else {
             setSearchMsg(t('恢复失败：') + (res.data?.error || ('HTTP ' + res.status)));
@@ -3123,51 +3162,77 @@ body.dark .wb-root,
             h(Btn, { primary: true, onClick: () => onOpenTab('accounts') }, '去登录')))
         : null;
 
+      /*
+       * 网页搜索是插件最容易被忽略、也最容易“装了却还在走 DeepSeek”的功能
+       * （issue #7）。它必须在概览**最上面**有独立一栏，而不是藏在「操作」
+       * 按钮堆里；旧宿主没上报 webSearch 状态时也要显示，并说明重启后生效。
+       */
+      const searchCard = unauthenticated ? null : h(Card, { title: '网页搜索' },
+        ...(searchKnown ? [
+          h(Row, { label: '状态' }, h(Pill, {
+            tone: searchReady ? (search?.lastVerifyFailed ? 'warn' : 'ok') : 'warn',
+            text: searchReady ? '已接入本地桥' : searchIssue.pill,
+          })),
+          h('p', { className: 'wb-note', style: { margin: '6px 0 0' } }, searchNote),
+          searchAutoNote ? h('p', { className: 'wb-note', style: { margin: '4px 0 0' } }, searchAutoNote) : null,
+          searchVerifyNote ? h('p', { className: 'wb-note', style: { margin: '4px 0 0' } }, searchVerifyNote) : null,
+          h('div', { className: 'wb-actions', style: { marginTop: '10px' } },
+            h(Btn, {
+              primary: !searchReady,
+              disabled: busy || searchBusy
+                || search.reason === 'namespace-missing'
+                || search.reason === 'error'
+                || search.reason === 'bridge-auth'
+                || search.reason === 'bridge-conflict',
+              onClick: enableSearch,
+              title: '把 dsh 的网页搜索指向本地桥（使用 WorkBuddy 搜索额度，不消耗 DeepSeek）',
+            }, searchBusy
+              ? (searchAction === 'verify' ? '检测中…' : '配置中…')
+              : (searchReady ? '重新接入 WorkBuddy 搜索' : '一键接入 WorkBuddy 搜索')),
+            searchReady
+              ? h(Btn, {
+                disabled: busy || searchBusy,
+                onClick: verifySearch,
+                title: '只跑一次真实搜索，不改配置',
+              }, searchBusy && searchAction === 'verify' ? '检测中…' : '重新检测')
+              : null,
+            search.revert?.available
+              ? h(Btn, {
+                disabled: busy || searchBusy,
+                onClick: revertSearch,
+                title: searchRevertMode === 'clear'
+                  ? '摘掉 WorkBuddy 写入的搜索地址与凭据，并关闭自动接入'
+                  : '恢复接入前的 dsh 搜索配置（并关闭自动接入）',
+              }, searchBusy && searchAction === 'revert'
+                ? '恢复中…'
+                : (searchRevertMode === 'clear' ? '恢复默认搜索配置' : '恢复接入前配置'))
+              : null),
+          searchMsg
+            ? h('p', { className: 'wb-note', role: 'status', 'aria-live': 'polite', style: { margin: '8px 0 0' } }, searchMsg)
+            : null,
+        ] : [
+          h(Row, { label: '状态' }, h(Pill, { tone: 'warn', text: '宿主端未上报搜索状态' })),
+          h('p', { className: 'wb-note', style: { margin: '6px 0 0' } },
+            '当前 dsh 进程里的插件宿主端还是旧构建（或网页搜索服务未加载）。完全退出 dsh 再打开后，这里会自动接入并显示搜索状态；现在也可以尝试一键接入。'),
+          h('div', { className: 'wb-actions', style: { marginTop: '10px' } },
+            h(Btn, {
+              primary: true,
+              disabled: busy || searchBusy,
+              onClick: enableSearch,
+              title: '把 dsh 的网页搜索指向本地桥（使用 WorkBuddy 搜索额度，不消耗 DeepSeek）',
+            }, searchBusy ? '配置中…' : '一键接入 WorkBuddy 搜索'),
+            h(Btn, { onClick: () => onOpenTab('diagnose') }, '去诊断 →')),
+          searchMsg
+            ? h('p', { className: 'wb-note', role: 'status', 'aria-live': 'polite', style: { margin: '8px 0 0' } }, searchMsg)
+            : null,
+        ]));
+
       return h('div', { style: { display: 'flex', flexDirection: 'column', gap: '12px' } },
         welcome,
-        // 积分卡放在最前：这是大家真正在意的东西，值得单独一张卡 + 大号数字
+        // 网页搜索独立一栏、放在最上面：自动接入 / 手动接入都必须一眼可见。
+        searchCard,
+        // 积分卡紧随其后：这是大家真正在意的东西，值得单独一张卡 + 大号数字
         unauthenticated ? null : h(QuotaCard, { status, reload, busy, onOpenTab }),
-
-        // 网页搜索单独一张卡、紧跟积分：没接入时这里是第一眼能看到的状态 + 主按钮
-        unauthenticated ? null : (searchKnown
-          ? h(Card, { title: '网页搜索' },
-            h(Row, { label: '状态' }, h(Pill, {
-              tone: searchReady ? (search?.lastVerifyFailed ? 'warn' : 'ok') : 'warn',
-              text: searchReady ? '已接入本地桥' : searchIssue.pill,
-            })),
-            h('p', { className: 'wb-note', style: { margin: '6px 0 0' } }, searchNote),
-            searchVerifyNote ? h('p', { className: 'wb-note', style: { margin: '4px 0 0' } }, searchVerifyNote) : null,
-            h('div', { className: 'wb-actions', style: { marginTop: '10px' } },
-              h(Btn, {
-                primary: !searchReady,
-                disabled: busy || searchBusy
-                  || search.reason === 'namespace-missing'
-                  || search.reason === 'error'
-                  || search.reason === 'bridge-auth'
-                  || search.reason === 'bridge-conflict',
-                onClick: enableSearch,
-                title: '把 dsh 的网页搜索指向本地桥（使用 WorkBuddy 搜索额度，不消耗 DeepSeek）',
-              }, searchBusy
-                ? (searchAction === 'verify' ? '检测中…' : '配置中…')
-                : (searchReady ? '重新接入 WorkBuddy 搜索' : '一键接入 WorkBuddy 搜索')),
-              searchReady
-                ? h(Btn, {
-                  disabled: busy || searchBusy,
-                  onClick: verifySearch,
-                  title: '只跑一次真实搜索，不改配置',
-                }, searchBusy && searchAction === 'verify' ? '检测中…' : '重新检测')
-                : null,
-              search.revert?.available
-                ? h(Btn, {
-                  disabled: busy || searchBusy,
-                  onClick: revertSearch,
-                  title: '恢复一键接入前保存的 dsh 搜索配置',
-                }, searchBusy && searchAction === 'revert' ? '恢复中…' : '恢复接入前配置')
-                : null),
-            searchMsg
-              ? h('p', { className: 'wb-note', role: 'status', 'aria-live': 'polite', style: { margin: '8px 0 0' } }, searchMsg)
-              : null)
-          : null),
 
         alerts.length
           ? h('div', { className: 'wb-card' },
@@ -3208,14 +3273,7 @@ body.dark .wb-root,
             h(Btn, { disabled: busy, onClick: () => reload() }, '刷新状态'),
             h(Btn, { onClick: () => onOpenTab('diagnose') }, '去诊断 →'),
             h(Btn, { disabled: busy, onClick: report }, '复制诊断报告'),
-            h(Btn, { onClick: () => copyText(status?.config?.bridgeUrl + '/v1') }, '复制桥地址'),
-            // 旧宿主没有 webSearch 状态：保留操作区里的兜底入口，新宿主用上面的独立卡片
-            !searchKnown ? h(Btn, {
-              disabled: busy || searchBusy,
-              onClick: enableSearch,
-              title: '把 dsh 的网页搜索指向本地桥（使用 WorkBuddy 搜索额度，不消耗 DeepSeek）',
-            }, searchBusy ? '配置中…' : '一键接入 WorkBuddy 搜索') : null),
-          !searchKnown && searchMsg ? h('p', { className: 'wb-note', style: { margin: '8px 0 0' } }, searchMsg) : null));
+            h(Btn, { onClick: () => copyText(status?.config?.bridgeUrl + '/v1') }, '复制桥地址'))));
     }
 
     /**

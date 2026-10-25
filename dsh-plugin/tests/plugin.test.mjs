@@ -271,6 +271,9 @@ test('resolveConfig 合默认值并做类型收敛', () => {
   assert.equal(cfg.migrateLegacy, false);
   assert.equal(cfg.provider, DEFAULTS.provider);
   assert.equal(cfg.displayName, 'WorkBuddy');
+  assert.equal(cfg.autoWebSearch, true, '网页搜索默认自动接入（issue #7）');
+  assert.equal(resolveConfig({ autoWebSearch: false }).autoWebSearch, false);
+  assert.equal(resolveConfig({ autoWebSearch: 'off' }).autoWebSearch, false);
 });
 
 test('detectProjectRoot 能从插件目录上溯找到项目根', () => {
@@ -361,7 +364,7 @@ test('换账号后积分/签到缓存必须作废（回归：面板把 A 账号�
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-test('apply() 装配：注册 llm 路由、5 个工具、命令、HTTP 路由', () => {
+test('apply() 装配：注册 llm 路由、6 个工具、命令、HTTP 路由', () => {
   const dir = mkdtempSync(join(tmpdir(), 'wb-apply-'));
   try {
     const { ctx, calls } = fakeCtx();
@@ -370,9 +373,10 @@ test('apply() 装配：注册 llm 路由、5 个工具、命令、HTTP 路由', 
     assert.equal(calls.adapters.length, 1);
     assert.deepEqual(calls.adapters[0].providers, ['workbuddy']);
     assert.equal(calls.adapters[0].adapter.providerInfo('workbuddy').name, 'WorkBuddy');
-    assert.equal(calls.tools.length, 5);
+    assert.equal(calls.tools.length, 6);
     assert.deepEqual(calls.tools.map((t) => t.name).sort(), [
       'workbuddy_bridge', 'workbuddy_checkin', 'workbuddy_models', 'workbuddy_status', 'workbuddy_usage',
+      'workbuddy_web_search',
     ]);
     for (const tool of calls.tools) {
       assert.equal(typeof tool.execute, 'function');

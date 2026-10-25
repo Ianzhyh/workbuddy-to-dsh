@@ -171,7 +171,7 @@ dsh plugin --profile desktop add github:Ianzhyh/workbuddy-to-dsh
 
 # 方式二：release 附件（tgz 安装包，无构建、无需 allowBuilds 授权）
 #   从 GitHub Releases 下载 dsh-plugin-workbuddy-<版本>.tgz 后：
-dsh plugin --profile desktop add ./dsh-plugin-workbuddy-1.10.1.tgz
+dsh plugin --profile desktop add ./dsh-plugin-workbuddy-1.11.0.tgz
 
 # 方式三：从源码（插件在 dsh-plugin/ 子目录，接第 1 步的 git clone）
 dsh plugin --profile desktop add workbuddy-to-dsh/dsh-plugin
@@ -474,13 +474,20 @@ node tools\connect.mjs apply codex --model glm-5.3
 | 上下文 / 输出 | **模型详情顶部可编辑**：输入/输出并排，滑块 + 数值框，留空 = 自动，Token 改完自动保存 | 只能改 `.env` 的 `WORKBUDDY_CONTEXT_WINDOW`（全局默认） |
 | 桥的启停 | 插件自动复用/拉起 | 控制台按钮，或 `启动.cmd` |
 | 数据界面 | **dsh 设置页（9 个标签页）** + 控制台网页，两边同步 | 只有控制台网页 |
-| 网页搜索 | 概览顶部独立状态卡，**未接入主动提醒 + 一键接入**；令牌写独立引用，不覆盖 DeepSeek key | 需手动改 dsh 的 `web-search-deepseek` 配置 |
-| agent 侧 | 5 个工具 + `/workbuddy` 命令 | 无 |
+| 网页搜索 | **启动后自动接入（默认）**，概览顶部独立状态卡 + 一键接入/恢复；令牌写独立引用，不覆盖 DeepSeek key | 需手动改 dsh 的 `web-search-deepseek` 配置 |
+| agent 侧 | 6 个工具（含 `workbuddy_web_search` 原生搜索兜底）+ `/workbuddy` 命令 | 无 |
 
-概览顶部的「网页搜索」卡会按「配置 + 桥存活 + 令牌匹配」显示是否真的可用；未接入时
-「需要你动手」里会提醒，点「接入搜索」即可。插件会把桥令牌写进独立凭据引用、用 dsh
-自己的 web 服务真搜一次做自检，并保留最近一次的时间/来源数；可随时「重新检测」。
-一键接入前会快照原配置，接入后可用「恢复接入前配置」还原。详见
+概览**最上方**的「网页搜索」独立卡片会按「配置 + 桥存活 + 令牌匹配」显示是否真的
+可用（不再藏在「操作」里；旧宿主没上报状态时也会显示重启提示与手动入口）。插件启动、
+桥就绪后**默认自动接入**（issue #7）：用户显式配过 `baseURL` / key / `searchProvider`
+就完全不碰；桥换了端口或本地令牌轮换会自动自愈；点「恢复接入前配置」会还原并关闭自动
+接入，之后不再自动重连。自动接入时卡片会注明；自动失败会显示原因并保留「一键接入」
+按钮，也可以用 `WORKBUDDY_AUTO_WEB_SEARCH=0` 永久关闭。接入后插件会把桥令牌写进独立
+凭据引用、用 dsh 自己的 web 服务真搜一次做自检，并保留最近一次的时间/来源数。
+
+即使 dsh 内置搜索仍指向 DeepSeek（或 key 失效），agent 还可以用
+`workbuddy_web_search` 工具直接走桥的 WorkBuddy 原生搜索，不依赖 dsh 的搜索配置。
+详见
 [`dsh-plugin/README.md`](dsh-plugin/README.md#让-dsh-的网页搜索走-workbuddy不消耗-deepseek-钱包)。
 
 ```sh
@@ -570,9 +577,11 @@ copilot.tencent.com/v2/chat/completions   ← 上游只说 OpenAI 协议，且�
 网页搜索另走 WorkBuddy 的原生 `POST /agenttool/v1/search`：桥暴露
 `POST /v1/web_search`，并在 `/v1/messages` 识别 `web_search_20250305`。dsh 的
 Web search provider 把接口地址指到桥后，搜索走 WorkBuddy 账号、**不消耗 DeepSeek
-钱包**。插件概览顶部提供**一键接入**（未接入会主动提醒），桥令牌写进独立凭据引用、
-不覆盖 `DEEPSEEK_API_KEY`，写完还会用 dsh 自己的 web 服务真搜一次做自检；配置与
-验证提示词见 [`dsh-plugin/README.md`](dsh-plugin/README.md#让-dsh-的网页搜索走-workbuddy不消耗-deepseek-钱包)。
+钱包**。插件启动后**默认自动接入**（用户显式配置过搜索后端则不动；可 `恢复接入前配置`
+或 `WORKBUDDY_AUTO_WEB_SEARCH=0` 关闭），桥令牌写进独立凭据引用、不覆盖
+`DEEPSEEK_API_KEY`，写完还会用 dsh 自己的 web 服务真搜一次做自检；自动失败的兜底是
+`workbuddy_web_search` 工具（直接打桥，不依赖 dsh 搜索配置）。配置与验证提示词见
+[`dsh-plugin/README.md`](dsh-plugin/README.md#让-dsh-的网页搜索走-workbuddy不消耗-deepseek-钱包)。
 
 上游比 OpenAI 规范更严的地方（`developer` 角色、`tool_choice` 只认字符串、首条必须
 是 `system`）都在同一次归一化里处理；缺的能力（embedding）明确返回 501 而不是伪造。

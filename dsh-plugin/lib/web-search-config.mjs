@@ -47,7 +47,12 @@ export async function configureWorkBuddyWebSearch({ settings, credentials, baseU
    * 无条件 update 会直接抛 "namespace is not registered"，把一键配置打断。
    */
   let providerSelected = false;
-  const hasWebSection = typeof settings.get === 'function' && settings.get(WEB_ENTRY_ID) !== undefined;
+  /*
+   * 真实 dsh 的 settings 服务没有 `get(ns)`，只有 `describe()`；这里必须用
+   * describe 判断 `web` 分节是否存在，否则永远跳过 provider 选择。
+   */
+  const config = readWebSearchConfig(settings);
+  const hasWebSection = config.hasWeb;
   if (hasWebSection) {
     await settings.update(WEB_ENTRY_ID, { searchProvider: 'deepseek-official' });
     providerSelected = true;
@@ -57,7 +62,7 @@ export async function configureWorkBuddyWebSearch({ settings, credentials, baseU
   const patch = { baseURL, apiKeyEnv: SEARCH_KEY_REF };
   // 老配置可能把字面 apiKey 写进了分节；provider 会优先用它，导致桥令牌被忽略。
   // 置空即可回落到 apiKeyEnv，同时不把任何秘密写进 settings/patch。
-  const current = typeof settings.get === 'function' ? settings.get(WEB_SEARCH_ENTRY_ID) : undefined;
+  const current = config.section;
   const clearedLiteralKey = Boolean(current && typeof current === 'object'
     && typeof current.apiKey === 'string' && current.apiKey.length > 0);
   if (clearedLiteralKey) patch.apiKey = '';
@@ -204,6 +209,306 @@ export async function restoreWorkBuddyWebSearch({ settings, credentials, snapsho
   return { reverted: true, summary: snapshot.summary || {} };
 }
 
+const normalizeBaseURL = (value) => (typeof value === 'string' ? value.replace(/\/+$/, '') : '');
+
+/**
+ * 这个地址是不是本地桥的搜索入口。
+ *
+ * 端口不参与判断：桥换端口（改配置、旧进程迁移）后仍应认成“我们自己接的”，
+ * 由自动接入自愈，而不是把它误判成用户手工配置的第三方端点。
+ */
+export function isBridgeSearchEndpoint(value, expectedBaseURL) {
+  const actual = normalizeBaseURL(value);
+  const expected = normalizeBaseURL(expectedBaseURL);
+  if (!actual) return false;
+  if (expected && actual === expected) return true;
+  try {
+    const url = new URL(actual);
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') return false;
+    if (!['127.0.0.1', 'localhost', '[::1]', '::1'].includes(url.hostname)) return false;
+    return url.pathname.replace(/\/+$/, '') === '/v1';
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 当前配置是否就是本插件写的那种形态。
+ *
+ * 只看“像不像”，不证明是谁写的：地址指向本机桥、没有字面 key、凭据引用是
+ * 插件专用引用、provider 还是官方默认。自动接入用它区分「自己留下的配置」
+ * 和「用户手写的配置」。
+ */
+export function looksLikeManagedSearchConfig({
+  section,
+  webSection,
+  expectedBaseURL,
+  searchKeyRef = SEARCH_KEY_REF,
+} = {}) {
+  if (!isBridgeSearchEndpoint(section?.baseURL, expectedBaseURL)) return false;
+  const apiKeyEnv = typeof section?.apiKeyEnv === 'string' ? section.apiKeyEnv : '';
+  if (apiKeyEnv !== '' && apiKeyEnv !== searchKeyRef) return false;
+  if (typeof section?.apiKey === 'string' && section.apiKey.length > 0) return false;
+  const provider = typeof webSection?.searchProvider === 'string' ? webSection.searchProvider : '';
+  return provider === '' || provider === 'deepseek-official';
+}
+
+/**
+ * 用户是否**显式**选择了搜索后端。
+ *
+ * 入参必须是 `settings.describe()` 里的 user 层（只含用户改写过的字段），
+ * 不能传合并后的解析值 —— 否则 bundle 默认值会被当成用户选择，自动接入永远
+ * 不敢动。判据只取“换后端”的字段：baseURL / apiKey / apiKeyEnv / searchProvider；
+ * maxUses 这类调参不算。
+ */
+export function hasExplicitSearchOverride({
+  section,
+  webSection,
+  expectedBaseURL,
+  searchKeyRef = SEARCH_KEY_REF,
+} = {}) {
+  const userSection = section && typeof section === 'object' ? section : {};
+  const userWeb = webSection && typeof webSection === 'object' ? webSection : {};
+  const baseURL = normalizeBaseURL(userSection.baseURL);
+  const managedEndpoint = baseURL !== '' && isBridgeSearchEndpoint(baseURL, expectedBaseURL);
+
+  if (baseURL !== '' && !managedEndpoint) return true;
+  if (typeof userSection.apiKey === 'string' && userSection.apiKey.length > 0) return true;
+  if (typeof userSection.apiKeyEnv === 'string' && userSection.apiKeyEnv !== ''
+    && userSection.apiKeyEnv !== searchKeyRef) return true;
+  const provider = typeof userWeb.searchProvider === 'string' ? userWeb.searchProvider : '';
+  if (provider !== '' && provider !== 'deepseek-official') return true;
+  // 显式选回官方 DeepSeek，但端点却不是桥：这是用户的决定，不能覆盖。
+  if (provider === 'deepseek-official' && !managedEndpoint) return true;
+  return false;
+}
+
+/**
+ * 启动时要不要自动接入。
+ *
+ * @returns {{ action: 'configure' | 'skip' | 'wait', reason: string }}
+ *   - configure：可以写配置（auto = 首次接入，heal = 修复令牌/端口漂移）
+ *   - skip：用户显式配置、已接入、或宿主没有搜索 provider
+ *   - wait：桥/服务还没就绪，稍后再试
+ */
+export function decideWebSearchAutoSetup({
+  enabled = true,
+  status,
+  explicitOverride = false,
+  managed = false,
+  bridgeState = 'stopped',
+} = {}) {
+  if (!enabled) return { action: 'skip', reason: 'disabled' };
+  if (!status || status.available !== true) return { action: 'wait', reason: 'unavailable' };
+  if (status.reason === 'namespace-missing') return { action: 'skip', reason: 'unavailable' };
+  // 读配置本身失败时绝不能“当作没配过”然后去写，先等下一轮。
+  if (status.reason === 'error') return { action: 'wait', reason: 'settings' };
+  if (status.configured === true && status.tokenMatches !== false) {
+    return { action: 'skip', reason: 'configured' };
+  }
+  if (explicitOverride && !managed) return { action: 'skip', reason: 'explicit' };
+  if (bridgeState !== 'running') return { action: 'wait', reason: 'bridge' };
+  return { action: 'configure', reason: managed ? 'heal' : 'auto' };
+}
+
+/**
+ * 读搜索配置的**生效值 + 用户层**。
+ *
+ * 这台 dsh 的 `settings` 服务只有 `describe()/update()/replace()`，**没有
+ * `get(ns)`**；旧代码用 `settings.get` 判断，结果把真实存在的搜索配置误判成
+ * “不可用”，自动接入也被跳过（issue #7 里入口看起来消失的根因）。
+ *
+ * 读取顺序：
+ *   1. 有 `describe()` 就以它为准（`value` = 生效值，`user` = 用户改写层）；
+ *   2. 兼容只有 `get(ns)` 的旧宿主；
+ *   3. 两者都没有 → 不可用。
+ *
+ * 某些测试桩的 `describe()` 只给 `user` 不给 `value`，此时用 `get` 补生效值；
+ * 两者都没有时用空对象，交给调用方按“分节存在但为空”处理。
+ *
+ * @returns {{
+ *   available: boolean, error: boolean, section: object | undefined,
+ *   webSection: object | undefined, searchUser: object | null,
+ *   webUser: object | null, hasWeb: boolean, source: string
+ * }}
+ */
+export function readWebSearchConfig(settings) {
+  const empty = {
+    available: false,
+    error: false,
+    section: undefined,
+    webSection: undefined,
+    searchUser: null,
+    webUser: null,
+    hasWeb: false,
+    source: 'none',
+  };
+  if (!settings) return empty;
+
+  let descriptors = null;
+  if (typeof settings.describe === 'function') {
+    try {
+      const list = settings.describe();
+      if (Array.isArray(list)) descriptors = list;
+    } catch {
+      return { ...empty, error: true, source: 'describe' };
+    }
+  }
+
+  const read = (ns) => {
+    let fallback;
+    const getValue = () => {
+      if (fallback !== undefined) return fallback;
+      fallback = null;
+      if (typeof settings.get === 'function') {
+        try { fallback = settings.get(ns); } catch { fallback = null; }
+      }
+      return fallback;
+    };
+
+    if (descriptors) {
+      const descriptor = descriptors.find((item) => item && item.ns === ns);
+      if (!descriptor) return { exists: false, value: undefined, user: {} };
+      const value = descriptor.value && typeof descriptor.value === 'object'
+        ? descriptor.value
+        : (getValue() || {});
+      return {
+        exists: true,
+        value,
+        user: descriptor.user && typeof descriptor.user === 'object' ? { ...descriptor.user } : {},
+      };
+    }
+    if (typeof settings.get === 'function') {
+      const value = getValue();
+      return { exists: value !== undefined && value !== null, value, user: null };
+    }
+    return { exists: false, value: undefined, user: null };
+  };
+
+  const search = read(WEB_SEARCH_ENTRY_ID);
+  const web = read(WEB_ENTRY_ID);
+  return {
+    available: search.exists,
+    error: false,
+    section: search.exists ? search.value : undefined,
+    webSection: web.exists ? web.value : undefined,
+    searchUser: search.user,
+    webUser: web.user,
+    hasWeb: web.exists,
+    source: descriptors ? 'describe' : (typeof settings.get === 'function' ? 'get' : 'none'),
+  };
+}
+
+/**
+ * 读 describe() 的 user 层（只有用户改写过的字段）。
+ * 保留这个轻量入口给恢复/退出自动接入使用；需要生效值时用
+ * {@link readWebSearchConfig}（一次 describe 同时拿两份数据）。
+ *
+ * @returns {{ available: boolean, search: object | null, web: object | null, hasWeb: boolean }}
+ */
+export function readWebSearchUserLayers(settings) {
+  const config = readWebSearchConfig(settings);
+  return {
+    available: config.available,
+    search: config.searchUser,
+    web: config.webUser,
+    hasWeb: config.hasWeb,
+  };
+}
+
+/**
+ * 没有内存快照时的回滚：只摘掉本插件写进去的字段。
+ *
+ * 用在「自动接入后重启了 dsh」：这时原配置快照已经随内存消失，但我们仍能
+ * 认出自己的指纹（桥地址 + 插件专用凭据引用），把它们删掉就回到 bundle 默认。
+ * 不会碰用户的其它搜索字段（maxUses 等）。
+ */
+export async function resetWorkBuddyWebSearchOverrides({
+  settings,
+  credentials,
+  expectedBaseURL,
+  searchKeyRef = SEARCH_KEY_REF,
+} = {}) {
+  if (!settings || typeof settings.describe !== 'function' || typeof settings.replace !== 'function') {
+    throw new Error('dsh settings service does not support inspecting or restoring search settings');
+  }
+  const descriptors = settings.describe();
+  const list = Array.isArray(descriptors) ? descriptors : [];
+  const searchDesc = list.find((item) => item && item.ns === WEB_SEARCH_ENTRY_ID);
+  if (!searchDesc) throw new Error('dsh web search section is not configurable');
+
+  const section = searchDesc.user && typeof searchDesc.user === 'object' ? { ...searchDesc.user } : {};
+  const removed = [];
+  if (isBridgeSearchEndpoint(section.baseURL, expectedBaseURL)) {
+    delete section.baseURL;
+    removed.push('baseURL');
+  }
+  if (typeof section.apiKeyEnv === 'string' && section.apiKeyEnv === searchKeyRef) {
+    delete section.apiKeyEnv;
+    removed.push('apiKeyEnv');
+  }
+  if (section.apiKey === '') {
+    delete section.apiKey;
+    removed.push('apiKey');
+  }
+  if (!removed.length) throw new Error('current web search configuration was not installed by WorkBuddy');
+
+  await settings.replace(WEB_SEARCH_ENTRY_ID, section);
+
+  const webDesc = list.find((item) => item && item.ns === WEB_ENTRY_ID);
+  if (webDesc) {
+    const webSection = webDesc.user && typeof webDesc.user === 'object' ? { ...webDesc.user } : {};
+    webSection.searchProvider = 'deepseek-official';
+    await settings.replace(WEB_ENTRY_ID, webSection);
+  } else {
+    // 没有 web 分节时，用显式的默认凭据引用留下“用户选择”标记，
+    // 避免下次启动又自动接回来。
+    section.apiKeyEnv = 'DEEPSEEK_API_KEY';
+    await settings.replace(WEB_SEARCH_ENTRY_ID, section);
+  }
+
+  if (credentials && typeof credentials.unset === 'function') {
+    try { await credentials.unset(searchKeyRef); } catch { /* 凭据本来就不存在时忽略 */ }
+  }
+  return { reverted: true, removed, summary: { baseURL: '', apiKeyRef: '' } };
+}
+
+/**
+ * 回滚之后留下“不要再自动接入”的显式标记。
+ *
+ * 优先写 `web.searchProvider = deepseek-official`（dsh 认识的原生字段）；
+ * 没有 web 分节时写 `apiKeyEnv = DEEPSEEK_API_KEY`。两者都与默认值等价，
+ * 但会进入 user 层，自动接入据此尊重用户选择。
+ *
+ * @returns {{ marked: boolean, reason: string }}
+ */
+export async function markWorkBuddyWebSearchOptOut({
+  settings,
+  searchKeyRef = SEARCH_KEY_REF,
+} = {}) {
+  if (!settings || typeof settings.describe !== 'function' || typeof settings.replace !== 'function') {
+    return { marked: false, reason: 'settings-unavailable' };
+  }
+  const layers = readWebSearchUserLayers(settings);
+  if (!layers.available) return { marked: false, reason: 'section-missing' };
+  const search = layers.search || {};
+  const web = layers.web || {};
+  const explicit = hasExplicitSearchOverride({
+    section: search,
+    webSection: web,
+    expectedBaseURL: '',
+    searchKeyRef,
+  });
+  if (explicit) return { marked: false, reason: 'already-explicit' };
+
+  if (layers.hasWeb) {
+    await settings.replace(WEB_ENTRY_ID, { ...web, searchProvider: 'deepseek-official' });
+    return { marked: true, reason: 'provider' };
+  }
+  await settings.replace(WEB_SEARCH_ENTRY_ID, { ...search, apiKeyEnv: 'DEEPSEEK_API_KEY' });
+  return { marked: true, reason: 'key-ref' };
+}
+
 /**
  * 判断 dsh 的网页搜索当前是否真的指向本地桥。
  *
@@ -218,11 +523,10 @@ export async function restoreWorkBuddyWebSearch({ settings, credentials, snapsho
  * @returns {{ configured: boolean, pointsToBridge: boolean, providerSelected: boolean, provider: string, baseURL: string, apiKeyRef: string, reason: string }}
  */
 export function deriveWebSearchStatus({ section, webSection, expectedBaseURL, keyConfigured = false }) {
-  const normalize = (value) => (typeof value === 'string' ? value.replace(/\/+$/, '') : '');
-  const baseURL = normalize(section?.baseURL);
+  const baseURL = normalizeBaseURL(section?.baseURL);
   const apiKeyRef = typeof section?.apiKeyEnv === 'string' ? section.apiKeyEnv : '';
   const provider = typeof webSection?.searchProvider === 'string' ? webSection.searchProvider : '';
-  const pointsToBridge = baseURL !== '' && baseURL === normalize(expectedBaseURL);
+  const pointsToBridge = baseURL !== '' && baseURL === normalizeBaseURL(expectedBaseURL);
   // rc.6 没有 `web` 分节；没有显式选择时沿用 bundle patch 的 deepseek-official。
   const providerSelected = provider === '' || provider === 'deepseek-official';
   const configured = pointsToBridge && keyConfigured === true && providerSelected;

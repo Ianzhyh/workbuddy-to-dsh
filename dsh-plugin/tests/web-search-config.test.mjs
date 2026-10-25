@@ -2,8 +2,15 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   configureWorkBuddyWebSearch,
+  decideWebSearchAutoSetup,
   deriveWebSearchReadiness,
   deriveWebSearchStatus,
+  hasExplicitSearchOverride,
+  isBridgeSearchEndpoint,
+  looksLikeManagedSearchConfig,
+  markWorkBuddyWebSearchOptOut,
+  readWebSearchUserLayers,
+  resetWorkBuddyWebSearchOverrides,
   restoreWorkBuddyWebSearch,
   snapshotWorkBuddyWebSearch,
   verifyWorkBuddyWebSearch,

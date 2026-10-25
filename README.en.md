@@ -124,14 +124,20 @@ the `EN` / `中` toggle in its top-right corner switches all nine tabs
 
 The plugin also puts a dedicated **Web search** card at the top of the overview. Its
 readiness reflects the actual configuration, bridge availability and token match — not
-just whether settings were written. When dsh search is not connected, the card and the
-**Needs your attention** list show a prominent reminder with a one-click **Connect
-search** button. The bridge token is stored under a dedicated credential reference
-(never overwriting `DEEPSEEK_API_KEY`), and setup self-tests through dsh's own web
-service; the card keeps the last test time/source count and offers **Test again**.
-The previous dsh search settings are snapshotted before setup, so **Restore previous
-config** can undo the change. Search then uses WorkBuddy quota instead of the DeepSeek
-wallet.
+just whether settings were written. **Search is connected automatically by default**
+once the plugin starts and the bridge is ready (issue #7). An explicit user choice of
+`baseURL` / API key / `searchProvider` is never overwritten; a changed bridge port or
+rotated local token is repaired on startup. **Restore previous config** reverts the
+change and turns automatic setup off, so it will not reconnect on the next start;
+`WORKBUDDY_AUTO_WEB_SEARCH=0` disables it from the beginning. When dsh search is not
+connected, the card and the **Needs your attention** list still show a reminder with a
+one-click **Connect search** button. The bridge token is stored under a dedicated
+credential reference (never overwriting `DEEPSEEK_API_KEY`), and setup self-tests
+through dsh's own web service; the card keeps the last test time/source count and
+offers **Test again**. If dsh's built-in search still fails (for example, an invalid
+DeepSeek key), the `workbuddy_web_search` tool can search through the bridge directly
+without relying on dsh's search configuration. Search then uses WorkBuddy quota
+instead of the DeepSeek wallet.
 
 ## Highlights
 
@@ -140,9 +146,10 @@ wallet.
 - **No plaintext credentials on disk** — desktop AtRest keys are fetched via
   `ELECTRON_RUN_AS_NODE` on demand; plugin-sign-in credentials are stored as
   DPAPI-protected AES-GCM envelopes. Plaintext tokens stay in memory only.
-- **Native web search, one-click** — dsh search can run through WorkBuddy instead of
-  the DeepSeek wallet; the plugin stores the bridge token in a separate credential
-  reference, self-tests the full chain, and reminds you when it is not connected.
+- **Native web search, automatic by default** — dsh search can run through WorkBuddy
+  instead of the DeepSeek wallet; the plugin stores the bridge token in a separate
+  credential reference, self-tests the full chain, respects explicit user settings,
+  and exposes `workbuddy_web_search` as a fallback that bypasses dsh search config.
 - **Three protocols**, streaming, tool calls, multi-turn tool results.
   Codex speaks the OpenAI **Responses** protocol, which is *not* chat/completions —
   the bridge contains a real conversion layer (`/v1/responses`), so there is no
