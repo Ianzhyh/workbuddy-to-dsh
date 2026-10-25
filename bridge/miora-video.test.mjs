@@ -457,6 +457,35 @@ test('长轮询：waitMs 内等到 completed；预算用完返回最后一次状
   assert.equal(queries, 3, '4 秒预算 = 首次 + 2 次重试；超时是「还没出来」，不是失败');
 });
 
+test('长轮询：预算按真实时间收手（慢查询不会拖到次数上限）', async () => {
+  let clock = 0;
+  let queries = 0;
+  const fetchImpl = async (url) => {
+    if (String(url).endsWith('/v2/api-keys')) {
+      return jsonResponse(200, {
+        code: 0,
+        data: { key: 'ck_t_slow', expires_at: new Date(Date.now() + 900_000).toISOString() },
+      });
+    }
+    if (String(url).endsWith('/video/query-task')) {
+      queries += 1;
+      clock += 10_000; // 模拟每次查询都很慢
+      return jsonResponse(200, {
+        code: 0,
+        failed: false,
+        data: { 'task-deadline': { status: 'processing' } },
+      });
+    }
+    throw new Error(`unexpected ${url}`);
+  };
+
+  const result = await queryVideo(AUTH, 'task-deadline', {
+    fetchImpl, baseUrl: BASE, waitMs: 20_000, sleep: async () => {}, now: () => clock,
+  });
+  assert.equal(result.status, 'in_progress');
+  assert.equal(queries, 2, '20 秒预算被两次 10 秒查询用尽，第三次不该再打');
+});
+
 test('查询：没有本地提交记录的任务不伪造元数据', async () => {
   const fetchImpl = async (url) => {
     if (String(url).endsWith('/v2/api-keys')) {

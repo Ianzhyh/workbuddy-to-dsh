@@ -715,6 +715,8 @@ export async function queryVideo(auth, id, options = {}) {
   const waitMs = Math.min(Math.max(Number(options.waitMs) || 0, 0), MAX_VIDEO_WAIT_MS);
   const sleep = options.sleep || ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
   const attempts = waitMs > 0 ? Math.ceil(waitMs / QUERY_POLL_INTERVAL_MS) + 1 : 1;
+  // 预算是**真实时间**：单次查询很慢时也要按时收手，不能只靠轮询次数兜底。
+  const deadline = opts.now() + waitMs;
 
   let last = null;
   for (let attempt = 0; attempt < attempts; attempt += 1) {
@@ -732,8 +734,9 @@ export async function queryVideo(auth, id, options = {}) {
     const terminal = last.status === 'completed' || last.status === 'failed' || last.status === 'cancelled';
     if (terminal || attempt === attempts - 1) return last;
     // 最后一段可能不足一个轮询间隔：别让 wait=1 实际等了 2 秒。
-    const remaining = waitMs - attempt * QUERY_POLL_INTERVAL_MS;
-    await sleep(Math.max(0, Math.min(QUERY_POLL_INTERVAL_MS, remaining)));
+    const remaining = Math.min(deadline - opts.now(), waitMs - attempt * QUERY_POLL_INTERVAL_MS);
+    if (remaining <= 0) return last;
+    await sleep(Math.min(QUERY_POLL_INTERVAL_MS, remaining));
   }
   return last;
 }

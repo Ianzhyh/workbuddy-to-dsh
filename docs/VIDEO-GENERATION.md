@@ -153,8 +153,8 @@ Authorization: Bearer <本地桥令牌>
 ```
 
 - `wait=N`（0–60，整数秒）：**桥代客户端轮询**，每 2 秒查一次，直到终态或预算用完。
-  查询不计费，重复查询安全；超时返回最后一次状态（不是失败）。`wait=abc` 直接 400，
-  不会静默当成 0。
+  预算是**真实时间**：单次查询很慢也不会把 60 秒拖成几分钟。查询不计费，重复查询安全；
+  超时返回最后一次状态（不是失败）。`wait=abc` 直接 400，不会静默当成 0。
 - 建议交互：提交后用 `wait=20` 查一次；仍是 `in_progress` 再隔一会儿查，别重提。
 - `status` 是归一化状态（`pending`→`queued`、`processing`→`in_progress`），
   `upstream_status` 保留上游原值。
@@ -191,7 +191,7 @@ GET /v1/videos/{upstreamTaskId}/content
 | 计费 | **提交成功即按账号积分计费**；查询与 `/content` 不计费 |
 | 幂等 | **提交不是幂等的**：不要因为超时/断线自动重试，否则可能重复扣费 |
 | 提交超时 | 桥给提交预留 390 秒（异步接口正常几秒返回）；客户端超时先断开时任务可能已创建 —— 先查，不要重提 |
-| 查询超时 | 单次 30 秒；`wait=N` 的总预算最多 60 秒（客户端把超时设得比它长） |
+| 查询超时 | 单次 30 秒；`wait=N` 的总预算最多 60 秒（按真实时间计，客户端把超时设得比它长） |
 | 请求体 | 沿用 `WORKBUDDY_MAX_BODY_BYTES`（默认 32 MB）；base64 图片会快速放大，注意 413 |
 | 账本 | 视频提交按 `kind=video` 单独计数（控制台用量页显示「视频提交/视频失败」），不计入模型调用与 tokens；上游不回报视频积分 |
 
@@ -285,7 +285,8 @@ curl -sS "http://127.0.0.1:8790/v1/videos/<id>?wait=30" -H "Authorization: Beare
 - 参数校验/归一：`miora-video.test.mjs` 覆盖未知字段、空帧、非字符串参考图、
   非整数时长、非法画幅、非图片 data URI、分辨率大小写归一。
 - 长轮询与元数据回填：`miora-video.test.mjs`（注入 sleep）与
-  `bridge-video.test.mjs`（真起桥 + 桩上游，`task-slow` 两次查询后 completed）。
+  `bridge-video.test.mjs`（真起桥 + 桩上游，`task-slow` 两次查询后 completed）；
+  预算按**真实时间**收手（`task-deadline`：两次 10 秒查询用尽 20 秒预算即停止）。
 - `VIDEO_NO_OUTPUT`：`bridge-video.test.mjs` 的 `task-empty`（completed + 空产物）
   断言 `/content` 返回 502，而不是 409。
 - 打包完整性：`npm run check:pack` 递归校验根包入口的本地 import 都在 `files` 里。
