@@ -29,37 +29,43 @@ const fmtTokens = (n) => (Number(n) >= 1000 ? `${(Number(n) / 1000).toFixed(1)}k
  * 视频接口错误 → 模型能直接转述给用户的话。
  * 提交失败最怕 agent 自动重试：那可能重复计费，所以文案必须明确“不要重提”。
  */
-function videoFailureText(error, action) {
+/**
+ * 媒体接口错误 → 模型能直接转述给用户的话。
+ * 提交失败最怕 agent 自动重试：那可能重复计费，所以文案必须明确“不要重提”。
+ */
+function mediaFailureText(error, { action = 'submit', label = '视频' } = {}) {
   const status = Number(error?.status) || 0;
-  const code = String(error?.payload?.error?.code || '');
+  const code = String(error?.payload?.error?.code || error?.code || '');
   const message = String(error?.message || error || '').slice(0, 300);
-  if (code === 'VIDEO_NO_OUTPUT') {
-    return '任务已标记完成，但上游没有返回可下载的 https 产物。稍后再调用 workbuddy_video_status 查一次；'
+  const noun = label;
+  const actionText = action === 'submit' ? '提交' : '查询';
+  if (code.endsWith('_NO_OUTPUT')) {
+    return `任务已标记完成，但上游没有返回可下载的 https 产物。稍后再调用 ${noun === '图片' ? 'workbuddy_image_status' : 'workbuddy_video_status'} 查一次；`
       + '不要重新提交（会再扣一次积分）。';
   }
   if (status === 409) {
     return '任务还没完成，所以没有可下载的产物。稍后再查一次；不要重新提交。';
   }
   if (status === 403) {
-    return '视频接口只接受本地管理令牌（client key 仅聊天）。检查插件是否用 WORKBUDDY_LOCAL_TOKEN 连桥，或重启桥。';
+    return `${noun}接口只接受本地管理令牌（client key 仅聊天）。检查插件是否用 WORKBUDDY_LOCAL_TOKEN 连桥，或重启桥。`;
   }
   if (status === 401) {
-    return '视频请求失败：本地桥令牌或 WorkBuddy 登录态不可用。先确认桥在运行且已登录，再重试。';
+    return `${noun}请求失败：本地桥令牌或 WorkBuddy 登录态不可用。先确认桥在运行且已登录，再重试。`;
   }
   if (status === 429) {
-    return `视频${action === 'submit' ? '提交' : '查询'}被 Miora 限流：${message || 'HTTP 429'}。`
-      + '不要重复提交（任务可能已经创建）；稍后先调用 workbuddy_video_status 查已有任务。';
+    return `${noun}${actionText}被 Miora 限流：${message || 'HTTP 429'}。`
+      + `不要重复提交（任务可能已经创建）；稍后先调用 ${noun === '图片' ? 'workbuddy_image_status' : 'workbuddy_video_status'} 查已有任务。`;
   }
   if (status === 400) {
-    return `视频请求被拒绝：${message || '参数不合法'}。按提示修改参数或内容，不要原样重试。`;
+    return `${noun}请求被拒绝：${message || '参数不合法'}。按提示修改参数或内容，不要原样重试。`;
   }
   if (status === 404) {
-    return `没有找到这个视频任务：${message || 'unknown id'}。确认 id 来自 workbuddy_generate_video 的返回。`;
+    return `没有找到这个${noun}任务：${message || 'unknown id'}。确认 id 来自提交工具的返回。`;
   }
   if (/ECONNREFUSED|fetch failed|socket hang up/i.test(message)) {
-    return '视频请求失败：本地桥未运行。先调用 workbuddy_bridge（action=start），再重试。';
+    return `${noun}请求失败：本地桥未运行。先调用 workbuddy_bridge（action=start），再重试。`;
   }
-  return `视频${action === 'submit' ? '提交' : '查询'}失败：${message || '未知错误'}`;
+  return `${noun}${actionText}失败：${message || '未知错误'}`;
 }
 
 /**
@@ -206,9 +212,22 @@ export function createTools(deps) {
       const total = usage?.total || {};
       const videos = Number(total.videos) || 0;
       const videoFailed = Number(total.videoFailed) || 0;
-      const videoText = (videos || videoFailed)
-        ? `，视频提交 ${videos} 次${videoFailed ? `（失败 ${videoFailed}）` : ''}`
-        : '';
+      const images = Number(total.images) || 0;
+      const imageFailed = Number(total.imageFailed) || 0;
+      const videoCredit = Number(total.videoCredit) || 0;
+      const videoCreditKnown = Number(total.videoCreditKnown) || 0;
+      const imageCredit = Number(total.imageCredit) || 0;
+      const imageCreditKnown = Number(total.imageCreditKnown) || 0;
+      const genBits = [];
+      if (videos || videoFailed) {
+        genBits.push(`视频提交 ${videos} 次${videoFailed ? `（失败 ${videoFailed}）` : ''}`
+          + `${videoCreditKnown ? `，估算消耗 ${videoCredit.toFixed(2)} 积分` : ''}`);
+      }
+      if (images || imageFailed) {
+        genBits.push(`图片提交 ${images} 次${imageFailed ? `（失败 ${imageFailed}）` : ''}`
+          + `${imageCreditKnown ? `，估算消耗 ${imageCredit.toFixed(2)} 积分` : ''}`);
+      }
+      const videoText = genBits.length ? `，${genBits.join('，')}` : '';
       const lines = [`最近 ${days} 天：调用 ${total.calls || 0} 次，失败 ${total.failed || 0} 次${videoText}，`
         + `输入 ${fmtTokens(total.promptTokens)} / 输出 ${fmtTokens(total.completionTokens)} tokens，`
         + `消耗积分 ${typeof total.credit === 'number' ? total.credit.toFixed(2) : '0'}，平均耗时 ${total.calls ? Math.round((total.ms || 0) / total.calls) : 0} ms`];
@@ -373,7 +392,7 @@ export function createTools(deps) {
           signal: exec?.signal,
         });
       } catch (error) {
-        return videoFailureText(error, 'submit');
+        return mediaFailureText(error, { action: 'submit', label: '视频' });
       }
       const lines = [
         `已提交视频任务：${video.id}`,
@@ -416,7 +435,7 @@ export function createTools(deps) {
       try {
         video = await client.videoStatus(id, { waitMs: waitSeconds * 1000, signal: exec?.signal });
       } catch (error) {
-        return videoFailureText(error, 'status');
+        return mediaFailureText(error, { action: 'status', label: '视频' });
       }
       const lines = [
         `任务 ${id}：${video.status}（上游：${video.upstream_status || '-'}）`,
@@ -437,6 +456,124 @@ export function createTools(deps) {
         }
       } else if (video.status === 'failed' || video.status === 'cancelled') {
         lines.push(`任务未成功：${video.error?.message || '上游未给失败原因'}`);
+        lines.push('不要直接重复提交；先确认失败原因，必要时再生成。');
+      } else {
+        lines.push(waitSeconds > 0
+          ? `仍在生成（已等待约 ${waitSeconds} 秒）。稍后再调用本工具查询；不要重新提交，否则会重复计费。`
+          : '仍在生成。稍后再调用本工具查询；不要重新提交，否则会重复计费。');
+      }
+      return lines.join('\n');
+    },
+  });
+
+  /*
+   * 图片生成工具（Miora）。
+   *
+   * 与视频同一套纪律：提交只拿任务 id、不阻塞等出图；文案明确高积分计费且
+   * 禁止同一需求重复提交（会重复扣费）。
+   */
+  const imageSubmitTool = textTool({
+    name: 'workbuddy_generate_image',
+    description:
+      '用 WorkBuddy 的 Miora 生成图片：只给 prompt 是文生图；同时给 images[] 就是图生图（按指令改图）。'
+      + '这是高积分计费操作，**只在用户明确要求生成/修改图片时调用**；同一需求只提交一次。'
+      + '提交是异步的：本工具返回任务 id，之后用 workbuddy_image_status 查询；'
+      + '不要因为等待时间长就重复提交（会重复扣费）。'
+      + '参数会严格校验：拼错的键（如 aspect_ratio / width）会直接返回 400，而不是被忽略。',
+    parameters: {
+      type: 'object',
+      properties: {
+        prompt: { type: 'string', description: '图片描述（文生图）或修改指令（图生图）。必填' },
+        images: {
+          type: 'array',
+          items: { type: 'string' },
+          description: '参考图（给了就是图生图）：绝对本地路径 / 公网 https URL / data URI / miora fileKey，每张 ≤ 20 MB',
+        },
+        size: { type: 'string', description: '输出尺寸 WIDTHxHEIGHT，如 1024x1024；不传用模型默认' },
+        quality: { type: 'string', description: '文生图的质量档（如 standard / hd），图生图忽略' },
+      },
+      required: ['prompt'],
+      additionalProperties: false,
+    },
+    timeoutMs: 410_000,
+    async execute(args, exec) {
+      const images = Array.isArray(args?.images)
+        ? args.images.filter((item) => typeof item === 'string' && item.trim()).map((item) => item.trim())
+        : [];
+      const mode = images.length ? 'edit' : 'generate';
+      let image;
+      try {
+        image = await client.imageSubmit({
+          prompt: typeof args?.prompt === 'string' ? args.prompt : '',
+          images,
+          size: typeof args?.size === 'string' ? args.size : '',
+          quality: typeof args?.quality === 'string' ? args.quality : '',
+          mode,
+          signal: exec?.signal,
+        });
+      } catch (error) {
+        return mediaFailureText(error, { action: 'submit', label: '图片' });
+      }
+      const lines = [
+        `已提交图片任务：${image.id}`,
+        `状态：${image.status}；模式：${image.mode || mode}`
+          + `${image.size ? `；尺寸：${image.size}` : ''}${image.model ? `；模型：${image.model}` : ''}`,
+        '提交成功即按 WorkBuddy 账号积分计费。同一需求不要再提交一次。',
+        `生成是异步的，稍后用 workbuddy_image_status 查询（id=${image.id}）；completed 后把返回的 URL 交给用户。`,
+      ];
+      return lines.join('\n');
+    },
+  });
+
+  const imageStatusTool = textTool({
+    name: 'workbuddy_image_status',
+    description:
+      '查询 workbuddy_generate_image 提交的图片任务状态。'
+      + '默认会在本工具里等待最多 20 秒（桥代轮询），通常能直接拿到 completed；'
+      + 'queued/in_progress 时告诉用户还在生成，稍后再查，**不要重新提交**；'
+      + 'completed 时返回有时效的下载 URL；failed/cancelled 时返回失败原因。',
+    parameters: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', description: '提交图片时返回的任务 id（upstreamTaskId）' },
+        wait_seconds: {
+          type: 'integer',
+          minimum: 0,
+          maximum: 45,
+          description: '在本工具内等待多少秒再返回（0 = 立即返回；默认 20，最大 45）',
+        },
+      },
+      required: ['id'],
+      additionalProperties: false,
+    },
+    timeoutMs: 90_000,
+    async execute(args, exec) {
+      const id = typeof args?.id === 'string' ? args.id.trim() : '';
+      if (!id) throw new Error('id 不能为空：请传 workbuddy_generate_image 返回的任务 id');
+      const rawWait = Number(args?.wait_seconds);
+      const waitSeconds = Number.isFinite(rawWait) ? Math.min(Math.max(Math.trunc(rawWait), 0), 45) : 20;
+      let image;
+      try {
+        image = await client.imageStatus(id, { waitMs: waitSeconds * 1000, signal: exec?.signal });
+      } catch (error) {
+        return mediaFailureText(error, { action: 'status', label: '图片' });
+      }
+      const lines = [
+        `任务 ${id}：${image.status}（上游：${image.upstream_status || '-'}）`,
+        `模式：${image.mode || '-'}${image.size ? `；尺寸：${image.size}` : ''}`
+          + `${image.quality ? `；质量：${image.quality}` : ''}`,
+      ];
+      if (image.created_at) lines.push(`提交时间：${new Date(image.created_at * 1000).toISOString()}`);
+      if (image.status === 'completed') {
+        const urls = Array.isArray(image.output?.urls) ? image.output.urls : [];
+        if (urls.length) {
+          lines.push('图片已生成。以下签名 URL 有时效，请尽快下载或转存：');
+          for (const url of urls) lines.push(`- ${url}`);
+        } else {
+          lines.push('上游标记完成，但没有返回 https 产物 URL。稍后再查一次，或到 WorkBuddy 客户端查看该任务。');
+        }
+      } else if (image.status === 'failed' || image.status === 'cancelled') {
+        lines.push(`任务未成功：${image.error?.message || '上游未给失败原因'}`);
         lines.push('不要直接重复提交；先确认失败原因，必要时再生成。');
       } else {
         lines.push(waitSeconds > 0
@@ -495,5 +632,8 @@ export function createTools(deps) {
     },
   });
 
-  return [statusTool, modelsTool, usageTool, checkinTool, webSearchTool, videoSubmitTool, videoStatusTool, bridgeTool];
+  return [
+    statusTool, modelsTool, usageTool, checkinTool, webSearchTool,
+    videoSubmitTool, videoStatusTool, imageSubmitTool, imageStatusTool, bridgeTool,
+  ];
 }

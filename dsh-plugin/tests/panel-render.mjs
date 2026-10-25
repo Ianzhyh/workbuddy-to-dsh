@@ -308,6 +308,11 @@ try {
   if (!svgCount) problems.push('用量页没有渲染趋势图（内联 SVG）');
   const usageText = await page.cdp.evaluate("document.querySelector('.wb-root') ? document.querySelector('.wb-root').innerText : ''");
   if (!/搜索次数/.test(usageText)) problems.push('用量页没有单列搜索次数');
+  if (!/视频提交/.test(usageText)) problems.push('用量页没有单列视频提交次数');
+  if (!/图片提交/.test(usageText)) problems.push('用量页没有单列图片提交次数');
+  if (!/视频消耗积分/.test(usageText)) problems.push('用量页没有单独卡片显示视频消耗积分');
+  if (!/图片消耗积分/.test(usageText)) problems.push('用量页没有单独卡片显示图片消耗积分');
+  if (!/上游不回报积分/.test(usageText)) problems.push('用量页没有说明生成类不回报积分');
   if (!/已回报 30\/36 次/.test(usageText)) problems.push('用量页没有显示积分回报覆盖率');
   if (!/本地账本只覆盖本桥请求/.test(usageText)) problems.push('用量页没有说明本地账本与上游余额的口径差异');
   let shot = await page.cdp.send('Page.captureScreenshot', { format: 'png', captureBeyondViewport: true });

@@ -152,6 +152,8 @@ const need = [
   'package/vendor/config.mjs',
   'package/vendor/bridge/workbuddy-bridge.mjs',
   'package/vendor/bridge/miora-video.mjs',
+  'package/vendor/bridge/miora-image.mjs',
+  'package/vendor/bridge/miora-media-core.mjs',
   'package/vendor/bridge/promotions.mjs',
   'package/vendor/dashboard/server.mjs',
   'package/vendor/dashboard/public/index.html',
@@ -177,6 +179,8 @@ const mirrors = [
   ['package/vendor/config.mjs', 'config.mjs'],
   ['package/vendor/bridge/workbuddy-bridge.mjs', 'bridge/workbuddy-bridge.mjs'],
   ['package/vendor/bridge/miora-video.mjs', 'bridge/miora-video.mjs'],
+  ['package/vendor/bridge/miora-image.mjs', 'bridge/miora-image.mjs'],
+  ['package/vendor/bridge/miora-media-core.mjs', 'bridge/miora-media-core.mjs'],
   ['package/vendor/bridge/promotions.mjs', 'bridge/promotions.mjs'],
 ];
 for (const [inPkg, inRepo] of mirrors) {

@@ -131,6 +131,8 @@ export const FIXTURES = {
       total: {
         calls: 36, promptTokens: 186000, completionTokens: 42000, ms: 38000,
         credit: 1.24, creditCalls: 30, failed: 2, searches: 4, searchFailed: 1,
+        videos: 2, videoFailed: 1, images: 1, imageFailed: 1,
+        videoCredit: 3.5, videoCreditKnown: 2, imageCredit: 0.8, imageCreditKnown: 1,
       },
       models: [
         { model: 'deepseek-v4.1-flash', calls: 24, promptTokens: 120000, completionTokens: 30000, credit: 0.76, creditCalls: 20 },

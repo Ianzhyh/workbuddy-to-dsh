@@ -958,6 +958,17 @@ body.dark .wb-root,
       '模型调用': 'Model calls',
       '搜索次数': 'Search calls',
       '搜索失败': 'Search failures',
+      '视频提交': 'Video submissions',
+      '视频失败': 'Video failures',
+      '图片提交': 'Image submissions',
+      '图片失败': 'Image failures',
+      '视频消耗积分': 'Video credit used',
+      '图片消耗积分': 'Image credit used',
+      '生成消耗': 'Generation usage',
+      '上游不回报积分，消耗 = 提交前后账号余额差（估算；并发生成或模型调用会混入）。':
+        'Upstream reports no credit; usage = account balance delta around submit (estimated; concurrent calls can skew it).',
+      '视频/图片提交按次计费，上游不回报积分；消耗以上游余额为准。':
+        'Video/image submissions are billed per call without reported credit; check the upstream balance.',
       '已回报 ': 'Reported for ',
       ' 次扣分（上游按两位小数）': ' calls with credit (upstream rounds to 2 decimals)',
       '上游未回报扣分（': 'Upstream did not report credit for ',
@@ -4086,6 +4097,19 @@ body.dark .wb-root,
       const searches = Number(total.searches);
       const hasSearchMetric = Number.isFinite(searches);
       const searchFailed = Number(total.searchFailed) || 0;
+      const videos = Number(total.videos) || 0;
+      const videoFailed = Number(total.videoFailed) || 0;
+      const hasVideoMetric = Number.isFinite(Number(total.videos));
+      const images = Number(total.images) || 0;
+      const imageFailed = Number(total.imageFailed) || 0;
+      const hasImageMetric = Number.isFinite(Number(total.images));
+      const generationTotal = videos + images;
+      const videoCredit = Number(total.videoCredit) || 0;
+      const videoCreditKnown = Number(total.videoCreditKnown) || 0;
+      const imageCredit = Number(total.imageCredit) || 0;
+      const imageCreditKnown = Number(total.imageCreditKnown) || 0;
+      const showGenerationCard = hasVideoMetric || hasImageMetric;
+      const generationNote = t('上游不回报积分，消耗 = 提交前后账号余额差（估算；并发生成或模型调用会混入）。');
       const creditNote = totalCalls
         ? (creditCalls
           ? t('已回报 ') + creditCalls + '/' + totalCalls + t(' 次扣分（上游按两位小数）')
@@ -4104,7 +4128,8 @@ body.dark .wb-root,
       const noteLine1 = [creditNote, searchNote].filter(Boolean).join(' · ');
       const noteLine2 = [searchVersionNote, scopeNote].filter(Boolean).join(' · ');
       const hasAnyData = totalCalls > 0 || Number(total.failed) > 0
-        || (hasSearchMetric && (searches > 0 || searchFailed > 0));
+        || (hasSearchMetric && (searches > 0 || searchFailed > 0))
+        || generationTotal > 0 || videoFailed > 0 || imageFailed > 0;
       const series = hours ? (usage?.hours || []) : (usage?.days || []);
       const points = series.map((d) => ({
         label: hours ? String(d.key).slice(-2) + '时' : String(d.day || d.key).slice(5),
@@ -4134,6 +4159,21 @@ body.dark .wb-root,
         reload();
       };
       return h('div', { style: { display: 'flex', flexDirection: 'column', gap: '12px' } },
+        showGenerationCard
+          ? h(Card, { title: '生成消耗' },
+            h('div', { className: 'wb-usage-grid' },
+              h('div', { className: 'wb-metric' }, h('span', null, '视频提交'), h('b', null, fmtInt(videos))),
+              h('div', { className: 'wb-metric brand' }, h('span', null, '视频消耗积分'), h('b', null, videoCreditKnown ? videoCredit.toFixed(2) : '—')),
+              videoFailed > 0
+                ? h('div', { className: 'wb-metric warn' }, h('span', null, '视频失败'), h('b', null, fmtInt(videoFailed)))
+                : null,
+              h('div', { className: 'wb-metric' }, h('span', null, '图片提交'), h('b', null, fmtInt(images))),
+              h('div', { className: 'wb-metric brand' }, h('span', null, '图片消耗积分'), h('b', null, imageCreditKnown ? imageCredit.toFixed(2) : '—')),
+              imageFailed > 0
+                ? h('div', { className: 'wb-metric warn' }, h('span', null, '图片失败'), h('b', null, fmtInt(imageFailed)))
+                : null),
+            h('p', { className: 'wb-note' }, generationNote))
+          : null,
         h(Card, { title: '用量统计' },
           h('div', { className: 'wb-usage-toolbar' },
             h('div', { className: 'wb-actions-group' },

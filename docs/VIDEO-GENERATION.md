@@ -20,7 +20,7 @@ WorkBuddy 客户端内置的 Miora MCP（`resources/plugins/workbuddy-builtin/mc
 | `miora_frame_to_video` | `mode=frame`（首帧，可选尾帧） |
 | `miora_reference_to_video` | `mode=reference`（参考图） |
 | `miora_query_task` | `GET /v1/videos/{id}` |
-| `miora_text_to_image` / `miora_edit_image` | 未接入（同源，可按相同方式扩展） |
+| `miora_text_to_image` / `miora_edit_image` | 图片生成，见 [`IMAGE-GENERATION.md`](IMAGE-GENERATION.md) |
 
 调用链与桥的实现一致：
 
@@ -193,7 +193,7 @@ GET /v1/videos/{upstreamTaskId}/content
 | 提交超时 | 桥给提交预留 390 秒（异步接口正常几秒返回）；客户端超时先断开时任务可能已创建 —— 先查，不要重提 |
 | 查询超时 | 单次 30 秒；`wait=N` 的总预算最多 60 秒（按真实时间计，客户端把超时设得比它长） |
 | 请求体 | 沿用 `WORKBUDDY_MAX_BODY_BYTES`（默认 32 MB）；base64 图片会快速放大，注意 413 |
-| 账本 | 视频提交按 `kind=video` 单独计数（控制台用量页显示「视频提交/视频失败」），不计入模型调用与 tokens；上游不回报视频积分 |
+| 账本 | 视频提交按 `kind=video` 单独计数（控制台用量页显示「视频提交/视频失败」），不计入模型调用与 tokens；上游不回报视频积分，桥记录**提交前后账号余额差**为 `creditEstimate`（估算，并发生成/模型调用会混入），用量页单列「视频消耗积分」 |
 
 > 视频是高积分工具（客户端里单独审批，和图片分组），桥不会替你估算成本。
 > 需要控制消耗时先用短时长/低分辨率，或先在 WorkBuddy 客户端里确认当前账号额度。
@@ -260,8 +260,8 @@ curl -sS "http://127.0.0.1:8790/v1/videos/<id>?wait=30" -H "Authorization: Beare
 ## 7. 边界与后续
 
 - 只服务**当前登录的本人账号**，不做多账号池化、代调用或转售；临时 key 不导出。
-- 只接视频。图片生成（`miora_text_to_image` / `miora_edit_image`）同源，
-  可按相同方式扩展。
+- 视频与图片共用同一套临时 key、长轮询与错误映射；图片接口（`/v1/images`、
+  `/v1/images/edits`）见 [`IMAGE-GENERATION.md`](IMAGE-GENERATION.md)。
 - 上游是未公开接口，路径与字段可能变化；桥把上游错误映射成明确 code，便于失效时定位。
 - 配置项：`WORKBUDDY_MIORA_BASE`（默认 `https://public.miora.qq.com`，一般不用改）。
 

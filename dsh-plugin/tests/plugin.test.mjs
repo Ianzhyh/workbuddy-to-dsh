@@ -364,7 +364,7 @@ test('换账号后积分/签到缓存必须作废（回归：面板把 A 账号�
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-test('apply() 装配：注册 llm 路由、8 个工具、命令、HTTP 路由', () => {
+test('apply() 装配：注册 llm 路由、10 个工具、命令、HTTP 路由', () => {
   const dir = mkdtempSync(join(tmpdir(), 'wb-apply-'));
   try {
     const { ctx, calls } = fakeCtx();
@@ -373,10 +373,11 @@ test('apply() 装配：注册 llm 路由、8 个工具、命令、HTTP 路由', 
     assert.equal(calls.adapters.length, 1);
     assert.deepEqual(calls.adapters[0].providers, ['workbuddy']);
     assert.equal(calls.adapters[0].adapter.providerInfo('workbuddy').name, 'WorkBuddy');
-    assert.equal(calls.tools.length, 8);
+    assert.equal(calls.tools.length, 10);
     assert.deepEqual(calls.tools.map((t) => t.name).sort(), [
-      'workbuddy_bridge', 'workbuddy_checkin', 'workbuddy_generate_video', 'workbuddy_models',
-      'workbuddy_status', 'workbuddy_usage', 'workbuddy_video_status', 'workbuddy_web_search',
+      'workbuddy_bridge', 'workbuddy_checkin', 'workbuddy_generate_image', 'workbuddy_generate_video',
+      'workbuddy_image_status', 'workbuddy_models', 'workbuddy_status', 'workbuddy_usage',
+      'workbuddy_video_status', 'workbuddy_web_search',
     ]);
     for (const tool of calls.tools) {
       assert.equal(typeof tool.execute, 'function');

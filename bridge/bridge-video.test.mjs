@@ -49,6 +49,19 @@ const stub = createServer((req, res) => {
         data: { key: `ck_t_video_${apiKeyCalls}`, expires_at: new Date(Date.now() + 900_000).toISOString() },
       });
     }
+    if (req.url === '/v2/billing/meter/get-user-resource') {
+      // 余额常量：差值恒为 0，生成消耗估算应为 null（不能把“没变化”写成 0）。
+      return json(200, {
+        code: 0,
+        data: {
+          Response: {
+            Data: {
+              Accounts: [{ CapacityType: 0, CapacitySize: 1000, CapacityRemain: 1000 }],
+            },
+          },
+        },
+      });
+    }
     if (req.url === '/api/ai/workbuddy-proxy/video/submit') {
       submitCalls.push({ headers: req.headers, body });
       const prompt = String(body?.prompt || '');
@@ -155,6 +168,7 @@ const child = spawn(process.execPath, [BRIDGE], {
     WORKBUDDY_USAGE_FILE: join(dir, 'usage.jsonl'),
     CODEBUDDY_ENDPOINT: STUB,
     WORKBUDDY_MIORA_BASE: STUB,
+    WORKBUDDY_BILLING_BASE: STUB,
     WORKBUDDY_SKIP_MODEL_PREFLIGHT: '1',
     WORKBUDDY_AUTO_CHECKIN: '0',
     WORKBUDDY_LOG: '0',
@@ -386,6 +400,8 @@ test('账本：视频提交单独计数，不污染模型调用/tokens/积分', 
   assert.ok(usage.total.videoFailed >= 1, `失败提交应计入 videoFailed，实际 ${usage.total.videoFailed}`);
   assert.equal(usage.total.calls, 0, '视频不能混进模型调用次数');
   assert.equal(usage.total.promptTokens + usage.total.completionTokens, 0, '视频没有模型 token');
+  assert.equal(usage.total.videoCreditKnown, 0, '余额没变化时不能伪造生成消耗');
+  assert.equal(usage.total.videoCredit, 0);
   assert.equal(usage.models.some((model) => model.model === 'video'), false, '模型排行不应出现 video');
   assert.ok(usage.failures.some((failure) => failure.kind === 'video'), '失败列表要能区分视频');
 });

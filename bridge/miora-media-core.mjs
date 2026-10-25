@@ -1,0 +1,529 @@
+/**
+ * Miora 媒体客户端底层（视频 / 图片共用）。
+ *
+ * 上游链路（从桌面端 miora MCP 的 dist/cli.cjs 反查并实测）：
+ *   1. 用当前登录 token 调 `<chat endpoint>/v2/api-keys`，
+ *      申请名为 workbuddy-connect-cloud-service 的 15 分钟临时 key（ck_t_…）；
+ *   2. 以 Bearer 临时 key 调 `public.miora.qq.com/api/ai/workbuddy-proxy/*`。
+ *
+ * 临时 key 只放内存、按账号与 token 指纹缓存；不落盘、不进日志或响应。
+ * 提交是计费动作，任何失败都不自动重试 —— 只有 401（请求未被受理）会换 key 重试一次。
+ *
+ * 错误码按媒体类型加前缀（`VIDEO_*` / `IMAGE_*`）：同一个网关失败，客户端仍能按
+ * 能力区分；`prefix` 由各模块通过 options 传下来，默认 VIDEO。
+ */
+import { createHash } from 'node:crypto';
+import { readFile } from 'node:fs/promises';
+import { extname, isAbsolute } from 'node:path';
+
+export const DEFAULT_MIORA_BASE = 'https://public.miora.qq.com';
+
+const CLIENT_TEMP_KEY_PATH = '/v2/api-keys';
+const CLIENT_TEMP_KEY_NAME = 'workbuddy-connect-cloud-service';
+const TEMP_KEY_TTL_MS = 15 * 60 * 1000;
+const TEMP_KEY_REFRESH_SKEW_MS = 60 * 1000;
+// 视频帧单张 10 MB（与官方 miora MCP 的 MAX_FRAME_BYTES 一致）；图片走 20 MB，
+// 由 image 模块显式传入 maxBytes。
+export const DEFAULT_INPUT_MAX_BYTES = 10 * 1024 * 1024;
+const TEMP_KEY_TIMEOUT_MS = 10_000;
+// 与官方 miora MCP 的 MIORA_SUBMIT_HTTP_TIMEOUT_MS 一致：提交接口是异步的，
+// 正常几秒返回；把预算放足，避免上游慢时桥先放弃、任务 id 丢失却已计费。
+export const SUBMIT_TIMEOUT_MS = 390_000;
+export const QUERY_TIMEOUT_MS = 30_000;
+
+// 长轮询：`GET /v1/{videos,images}/{id}?wait=N` 由桥代客户端轮询。
+// 上限 60 秒（工具侧还会留出单次查询的超时余量），间隔 2 秒。
+export const MAX_MEDIA_WAIT_MS = 60_000;
+const QUERY_POLL_INTERVAL_MS = 2_000;
+
+/*
+ * 提交元数据的**内存**缓存：mode / seconds / resolution / created_at 只有提交时才知道，
+ * 上游查询接口不返回。存它只是为了让「提交 → 查询」前后字段一致，不是持久化：
+ * 不含 prompt、不落盘，桥重启后自然丢失（文档写明是 best-effort）。
+ */
+const META_TTL_MS = 6 * 60 * 60 * 1000;
+const META_MAX_ENTRIES = 500;
+
+const EXT_TO_MIME = new Map([
+  ['.png', 'image/png'],
+  ['.jpg', 'image/jpeg'],
+  ['.jpeg', 'image/jpeg'],
+  ['.gif', 'image/gif'],
+  ['.webp', 'image/webp'],
+  ['.bmp', 'image/bmp'],
+  ['.svg', 'image/svg+xml'],
+]);
+
+const FILE_KEY_RE = /^(?:bga|file)\//;
+
+export class MioraMediaError extends Error {
+  constructor(code, message, options = {}) {
+    super(message);
+    this.name = 'MioraMediaError';
+    this.code = code;
+    this.status = options.status ?? 502;
+    this.retryAfter = options.retryAfter ?? null;
+    this.upstreamCode = options.upstreamCode ?? null;
+  }
+}
+
+/** 兼容旧名：video 模块与桥仍按 `MioraVideoError` 导入/判断（同一个类）。 */
+export const MioraVideoError = MioraMediaError;
+
+export function invalidInput(prefix, message) {
+  return new MioraMediaError(`${prefix}_INVALID_INPUT`, message, { status: 400 });
+}
+
+function shortMessage(value, limit = 300) {
+  const text = String(value ?? '').replace(/\s+/g, ' ').trim();
+  if (!text) return '';
+  return text.length > limit ? `${text.slice(0, limit)}…` : text;
+}
+
+function trimSlash(value) {
+  return String(value || '').replace(/\/+$/, '');
+}
+
+export function isObject(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+export function normalizeMediaStatus(status) {
+  switch (String(status || '').toLowerCase()) {
+    case 'pending':
+    case 'queued':
+      return 'queued';
+    case 'processing':
+    case 'in_progress':
+    case 'running':
+      return 'in_progress';
+    case 'completed':
+    case 'succeeded':
+      return 'completed';
+    case 'failed':
+    case 'error':
+      return 'failed';
+    case 'cancelled':
+    case 'canceled':
+      return 'cancelled';
+    default:
+      return 'in_progress';
+  }
+}
+
+/** 兼容旧名（视频的对外字段就叫 status 归一，测试直接测它）。 */
+export const normalizeVideoStatus = normalizeMediaStatus;
+
+export function mediaPayload(resolved) {
+  if (resolved.origin === 'url') return { url: resolved.url };
+  if (resolved.origin === 'fileKey') return { file_key: resolved.fileKey };
+  return { base64: resolved.base64 };
+}
+
+function isPrivateIpv4(host) {
+  const parts = host.split('.').map(Number);
+  if (parts.length !== 4 || parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) return false;
+  return parts[0] === 10
+    || parts[0] === 127
+    || (parts[0] === 169 && parts[1] === 254)
+    || (parts[0] === 172 && parts[1] >= 16 && parts[1] <= 31)
+    || (parts[0] === 192 && parts[1] === 168)
+    || parts[0] === 0;
+}
+
+function publicHttpsUrl(raw, field, invalidCode) {
+  let url;
+  try {
+    url = new URL(raw);
+  } catch {
+    throw new MioraMediaError(invalidCode, `${field} is not a valid URL.`, { status: 400 });
+  }
+  if (url.protocol !== 'https:') {
+    throw new MioraMediaError(invalidCode, `${field} must be a public https URL.`, { status: 400 });
+  }
+  if (url.username || url.password) {
+    throw new MioraMediaError(invalidCode, `${field} must not contain credentials.`, { status: 400 });
+  }
+  const host = url.hostname.toLowerCase().replace(/^\[|\]$/g, '');
+  if (host === 'localhost' || host.endsWith('.local') || host === '::1'
+    || /^(?:fc|fd|fe8|fe9|fea|feb)/.test(host) || isPrivateIpv4(host)) {
+    throw new MioraMediaError(
+      invalidCode,
+      `${field} must be a public https URL (private/reserved hosts are rejected).`,
+      { status: 400 },
+    );
+  }
+  return url.toString();
+}
+
+function safeFileKey(raw, field, invalidCode) {
+  const segments = raw.split('/').slice(1);
+  if (segments.length === 0 || segments.some((segment) => segment === '' || segment === '.' || segment === '..')) {
+    throw new MioraMediaError(invalidCode, `${field} is a miora fileKey with path-traversal segments.`, { status: 400 });
+  }
+  return raw;
+}
+
+function parseDataUri(raw, field, { maxBytes, invalidCode }) {
+  const match = /^data:([^;,]+)?(;base64)?,(.*)$/s.exec(raw);
+  if (!match) throw new MioraMediaError(invalidCode, `${field} is not a valid data URI.`, { status: 400 });
+  if (!match[2]) {
+    throw new MioraMediaError(invalidCode, `${field} data URI must use ;base64 encoding.`, { status: 400 });
+  }
+  const mimeType = match[1]?.trim();
+  if (mimeType && !/^image\//i.test(mimeType)) {
+    throw new MioraMediaError(
+      invalidCode,
+      `${field} data URI must be an image/* type (got ${mimeType}).`,
+      { status: 400 },
+    );
+  }
+  const payload = match[3] ?? '';
+  const buffer = Buffer.from(payload, 'base64');
+  if (buffer.length === 0) {
+    throw new MioraMediaError(invalidCode, `${field} data URI has an empty payload.`, { status: 400 });
+  }
+  if (buffer.length > maxBytes) {
+    throw new MioraMediaError(invalidCode, `${field} exceeds ${maxBytes}B (${buffer.length}B).`, { status: 400 });
+  }
+  return { origin: 'dataUri', base64: payload, mimeType: mimeType || undefined };
+}
+
+/**
+ * 把图片输入归一成上游 media payload。
+ * 支持：绝对本地路径、miora fileKey（bga/… 或 file/…）、公网 https URL、base64 data URI。
+ *
+ * @param {string} raw
+ * @param {{ fieldName?: string, maxBytes?: number, invalidCode?: string, readFile?: Function }} [options]
+ */
+export async function resolveImageInput(raw, options = {}) {
+  const field = options.fieldName || 'image';
+  const maxBytes = options.maxBytes ?? DEFAULT_INPUT_MAX_BYTES;
+  const invalidCode = options.invalidCode || 'VIDEO_INVALID_INPUT';
+  const invalid = (message) => new MioraMediaError(invalidCode, message, { status: 400 });
+  const text = typeof raw === 'string' ? raw.trim() : '';
+  if (!text) throw invalid(`${field} is empty.`);
+  if (text.startsWith('data:')) return parseDataUri(text, field, { maxBytes, invalidCode });
+  if (/^https?:\/\//i.test(text)) {
+    return { origin: 'url', url: publicHttpsUrl(text, field, invalidCode) };
+  }
+  if (FILE_KEY_RE.test(text)) return { origin: 'fileKey', fileKey: safeFileKey(text, field, invalidCode) };
+  if (!isAbsolute(text)) {
+    throw invalid(`${field} must be an absolute local path, miora fileKey, public https URL, or data URI.`);
+  }
+  const buffer = await (options.readFile || readFile)(text).catch((err) => {
+    throw invalid(`${field} could not be read: ${text} (${err.message})`);
+  });
+  if (buffer.length === 0) throw invalid(`${field} is empty: ${text}`);
+  if (buffer.length > maxBytes) throw invalid(`${field} exceeds ${maxBytes}B (${buffer.length}B): ${text}`);
+  const mimeType = EXT_TO_MIME.get(extname(text).toLowerCase());
+  if (!mimeType) throw invalid(`${field} has an unsupported image extension: ${text}`);
+  return { origin: 'path', base64: buffer.toString('base64'), mimeType };
+}
+
+function unwrapEnvelope(body) {
+  if (isObject(body) && 'code' in body && 'failed' in body && 'data' in body) return body.data;
+  return body;
+}
+
+function bodyFailure(body) {
+  if (!isObject(body)) return null;
+  if (body.failed === true) return body;
+  if (typeof body.message === 'string') {
+    try {
+      const inner = JSON.parse(body.message);
+      if (isObject(inner) && inner.failed === true) return inner;
+    } catch { /* 不是嵌套 JSON */ }
+  }
+  return null;
+}
+
+function retryAfterSeconds(headers) {
+  const raw = headers?.get?.('retry-after');
+  if (!raw) return null;
+  const seconds = Number(raw);
+  if (Number.isFinite(seconds) && seconds >= 0) return Math.floor(seconds);
+  const at = Date.parse(raw);
+  if (!Number.isFinite(at)) return null;
+  const delta = Math.ceil((at - Date.now()) / 1000);
+  return delta > 0 ? delta : null;
+}
+
+function statusFromMessage(message) {
+  const match = /\bstatus=(\d{3})\b/.exec(String(message || ''));
+  return match ? Number(match[1]) : 0;
+}
+
+function upstreamFailure(status, body, path, { prefix = 'VIDEO', retryAfter = null } = {}) {
+  const code = body?.code ?? body?.error?.code ?? null;
+  const message = shortMessage(body?.message ?? body?.msg ?? body?.error?.message) || `Miora ${path} failed (HTTP ${status}).`;
+  /*
+   * Miora 的 submit 代理有时用外层 2xx/5xx 包住上游的业务错误，
+   * 真正的状态码只写在 message 里：`upstream video-submit failed: status=400 ...`。
+   * 不解析它就会把「时长/分辨率不支持」这种明确的 400 误报成 502。
+   * 外层 401/403/429 是网关自己的鉴权/限流，优先保留，不去猜内层。
+   */
+  const embeddedStatus = statusFromMessage(message);
+  const effectiveStatus = embeddedStatus
+    && (status >= 500 || (status >= 200 && status < 300))
+    ? embeddedStatus
+    : status;
+  if (effectiveStatus === 401) {
+    return new MioraMediaError(`${prefix}_AUTH`, 'Miora rejected the temporary key. Check the current login and retry.', {
+      status: 401,
+      upstreamCode: code,
+    });
+  }
+  if (effectiveStatus === 403) {
+    return new MioraMediaError(`${prefix}_SCOPE_DENIED`, message, { status: 403, upstreamCode: code });
+  }
+  if (effectiveStatus === 429) {
+    return new MioraMediaError(`${prefix}_RATE_LIMITED`, message, {
+      status: 429,
+      retryAfter,
+      upstreamCode: code,
+    });
+  }
+  if (effectiveStatus === 400 || effectiveStatus === 422) {
+    return new MioraMediaError(`${prefix}_UPSTREAM_REJECTED`, message, { status: 400, upstreamCode: code });
+  }
+  return new MioraMediaError(`${prefix}_UPSTREAM`, message, { status: 502, upstreamCode: code });
+}
+
+const tempKeyCache = new Map();
+const tempKeyPending = new Map();
+
+function cacheKeyFor(auth) {
+  const fingerprint = createHash('sha256').update(String(auth?.access || '')).digest('hex').slice(0, 16);
+  return `${trimSlash(auth?.endpoint)}|${auth?.userId || auth?.uid || ''}|${fingerprint}`;
+}
+
+const submissionMeta = new Map();
+
+/** 记住一次提交的元数据（仅供同进程内的查询回填；不含 prompt）。 */
+export function rememberSubmission(id, meta) {
+  if (!id) return;
+  submissionMeta.delete(id);
+  submissionMeta.set(id, meta);
+  while (submissionMeta.size > META_MAX_ENTRIES) {
+    const oldest = submissionMeta.keys().next().value;
+    submissionMeta.delete(oldest);
+  }
+}
+
+export function recallSubmission(id) {
+  const meta = submissionMeta.get(id);
+  if (!meta) return null;
+  // TTL 用真实时钟：`now` 是可注入的（测试用来固定 created_at），不该影响缓存寿命。
+  if (Date.now() - meta.savedAt > META_TTL_MS) {
+    submissionMeta.delete(id);
+    return null;
+  }
+  return meta;
+}
+
+export function resetTempKeyCache() {
+  tempKeyCache.clear();
+  tempKeyPending.clear();
+  // 单元测试共用它做隔离；提交元数据也必须一起清，否则用例之间会串。
+  submissionMeta.clear();
+}
+
+function parseExpiry(value, fallback) {
+  const text = String(value ?? '').trim();
+  if (!text) return fallback;
+  const asDate = Date.parse(text);
+  if (Number.isFinite(asDate)) return asDate;
+  const asNumber = Number(text);
+  if (Number.isFinite(asNumber) && asNumber > 0) {
+    return asNumber < 1e12 ? asNumber * 1000 : asNumber;
+  }
+  return fallback;
+}
+
+async function requestClientTempKey(auth, options) {
+  const prefix = options.prefix || 'VIDEO';
+  const endpoint = trimSlash(auth?.endpoint);
+  if (!endpoint) {
+    throw new MioraMediaError(`${prefix}_AUTH`, 'no upstream endpoint for the current login.', { status: 401 });
+  }
+  const url = `${endpoint}${CLIENT_TEMP_KEY_PATH}`;
+  const now = options.now();
+  let response;
+  try {
+    response = await options.fetchImpl(url, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${auth.access}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        name: CLIENT_TEMP_KEY_NAME,
+        expire_in_seconds: 900,
+        temporary: true,
+      }),
+      signal: AbortSignal.timeout(options.timeoutMs ?? TEMP_KEY_TIMEOUT_MS),
+    });
+  } catch (err) {
+    throw new MioraMediaError(
+      `${prefix}_UNAVAILABLE`,
+      `could not reach the WorkBuddy gateway: ${shortMessage(err.message)}`,
+      { status: 502 },
+    );
+  }
+  let body = null;
+  try { body = await response.json(); } catch { /* 非 JSON 按下述错误处理 */ }
+  const key = body?.data?.key;
+  if (!response.ok || body?.code !== 0 || typeof key !== 'string' || !key.startsWith('ck_t_')) {
+    const message = shortMessage(body?.msg ?? body?.message)
+      || `could not obtain a temporary Miora key (HTTP ${response.status}).`;
+    if (response.status === 429) {
+      throw new MioraMediaError(`${prefix}_RATE_LIMITED`, message, {
+        status: 429,
+        retryAfter: retryAfterSeconds(response.headers),
+        upstreamCode: body?.code ?? null,
+      });
+    }
+    if (response.status === 403) {
+      throw new MioraMediaError(`${prefix}_SCOPE_DENIED`, message, {
+        status: 403,
+        upstreamCode: body?.code ?? null,
+      });
+    }
+    throw new MioraMediaError(`${prefix}_AUTH`, message, {
+      status: response.status === 401 ? 401 : 502,
+      upstreamCode: body?.code ?? null,
+    });
+  }
+  return {
+    key,
+    expiresAt: parseExpiry(body?.data?.expires_at, now + TEMP_KEY_TTL_MS),
+  };
+}
+
+async function getTempKey(auth, options) {
+  const cacheKey = cacheKeyFor(auth);
+  const cached = tempKeyCache.get(cacheKey);
+  if (cached && cached.expiresAt - TEMP_KEY_REFRESH_SKEW_MS > options.now()) return cached.key;
+
+  let pending = tempKeyPending.get(cacheKey);
+  if (!pending) {
+    pending = requestClientTempKey(auth, options)
+      .then((entry) => {
+        tempKeyCache.set(cacheKey, entry);
+        return entry.key;
+      })
+      .finally(() => { tempKeyPending.delete(cacheKey); });
+    tempKeyPending.set(cacheKey, pending);
+  }
+  return pending;
+}
+
+/**
+ * 带临时 key 的 POST（401 换 key 重试一次）。
+ * 视频 / 图片共用；错误码前缀由 `options.prefix` 决定。
+ */
+export async function mioraRequest(auth, path, body, options, retried = false) {
+  const prefix = options.prefix || 'VIDEO';
+  const base = trimSlash(options.baseUrl || DEFAULT_MIORA_BASE);
+  const tempKey = await getTempKey(auth, options);
+  let response;
+  try {
+    response = await options.fetchImpl(`${base}${path}`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${tempKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(options.timeoutMs ?? QUERY_TIMEOUT_MS),
+    });
+  } catch (err) {
+    throw new MioraMediaError(`${prefix}_UNAVAILABLE`, `Miora is unreachable: ${shortMessage(err.message)}`, { status: 502 });
+  }
+
+  const text = await response.text();
+  let parsed = null;
+  try { parsed = text ? JSON.parse(text) : null; } catch { /* 非 JSON */ }
+
+  if (response.status === 401 && !retried) {
+    tempKeyCache.delete(cacheKeyFor(auth));
+    return mioraRequest(auth, path, body, options, true);
+  }
+  if (!response.ok) {
+    throw upstreamFailure(response.status, parsed ?? { message: text }, path, {
+      prefix,
+      retryAfter: retryAfterSeconds(response.headers),
+    });
+  }
+  if (!isObject(parsed)) {
+    throw new MioraMediaError(`${prefix}_UPSTREAM`, `Miora ${path} returned a non-JSON body.`, { status: 502 });
+  }
+  const failed = bodyFailure(parsed);
+  if (failed) throw upstreamFailure(Number(failed.httpStatus) || response.status, failed, path, { prefix });
+  // 有些网关用 HTTP 200 + 非 0 code 表达失败（没有 failed 字段）；不能当成成功解包。
+  if (typeof parsed.code === 'number' && parsed.code !== 0) {
+    throw upstreamFailure(Number(parsed.httpStatus) || response.status, parsed, path, { prefix });
+  }
+  return unwrapEnvelope(parsed);
+}
+
+export function mediaClientOptions(options = {}) {
+  return {
+    fetchImpl: options.fetchImpl || fetch,
+    now: options.now || Date.now,
+    baseUrl: options.baseUrl || DEFAULT_MIORA_BASE,
+    timeoutMs: options.timeoutMs,
+    readFile: options.readFile,
+    prefix: options.prefix || 'VIDEO',
+  };
+}
+
+/**
+ * 查询任务；`waitMs > 0` 时由桥代客户端轮询（每 2 秒），直到终态或预算用完。
+ * 查询不计费，重复查询安全；超时返回最后一次状态，不是失败。
+ *
+ * @param {object} auth
+ * @param {string} id
+ * @param {{
+ *   queryPath?: string, normalize?: Function, prefix?: string, label?: string,
+ *   waitMs?: number, sleep?: Function, fetchImpl?: Function, now?: Function,
+ *   baseUrl?: string, timeoutMs?: number,
+ * }} options
+ */
+export async function pollMediaTask(auth, id, options = {}) {
+  const prefix = options.prefix || 'VIDEO';
+  const label = options.label || 'media';
+  if (typeof options.normalize !== 'function' || !options.queryPath) {
+    throw new Error('pollMediaTask requires queryPath and normalize');
+  }
+  const taskId = typeof id === 'string' ? id.trim() : '';
+  if (!taskId) throw invalidInput(prefix, `${label} id is required.`);
+  const opts = mediaClientOptions(options);
+  const waitMs = Math.min(Math.max(Number(options.waitMs) || 0, 0), MAX_MEDIA_WAIT_MS);
+  const sleep = options.sleep || ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+  const attempts = waitMs > 0 ? Math.ceil(waitMs / QUERY_POLL_INTERVAL_MS) + 1 : 1;
+  // 预算是**真实时间**：单次查询很慢时也要按时收手，不能只靠轮询次数兜底。
+  const deadline = opts.now() + waitMs;
+
+  let last = null;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    const data = await mioraRequest(auth, options.queryPath, { upstreamTaskIds: [taskId] }, opts);
+    const entry = isObject(data) ? data[taskId] : null;
+    if (!isObject(entry)) {
+      throw new MioraMediaError(`${prefix}_NOT_FOUND`, `Miora has no ${label} task ${taskId}.`, { status: 404 });
+    }
+    last = options.normalize({
+      id: taskId,
+      entry,
+      meta: recallSubmission(taskId),
+    });
+    const terminal = last.status === 'completed' || last.status === 'failed' || last.status === 'cancelled';
+    if (terminal || attempt === attempts - 1) return last;
+    // 最后一段可能不足一个轮询间隔：别让 wait=1 实际等了 2 秒。
+    const remaining = Math.min(deadline - opts.now(), waitMs - attempt * QUERY_POLL_INTERVAL_MS);
+    if (remaining <= 0) return last;
+    await sleep(Math.min(QUERY_POLL_INTERVAL_MS, remaining));
+  }
+  return last;
+}

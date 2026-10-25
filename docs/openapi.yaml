@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: WorkBuddy 本地 API 桥
-  version: 1.13.1
+  version: 1.14.0
   description: |
     把本机 WorkBuddy 桌面端已登录的模型能力，经本地回环桥暴露为
     OpenAI 兼容与 Anthropic 兼容两套接口。仅监听 127.0.0.1。
@@ -106,6 +106,54 @@ components:
           description: 参考图；每项必须是非空字符串
         reference_paths: { type: array, items: { type: string }, description: references 的别名 }
         model: { type: string, description: 接受但忽略（选模型由 Miora 决定） }
+    ImageRequest:
+      type: object
+      additionalProperties: false
+      description: |
+        Miora 图片生成请求。`POST /v1/images` 固定文生图（`mode=generate`），
+        `POST /v1/images/edits` 固定图生图（`mode=edit`）；body 里显式 `mode` 会覆盖路径默认值。
+
+        **未知字段一律 400**。`images` 每项支持绝对本地路径、miora fileKey、
+        公网 https URL、base64 data URI，单张 ≤ 20 MB。
+      properties:
+        mode: { type: string, enum: [generate, edit] }
+        prompt: { type: string, minLength: 1, maxLength: 8000 }
+        size:
+          type: string
+          pattern: '^[0-9]{2,5}x[0-9]{2,5}$'
+          description: 'WIDTHxHEIGHT，如 1024x1024；不传用模型默认'
+        quality: { type: string, maxLength: 32, description: '文生图质量档（如 standard / hd）；图生图忽略' }
+        images:
+          type: array
+          items: { type: string }
+          description: 图生图的参考图（至少一张）
+        image: { type: string, description: images 的单张别名，二者不能同时给 }
+    Image:
+      type: object
+      properties:
+        id: { type: string }
+        object: { type: string, const: image }
+        status: { type: string, enum: [queued, in_progress, completed, failed, cancelled] }
+        upstream_status: { type: string }
+        created_at: { type: [integer, 'null'], description: 提交时间（秒），best-effort 回填 }
+        model: { type: [string, 'null'] }
+        provider: { type: [string, 'null'] }
+        mode: { type: [string, 'null'], enum: [generate, edit, null] }
+        size: { type: [string, 'null'] }
+        quality: { type: [string, 'null'] }
+        result_files:
+          type: array
+          description: 上游原始产物字段（通常含 signedUrl / mimeType / fileKey）
+          items: { type: object, additionalProperties: true }
+        output:
+          type: [object, 'null']
+          properties:
+            url: { type: string }
+            urls: { type: array, items: { type: string } }
+        error:
+          type: [object, 'null']
+          properties:
+            message: { type: string }
     Video:
       type: object
       properties:
@@ -267,6 +315,94 @@ paths:
         '404': { description: 上游没有该任务 }
         '409': { description: 任务未完成（VIDEO_NOT_READY） }
         '502': { description: 已完成但上游没有 https 产物（VIDEO_NO_OUTPUT），或 Miora 不可用 }
+  /v1/images:
+    post:
+      summary: 提交 Miora 文生图任务
+      description: |
+        异步任务：成功返回 202，之后用 GET /v1/images/{id} 查询。
+        提交成功即按 WorkBuddy 账号积分计费；401 只换临时 key 重试一次，
+        429/5xx 不自动重试。只接受本地管理令牌（local token）。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ImageRequest' }
+      responses:
+        '202':
+          description: 已提交
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Image' }
+        '400': { description: 参数错误（含未知字段与带 images 的冲突；不会提交上游） }
+        '401': { description: 登录态不可用，或临时 key 申请失败 }
+        '403': { description: 只接受本地管理令牌；client key 返回 IMAGE_LOCAL_TOKEN_REQUIRED }
+        '429': { description: Miora 限流，带 Retry-After }
+        '502': { description: Miora 不可用 / 上游拒绝 }
+  /v1/images/edits:
+    post:
+      summary: 提交 Miora 图生图任务
+      description: |
+        与 POST /v1/images 同构，但默认 mode=edit，必须提供 images[]（至少一张）。
+        计费、重试与鉴权规则同上。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ImageRequest' }
+      responses:
+        '202':
+          description: 已提交
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Image' }
+        '400': { description: 参数错误（缺 images / 未知字段等） }
+        '401': { description: 登录态不可用 }
+        '403': { description: 仅 local token }
+        '429': { description: Miora 限流 }
+        '502': { description: Miora 不可用 / 上游拒绝 }
+  /v1/images/{image_id}:
+    get:
+      summary: 查询图片任务状态（可长轮询）
+      parameters:
+        - name: image_id
+          in: path
+          required: true
+          schema: { type: string }
+        - name: wait
+          in: query
+          required: false
+          description: 让桥代轮询的秒数（0–60，整数）；超时返回最后一次状态，不是失败
+          schema: { type: integer, minimum: 0, maximum: 60, default: 0 }
+      responses:
+        '200':
+          description: 当前任务状态
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Image' }
+        '400': { description: image_id 或 wait 非法 }
+        '401': { description: 登录态不可用 }
+        '403': { description: client key 不可用（仅 local token） }
+        '404': { description: 上游没有该任务（IMAGE_NOT_FOUND） }
+        '502': { description: Miora 不可用 }
+  /v1/images/{image_id}/content:
+    get:
+      summary: 跳转到已完成图片的签名 URL
+      parameters:
+        - name: image_id
+          in: path
+          required: true
+          schema: { type: string }
+        - name: wait
+          in: query
+          required: false
+          description: 先等待任务出图再跳转（0–60 秒）
+          schema: { type: integer, minimum: 0, maximum: 60, default: 0 }
+      responses:
+        '302': { description: Location 指向上游 https 签名 URL（有时效） }
+        '403': { description: client key 不可用（仅 local token） }
+        '404': { description: 上游没有该任务 }
+        '409': { description: 任务未完成（IMAGE_NOT_READY） }
+        '502': { description: 已完成但无 https 产物（IMAGE_NO_OUTPUT），或 Miora 不可用 }
   /v1/messages:
     post:
       summary: Anthropic Messages 兼容（Claude Code 直连）

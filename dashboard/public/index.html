@@ -940,6 +940,13 @@ const I18N_EN = {
   '搜索次数': 'Search calls',
   '搜索失败': 'Search failures',
   '视频提交': 'Video submissions',
+  '图片提交': 'Image submissions',
+  '图片失败': 'Image failures',
+  '视频消耗积分': 'Video credit used',
+  '图片消耗积分': 'Image credit used',
+  '生成消耗': 'Generation usage',
+  '（提交前后账号余额差估算）': '(estimated from the account balance delta)',
+  '余额差估算': 'estimated from balance delta',
   '视频失败': 'Video failures',
   '不计入模型调用/积分': 'excluded from model calls / credit',
   '不计入模型调用/tokens': 'excluded from model calls / tokens',
@@ -947,6 +954,10 @@ const I18N_EN = {
     'Search calls are excluded from model calls, tokens, and credit. The local ledger covers only this bridge and is not the same scope as the upstream balance or other clients.',
   '视频提交按次计费，但上游不回报 token/积分；单独计数，积分以上游余额为准。本地账本只覆盖本桥流量，与上游余额/其它客户端不是同一口径。':
     'Video submissions are billed per job but do not report tokens or credit; they are counted separately, and credit should be read from the upstream balance. The local ledger covers only this bridge and is not the same scope as the upstream balance or other clients.',
+  '图片提交按次计费，但上游不回报 token/积分；单独计数，积分以上游余额为准。本地账本只覆盖本桥流量，与上游余额/其它客户端不是同一口径。':
+    'Image submissions are billed per job but do not report tokens or credit; they are counted separately, and credit should be read from the upstream balance. The local ledger covers only this bridge and is not the same scope as the upstream balance or other clients.',
+  '生成消耗 = 提交前后账号余额差（估算；并发生成或模型调用会混入）。':
+    'Generation credit = account balance delta around submit (estimated; concurrent generations or model calls can skew it).',
   '当前桥版本较旧，搜索调用仍计入调用次数；重启桥后可按新口径拆分。本地账本只覆盖本桥流量，与上游余额/其它客户端不是同一口径。':
     'The running bridge is older, so search calls are still counted as calls. Restart the bridge to split them. The local ledger covers only this bridge and is not the same scope as the upstream balance or other clients.',
   '输入 tokens': 'Input tokens',
@@ -4253,9 +4264,17 @@ function renderUsage() {
   const videos = Number(t.videos) || 0;
   const videoFailed = Number(t.videoFailed) || 0;
   const hasVideoMetric = Number.isFinite(Number(t.videos));
+  const images = Number(t.images) || 0;
+  const imageFailed = Number(t.imageFailed) || 0;
+  const hasImageMetric = Number.isFinite(Number(t.images));
+  const videoCredit = Number(t.videoCredit) || 0;
+  const videoCreditKnown = Number(t.videoCreditKnown) || 0;
+  const imageCredit = Number(t.imageCredit) || 0;
+  const imageCreditKnown = Number(t.imageCreditKnown) || 0;
   const emptyTotal = Boolean(u && u.total)
     && Number(t.calls) === 0 && Number(t.failed) === 0
-    && searches === 0 && searchFailed === 0 && videos === 0 && videoFailed === 0;
+    && searches === 0 && searchFailed === 0 && videos === 0 && videoFailed === 0
+    && images === 0 && imageFailed === 0;
   if (!u || !u.total || emptyTotal) {
     box.innerHTML = '<div class="empty">暂无数据（桥未运行或还没有请求过）。</div>';
     return;
@@ -4275,14 +4294,24 @@ function renderUsage() {
         + '　上游按两位小数回报'
       : '上游未回报（' + t.calls + ' 次调用）';
 
-  let html =
+  // 「生成消耗」单独一块：次数 + 提交前后余额差（估算）。不混进模型调用的卡片网格里。
+  const generationCards = (hasVideoMetric || hasImageMetric)
+    ? '<p class="hint" style="margin:14px 0 8px"><b>生成消耗</b>（提交前后账号余额差估算）</p>'
+      + '<div class="cards" style="margin-bottom:14px">'
+        + card('视频提交', String(videos), '不计入模型调用/tokens', true)
+        + card('视频消耗积分', fmtCredit(videoCredit, videoCreditKnown), '余额差估算', true)
+        + (videoFailed > 0 ? card('视频失败', String(videoFailed), '不计入模型调用/tokens', true) : '')
+        + card('图片提交', String(images), '不计入模型调用/tokens', true)
+        + card('图片消耗积分', fmtCredit(imageCredit, imageCreditKnown), '余额差估算', true)
+        + (imageFailed > 0 ? card('图片失败', String(imageFailed), '不计入模型调用/tokens', true) : '')
+      + '</div>'
+    : '';
+
+  let html = generationCards +
     '<div class="cards" style="margin-bottom:14px">' +
       card('调用次数', String(t.calls), '最近 ' + u.windowDays + ' 天') +
       (hasSearchMetric
         ? card('搜索次数', String(searches), '不计入模型调用/积分', true)
-        : '') +
-      (hasVideoMetric
-        ? card('视频提交', String(videos), '不计入模型调用/tokens', true)
         : '') +
       card('输入 tokens', fmtNum(t.promptTokens), '') +
       card('输出 tokens', fmtNum(t.completionTokens), '') +
@@ -4294,15 +4323,18 @@ function renderUsage() {
       (searchFailed > 0
         ? card('搜索失败', String(searchFailed), '不计入模型调用/积分', true)
         : '') +
-      (videoFailed > 0
-        ? card('视频失败', String(videoFailed), '不计入模型调用/tokens', true)
-        : '') +
     '</div>' +
     '<p class="hint">' + (hasSearchMetric
       ? '搜索调用不计入模型调用、tokens 与积分；本地账本只覆盖本桥流量，与上游余额/其它客户端不是同一口径。'
       : '当前桥版本较旧，搜索调用仍计入调用次数；重启桥后可按新口径拆分。本地账本只覆盖本桥流量，与上游余额/其它客户端不是同一口径。')
       + (hasVideoMetric
         ? '<br>视频提交按次计费，但上游不回报 token/积分；单独计数，积分以上游余额为准。本地账本只覆盖本桥流量，与上游余额/其它客户端不是同一口径。'
+        : '')
+      + (hasImageMetric
+        ? '<br>图片提交按次计费，但上游不回报 token/积分；单独计数，积分以上游余额为准。本地账本只覆盖本桥流量，与上游余额/其它客户端不是同一口径。'
+        : '')
+      + ((videoCreditKnown || imageCreditKnown)
+        ? '<br>生成消耗 = 提交前后账号余额差（估算；并发生成或模型调用会混入）。'
         : '') + '</p>';
 
   // 趋势图（R10.1）：指标由 #trendMetric、粒度由 #trendGran 决定。

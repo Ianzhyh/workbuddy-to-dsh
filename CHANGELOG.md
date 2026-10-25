@@ -17,6 +17,45 @@
 
 只支持最近 2 个 minor 版本。
 
+## [1.14.0] - 2026-10-25
+
+### Added
+
+- **文生图 / 图生图接口**：桥新增 `POST /v1/images`（文生图）、`POST /v1/images/edits`
+  （图生图）、`GET /v1/images/{id}`、`GET /v1/images/{id}/content`：
+  - 与视频同源（Miora `image/generate/submit`、`image/edit/submit`、`image/query-task`），
+    共用临时 key、401 一次性换 key、429/5xx 不自动重试；
+  - 图片输入支持绝对本地路径 / miora fileKey / 公网 https / base64 data URI，
+    单张 **≤ 20 MB**（视频帧 10 MB）；
+  - 路径语义固定：`/v1/images` 只做文生图（带 `images` 会 400），
+    `/v1/images/edits` 只做图生图；`size`（`WIDTHxHEIGHT`）与 `quality` 透传上游；
+  - 异步任务 + `?wait=N` 长轮询 + 提交元数据内存回填（6 小时，不含 prompt）；
+  - 错误码统一 `IMAGE_*`（`IMAGE_NOT_FOUND` / `IMAGE_NOT_READY` / `IMAGE_NO_OUTPUT` 等），
+    与视频的 `VIDEO_*` 区分。
+- **dsh 图片工具**：`workbuddy_generate_image`（提交，给 `images` 即图生图）与
+  `workbuddy_image_status`（查询，`wait_seconds` 默认代等 20 秒）。
+- **用量页支持生成类计数与消耗**：插件「用量」与控制台用量页新增
+  「视频提交 / 视频失败 / 图片提交 / 图片失败」四张卡，以及**单独**的
+  「视频消耗积分 / 图片消耗积分」两张卡；`/v1/usage` 新增
+  `images` / `imageFailed` / `videoCredit` / `imageCredit`（含 `*Known` 计数）。
+  上游不回报单次积分，桥用**提交前后账号余额差**记录 `creditEstimate`（估算；
+  并发生成或模型调用会混入；读不到时显示「—」而不是 0）。
+- `docs/IMAGE-GENERATION.md`（接口、参数、错误码、与视频差异、未实测声明）；
+  OpenAPI 新增 `ImageRequest` / `Image` 与四条图片路径。
+
+### Changed
+
+- **抽出 `bridge/miora-media-core.mjs`**：临时 key、`mioraRequest`、图片归一化、
+  长轮询、提交元数据缓存都只保留一份；错误码前缀由 `prefix` 参数决定
+  （视频 `VIDEO_` / 图片 `IMAGE_`），视频行为与既有契约不变（`miora-video.mjs`
+  仍按原名字导出）。
+- 视频与图片共享同一条临时 key 缓存（同一账号只申请一次），减少上游 `/v2/api-keys` 调用。
+
+### Notes
+
+- 图片接口的路径、字段与限制来自客户端内置 `miora-mcp` 的实现，并用桩上游做了端到端
+  合约测试；**本轮没有真机出图**（避免计费），实际出图效果与扣费时点未实测。
+
 ## [1.13.1] - 2026-10-25
 
 ### Fixed

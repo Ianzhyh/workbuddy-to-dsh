@@ -38,6 +38,7 @@ import { spawn } from 'node:child_process';
 import { waitDrain } from './wait-drain.mjs';
 import { applyPromotion, groupPromotions } from './promotions.mjs';
 import { submitVideo, queryVideo, MioraVideoError, MAX_VIDEO_WAIT_MS } from './miora-video.mjs';
+import { submitImage, queryImage } from './miora-image.mjs';
 
 /**
  * 本桥源码的构建指纹。
@@ -3185,23 +3186,32 @@ function searchVersionFor(auth) {
   return APP_VERSION;
 }
 
-// ── Miora 视频生成（文生视频 / 首尾帧 / 参考图）────────────────────────
-const VIDEO_TASK_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/;
+// ── Miora 媒体生成（视频：text/frame/reference；图片：generate/edit）──────
+const MEDIA_TASK_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/;
+const MEDIA_WAIT_MAX_S = MAX_VIDEO_WAIT_MS / 1000;
 
-function respondVideoError(res, err) {
+/** 视频 / 图片共用的错误响应；type 按 code 前缀区分，失败日志统一走 media failed。 */
+function respondMediaError(res, err) {
   const status = err instanceof MioraVideoError ? err.status : (Number(err?.status) || 502);
   const headers = err?.retryAfter ? { 'Retry-After': String(err.retryAfter) } : {};
-  if (status >= 500) log('video failed', status, err?.code || '', shortError(err?.message || err, 200));
+  const code = err?.code || 'MEDIA_ERROR';
+  const kind = code.startsWith('IMAGE_') ? 'image' : 'video';
+  if (status >= 500) log('media failed', kind, status, code, shortError(err?.message || err, 200));
+  const type = status === 429
+    ? 'rate_limit_error'
+    : (code.endsWith('_NOT_READY') || code.endsWith('_NO_OUTPUT')
+      ? `${kind}_not_ready`
+      : `${kind}_generation_error`);
   return json(res, status, {
     error: {
       message: `workbuddy-bridge: ${shortError(err?.message || err, 300)}`,
-      type: status === 429 ? 'rate_limit_error' : 'video_generation_error',
-      code: err?.code || 'VIDEO_ERROR',
+      type,
+      code,
     },
   }, headers);
 }
 
-async function videoAuth() {
+async function mediaAuth(prefix) {
   try {
     return { auth: await resolveAuth() };
   } catch (e) {
@@ -3212,7 +3222,7 @@ async function videoAuth() {
           error: {
             message: `workbuddy-bridge: ${shortError(e?.message || e, 300)}`,
             type: 'authentication_error',
-            code: 'VIDEO_NO_CREDENTIAL',
+            code: `${prefix}_NO_CREDENTIAL`,
           },
         },
       },
@@ -3220,14 +3230,33 @@ async function videoAuth() {
   }
 }
 
-async function handleVideoSubmit(req, res) {
+/**
+ * 账号积分余额（生成类“消耗”估算用）。
+ *
+ * 上游不回报单次视频/图片的积分，只能拿提交前后的余额差做估算。
+ * 读不到就返回 null —— 余额是锦上添花，绝不能阻断已经计费的提交。
+ */
+async function quotaBalance(auth) {
+  try {
+    const quota = await fetchQuota(auth);
+    return typeof quota?.total === 'number' ? quota.total : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 提交（视频 / 图片共用）。`defaultMode` 让路径带上语义：
+ * `/v1/images` = 文生图，`/v1/images/edits` = 图生图（body 显式 mode 优先）。
+ */
+async function handleMediaSubmit(req, res, { submit, kind, label, prefix, defaultMode = '' }) {
   const startedAt = Date.now();
   let raw;
   try {
     raw = await readBody(req);
   } catch (e) {
     if (e.code === 'BODY_TOO_LARGE') {
-      return rejectTooLarge(req, res, 'openai', 'video request body too large');
+      return rejectTooLarge(req, res, 'openai', `${label} request body too large`);
     }
     throw e;
   }
@@ -3235,99 +3264,148 @@ async function handleVideoSubmit(req, res) {
   try { body = JSON.parse(raw); }
   catch {
     return json(res, 400, {
-      error: { message: 'workbuddy-bridge: invalid JSON body', type: 'invalid_request', code: 'VIDEO_INVALID_INPUT' },
+      error: {
+        message: 'workbuddy-bridge: invalid JSON body',
+        type: 'invalid_request',
+        code: `${prefix}_INVALID_INPUT`,
+      },
     });
   }
 
-  const resolved = await videoAuth();
+  const resolved = await mediaAuth(prefix);
   if (resolved.error) return json(res, resolved.error.status, resolved.error.body);
   try {
-    const video = await submitVideo(resolved.auth, body, { baseUrl: VIDEO_BASE_OVERRIDE || undefined });
+    let payload = body;
+    if (defaultMode && body && typeof body === 'object' && !Array.isArray(body) && body.mode === undefined) {
+      payload = { ...body, mode: defaultMode };
+    }
+    const balanceBefore = await quotaBalance(resolved.auth);
+    const media = await submit(resolved.auth, payload, { baseUrl: VIDEO_BASE_OVERRIDE || undefined });
+    /*
+     * 生成消耗只能估算：提交前后各读一次账号余额，差值写进账本（creditEstimate）。
+     * 差值 ≤ 0 / 读不到 → 不记（界面显示「—」），绝不把“没测到”写成 0。
+     */
+    const balanceAfter = await quotaBalance(resolved.auth);
+    const creditEstimate = balanceBefore !== null && balanceAfter !== null && balanceBefore > balanceAfter
+      ? Math.round((balanceBefore - balanceAfter) * 10000) / 10000
+      : null;
     recordRequest({
-      model: 'video', kind: 'video', stream: false, ms: Date.now() - startedAt,
+      model: kind, kind, stream: false, ms: Date.now() - startedAt,
       ok: true, status: 202, code: null,
+      ...(creditEstimate !== null ? { creditEstimate } : {}),
     });
-    log(`video submit id=${video.id} mode=${video.mode} status=${video.status}`);
-    return json(res, 202, video, { 'Cache-Control': 'no-store' });
+    log(`${label} submit id=${media.id} mode=${media.mode} status=${media.status}`);
+    return json(res, 202, media, { 'Cache-Control': 'no-store' });
   } catch (e) {
     recordRequest({
-      model: 'video', kind: 'video', stream: false, ms: Date.now() - startedAt,
+      model: kind, kind, stream: false, ms: Date.now() - startedAt,
       ok: false, status: e?.status || 502, code: e?.code || null, error: e?.message || String(e),
     });
-    return respondVideoError(res, e);
+    return respondMediaError(res, e);
   }
 }
 
-async function handleVideoLookup(req, res, pathname, url) {
-  const rest = pathname.slice('/v1/videos/'.length);
+/**
+ * 查询 / 下载（视频 / 图片共用）。
+ * `?wait=N` 让桥代客户端轮询 N 秒（上限 60）；只接受整数秒，
+ * 收到 `wait=abc` 要明确拒绝，而不是当 0 静默返回“还在生成”。
+ */
+async function handleMediaLookup(req, res, pathname, url, { basePath, query, label, prefix }) {
+  const rest = pathname.slice(basePath.length);
   const wantsContent = rest.endsWith('/content');
   const rawId = wantsContent ? rest.slice(0, -'/content'.length) : rest;
   let id;
   try { id = decodeURIComponent(rawId); }
-  catch { return json(res, 400, { error: { message: 'workbuddy-bridge: malformed video id', type: 'invalid_request', code: 'VIDEO_INVALID_INPUT' } }); }
-  if (!VIDEO_TASK_ID_RE.test(id)) {
-    return json(res, 400, { error: { message: 'workbuddy-bridge: malformed video id', type: 'invalid_request', code: 'VIDEO_INVALID_INPUT' } });
+  catch {
+    return json(res, 400, {
+      error: {
+        message: `workbuddy-bridge: malformed ${label} id`,
+        type: 'invalid_request',
+        code: `${prefix}_INVALID_INPUT`,
+      },
+    });
+  }
+  if (!MEDIA_TASK_ID_RE.test(id)) {
+    return json(res, 400, {
+      error: {
+        message: `workbuddy-bridge: malformed ${label} id`,
+        type: 'invalid_request',
+        code: `${prefix}_INVALID_INPUT`,
+      },
+    });
   }
 
-  /*
-   * `?wait=N`：让桥代客户端轮询 N 秒（上限 60），避免 agent 自己每两秒查一次。
-   * 只接受整数秒 —— 收到 `wait=abc` 要明确拒绝，而不是当 0 静默返回“还在生成”。
-   */
   const waitRaw = url.searchParams.get('wait');
   let waitMs = 0;
   if (waitRaw !== null && waitRaw !== '') {
     if (!/^\d{1,4}$/.test(waitRaw)) {
       return json(res, 400, {
         error: {
-          message: `workbuddy-bridge: wait must be an integer number of seconds (0-${MAX_VIDEO_WAIT_MS / 1000})`,
+          message: `workbuddy-bridge: wait must be an integer number of seconds (0-${MEDIA_WAIT_MAX_S})`,
           type: 'invalid_request',
-          code: 'VIDEO_INVALID_INPUT',
+          code: `${prefix}_INVALID_INPUT`,
         },
       });
     }
     waitMs = Math.min(Number(waitRaw) * 1000, MAX_VIDEO_WAIT_MS);
   }
 
-  const resolved = await videoAuth();
+  const resolved = await mediaAuth(prefix);
   if (resolved.error) return json(res, resolved.error.status, resolved.error.body);
   try {
-    const video = await queryVideo(resolved.auth, id, {
+    const media = await query(resolved.auth, id, {
       baseUrl: VIDEO_BASE_OVERRIDE || undefined,
       waitMs,
     });
-    if (!wantsContent) return json(res, 200, video, { 'Cache-Control': 'no-store' });
-    if (video.status !== 'completed') {
+    if (!wantsContent) return json(res, 200, media, { 'Cache-Control': 'no-store' });
+    if (media.status !== 'completed') {
       return json(res, 409, {
         error: {
-          message: `workbuddy-bridge: video ${id} is ${video.status}; no downloadable output yet`,
-          type: 'video_not_ready',
-          code: 'VIDEO_NOT_READY',
+          message: `workbuddy-bridge: ${label} ${id} is ${media.status}; no downloadable output yet`,
+          type: `${label}_not_ready`,
+          code: `${prefix}_NOT_READY`,
         },
       });
     }
-    if (!video.output?.url) {
+    if (!media.output?.url) {
       /*
        * 上游说 completed 却没给 https 产物：这不是「没生成完」，重试查询也许能拿到，
        * 但绝不能再报 409 NOT_READY（客户端会以为继续等就行）。明确 502 + 可区分的 code。
        */
       return json(res, 502, {
         error: {
-          message: `workbuddy-bridge: video ${id} is completed but Miora returned no https output; query again later`,
-          type: 'video_generation_error',
-          code: 'VIDEO_NO_OUTPUT',
+          message: `workbuddy-bridge: ${label} ${id} is completed but Miora returned no https output; query again later`,
+          type: `${label}_generation_error`,
+          code: `${prefix}_NO_OUTPUT`,
         },
       });
     }
     res.writeHead(302, {
-      Location: video.output.url,
+      Location: media.output.url,
       'Cache-Control': 'no-store',
       ...SECURITY_HEADERS,
     });
     return res.end();
   } catch (e) {
-    return respondVideoError(res, e);
+    return respondMediaError(res, e);
   }
 }
+
+const handleVideoSubmit = (req, res) => handleMediaSubmit(req, res, {
+  submit: submitVideo, kind: 'video', label: 'video', prefix: 'VIDEO',
+});
+const handleImageGenerate = (req, res) => handleMediaSubmit(req, res, {
+  submit: submitImage, kind: 'image', label: 'image', prefix: 'IMAGE', defaultMode: 'generate',
+});
+const handleImageEdit = (req, res) => handleMediaSubmit(req, res, {
+  submit: submitImage, kind: 'image', label: 'image', prefix: 'IMAGE', defaultMode: 'edit',
+});
+const handleVideoLookup = (req, res, pathname, url) => handleMediaLookup(req, res, pathname, url, {
+  basePath: '/v1/videos/', query: queryVideo, label: 'video', prefix: 'VIDEO',
+});
+const handleImageLookup = (req, res, pathname, url) => handleMediaLookup(req, res, pathname, url, {
+  basePath: '/v1/images/', query: queryImage, label: 'image', prefix: 'IMAGE',
+});
 
 /**
  * 搜索端的头与 chat 不同：WorkBuddy CLI 的 WebSearch 用的是 WorkBuddy 身份
@@ -6756,7 +6834,7 @@ function recentRequests(limit = 50) {
   return rows.map((r) => ({
     t: r.t,
     model: r.model || '',
-    ...(r.kind === 'search' || r.kind === 'video' ? { kind: r.kind } : {}),
+    ...(r.kind === 'search' || r.kind === 'video' || r.kind === 'image' ? { kind: r.kind } : {}),
     ...(r.probe === true ? { probe: true } : {}),
     stream: r.stream === true,
     ms: Number(r.ms) || 0,
@@ -6767,6 +6845,9 @@ function recentRequests(limit = 50) {
     ...(typeof r.promptTokens === 'number' ? { promptTokens: r.promptTokens } : {}),
     ...(typeof r.completionTokens === 'number' ? { completionTokens: r.completionTokens } : {}),
     ...(typeof r.credit === 'number' ? { credit: r.credit } : {}),
+    // 生成类（视频/图片）的**估算**消耗：提交前后账号余额差。上游不回报单次积分，
+    // 这个值可能为 null（余额没变化/读不到），调用方必须当“参考值”而非账单。
+    ...(typeof r.creditEstimate === 'number' ? { creditEstimate: r.creditEstimate } : {}),
     // 诊断用的两个时延拆分：桥前置处理 vs 上游首个字节（不含内容解析耗时）。
     // 面板/控制台用它回答"慢在桥还是慢在上游"，账本里可能没有（旧记录 / 非流式）。
     ...(typeof r.overheadMs === 'number' ? { overheadMs: r.overheadMs } : {}),
@@ -6823,10 +6904,14 @@ function summarizeUsage(days = 7, opts = {}) {
   // 混进 calls 会让「调用次数」和平均耗时对不上模型账。
   // videos / videoFailed 同理：视频提交按次计费，但不回报 token；单独一列，
   // 才能和模型调用、网页搜索放在同一张账本里而不互相污染。
+  // images / imageFailed 与视频同构：图片提交也不回报 token/积分。
   let total = {
     calls: 0, promptTokens: 0, completionTokens: 0, ms: 0,
     credit: 0, creditCalls: 0, failed: 0, searches: 0, searchFailed: 0,
-    videos: 0, videoFailed: 0,
+    videos: 0, videoFailed: 0, images: 0, imageFailed: 0,
+    // 生成类的估算积分（提交前后余额差）。Known 表示有多少次采到了差值；
+    // 0 次时界面要显示「—」而不是 0，避免把“没测到”说成“没花钱”。
+    videoCredit: 0, videoCreditKnown: 0, imageCredit: 0, imageCreditKnown: 0,
   };
 
   const ensureDay = (ts) => {
@@ -6835,7 +6920,8 @@ function summarizeUsage(days = 7, opts = {}) {
     if (!bucket) {
       bucket = {
         day, calls: 0, promptTokens: 0, completionTokens: 0, credit: 0, creditCalls: 0,
-        searches: 0, searchFailed: 0, videos: 0, videoFailed: 0, byModel: new Map(),
+        searches: 0, searchFailed: 0, videos: 0, videoFailed: 0,
+        images: 0, imageFailed: 0, byModel: new Map(),
       };
       byDay.set(day, bucket);
     }
@@ -6848,7 +6934,8 @@ function summarizeUsage(days = 7, opts = {}) {
     if (!bucket) {
       bucket = {
         key, calls: 0, promptTokens: 0, completionTokens: 0, credit: 0, creditCalls: 0,
-        searches: 0, searchFailed: 0, videos: 0, videoFailed: 0, byModel: new Map(),
+        searches: 0, searchFailed: 0, videos: 0, videoFailed: 0,
+        images: 0, imageFailed: 0, byModel: new Map(),
       };
       byHour.set(key, bucket);
     }
@@ -6857,17 +6944,20 @@ function summarizeUsage(days = 7, opts = {}) {
   // 老账本没有 kind；model=web-search 是 v1.9.4 起的稳定标记。
   const isSearchRow = (row) => row.kind === 'search' || row.model === 'web-search';
   const isVideoRow = (row) => row.kind === 'video';
+  const isImageRow = (row) => row.kind === 'image';
 
   for (const r of rows) {
     if (r.t < since) continue;
     const isSearch = isSearchRow(r);
     const isVideo = isVideoRow(r);
+    const isImage = isImageRow(r);
     // 体检失败是“探测结果”，不是用户请求事故：不进失败数/失败列表。
     if (r.probe === true && r.ok === false) continue;
 
     // 失败的请求单独归类：它没有 token、没有扣分，混进成功率会误导
     if (r.ok === false) {
       if (isVideo) total.videoFailed += 1;
+      else if (isImage) total.imageFailed += 1;
       else if (isSearch) total.searchFailed += 1;
       else total.failed += 1;
       failures.push({
@@ -6878,12 +6968,16 @@ function summarizeUsage(days = 7, opts = {}) {
         status: Number(r.status) || 0,
         code: r.code ?? null,
         error: shortError(r.error),
-        kind: isVideo ? 'video' : (isSearch ? 'search' : 'call'),
+        kind: isVideo ? 'video' : (isImage ? 'image' : (isSearch ? 'search' : 'call')),
       });
       if (isVideo) {
         ensureDay(r.t).videoFailed += 1;
         const h = ensureHour(r.t);
         if (h) h.videoFailed += 1;
+      } else if (isImage) {
+        ensureDay(r.t).imageFailed += 1;
+        const h = ensureHour(r.t);
+        if (h) h.imageFailed += 1;
       } else if (isSearch) {
         ensureDay(r.t).searchFailed += 1;
         const h = ensureHour(r.t);
@@ -6894,9 +6988,25 @@ function summarizeUsage(days = 7, opts = {}) {
 
     if (isVideo) {
       total.videos += 1;
+      if (typeof r.creditEstimate === 'number') {
+        total.videoCredit += r.creditEstimate;
+        total.videoCreditKnown += 1;
+      }
       ensureDay(r.t).videos += 1;
       const h = ensureHour(r.t);
       if (h) h.videos += 1;
+      continue;
+    }
+
+    if (isImage) {
+      total.images += 1;
+      if (typeof r.creditEstimate === 'number') {
+        total.imageCredit += r.creditEstimate;
+        total.imageCreditKnown += 1;
+      }
+      ensureDay(r.t).images += 1;
+      const h = ensureHour(r.t);
+      if (h) h.images += 1;
       continue;
     }
 
@@ -6957,6 +7067,8 @@ function summarizeUsage(days = 7, opts = {}) {
   // 浮点累加会攒出 0.6900000000000001 这种噪声，出接口前收一下
   const round4 = (n) => Math.round(n * 10000) / 10000;
   total.credit = round4(total.credit);
+  total.videoCredit = round4(total.videoCredit);
+  total.imageCredit = round4(total.imageCredit);
   for (const m of byModel.values()) m.credit = round4(m.credit);
   for (const d of byDay.values()) {
     d.credit = round4(d.credit);
@@ -6977,7 +7089,8 @@ function summarizeUsage(days = 7, opts = {}) {
       // 补出来的空桶也要带 `byModel: []`，形状与真实桶一致 —— 前端不必分支判空
       const h = byHour.get(key) || {
         key, calls: 0, promptTokens: 0, completionTokens: 0, credit: 0, creditCalls: 0,
-        searches: 0, searchFailed: 0, videos: 0, videoFailed: 0, byModel: new Map(),
+        searches: 0, searchFailed: 0, videos: 0, videoFailed: 0,
+        images: 0, imageFailed: 0, byModel: new Map(),
       };
       hours.push({ ...h, byModel: [...h.byModel.values()].sort((a, b) => b.credit - a.credit) });
     }
@@ -8260,17 +8373,21 @@ async function handleRequest(req, res) {
     }
 
     /*
-     * 视频接口能读本机绝对路径图片、且提交会消耗账号积分 —— 和聊天不是同一类
-     * 能力。client key 按设计是“仅聊天”，不能借视频接口越权读文件或花积分。
+     * 视频/图片接口能读本机绝对路径图片、且提交会消耗账号积分 —— 和聊天不是同一类
+     * 能力。client key 按设计是“仅聊天”，不能借媒体接口越权读文件或花积分。
      */
     const videoRequest = url.pathname === '/v1/videos' || url.pathname.startsWith('/v1/videos/');
-    if (videoRequest && requestScope.getStore()?.client !== 'local') {
+    const imageRequest = url.pathname === '/v1/images'
+      || url.pathname === '/v1/images/edits'
+      || url.pathname.startsWith('/v1/images/');
+    if ((videoRequest || imageRequest) && requestScope.getStore()?.client !== 'local') {
+      const kind = imageRequest ? 'image' : 'video';
       return json(res, 403, {
         error: {
-          message: 'workbuddy-bridge: video generation requires the local token '
+          message: `workbuddy-bridge: ${kind} generation requires the local token `
             + '(client keys are chat-only)',
-          type: 'video_forbidden',
-          code: 'VIDEO_LOCAL_TOKEN_REQUIRED',
+          type: `${kind}_forbidden`,
+          code: `${kind.toUpperCase()}_LOCAL_TOKEN_REQUIRED`,
         },
       });
     }
@@ -8689,12 +8806,21 @@ async function handleRequest(req, res) {
       }
     }
 
-    // ── Miora 视频生成（计费能力，提交是异步的）─────────────────────────
+    // ── Miora 媒体生成（计费能力，提交是异步的）─────────────────────────
     if (url.pathname === '/v1/videos' && req.method === 'POST') {
       return handleVideoSubmit(req, res);
     }
     if (url.pathname.startsWith('/v1/videos/') && req.method === 'GET') {
       return handleVideoLookup(req, res, url.pathname, url);
+    }
+    if (url.pathname === '/v1/images' && req.method === 'POST') {
+      return handleImageGenerate(req, res);
+    }
+    if (url.pathname === '/v1/images/edits' && req.method === 'POST') {
+      return handleImageEdit(req, res);
+    }
+    if (url.pathname.startsWith('/v1/images/') && url.pathname !== '/v1/images/edits' && req.method === 'GET') {
+      return handleImageLookup(req, res, url.pathname, url);
     }
 
     // ── WorkBuddy 原生网页搜索（不经过 DeepSeek）────────────────────────
@@ -9777,7 +9903,7 @@ async function handleRequest(req, res) {
     if (url.pathname === '/' ) {
       return json(res, 200, {
         service: 'workbuddy-bridge',
-        usage: 'POST /v1/chat/completions · POST /v1/messages (Anthropic) · POST /v1/responses (Codex) · POST /v1/videos · GET /v1/videos/{id} · GET /v1/models · GET /v1/usage · GET /v1/requests · GET /v1/quota · GET /v1/checkin · POST /v1/auth/device (device-code login) · GET /v1/auth/credentials · GET /v1/auth/source · GET /health',
+        usage: 'POST /v1/chat/completions · POST /v1/messages (Anthropic) · POST /v1/responses (Codex) · POST /v1/videos · GET /v1/videos/{id} · POST /v1/images · POST /v1/images/edits · GET /v1/images/{id} · GET /v1/models · GET /v1/usage · GET /v1/requests · GET /v1/quota · GET /v1/checkin · POST /v1/auth/device (device-code login) · GET /v1/auth/credentials · GET /v1/auth/source · GET /health',
         featured: FEATURED.map((m) => m.id),
       });
     }
@@ -9816,6 +9942,7 @@ if (process.argv.includes('--check')) {
   // "桥明明认识它、为什么 /v1/models 里没有"（诊断日志的可信度就靠这点）
   lines.push(`models          ${FEATURED.filter((m) => featuredAllowedIn(m, checkRegion)).map((m) => m.id).join(', ')}`);
   lines.push(`video           POST /v1/videos (Miora ${VIDEO_BASE_OVERRIDE || 'public.miora.qq.com'})`);
+  lines.push(`image           POST /v1/images · POST /v1/images/edits (Miora ${VIDEO_BASE_OVERRIDE || 'public.miora.qq.com'})`);
   console.log(lines.join('\n'));
   process.exit(authOk || API_KEY ? 0 : 1);
 }
@@ -9841,6 +9968,7 @@ server.listen(PORT, HOST, async () => {
   // 同上：精选列表按区域过滤（国际版别在日志里列 v4-pro —— 那个区域不提供它）
   console.log(`models     : ${FEATURED.filter((m) => featuredAllowedIn(m, region)).map((m) => m.id).join(', ')}  (all models: /v1/models?all=1)`);
   console.log(`video      : POST /v1/videos (Miora ${VIDEO_BASE_OVERRIDE || 'public.miora.qq.com'})`);
+  console.log(`image      : POST /v1/images · POST /v1/images/edits (Miora ${VIDEO_BASE_OVERRIDE || 'public.miora.qq.com'})`);
   /*
    * 只在**开了**的时候说一句：默认行为（丢弃思维链）不需要每次都提醒，
    * 但既然有人开了这个开关，就要让他一眼看到"确实生效了"——

@@ -150,13 +150,15 @@ instead of the DeepSeek wallet.
   instead of the DeepSeek wallet; the plugin stores the bridge token in a separate
   credential reference, self-tests the full chain, respects explicit user settings,
   and exposes `workbuddy_web_search` as a fallback that bypasses dsh search config.
-- **Video generation API** — text-to-video, first/last-frame and reference-image
-  videos through WorkBuddy's Miora gateway, exposed as async `/v1/videos` endpoints
-  (`202` submit, `GET /v1/videos/{id}` query, `/content` redirect). The temporary key
-  stays in memory; only a 401 triggers one key refresh, and 429/5xx are never retried
-  automatically to avoid double billing. dsh agents can call
-  `workbuddy_generate_video` and `workbuddy_video_status` directly. See
-  [`docs/VIDEO-GENERATION.md`](docs/VIDEO-GENERATION.md).
+- **Video & image generation APIs** — text-to-video, first/last-frame and
+  reference-image videos via `/v1/videos`, plus text-to-image and image editing via
+  `/v1/images` and `/v1/images/edits` (async `202` submit, `GET .../{id}` query with
+  optional `?wait=N`, `/content` redirect). The temporary key stays in memory; only a
+  401 triggers one key refresh, and 429/5xx are never retried automatically to avoid
+  double billing. dsh agents can call `workbuddy_generate_video`,
+  `workbuddy_video_status`, `workbuddy_generate_image` and `workbuddy_image_status`
+  directly. See [`docs/VIDEO-GENERATION.md`](docs/VIDEO-GENERATION.md) and
+  [`docs/IMAGE-GENERATION.md`](docs/IMAGE-GENERATION.md).
 - **Time-aware promotions** — nightly free/discount windows are evaluated from the
   upstream `schedule` (timezone, daily windows, validity dates), so rates switch at
   23:00/08:00 instead of staying static; expired campaigns disappear everywhere.

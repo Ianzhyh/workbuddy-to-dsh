@@ -291,17 +291,46 @@ export class BridgeClient {
     });
   }
 
-  /**
-   * `GET /v1/videos/{id}`：查询任务状态；completed 时带 `output.url(s)`。
+  /** `GET /v1/videos/{id}`：查询任务状态；completed 时带 `output.url(s)`。
    *
    * `waitMs > 0` 让桥代客户端轮询（桥侧上限 60 秒），工具不必自己 sleep。
    */
   videoStatus(id, { waitMs = 0, signal } = {}) {
+    return this.#mediaStatus('/v1/videos', id, { waitMs, signal });
+  }
+
+  /**
+   * `POST /v1/images`（文生图）或 `/v1/images/edits`（图生图，带 images 时）。
+   * 与视频一样是异步任务：成功返回任务 id，之后用 imageStatus 查询。
+   */
+  imageSubmit({ prompt, images, size, quality, mode, signal } = {}) {
+    const body = {};
+    if (typeof prompt === 'string' && prompt.trim()) body.prompt = prompt.trim();
+    if (mode) body.mode = mode;
+    if (Array.isArray(images) && images.length) body.images = images;
+    if (size) body.size = size;
+    if (quality) body.quality = quality;
+    const path = mode === 'edit' ? '/v1/images/edits' : '/v1/images';
+    return this.#json(path, {
+      method: 'POST',
+      body,
+      signal,
+      // 与视频一致：桥侧提交超时 390s，客户端略长。
+      timeoutMs: 400_000,
+    });
+  }
+
+  /** `GET /v1/images/{id}`：查询图片任务；completed 时带 `output.url(s)`。 */
+  imageStatus(id, { waitMs = 0, signal } = {}) {
+    return this.#mediaStatus('/v1/images', id, { waitMs, signal });
+  }
+
+  /** 视频 / 图片共用的查询：`wait` 秒数夹在 0–60，客户端超时必须比桥晚放弃。 */
+  #mediaStatus(basePath, id, { waitMs = 0, signal } = {}) {
     const waitSeconds = Math.min(Math.max(Math.ceil(waitMs / 1000), 0), 60);
     const suffix = waitSeconds > 0 ? `?wait=${waitSeconds}` : '';
-    return this.#json(`/v1/videos/${encodeURIComponent(id)}${suffix}`, {
+    return this.#json(`${basePath}/${encodeURIComponent(id)}${suffix}`, {
       signal,
-      // 桥最多等 60 秒，再加一次查询的上游超时；客户端必须比桥晚放弃。
       timeoutMs: waitSeconds > 0 ? 95_000 : 45_000,
     });
   }

@@ -79,13 +79,14 @@ dsh 的模型选择器里，日常需要的接入、管理、监控、运维能�
 | 原生模型路由 | 运行时注册 `provider: workbuddy`，**不写任何配置文件**；上游加减模型自动跟随 |
 | 模型管理 | 勾选启用 / 禁用、同步到 dsh、**体检**（可用性 · 消耗倍率 · 实测成本）、详情与 CSV 导出 |
 | 账号切换 | 登录目录下多个账号一键切换（自动重启桥、清缓存）；**同一账号的多份登录快照自动合并成一行**（不会再看到两个一样的账号），可给账号起自定义名字便于区分 |
-| 积分与用量 | 积分余额；1 / 7 / 30 天趋势（次数 / tokens / 积分）、积分排行、CSV 导出 |
+| 积分与用量 | 积分余额；1 / 7 / 30 天趋势（次数 / tokens / 积分）、积分排行、CSV 导出；视频/图片单列提交次数与**消耗积分（提交前后余额差估算）** |
 | 请求明细 | 逐条记录（模型 / 耗时 / token / 积分 / 结果），失败标红、上游错误码一键复制 |
 | 环境诊断 | 逐项检查按优先级排序（红色项不解决，模型就不会出现）；含**客户端安装布局体检**（两个 WorkBuddy 客户端被装进同一目录会被点名并给出修法）；另有 CLI 自检 `doctor.mjs` |
 | 对话测试 | 多轮流式对话，按轮次显示 token / 扣分 / 耗时，附桥日志 |
 | 每日签到 | 自动签到（不开控制台也会签）+ 手动领取 |
 | 同时服务其它客户端 | 桥讲 OpenAI / Anthropic / Responses 三套协议 —— Claude Code、Codex、opencode、Cherry Studio 等直接接入 |
 | 视频生成（本地 API） | 文生视频 / 首尾帧 / 参考图三种模式，异步提交 + 查询（可长轮询）+ 下载跳转；走 WorkBuddy 账号积分，详见 [`docs/VIDEO-GENERATION.md`](docs/VIDEO-GENERATION.md) |
+| 图片生成（本地 API） | 文生图 / 图生图两种模式，异步提交 + 查询（可长轮询）+ 下载跳转；与视频共用临时 key 与错误契约，详见 [`docs/IMAGE-GENERATION.md`](docs/IMAGE-GENERATION.md) |
 | 中英双语 | 控制台与 dsh 设置页（9 个标签页）全部双语，右上角 `EN` / `中` 切换 |
 
 **在 dsh 里直接装**：设置 → 插件 → 添加插件，填
@@ -172,7 +173,7 @@ dsh plugin --profile desktop add github:Ianzhyh/workbuddy-to-dsh
 
 # 方式二：release 附件（tgz 安装包，无构建、无需 allowBuilds 授权）
 #   从 GitHub Releases 下载 dsh-plugin-workbuddy-<版本>.tgz 后：
-dsh plugin --profile desktop add ./dsh-plugin-workbuddy-1.13.1.tgz
+dsh plugin --profile desktop add ./dsh-plugin-workbuddy-1.14.0.tgz
 
 # 方式三：从源码（插件在 dsh-plugin/ 子目录，接第 1 步的 git clone）
 dsh plugin --profile desktop add workbuddy-to-dsh/dsh-plugin
@@ -593,10 +594,13 @@ Web search provider 把接口地址指到桥后，搜索走 WorkBuddy 账号、*
 
 视频生成另走 WorkBuddy 的 Miora 产品网关：桥暴露 `POST /v1/videos`、
 `GET /v1/videos/{id}` 与 `GET /v1/videos/{id}/content`，支持**文生视频、首尾帧、
-参考图**三种模式。提交是异步的（`202` + 轮询查询），提交成功即按账号积分计费；
-临时 key 只驻内存，401 才换 key 重试一次，429/5xx 不自动重提以免重复扣费。
-视频接口只接受本地管理令牌（普通 client key 仅聊天）；配置、参数、计费边界与实测
-结论见 [`docs/VIDEO-GENERATION.md`](docs/VIDEO-GENERATION.md)。
+参考图**三种模式。图片同源：`POST /v1/images`、`POST /v1/images/edits`、
+`GET /v1/images/{id}`、`GET /v1/images/{id}/content`，支持**文生图 / 图生图**。
+两类都是异步任务（`202` + 轮询查询，可加 `?wait=N` 让桥代等），提交成功即按账号积分
+计费；临时 key 只驻内存，401 才换 key 重试一次，429/5xx 不自动重提以免重复扣费。
+媒体接口只接受本地管理令牌（普通 client key 仅聊天）；配置、参数、计费边界与实测
+结论见 [`docs/VIDEO-GENERATION.md`](docs/VIDEO-GENERATION.md) 与
+[`docs/IMAGE-GENERATION.md`](docs/IMAGE-GENERATION.md)。
 
 ---
 
