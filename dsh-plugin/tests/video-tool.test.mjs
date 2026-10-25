@@ -94,12 +94,15 @@ test('查询工具：completed 返回有时效 URL，processing 不催重提，f
       upstream_status: 'completed',
       mode: 'text',
       seconds: 5,
-      resolution: '720p',
+      resolution: '768P',
+      created_at: 1761390000,
       output: { url: 'https://cdn.example/v.mp4', urls: ['https://cdn.example/v.mp4'] },
     };
   });
   const done = await completed.execute({ id: ' task-1 ' });
   assert.match(done, /completed/);
+  assert.match(done, /768P/);
+  assert.match(done, /提交时间/);
   assert.match(done, /https:\/\/cdn\.example\/v\.mp4/);
   assert.match(done, /有时效/);
 
@@ -116,6 +119,48 @@ test('查询工具：completed 返回有时效 URL，processing 不催重提，f
   const errorText = await failed.execute({ id: 'task-3' });
   assert.match(errorText, /render failed/);
   assert.match(errorText, /不要直接重复提交/);
+});
+
+test('查询工具：默认代等 20 秒，wait_seconds=0 立即返回，超过 45 秒被夹住', async () => {
+  const seen = [];
+  const status = tool('workbuddy_video_status', async () => ({}), async (id, options) => {
+    seen.push({ id, waitMs: options?.waitMs });
+    return { status: 'in_progress', upstream_status: 'processing' };
+  });
+
+  const waited = await status.execute({ id: 'task-1' });
+  assert.equal(seen[0].waitMs, 20_000);
+  assert.match(waited, /已等待约 20 秒/);
+  assert.match(waited, /不要重新提交/);
+
+  const immediate = await status.execute({ id: 'task-1', wait_seconds: 0 });
+  assert.equal(seen[1].waitMs, 0);
+  assert.doesNotMatch(immediate, /已等待/);
+
+  await status.execute({ id: 'task-1', wait_seconds: 999 });
+  assert.equal(seen[2].waitMs, 45_000);
+  assert.deepEqual(status.parameters.properties.wait_seconds.maximum, 45);
+});
+
+test('查询工具：409 与 VIDEO_NO_OUTPUT 都给出「别重提」的可执行结论', async () => {
+  const conflict = tool('workbuddy_video_status', async () => ({}), async () => {
+    const error = new Error('not ready');
+    error.status = 409;
+    throw error;
+  });
+  const conflictText = await conflict.execute({ id: 'task-1' });
+  assert.match(conflictText, /还没完成/);
+  assert.match(conflictText, /不要重新提交/);
+
+  const noOutput = tool('workbuddy_video_status', async () => ({}), async () => {
+    const error = new Error('no https output');
+    error.status = 502;
+    error.payload = { error: { code: 'VIDEO_NO_OUTPUT', message: 'no https output' } };
+    throw error;
+  });
+  const noOutputText = await noOutput.execute({ id: 'task-1' });
+  assert.match(noOutputText, /没有返回可下载/);
+  assert.match(noOutputText, /不要重新提交/);
 });
 
 test('查询工具：404 与空 id 都给人话', async () => {

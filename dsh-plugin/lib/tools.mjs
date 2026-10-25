@@ -31,7 +31,15 @@ const fmtTokens = (n) => (Number(n) >= 1000 ? `${(Number(n) / 1000).toFixed(1)}k
  */
 function videoFailureText(error, action) {
   const status = Number(error?.status) || 0;
+  const code = String(error?.payload?.error?.code || '');
   const message = String(error?.message || error || '').slice(0, 300);
+  if (code === 'VIDEO_NO_OUTPUT') {
+    return '任务已标记完成，但上游没有返回可下载的 https 产物。稍后再调用 workbuddy_video_status 查一次；'
+      + '不要重新提交（会再扣一次积分）。';
+  }
+  if (status === 409) {
+    return '任务还没完成，所以没有可下载的产物。稍后再查一次；不要重新提交。';
+  }
   if (status === 403) {
     return '视频接口只接受本地管理令牌（client key 仅聊天）。检查插件是否用 WORKBUDDY_LOCAL_TOKEN 连桥，或重启桥。';
   }
@@ -330,7 +338,8 @@ export function createTools(deps) {
       '用 WorkBuddy 的 Miora 生成视频：支持文生视频、首帧（可选尾帧）生视频、参考图生视频。'
       + '这是高积分计费操作，**只在用户明确要求生成视频时调用**；同一需求只提交一次。'
       + '提交是异步的：本工具返回任务 id，之后用 workbuddy_video_status 查询；'
-      + '不要因为等待时间长就重复提交（会重复扣费）。',
+      + '不要因为等待时间长就重复提交（会重复扣费）。'
+      + '参数会严格校验：拼错的键（如 size / image）会直接返回 400，而不是被忽略后按文生视频计费。',
     parameters: {
       type: 'object',
       properties: {
@@ -339,8 +348,8 @@ export function createTools(deps) {
         first_frame: { type: 'string', description: '起始帧：绝对本地路径 / 公网 https URL / data URI / miora fileKey' },
         last_frame: { type: 'string', description: '结束帧（可选），格式同 first_frame' },
         references: { type: 'array', items: { type: 'string' }, description: '参考图（一张或多张），格式同 first_frame' },
-        duration: { type: 'number', description: '目标时长（秒）。本次实测支持 4–15 秒，3 秒会被上游拒绝' },
-        resolution: { type: 'string', description: '分辨率。本次实测支持 768P / 2K，720p 会被上游拒绝' },
+        duration: { type: 'integer', minimum: 1, description: '目标时长（正整数秒）。本次实测支持 4–15 秒，3 秒会被上游拒绝' },
+        resolution: { type: 'string', description: '分辨率。本次实测支持 768P / 2K（大小写不敏感），720p 会被上游拒绝' },
         aspect_ratio: { type: 'string', description: '画幅，如 16:9 / 9:16 / 1:1' },
       },
       additionalProperties: false,
@@ -380,23 +389,32 @@ export function createTools(deps) {
     name: 'workbuddy_video_status',
     description:
       '查询 workbuddy_generate_video 提交的视频任务状态。'
+      + '默认会在本工具里等待最多 20 秒（桥代轮询），通常能直接拿到 completed；'
       + 'queued/in_progress 时告诉用户还在生成，稍后再查，**不要重新提交**；'
       + 'completed 时返回有时效的下载 URL；failed/cancelled 时返回失败原因。',
     parameters: {
       type: 'object',
       properties: {
         id: { type: 'string', description: '提交视频时返回的任务 id（upstreamTaskId）' },
+        wait_seconds: {
+          type: 'integer',
+          minimum: 0,
+          maximum: 45,
+          description: '在本工具内等待多少秒再返回（0 = 立即返回；默认 20，最大 45）',
+        },
       },
       required: ['id'],
       additionalProperties: false,
     },
-    timeoutMs: 50_000,
+    timeoutMs: 90_000,
     async execute(args, exec) {
       const id = typeof args?.id === 'string' ? args.id.trim() : '';
       if (!id) throw new Error('id 不能为空：请传 workbuddy_generate_video 返回的任务 id');
+      const rawWait = Number(args?.wait_seconds);
+      const waitSeconds = Number.isFinite(rawWait) ? Math.min(Math.max(Math.trunc(rawWait), 0), 45) : 20;
       let video;
       try {
-        video = await client.videoStatus(id, exec?.signal);
+        video = await client.videoStatus(id, { waitMs: waitSeconds * 1000, signal: exec?.signal });
       } catch (error) {
         return videoFailureText(error, 'status');
       }
@@ -406,6 +424,9 @@ export function createTools(deps) {
           + `${video.resolution ? `；分辨率：${video.resolution}` : ''}`
           + `${video.aspect_ratio ? `；画幅：${video.aspect_ratio}` : ''}`,
       ];
+      if (video.created_at) {
+        lines.push(`提交时间：${new Date(video.created_at * 1000).toISOString()}`);
+      }
       if (video.status === 'completed') {
         const urls = Array.isArray(video.output?.urls) ? video.output.urls : [];
         if (urls.length) {
@@ -418,7 +439,9 @@ export function createTools(deps) {
         lines.push(`任务未成功：${video.error?.message || '上游未给失败原因'}`);
         lines.push('不要直接重复提交；先确认失败原因，必要时再生成。');
       } else {
-        lines.push('仍在生成。稍后再调用本工具查询；不要重新提交，否则会重复计费。');
+        lines.push(waitSeconds > 0
+          ? `仍在生成（已等待约 ${waitSeconds} 秒）。稍后再调用本工具查询；不要重新提交，否则会重复计费。`
+          : '仍在生成。稍后再调用本工具查询；不要重新提交，否则会重复计费。');
       }
       return lines.join('\n');
     },

@@ -17,13 +17,13 @@
 
 只支持最近 2 个 minor 版本。
 
-## [Unreleased]
+## [1.13.0] - 2026-10-25
 
 ### Added
 
 - **文生视频 / 图生视频接口**：桥新增 `POST /v1/videos`、`GET /v1/videos/{id}`、
   `GET /v1/videos/{id}/content`，走 WorkBuddy 桌面端同款 Miora 网关：
-  - 支持文生视频、首帧（可选尾帧）生视频、参考图生视频三种模式；
+  - 支持文生视频（`text`）、首帧（可选尾帧）生视频（`frame`）、参考图生视频（`reference`）三种模式；
   - 图片输入支持绝对本地路径、miora fileKey、公网 https URL、base64 data URI；
   - 实测约束：时长 4–15 秒、分辨率 768P / 2K（3 秒 / 720p 会被上游拒绝，桥原样映射为 400）；
   - 真机验证：`minimax-h3-iOA` 生成 4 秒 / 768P 视频，101 秒出片，MP4（H.264+AAC，1344×768）可播放；
@@ -32,10 +32,44 @@
   - 视频提交进本地账本（`kind=video`），控制台用量页单列「视频提交/视频失败」，
     不污染模型调用与 tokens；
   - 配额与安全边界见 [`docs/VIDEO-GENERATION.md`](docs/VIDEO-GENERATION.md)。
+- **视频查询长轮询**：`GET /v1/videos/{id}?wait=N`（0–60 秒，整数）由桥代客户端每 2 秒
+  轮询到终态，返回最后一次状态；查询不计费，超时不是失败。`/content` 同样支持 `wait`。
+- **提交元数据回填**：`mode` / `seconds` / `resolution` / `aspect_ratio` / `created_at` /
+  `model` 这些“只有提交时才知道”的字段，在同一桥进程内查询时补回（内存 6 小时、最多 500 条、
+  不含 prompt、不落盘；桥重启后为 `null`，不伪造）。
 - **dsh 视频工具**：新增 `workbuddy_generate_video`（提交，异步返回任务 id）与
-  `workbuddy_video_status`（查询/取下载 URL），工具文案明确高积分计费且禁止重复提交。
+  `workbuddy_video_status`（查询/取下载 URL，新增 `wait_seconds`，默认代等 20 秒），
+  工具文案明确高积分计费且禁止重复提交。
+- **打包完整性门禁**：新增 `npm run check:pack`，递归校验根包入口的本地 import 都在
+  `package.json files` 里，已接进 `release:check`。
 - OpenAPI 契约新增 `VideoRequest` / `Video` 与三条视频路径；`.env.example`
   新增可选的 `WORKBUDDY_MIORA_BASE`。
+
+### Fixed
+
+- **根包漏打包 `bridge/miora-video.mjs`**（发布阻断）：`files` 白名单里没有它，从 npm
+  安装后 `detectProjectRoot()` 仍会选中根目录 `bridge/`（因为 `workbuddy-bridge.mjs` 在），
+  桥一启动就 `ERR_MODULE_NOT_FOUND`；本地跑仓库永远不红。现已补进 `files`，并用
+  `check:pack` 防复发；`verify:release` 的关键文件清单与逐字节比对也补上了
+  `vendor/bridge/miora-video.mjs`。
+- **视频参数被静默忽略，可能按错误模式计费**：未知字段（`size` / `image` /
+  `firstFrameImage` 等）、空字符串帧、非字符串参考图原先会被跳过 —— 请求退化成文生视频，
+  图片没带上却照常提交。现在一律本地 400，并附 `Accepted` 清单与常见错写指路。
+- **completed 但无产物误报 409**：`/content` 对“已完成却没有 https 产物”返回
+  `502 VIDEO_NO_OUTPUT`，与“还没生成完”的 `409 VIDEO_NOT_READY` 区分开，客户端不会再
+  以为继续等就行。
+- **非法 `wait` 静默当 0**：`?wait=abc` 现在返回 400，不再悄悄退化成一次性查询。
+
+### Changed
+
+- **视频参数归一**：`duration` 必须正整数（拒绝 `4.5`）；`768p`/`2k` 归一成 `768P`/`2K`；
+  `aspect_ratio` 只接受正整数比（去空格，拒绝 `0:0`）；data URI 必须是 `image/*`；
+  `firstFrame` / `lastFrame` / `aspectRatio` 等 camelCase 别名可用，同一字段给多次会 400。
+- **工具文案**：`workbuddy_video_status` 展示提交时间与提交元数据；新增 409 /
+  `VIDEO_NO_OUTPUT` 的「别重提」结论；`workbuddy_generate_video` 注明严格校验与正整数时长。
+- **文档与契约**：`docs/VIDEO-GENERATION.md` 重写为字段/别名/校验表、模式推断表、错误码表、
+  `wait` 与元数据边界、curl 示例；`docs/openapi.yaml` 补 `additionalProperties: false`、
+  别名、`wait` 参数与 `created_at` 语义。
 
 ## [1.12.0] - 2026-10-25
 

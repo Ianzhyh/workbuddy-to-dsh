@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: WorkBuddy 本地 API 桥
-  version: 1.12.0
+  version: 1.13.0
   description: |
     把本机 WorkBuddy 桌面端已登录的模型能力，经本地回环桥暴露为
     OpenAI 兼容与 Anthropic 兼容两套接口。仅监听 127.0.0.1。
@@ -67,22 +67,45 @@ components:
         stop_sequences: { type: array, items: { type: string } }
     VideoRequest:
       type: object
+      additionalProperties: false
       description: |
         Miora 视频生成请求。mode 可显式指定，也可按是否带 first_frame / references 自动推断。
         first_frame 支持绝对本地路径、miora fileKey、公网 https URL、base64 data URI；
         input_reference 是 first_frame 的 OpenAI 风格别名。
+
+        **未知字段一律 400**（避免拼错的键被静默忽略后按文生视频计费）。
+        别名：first_frame_path / firstFrame / input_reference → first_frame；
+        last_frame_path / lastFrame → last_frame；reference_paths → references；
+        seconds → duration；aspectRatio → aspect_ratio。同一字段给多次会 400。
       properties:
         mode: { type: string, enum: [text, frame, reference] }
-        prompt: { type: string, maxLength: 8000 }
-        duration: { type: number, exclusiveMinimum: 0, description: 本次实测支持 4–15 秒；3 秒会被上游拒绝 }
-        resolution: { type: string, description: 本次实测支持 768P / 2K；720p 会被上游拒绝 }
-        aspect_ratio: { type: string, pattern: '^[0-9]{1,2}:[0-9]{1,2}$' }
+        prompt:
+          type: string
+          maxLength: 8000
+          description: 文生视频/参考图必填；首尾帧模式可选
+        duration:
+          type: integer
+          minimum: 1
+          description: 正整数秒。本次实测支持 4–15 秒；3 秒会被上游拒绝
+        seconds: { type: integer, minimum: 1, description: duration 的别名；两者不一致会 400 }
+        resolution:
+          type: string
+          description: 本次实测支持 768P / 2K（768p/2k 会归一成大写）；720p 会被上游拒绝
+        aspect_ratio:
+          type: string
+          pattern: '^[1-9][0-9]?:[1-9][0-9]?$'
+          description: 正整数比；空格会被去掉。aspectRatio 是别名
         first_frame: { type: string }
-        input_reference: { type: string }
+        first_frame_path: { type: string, description: first_frame 的别名 }
+        input_reference: { type: string, description: first_frame 的 OpenAI 风格别名 }
         last_frame: { type: string }
+        last_frame_path: { type: string, description: last_frame 的别名 }
         references:
           type: array
           items: { type: string }
+          description: 参考图；每项必须是非空字符串
+        reference_paths: { type: array, items: { type: string }, description: references 的别名 }
+        model: { type: string, description: 接受但忽略（选模型由 Miora 决定） }
     Video:
       type: object
       properties:
@@ -90,10 +113,16 @@ components:
         object: { type: string, const: video }
         status: { type: string, enum: [queued, in_progress, completed, failed, cancelled] }
         upstream_status: { type: string }
-        created_at: { type: [integer, 'null'], description: 提交时间（秒）；查询响应为 null }
+        created_at:
+          type: [integer, 'null']
+          description: |
+            提交时间（秒）。best-effort：同一个桥进程内查询会回填；
+            桥重启或任务不是本进程提交的 → null（桥不伪造时间）
         model: { type: [string, 'null'] }
         provider: { type: [string, 'null'] }
-        mode: { type: [string, 'null'] }
+        mode:
+          type: [string, 'null']
+          description: 提交元数据，best-effort 回填（不写盘，桥重启后为 null）
         seconds: { type: [number, 'null'] }
         resolution: { type: [string, 'null'] }
         aspect_ratio: { type: [string, 'null'] }
@@ -188,26 +217,33 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Video' }
-        '400': { description: 参数错误（不会提交上游） }
+        '400': { description: 参数错误（含未知字段；不会提交上游） }
         '401': { description: 登录态不可用，或临时 key 申请失败 }
         '403': { description: 只接受本地管理令牌；client key 返回 VIDEO_LOCAL_TOKEN_REQUIRED }
         '429': { description: Miora 限流，带 Retry-After }
         '502': { description: Miora 不可用 / 上游拒绝 }
   /v1/videos/{video_id}:
     get:
-      summary: 查询视频任务状态
+      summary: 查询视频任务状态（可长轮询）
       parameters:
         - name: video_id
           in: path
           required: true
           schema: { type: string }
+        - name: wait
+          in: query
+          required: false
+          description: |
+            让桥代客户端轮询的秒数（0–60，整数）。每 2 秒查一次，直到终态或预算用完；
+            超时返回最后一次状态（不是失败）。查询不计费，可重复。
+          schema: { type: integer, minimum: 0, maximum: 60, default: 0 }
       responses:
         '200':
           description: 当前任务状态（pending 归一到 queued，processing 归一到 in_progress）
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Video' }
-        '400': { description: video_id 非法 }
+        '400': { description: video_id 或 wait 非法 }
         '401': { description: 登录态不可用 }
         '403': { description: client key 不可用（仅 local token） }
         '404': { description: 上游没有该任务 }
@@ -220,11 +256,17 @@ paths:
           in: path
           required: true
           schema: { type: string }
+        - name: wait
+          in: query
+          required: false
+          description: 先等待任务出片再跳转（0–60 秒）
+          schema: { type: integer, minimum: 0, maximum: 60, default: 0 }
       responses:
         '302': { description: Location 指向上游 https 签名 URL（有时效） }
         '403': { description: client key 不可用（仅 local token） }
-        '409': { description: 任务未完成或没有产物 }
         '404': { description: 上游没有该任务 }
+        '409': { description: 任务未完成（VIDEO_NOT_READY） }
+        '502': { description: 已完成但上游没有 https 产物（VIDEO_NO_OUTPUT），或 Miora 不可用 }
   /v1/messages:
     post:
       summary: Anthropic Messages 兼容（Claude Code 直连）

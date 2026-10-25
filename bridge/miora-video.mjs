@@ -28,6 +28,19 @@ const TEMP_KEY_TIMEOUT_MS = 10_000;
 const SUBMIT_TIMEOUT_MS = 390_000;
 const QUERY_TIMEOUT_MS = 30_000;
 
+// 长轮询：`GET /v1/videos/{id}?wait=N` 由桥代客户端轮询，避免 agent 每两秒打一次。
+// 上限 60 秒（工具侧还会留出单次查询的超时余量），间隔 2 秒。
+export const MAX_VIDEO_WAIT_MS = 60_000;
+const QUERY_POLL_INTERVAL_MS = 2_000;
+
+/*
+ * 提交元数据的**内存**缓存：mode / seconds / resolution / created_at 只有提交时才知道，
+ * 上游查询接口不返回。存它只是为了让「提交 → 查询」前后字段一致，不是持久化：
+ * 不含 prompt、不落盘，桥重启后自然丢失（文档写明是 best-effort）。
+ */
+const META_TTL_MS = 6 * 60 * 60 * 1000;
+const META_MAX_ENTRIES = 500;
+
 const EXT_TO_MIME = new Map([
   ['.png', 'image/png'],
   ['.jpg', 'image/jpeg'],
@@ -136,13 +149,17 @@ function parseDataUri(raw, field) {
   const match = /^data:([^;,]+)?(;base64)?,(.*)$/s.exec(raw);
   if (!match) throw invalid(`${field} is not a valid data URI.`);
   if (!match[2]) throw invalid(`${field} data URI must use ;base64 encoding.`);
+  const mimeType = match[1]?.trim();
+  if (mimeType && !/^image\//i.test(mimeType)) {
+    throw invalid(`${field} data URI must be an image/* type (got ${mimeType}).`);
+  }
   const payload = match[3] ?? '';
   const buffer = Buffer.from(payload, 'base64');
   if (buffer.length === 0) throw invalid(`${field} data URI has an empty payload.`);
   if (buffer.length > IMAGE_MAX_BYTES) {
     throw invalid(`${field} exceeds ${IMAGE_MAX_BYTES}B (${buffer.length}B).`);
   }
-  return { origin: 'dataUri', base64: payload, mimeType: match[1]?.trim() || undefined };
+  return { origin: 'dataUri', base64: payload, mimeType: mimeType || undefined };
 }
 
 /**
@@ -171,15 +188,95 @@ export async function resolveImageInput(raw, options = {}) {
   return { origin: 'path', base64: buffer.toString('base64'), mimeType };
 }
 
-function stringList(value) {
-  if (!Array.isArray(value)) return [];
-  return value.filter((item) => typeof item === 'string' && item.trim() !== '').map((item) => item.trim());
+/*
+ * 允许的顶层字段。**不接受未知字段**：拼错一个键（firstFrameImage / image / size）
+ * 原先会被静默忽略 —— 请求退化成文生视频，图片没带上，但提交照样计费。
+ * 这里宁可 400 也不猜。
+ */
+const VIDEO_INPUT_KEYS = new Set([
+  'prompt',
+  'mode',
+  'duration',
+  'seconds',
+  'resolution',
+  'aspect_ratio',
+  'aspectRatio',
+  'first_frame',
+  'first_frame_path',
+  'firstFrame',
+  'input_reference',
+  'last_frame',
+  'last_frame_path',
+  'lastFrame',
+  'references',
+  'reference_paths',
+  'model', // 文档写明：不参与模型选择，接受但忽略
+]);
+
+/** 常见错写的指路牌（只说该用什么，不替用户猜意图）。 */
+const KEY_HINTS = new Map([
+  ['size', 'use resolution + aspect_ratio instead'],
+  ['image', 'use first_frame or references instead'],
+  ['reference_images', 'use references instead'],
+  ['referenceImages', 'use references instead'],
+  ['firstFrameImage', 'use first_frame instead'],
+  ['lastFrameImage', 'use last_frame instead'],
+  ['image_url', 'use first_frame or references instead'],
+  ['n', 'one video per request; remove n'],
+]);
+
+function assertKnownKeys(input) {
+  const unknown = Object.keys(input).filter((key) => !VIDEO_INPUT_KEYS.has(key));
+  if (!unknown.length) return;
+  const hinted = unknown.map((key) => (KEY_HINTS.has(key) ? `${key} (${KEY_HINTS.get(key)})` : key));
+  throw invalid(`unknown field(s): ${hinted.join(', ')}. Accepted: ${[...VIDEO_INPUT_KEYS].join(', ')}.`);
 }
 
-function optionalNumber(value, field) {
-  if (value === undefined || value === null) return undefined;
+/**
+ * 取一个字符串字段（含别名）。
+ * 出现但为空 / 类型不对时显式报错 —— 静默忽略会让图生视频悄悄变成文生视频。
+ */
+function pickString(input, keys, field) {
+  // null / undefined 视为“没给”；空字符串才是显式错误（常见于变量没填）。
+  const present = keys.filter((key) => Object.prototype.hasOwnProperty.call(input, key)
+    && input[key] !== undefined && input[key] !== null);
+  if (!present.length) return '';
+  const provided = present.filter((key) => input[key] !== '');
+  if (!provided.length) {
+    throw invalid(`${field} is empty (${present.join('/')}); omit it instead of passing an empty value.`);
+  }
+  if (provided.length > 1) {
+    throw invalid(`${field} is given more than once (${provided.join('/')}); pass only one.`);
+  }
+  const [key] = provided;
+  const value = input[key];
+  if (typeof value !== 'string') throw invalid(`${field} must be a string.`);
+  if (!value.trim()) throw invalid(`${field} is empty.`);
+  return value.trim();
+}
+
+function parseReferences(input) {
+  const keys = ['references', 'reference_paths'].filter((key) => Object.prototype.hasOwnProperty.call(input, key)
+    && input[key] !== undefined && input[key] !== null);
+  if (!keys.length) return [];
+  if (keys.length > 1) throw invalid('use either references or reference_paths, not both.');
+  const [key] = keys;
+  const value = input[key];
+  if (!Array.isArray(value)) throw invalid(`${key} must be an array of image strings.`);
+  return value.map((item, index) => {
+    if (typeof item !== 'string' || !item.trim()) {
+      throw invalid(`${key}[${index}] must be a non-empty string.`);
+    }
+    return item.trim();
+  });
+}
+
+function optionalDuration(value) {
+  if (value === undefined || value === null || value === '') return undefined;
   const number = Number(value);
-  if (!Number.isFinite(number) || number <= 0) throw invalid(`${field} must be a positive number.`);
+  if (!Number.isFinite(number) || !Number.isInteger(number) || number <= 0) {
+    throw invalid('duration must be a positive integer number of seconds.');
+  }
   return number;
 }
 
@@ -191,28 +288,50 @@ function optionalString(value, field, limit = 64) {
   return text;
 }
 
+/** 大小写归一：上游认 `768P` / `2K`。未知取值原样透传，由上游判定（不替它发明新档位）。 */
+const RESOLUTION_ALIASES = new Map([['768p', '768P'], ['2k', '2K']]);
+
+function normalizeResolution(value) {
+  const text = optionalString(value, 'resolution');
+  if (!text) return undefined;
+  return RESOLUTION_ALIASES.get(text.toLowerCase()) || text;
+}
+
+function normalizeAspectRatio(value) {
+  const text = optionalString(value, 'aspect_ratio');
+  if (!text) return undefined;
+  const compact = text.replace(/\s*:\s*/g, ':');
+  if (!/^[1-9]\d?:[1-9]\d?$/.test(compact)) {
+    throw invalid('aspect_ratio must be a positive ratio like "16:9", "9:16" or "1:1".');
+  }
+  return compact;
+}
+
 /**
  * 校验并构造上游提交体。三种模式：
  *   text      = 纯提示词
  *   frame     = first_frame（可选 last_frame）
  *   reference = 一张或多张参考图
- * `input_reference` 是 first_frame 的 OpenAI 风格别名。
+ * `input_reference` / `firstFrame` 是 first_frame 的别名（前者沿用 OpenAI 风格）。
+ *
+ * 校验原则：**能明确判错的都在本地 400**，绝不把「图片没带上」的请求当文生视频提交
+ * （提交即计费）。上游才是时长/分辨率档位的权威，本地只归一写法、不擅自扩缩范围。
  */
 export async function buildVideoSubmitBody(input, options = {}) {
   if (!isObject(input)) throw invalid('request body must be a JSON object.');
+  assertKnownKeys(input);
 
+  if (input.mode !== undefined && input.mode !== null && typeof input.mode !== 'string') {
+    throw invalid('mode must be a string: text, frame or reference.');
+  }
   const modeRaw = typeof input.mode === 'string' ? input.mode.trim().toLowerCase() : '';
   if (modeRaw && !['text', 'frame', 'reference'].includes(modeRaw)) {
     throw invalid('mode must be one of: text, frame, reference.');
   }
 
-  const firstRaw = [input.first_frame, input.first_frame_path, input.input_reference]
-    .find((value) => typeof value === 'string' && value.trim() !== '');
-  const lastRaw = [input.last_frame, input.last_frame_path]
-    .find((value) => typeof value === 'string' && value.trim() !== '');
-  const references = stringList(input.references).length
-    ? stringList(input.references)
-    : stringList(input.reference_paths);
+  const firstRaw = pickString(input, ['first_frame', 'first_frame_path', 'firstFrame', 'input_reference'], 'first_frame');
+  const lastRaw = pickString(input, ['last_frame', 'last_frame_path', 'lastFrame'], 'last_frame');
+  const references = parseReferences(input);
 
   const hasFrame = Boolean(firstRaw || lastRaw);
   const hasReferences = references.length > 0;
@@ -222,7 +341,7 @@ export async function buildVideoSubmitBody(input, options = {}) {
     throw invalid('mode "text" does not accept frames or references.');
   }
   if (mode === 'frame') {
-    if (!firstRaw) throw invalid('frame mode requires first_frame (alias: input_reference).');
+    if (!firstRaw) throw invalid('frame mode requires first_frame (alias: input_reference); last_frame alone is not enough.');
     if (hasReferences) throw invalid('frame mode does not accept references.');
   }
   if (mode === 'reference') {
@@ -230,18 +349,29 @@ export async function buildVideoSubmitBody(input, options = {}) {
     if (hasFrame) throw invalid('reference mode does not accept first_frame/last_frame.');
   }
 
+  if (input.prompt !== undefined && input.prompt !== null && typeof input.prompt !== 'string') {
+    throw invalid('prompt must be a string.');
+  }
   const promptRaw = typeof input.prompt === 'string' ? input.prompt.trim() : '';
   if ((mode === 'text' || mode === 'reference') && !promptRaw) {
     throw invalid(`prompt is required for ${mode} mode.`);
   }
   if (promptRaw.length > 8000) throw invalid('prompt is longer than 8000 characters.');
 
-  const duration = optionalNumber(input.duration ?? input.seconds, 'duration');
-  const resolution = optionalString(input.resolution, 'resolution');
-  const aspectRatio = optionalString(input.aspect_ratio, 'aspect_ratio');
-  if (aspectRatio && !/^\d{1,2}:\d{1,2}$/.test(aspectRatio)) {
-    throw invalid('aspect_ratio must look like "16:9", "9:16" or "1:1".');
+  const hasDuration = input.duration !== undefined && input.duration !== null;
+  const hasSeconds = input.seconds !== undefined && input.seconds !== null;
+  if (hasDuration && hasSeconds && Number(input.duration) !== Number(input.seconds)) {
+    throw invalid('duration and seconds disagree; pass only one.');
   }
+  const duration = optionalDuration(input.duration ?? input.seconds);
+  const resolution = normalizeResolution(input.resolution);
+  const hasAspectRatio = input.aspect_ratio !== undefined && input.aspect_ratio !== null;
+  const hasCamelAspectRatio = input.aspectRatio !== undefined && input.aspectRatio !== null;
+  if (hasAspectRatio && hasCamelAspectRatio
+    && String(input.aspect_ratio).replace(/\s*:\s*/g, ':') !== String(input.aspectRatio).replace(/\s*:\s*/g, ':')) {
+    throw invalid('aspect_ratio and aspectRatio disagree; pass only one.');
+  }
+  const aspectRatio = normalizeAspectRatio(input.aspect_ratio ?? input.aspectRatio);
 
   const body = {};
   if (promptRaw) body.prompt = promptRaw;
@@ -351,6 +481,8 @@ function cacheKeyFor(auth) {
 export function resetTempKeyCache() {
   tempKeyCache.clear();
   tempKeyPending.clear();
+  // 单元测试共用它做隔离；提交元数据也必须一起清，否则用例之间会串。
+  submissionMeta.clear();
 }
 
 function parseExpiry(value, fallback) {
@@ -477,7 +609,31 @@ async function mioraPost(auth, path, body, options, retried = false) {
   return unwrapEnvelope(parsed);
 }
 
-function normalizeResult({ id, data, entry, built = null, submittedAt = null }) {
+const submissionMeta = new Map();
+
+/** 记住一次提交的元数据（仅供同进程内的查询回填；不含 prompt）。 */
+function rememberSubmission(id, meta) {
+  if (!id) return;
+  submissionMeta.delete(id);
+  submissionMeta.set(id, meta);
+  while (submissionMeta.size > META_MAX_ENTRIES) {
+    const oldest = submissionMeta.keys().next().value;
+    submissionMeta.delete(oldest);
+  }
+}
+
+function recallSubmission(id) {
+  const meta = submissionMeta.get(id);
+  if (!meta) return null;
+  // TTL 用真实时钟：`now` 是可注入的（测试用来固定 created_at），不该影响缓存寿命。
+  if (Date.now() - meta.savedAt > META_TTL_MS) {
+    submissionMeta.delete(id);
+    return null;
+  }
+  return meta;
+}
+
+function normalizeResult({ id, data, entry, meta = null }) {
   const rawStatus = String(entry?.status ?? data?.status ?? 'pending');
   const files = Array.isArray(entry?.resultFiles)
     ? entry.resultFiles
@@ -493,13 +649,13 @@ function normalizeResult({ id, data, entry, built = null, submittedAt = null }) 
     object: 'video',
     status: normalizeVideoStatus(rawStatus),
     upstream_status: rawStatus,
-    created_at: submittedAt === null ? null : Math.floor(submittedAt / 1000),
-    model: data?.model ?? null,
-    provider: data?.provider ?? 'copilot-video',
-    mode: built?.mode ?? null,
-    seconds: built?.duration ?? null,
-    resolution: built?.resolution ?? null,
-    aspect_ratio: built?.aspectRatio ?? null,
+    created_at: meta?.createdAt ?? null,
+    model: data?.model ?? meta?.model ?? null,
+    provider: data?.provider ?? meta?.provider ?? 'copilot-video',
+    mode: meta?.mode ?? null,
+    seconds: meta?.duration ?? null,
+    resolution: meta?.resolution ?? null,
+    aspect_ratio: meta?.aspectRatio ?? null,
     result_files: files,
     output: urls.length ? { url: urls[0], urls } : null,
     error: errorMessage ? { message: shortMessage(errorMessage) } : null,
@@ -534,17 +690,50 @@ export async function submitVideo(auth, input, options = {}) {
       errorMessage: data.errorMessage,
     }
     : null;
-  return normalizeResult({ id: data.upstreamTaskId, data, entry, built, submittedAt: startedAt });
+  const meta = {
+    mode: built.mode,
+    duration: built.duration,
+    resolution: built.resolution,
+    aspectRatio: built.aspectRatio,
+    model: data.model ?? null,
+    provider: data.provider ?? null,
+    createdAt: Math.floor(startedAt / 1000),
+    savedAt: Date.now(),
+  };
+  rememberSubmission(String(data.upstreamTaskId), meta);
+  return normalizeResult({ id: data.upstreamTaskId, data, entry, meta });
 }
 
+/**
+ * 查询任务；`waitMs > 0` 时由桥代客户端轮询（每 2 秒），直到终态或预算用完。
+ * 查询不计费，重复查询安全；超时返回最后一次状态，不是失败。
+ */
 export async function queryVideo(auth, id, options = {}) {
   const taskId = typeof id === 'string' ? id.trim() : '';
   if (!taskId) throw invalid('video id is required.');
   const opts = clientOptions(options);
-  const data = await mioraPost(auth, VIDEO_QUERY_PATH, { upstreamTaskIds: [taskId] }, opts);
-  const entry = isObject(data) ? data[taskId] : null;
-  if (!isObject(entry)) {
-    throw new MioraVideoError('VIDEO_NOT_FOUND', `Miora has no video task ${taskId}.`, { status: 404 });
+  const waitMs = Math.min(Math.max(Number(options.waitMs) || 0, 0), MAX_VIDEO_WAIT_MS);
+  const sleep = options.sleep || ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+  const attempts = waitMs > 0 ? Math.ceil(waitMs / QUERY_POLL_INTERVAL_MS) + 1 : 1;
+
+  let last = null;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    const data = await mioraPost(auth, VIDEO_QUERY_PATH, { upstreamTaskIds: [taskId] }, opts);
+    const entry = isObject(data) ? data[taskId] : null;
+    if (!isObject(entry)) {
+      throw new MioraVideoError('VIDEO_NOT_FOUND', `Miora has no video task ${taskId}.`, { status: 404 });
+    }
+    last = normalizeResult({
+      id: taskId,
+      data: { upstreamTaskId: taskId },
+      entry,
+      meta: recallSubmission(taskId),
+    });
+    const terminal = last.status === 'completed' || last.status === 'failed' || last.status === 'cancelled';
+    if (terminal || attempt === attempts - 1) return last;
+    // 最后一段可能不足一个轮询间隔：别让 wait=1 实际等了 2 秒。
+    const remaining = waitMs - attempt * QUERY_POLL_INTERVAL_MS;
+    await sleep(Math.max(0, Math.min(QUERY_POLL_INTERVAL_MS, remaining)));
   }
-  return normalizeResult({ id: taskId, data: { upstreamTaskId: taskId }, entry });
+  return last;
 }

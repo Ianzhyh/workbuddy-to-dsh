@@ -160,7 +160,10 @@ test('提交/查询：临时 key 只申请一次，Authorization 用 ck_t_ key',
 
   const queried = await queryVideo(AUTH, 'task-1', { fetchImpl, baseUrl: BASE });
   assert.equal(queried.status, 'completed');
-  assert.equal(queried.created_at, null);
+  // 提交元数据只驻内存，但同一进程内查询应前后一致（不是 null）
+  assert.equal(queried.created_at, 1);
+  assert.equal(queried.mode, 'text');
+  assert.equal(queried.seconds, 5);
   assert.equal(queried.output.url, 'https://cdn.example/v.mp4');
   assert.equal(queried.result_files.length, 1);
 
@@ -356,6 +359,121 @@ test('临时 key：429/403 不能被笼统报成登录失败', async () => {
       return true;
     },
   );
+});
+
+test('视频请求体：未知字段/空帧/坏参考图一律本地 400（不许静默退化成文生视频）', async () => {
+  const cases = [
+    [{ prompt: 'x', size: '1280x720' }, /unknown field/],
+    [{ prompt: 'x', image: 'file/a' }, /unknown field/],
+    [{ prompt: 'x', first_frame: '' }, /first_frame is empty/],
+    [{ prompt: 'x', first_frame: 'file/a', firstFrame: 'file/b' }, /more than once/],
+    [{ prompt: 'x', references: [123] }, /references\[0\]/],
+    [{ prompt: 'x', references: 'file/a' }, /must be an array/],
+    [{ prompt: 'x', last_frame: 'file/a' }, /last_frame alone is not enough/],
+    [{ prompt: 'x', duration: 4.5 }, /positive integer/],
+    [{ prompt: 'x', duration: 5, seconds: 6 }, /disagree/],
+    [{ prompt: 'x', aspect_ratio: '0:0' }, /positive ratio/],
+    [{ prompt: 'x', references: ['data:text/plain;base64,AAAA'] }, /image\//],
+    [{ prompt: 123 }, /prompt must be a string/],
+    [{ prompt: 'x', mode: 1 }, /mode must be a string/],
+  ];
+  for (const [input, pattern] of cases) {
+    await assert.rejects(
+      () => buildVideoSubmitBody(input, { readFile }),
+      (err) => {
+        assert.equal(err.code, 'VIDEO_INVALID_INPUT');
+        assert.equal(err.status, 400);
+        assert.match(err.message, pattern);
+        return true;
+      },
+      JSON.stringify(input).slice(0, 120),
+    );
+  }
+});
+
+test('视频请求体：分辨率大小写归一、画幅去空格、camelCase 别名等价', async () => {
+  const lower = await buildVideoSubmitBody({ prompt: 'x', resolution: '768p', aspect_ratio: '16 : 9', seconds: 5 });
+  assert.equal(lower.resolution, '768P');
+  assert.equal(lower.aspectRatio, '16:9');
+  assert.deepEqual(lower.body, {
+    prompt: 'x', duration: 5, resolution: '768P', aspect_ratio: '16:9',
+  });
+
+  const camel = await buildVideoSubmitBody({ firstFrame: 'bga/x/y.png', aspectRatio: '9:16' });
+  assert.equal(camel.mode, 'frame');
+  assert.deepEqual(camel.body.input.first_frame_image, { file_key: 'bga/x/y.png' });
+  assert.equal(camel.aspectRatio, '9:16');
+
+  const upper = await buildVideoSubmitBody({ prompt: 'x', resolution: '2K' });
+  assert.equal(upper.resolution, '2K');
+});
+
+test('视频请求体：null 视为“没给”，空字符串仍然报错', async () => {
+  const built = await buildVideoSubmitBody({
+    prompt: 'x', first_frame: null, references: null, duration: null,
+  });
+  assert.equal(built.mode, 'text');
+  assert.deepEqual(built.body, { prompt: 'x' });
+});
+
+test('长轮询：waitMs 内等到 completed；预算用完返回最后一次状态', async () => {
+  let queries = 0;
+  const makeFetch = (finalStatus) => async (url) => {
+    if (String(url).endsWith('/v2/api-keys')) {
+      return jsonResponse(200, {
+        code: 0,
+        data: { key: 'ck_t_poll', expires_at: new Date(Date.now() + 900_000).toISOString() },
+      });
+    }
+    if (String(url).endsWith('/video/query-task')) {
+      queries += 1;
+      const status = queries < 3 ? 'processing' : finalStatus;
+      return jsonResponse(200, {
+        code: 0,
+        failed: false,
+        data: {
+          'task-poll': {
+            status,
+            resultFiles: status === 'completed' ? [{ signedUrl: 'https://cdn.example/poll.mp4' }] : [],
+          },
+        },
+      });
+    }
+    throw new Error(`unexpected ${url}`);
+  };
+
+  const done = await queryVideo(AUTH, 'task-poll', {
+    fetchImpl: makeFetch('completed'), baseUrl: BASE, waitMs: 10_000, sleep: async () => {},
+  });
+  assert.equal(done.status, 'completed');
+  assert.equal(queries, 3, '应轮询到终态后立刻返回');
+  assert.equal(done.output.url, 'https://cdn.example/poll.mp4');
+
+  queries = 0;
+  const timedOut = await queryVideo(AUTH, 'task-poll', {
+    fetchImpl: makeFetch('processing'), baseUrl: BASE, waitMs: 4_000, sleep: async () => {},
+  });
+  assert.equal(timedOut.status, 'in_progress');
+  assert.equal(queries, 3, '4 秒预算 = 首次 + 2 次重试；超时是「还没出来」，不是失败');
+});
+
+test('查询：没有本地提交记录的任务不伪造元数据', async () => {
+  const fetchImpl = async (url) => {
+    if (String(url).endsWith('/v2/api-keys')) {
+      return jsonResponse(200, {
+        code: 0,
+        data: { key: 'ck_t_meta', expires_at: new Date(Date.now() + 900_000).toISOString() },
+      });
+    }
+    if (String(url).endsWith('/video/query-task')) {
+      return jsonResponse(200, { code: 0, failed: false, data: { 'task-other': { status: 'processing' } } });
+    }
+    throw new Error(`unexpected ${url}`);
+  };
+  const video = await queryVideo(AUTH, 'task-other', { fetchImpl, baseUrl: BASE });
+  assert.equal(video.mode, null);
+  assert.equal(video.seconds, null);
+  assert.equal(video.created_at, null);
 });
 
 test('查询：任务不存在返回 404，失败任务保留 errorMessage', async () => {

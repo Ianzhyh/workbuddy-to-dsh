@@ -412,7 +412,7 @@ dsh 的 `web-search-deepseek` 分节：`baseURL=http://127.0.0.1:8790/v1`、
 | `workbuddy_checkin` | 签到状态；`claim=true` 立即领取 |
 | `workbuddy_web_search` | 直接走桥的 WorkBuddy 原生搜索；dsh 内置搜索 401/未接入时的兜底 |
 | `workbuddy_generate_video` | 提交 Miora 视频任务（文生视频 / 首尾帧 / 参考图）。**高积分计费**，异步返回任务 id；同一需求不要重复提交 |
-| `workbuddy_video_status` | 查询视频任务；completed 返回有时效的下载 URL，processing 时明确提示不要重提 |
+| `workbuddy_video_status` | 查询视频任务；默认代等 20 秒（`wait_seconds`），completed 返回有时效的下载 URL，processing 时明确提示不要重提 |
 | `workbuddy_bridge` | `status` / `start` / `stop` / `restart` 桥；`console` 确保控制台在跑并返回地址 |
 
 ```
@@ -549,7 +549,15 @@ npm run panel:check                    # 上面两个一起跑
 
 ## 修复记录（都补了回归测试）
 
-### 1.12.0（本轮）
+### 1.13.0（本轮）
+
+| 症状 | 根因 | 修法 / 回归 |
+|---|---|---|
+| 从 npm 安装后桥起不来（`ERR_MODULE_NOT_FOUND: miora-video.mjs`） | 根包 `files` 白名单漏了视频模块；插件又优先选仓库根目录的 `bridge/`，于是选中了一个缺文件的入口 | 补进 `files`；新增 `npm run check:pack` 递归校验入口 import 并接进 `release:check`；`verify:release` 也核对 vendored 视频模块。回归：`check-package-files.mjs` |
+| 图生视频参数拼错时，图片没带上却按文生视频提交计费 | 未知字段 / 空帧 / 非字符串参考图被静默跳过 | 一律本地 400，附 `Accepted` 清单与常见错写指路；`firstFrame` 等别名显式接受。回归：`miora-video.test.mjs`、`bridge-video.test.mjs` |
+| 任务已完成但上游没给产物时 `/content` 报 409，客户端以为继续等就行 | 一个 409 同时覆盖“没生成完”和“没产物” | completed 无 https 产物 → 502 `VIDEO_NO_OUTPUT`；查询新增 `?wait=N` 长轮询，`workbuddy_video_status` 的 `wait_seconds` 默认代等 20 秒。回归：`bridge-video.test.mjs`、`video-tool.test.mjs` |
+
+### 1.12.0
 
 | 症状 | 根因 | 修法 / 回归 |
 |---|---|---|

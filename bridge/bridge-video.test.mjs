@@ -22,6 +22,7 @@ const submitCalls = [];
 const queryCalls = [];
 let apiKeyCalls = 0;
 let refreshKeySubmits = 0;
+let slowPolls = 0;
 
 const stub = createServer((req, res) => {
   const chunks = [];
@@ -76,6 +77,27 @@ const stub = createServer((req, res) => {
       queryCalls.push({ headers: req.headers, body });
       const id = body?.upstreamTaskIds?.[0];
       if (id === 'missing') return json(200, { code: 0, failed: false, data: {} });
+      if (id === 'task-empty') {
+        return json(200, {
+          code: 0,
+          failed: false,
+          data: { 'task-empty': { status: 'completed', resultFiles: [] } },
+        });
+      }
+      if (id === 'task-slow') {
+        slowPolls += 1;
+        const status = slowPolls < 2 ? 'processing' : 'completed';
+        return json(200, {
+          code: 0,
+          failed: false,
+          data: {
+            'task-slow': {
+              status,
+              resultFiles: status === 'completed' ? [{ signedUrl: 'https://cdn.example/slow.mp4' }] : [],
+            },
+          },
+        });
+      }
       if (id === 'task-processing') {
         return json(200, { code: 0, failed: false, data: { 'task-processing': { status: 'processing' } } });
       }
@@ -206,7 +228,10 @@ test('文生视频：提交 202，请求体与临时 key 正确；查询/下载�
   assert.equal(lookup.status, 200);
   const queried = await lookup.json();
   assert.equal(queried.status, 'completed');
-  assert.equal(queried.created_at, null);
+  // 提交元数据在同一个桥进程内会补回（不写盘；重启后为 null）
+  assert.equal(queried.mode, 'text');
+  assert.equal(queried.seconds, 5);
+  assert.equal(typeof queried.created_at, 'number');
   assert.equal(queried.output.url, 'https://cdn.example/video.mp4');
   assert.equal(queryCalls.at(-1).body.upstreamTaskIds[0], 'task-1');
   assert.equal(apiKeyCalls, beforeApiKeys + 1, '查询应复用同一把临时 key');
@@ -247,7 +272,7 @@ test('图生视频：首尾帧与参考图分别映射到 input', async () => {
   });
 });
 
-test('本地校验：缺 prompt / 冲突模式不提交上游', async () => {
+test('本地校验：缺 prompt / 冲突模式 / 未知字段都不提交上游', async () => {
   const before = submitCalls.length;
   const missing = await post('/v1/videos', {});
   assert.equal(missing.status, 400);
@@ -257,6 +282,14 @@ test('本地校验：缺 prompt / 冲突模式不提交上游', async () => {
     mode: 'text', prompt: 'x', first_frame: 'file/a',
   });
   assert.equal(conflict.status, 400);
+
+  // 拼错的键不能被静默忽略：否则请求退化成文生视频，图片没带上却照常计费。
+  const unknown = await post('/v1/videos', { prompt: 'x', size: '1280x720' });
+  assert.equal(unknown.status, 400);
+  const body = await unknown.json();
+  assert.equal(body.error.code, 'VIDEO_INVALID_INPUT');
+  assert.match(body.error.message, /unknown field/);
+
   assert.equal(submitCalls.length, before, '非法输入不应打上游');
 });
 
@@ -311,14 +344,33 @@ test('上游拒绝：200+failed 转成 400，任务失败查询仍返回 200', a
   assert.equal((await missing.json()).error.code, 'VIDEO_NOT_FOUND');
 });
 
-test('未完成任务的 /content 返回 409；畸形 id 返回 400', async () => {
+test('未完成任务的 /content 返回 409；completed 但无产物返回 502；畸形 id 返回 400', async () => {
   const pending = await get('/v1/videos/task-processing/content', { redirect: 'manual' });
   assert.equal(pending.status, 409);
   assert.equal((await pending.json()).error.code, 'VIDEO_NOT_READY');
 
+  // 上游说 completed 却没有 https 产物：报 502 NO_OUTPUT，不能再让客户端以为「继续等」
+  const empty = await get('/v1/videos/task-empty/content', { redirect: 'manual' });
+  assert.equal(empty.status, 502);
+  assert.equal((await empty.json()).error.code, 'VIDEO_NO_OUTPUT');
+
   const bad = await get('/v1/videos/bad%2Fid');
   assert.equal(bad.status, 400);
   assert.equal((await bad.json()).error.code, 'VIDEO_INVALID_INPUT');
+});
+
+test('长轮询 wait：桥代客户端等到出片；非法 wait 不静默当 0', async () => {
+  const before = queryCalls.length;
+  const waited = await get('/v1/videos/task-slow?wait=1');
+  assert.equal(waited.status, 200);
+  const body = await waited.json();
+  assert.equal(body.status, 'completed');
+  assert.equal(body.output.url, 'https://cdn.example/slow.mp4');
+  assert.ok(queryCalls.length - before >= 2, `桥应自己轮询，实际 ${queryCalls.length - before} 次查询`);
+
+  const badWait = await get('/v1/videos/task-1?wait=abc');
+  assert.equal(badWait.status, 400);
+  assert.equal((await badWait.json()).error.code, 'VIDEO_INVALID_INPUT');
 });
 
 test('账本：视频提交单独计数，不污染模型调用/tokens/积分', async () => {

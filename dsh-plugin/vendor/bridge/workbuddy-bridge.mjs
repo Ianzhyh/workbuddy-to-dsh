@@ -37,7 +37,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { spawn } from 'node:child_process';
 import { waitDrain } from './wait-drain.mjs';
 import { applyPromotion, groupPromotions } from './promotions.mjs';
-import { submitVideo, queryVideo, MioraVideoError } from './miora-video.mjs';
+import { submitVideo, queryVideo, MioraVideoError, MAX_VIDEO_WAIT_MS } from './miora-video.mjs';
 
 /**
  * 本桥源码的构建指纹。
@@ -3258,7 +3258,7 @@ async function handleVideoSubmit(req, res) {
   }
 }
 
-async function handleVideoLookup(req, res, pathname) {
+async function handleVideoLookup(req, res, pathname, url) {
   const rest = pathname.slice('/v1/videos/'.length);
   const wantsContent = rest.endsWith('/content');
   const rawId = wantsContent ? rest.slice(0, -'/content'.length) : rest;
@@ -3269,17 +3269,52 @@ async function handleVideoLookup(req, res, pathname) {
     return json(res, 400, { error: { message: 'workbuddy-bridge: malformed video id', type: 'invalid_request', code: 'VIDEO_INVALID_INPUT' } });
   }
 
+  /*
+   * `?wait=N`：让桥代客户端轮询 N 秒（上限 60），避免 agent 自己每两秒查一次。
+   * 只接受整数秒 —— 收到 `wait=abc` 要明确拒绝，而不是当 0 静默返回“还在生成”。
+   */
+  const waitRaw = url.searchParams.get('wait');
+  let waitMs = 0;
+  if (waitRaw !== null && waitRaw !== '') {
+    if (!/^\d{1,4}$/.test(waitRaw)) {
+      return json(res, 400, {
+        error: {
+          message: `workbuddy-bridge: wait must be an integer number of seconds (0-${MAX_VIDEO_WAIT_MS / 1000})`,
+          type: 'invalid_request',
+          code: 'VIDEO_INVALID_INPUT',
+        },
+      });
+    }
+    waitMs = Math.min(Number(waitRaw) * 1000, MAX_VIDEO_WAIT_MS);
+  }
+
   const resolved = await videoAuth();
   if (resolved.error) return json(res, resolved.error.status, resolved.error.body);
   try {
-    const video = await queryVideo(resolved.auth, id, { baseUrl: VIDEO_BASE_OVERRIDE || undefined });
+    const video = await queryVideo(resolved.auth, id, {
+      baseUrl: VIDEO_BASE_OVERRIDE || undefined,
+      waitMs,
+    });
     if (!wantsContent) return json(res, 200, video, { 'Cache-Control': 'no-store' });
-    if (video.status !== 'completed' || !video.output?.url) {
+    if (video.status !== 'completed') {
       return json(res, 409, {
         error: {
           message: `workbuddy-bridge: video ${id} is ${video.status}; no downloadable output yet`,
           type: 'video_not_ready',
           code: 'VIDEO_NOT_READY',
+        },
+      });
+    }
+    if (!video.output?.url) {
+      /*
+       * 上游说 completed 却没给 https 产物：这不是「没生成完」，重试查询也许能拿到，
+       * 但绝不能再报 409 NOT_READY（客户端会以为继续等就行）。明确 502 + 可区分的 code。
+       */
+      return json(res, 502, {
+        error: {
+          message: `workbuddy-bridge: video ${id} is completed but Miora returned no https output; query again later`,
+          type: 'video_generation_error',
+          code: 'VIDEO_NO_OUTPUT',
         },
       });
     }
@@ -8659,7 +8694,7 @@ async function handleRequest(req, res) {
       return handleVideoSubmit(req, res);
     }
     if (url.pathname.startsWith('/v1/videos/') && req.method === 'GET') {
-      return handleVideoLookup(req, res, url.pathname);
+      return handleVideoLookup(req, res, url.pathname, url);
     }
 
     // ── WorkBuddy 原生网页搜索（不经过 DeepSeek）────────────────────────

@@ -291,9 +291,19 @@ export class BridgeClient {
     });
   }
 
-  /** `GET /v1/videos/{id}`：查询任务状态；completed 时带 `output.url(s)`。 */
-  videoStatus(id, signal) {
-    return this.#json(`/v1/videos/${encodeURIComponent(id)}`, { signal, timeoutMs: 45_000 });
+  /**
+   * `GET /v1/videos/{id}`：查询任务状态；completed 时带 `output.url(s)`。
+   *
+   * `waitMs > 0` 让桥代客户端轮询（桥侧上限 60 秒），工具不必自己 sleep。
+   */
+  videoStatus(id, { waitMs = 0, signal } = {}) {
+    const waitSeconds = Math.min(Math.max(Math.ceil(waitMs / 1000), 0), 60);
+    const suffix = waitSeconds > 0 ? `?wait=${waitSeconds}` : '';
+    return this.#json(`/v1/videos/${encodeURIComponent(id)}${suffix}`, {
+      signal,
+      // 桥最多等 60 秒，再加一次查询的上游超时；客户端必须比桥晚放弃。
+      timeoutMs: waitSeconds > 0 ? 95_000 : 45_000,
+    });
   }
 
   // ── 插件登录（第二条凭据来源）─────────────────────────────────────────
