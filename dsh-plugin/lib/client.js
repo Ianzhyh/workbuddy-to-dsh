@@ -957,6 +957,14 @@ body.dark .wb-root,
       '调用': 'Calls',
       '模型调用': 'Model calls',
       '搜索次数': 'Search calls',
+      '通道校验': 'Channel check',
+      '账号/权限': 'Account/permission',
+      '登录态': 'Login state',
+      '限流': 'Rate limit',
+      '额度': 'Quota',
+      '工具历史': 'Tool history',
+      '流中断': 'Stream interrupted',
+      '请求参数': 'Request parameters',
       '搜索失败': 'Search failures',
       '视频提交': 'Video submissions',
       '视频失败': 'Video failures',
@@ -1650,6 +1658,9 @@ body.dark .wb-root,
       [/^失败$/, 'Failed'],
       [/^HTTP (\d+)：(.+)$/, 'HTTP $1: $2'],
       [/^最近请求里有 (\d+) 条失败$/, (m, n) => n + (n === '1' ? ' recent failure' : ' recent failures')],
+      [/^最近 (\d+) 条失败属于账号\/通道\/额度问题，先看「请求」页再决定，不要连续重试$/,
+        (m, n) => n + (n === '1' ? ' recent failure is' : ' recent failures are')
+          + ' an account/channel/quota issue. Check Requests before retrying repeatedly.'],
 
       // ── 体检 / 模型 ──
       [/^可用 · (\d+)ms$/, 'ok · $1ms'],
@@ -3134,7 +3145,18 @@ body.dark .wb-root,
         });
       }
       if (!status?.route?.registered) alerts.push({ tone: 'bad', text: '原生模型路由未注册：' + (status?.route?.error || '未知原因') });
-      if (failedRecent.length) alerts.push({ tone: 'warn', text: `最近请求里有 ${failedRecent.length} 条失败`, action: 'requests' });
+      const criticalFailures = failedRecent.filter(
+        (r) => ['channel', 'account', 'auth', 'quota'].includes(r.failureKind),
+      );
+      if (criticalFailures.length) {
+        alerts.push({
+          tone: 'bad',
+          text: `最近 ${criticalFailures.length} 条失败属于账号/通道/额度问题，先看「请求」页再决定，不要连续重试`,
+          action: 'requests',
+        });
+      } else if (failedRecent.length) {
+        alerts.push({ tone: 'warn', text: `最近请求里有 ${failedRecent.length} 条失败`, action: 'requests' });
+      }
       if (checkinStatus && checkinStatus.todayCheckedIn === false && checkinStatus.active !== false) {
         alerts.push({ tone: 'warn', text: '今日还没签到', action: 'checkin' });
       }
@@ -4366,7 +4388,23 @@ body.dark .wb-root,
       }, [directory, all]);
       if (isInitialLoading(loading, data, error)) return h(Card, { title: '最近请求' }, h(Loading, { text: '正在读取请求记录…' }));
       const rows = all.filter((r) => (!onlyFailed || !r.ok) && (!modelFilter || r.model === modelFilter));
-      const failLabel = (r) => `失败${r.status ? ' HTTP ' + r.status : ''}${r.code ? ' · code ' + r.code : ''}`;
+      const failureKindLabel = (kind) => ({
+        channel: '通道校验',
+        account: '账号/权限',
+        auth: '登录态',
+        rate_limit: '限流',
+        quota: '额度',
+        tool_history: '工具历史',
+        stream: '流中断',
+        upstream: '上游',
+        request: '请求参数',
+        unknown: '未知',
+      }[kind] || '');
+      const failLabel = (r) => {
+        const base = `失败${r.status ? ' HTTP ' + r.status : ''}${r.code ? ' · code ' + r.code : ''}`;
+        const kind = failureKindLabel(r.failureKind);
+        return kind ? [base, ' · ', h('span', { style: { opacity: 0.75 } }, kind)] : base;
+      };
       return h(Card, { title: '最近请求' },
         error ? h(Alert, { bad: true }, error) : null,
         h(ActiveRequests, { active: data?.active || [], alertMs: data?.activeAlertMs }),

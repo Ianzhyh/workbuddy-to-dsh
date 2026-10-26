@@ -5651,7 +5651,7 @@ async function syncUsableModels() {
 function exportRequestsCsv() {
   const shown = visibleRequests();
   if (!shown.length) { setRegMsg('当前筛选下没有可导出的明细', 'err'); return; }
-  const rows = [['时间', '模型', '方式', '耗时(ms)', '首字(ms)', '桥开销(ms)', '输入 tokens', '输出 tokens', '缓存命中 tokens', '缓存未命中 tokens', '积分', '结果', '状态码', '错误码', '错误原文']];
+  const rows = [['时间', '模型', '方式', '耗时(ms)', '首字(ms)', '桥开销(ms)', '输入 tokens', '输出 tokens', '缓存命中 tokens', '缓存未命中 tokens', '积分', '结果', '失败归因', '状态码', '错误码', '错误原文']];
   for (const r of shown) {
     rows.push([
       new Date(r.t).toLocaleString('zh-CN', { hour12: false }),
@@ -5666,6 +5666,7 @@ function exportRequestsCsv() {
       typeof r.cacheMissTokens === 'number' ? r.cacheMissTokens : '',
       typeof r.credit === 'number' ? r.credit : '',
       r.ok ? '成功' : '失败',
+      r.failureKind || '',
       r.status || '',
       r.code === null || r.code === undefined ? '' : r.code,
       r.error ? String(r.error).replace(/\s+/g, ' ').slice(0, 300) : '',

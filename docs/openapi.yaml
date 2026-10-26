@@ -536,7 +536,7 @@ paths:
           schema: { type: integer, default: 50 }
       responses:
         '200':
-          description: 明细（requests[]，只含元数据）与进行中（active[]，含 runningMs）及 activeAlertMs。可选字段：`cachedTokens` / `cacheMissTokens`（上游回报才出现）、`toolRepair`（本次工具历史修复计数）、`imageOmitted`（非视觉模型忽略的图片数）、`channelRejected` / `channelAttempts`（11128 全降级失败）。
+          description: 明细（requests[]，只含元数据）与进行中（active[]，含 runningMs）及 activeAlertMs。可选字段：`cachedTokens` / `cacheMissTokens`（上游回报才出现）、`toolRepair`（本次工具历史修复计数）、`imageOmitted`（非视觉模型忽略的图片数）、`channelRejected` / `channelAttempts`（11128 全降级失败）、`failureKind`（channel/account/auth/rate_limit/quota/tool_history/stream/upstream/request/unknown）、`retryable`、`failureAction`。
           content:
             application/json:
               schema:

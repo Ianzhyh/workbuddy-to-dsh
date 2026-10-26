@@ -4486,6 +4486,8 @@ test('桥：11128 所有降级都失败时回 CHANNEL_REJECTED，并停止重试
     const ledger = readFileSync(join(bridge.dir, 'usage.jsonl'), 'utf8').trim().split(/\r?\n/).map((l) => JSON.parse(l));
     assert.equal(ledger.at(-1).channelRejected, true, '账本必须标出通道拒绝，便于面板归因');
     assert.equal(ledger.at(-1).channelAttempts, 2);
+    assert.equal(ledger.at(-1).failureKind, 'channel', '失败归因必须是通道校验');
+    assert.equal(ledger.at(-1).retryable, false, '通道拒绝不能提示重试');
   } finally {
     await bridge.stop();
     try { await stub.close(); } catch { /* 忽略 */ }
@@ -4902,6 +4904,43 @@ test('桥：chat 流式上游缺 delta 时补一个空 delta（不能把客户�
     assert.ok(first, '正文帧必须存在');
     const j = JSON.parse(first.slice(5).trim());
     assert.equal(j.choices[0].delta.content, 'x', '缺 delta 时要把顶层 content 挪进 delta');
+  } finally {
+    await bridge.stop();
+    try { await stub.close(); } catch { /* 忽略 */ }
+    rmSync(bridge.dir, { recursive: true, force: true });
+  }
+});
+
+test('桥：11148 工具历史不配对归因为 tool_history，且标记不可重试', { timeout: 90_000 }, async () => {
+  const stub = await startStubUpstream(['tool-history-model'], {
+    chatStatus: 400,
+    chatType: 'application/json',
+    chatRaw: JSON.stringify({ code: 11148, msg: 'tool calls and tool results do not match' }),
+  });
+  const bridge = await startBridge(
+    { CODEBUDDY_ENDPOINT: stub.base, WORKBUDDY_SKIP_MODEL_PREFLIGHT: '1' },
+    { auth: READABLE_FAKE_AUTH },
+  );
+  try {
+    const res = await fetch(bridge.baseUrl + '/v1/chat/completions', {
+      method: 'POST',
+      headers: { ...auth, 'content-type': 'application/json' },
+      body: JSON.stringify({
+        model: 'tool-history-model',
+        stream: false,
+        messages: [
+          { role: 'system', content: 'You are a helpful assistant.' },
+          { role: 'user', content: 'hi' },
+        ],
+      }),
+      signal: AbortSignal.timeout(15000),
+    });
+    assert.equal(res.status, 400);
+    await res.text();
+    const ledger = readFileSync(join(bridge.dir, 'usage.jsonl'), 'utf8').trim().split(/\r?\n/).map((l) => JSON.parse(l));
+    assert.equal(ledger.at(-1).failureKind, 'tool_history');
+    assert.equal(ledger.at(-1).retryable, false);
+    assert.equal(ledger.at(-1).failureAction, 'new-session');
   } finally {
     await bridge.stop();
     try { await stub.close(); } catch { /* 忽略 */ }

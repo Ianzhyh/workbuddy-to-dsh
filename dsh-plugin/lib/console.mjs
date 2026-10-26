@@ -90,6 +90,16 @@ export function findPortPid(port) {
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+/**
+ * 本机回环上的瞬时连接失败。控制台刚 listen、Windows 端口复用、localhost
+ * 解析抖动都会偶尔出现；把它直接判成「没运行」会让插件重复拉起控制台。
+ * 只重试这一类，**不重试** 3 秒超时（那是真的没响应）。
+ */
+const isTransientProbeError = (error) => {
+  const text = `${error?.code || ''} ${error?.message || ''} ${error?.cause?.code || ''}`;
+  return /fetch failed|ECONNREFUSED|ECONNRESET|EAI_AGAIN|EPIPE/i.test(text);
+};
+
 export class ConsoleSupervisor {
   /**
    * @param {object} options
@@ -171,7 +181,7 @@ export class ConsoleSupervisor {
    * 探测控制台是否在跑。**不抛错**。
    * @param {{signal?: AbortSignal, cached?: boolean}} [options]
    */
-  async probe({ signal, cached = false } = {}) {
+  async probe({ signal, cached = false, _retried = false } = {}) {
     if (cached && this.cache.state && Date.now() - this.cache.at < this.cacheTtlMs) {
       return {
         state: this.cache.state,
@@ -236,6 +246,10 @@ export class ConsoleSupervisor {
         result = { state: 'foreign', error: `端口 ${this.port} 上有 HTTP 服务，但不是 WorkBuddy 控制台（换个 DASHBOARD_PORT）` };
       }
     } catch (error) {
+      if (!_retried && !signal?.aborted && isTransientProbeError(error)) {
+        await sleep(50);
+        return this.probe({ signal, cached, _retried: true });
+      }
       result = { state: 'stopped', error: String(error?.message || error) };
     }
     this.cache = {

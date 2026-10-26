@@ -19,6 +19,13 @@
 
 ## [Unreleased]
 
+### Added
+
+- **失败归因**：账本失败记录统一带 `failureKind` / `retryable` / `failureAction`
+  （channel / account / auth / rate_limit / quota / tool_history / stream /
+  upstream / request / unknown）；请求页显示归因标签，概览对账号/通道/额度类失败
+  直接给“先看请求页、不要连续重试”的风险提示；CSV/OpenAPI 同步。
+
 ## [1.15.0] - 2026-10-26
 
 ### Added

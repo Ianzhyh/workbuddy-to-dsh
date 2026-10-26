@@ -7196,6 +7196,39 @@ function syncUsageMirror(file) {
   if (size !== usageBytes || mtimeMs !== usageMtimeMs) loadUsageLines(file);
 }
 
+/**
+ * 失败归因：把上游状态码/错误码/文案收敛成有限类别。
+ *
+ * 这不是为了好看，而是为了决定“要不要重试”。11128/403/额度耗尽重试多少次
+ * 都不会变，而 429/5xx/流中断值得退避重试；面板必须能一眼分开。
+ */
+function classifyFailure(entry) {
+  const status = Number(entry?.status) || 0;
+  const code = entry?.code;
+  const text = `${code ?? ''} ${entry?.error ?? ''}`;
+  if (entry?.channelRejected === true || Number(code) === 11128 || /11128|unapproved channel/i.test(text)) {
+    return { failureKind: 'channel', retryable: false, failureAction: 'diagnose' };
+  }
+  if (status === 401) return { failureKind: 'auth', retryable: false, failureAction: 'relogin' };
+  if (status === 403) return { failureKind: 'account', retryable: false, failureAction: 'check-account' };
+  if (status === 429 || Number(code) === 14003 || Number(code) === 15001 || /rate.?limit|too many requests/i.test(text)) {
+    return { failureKind: 'rate_limit', retryable: true, failureAction: 'backoff' };
+  }
+  if (Number(code) === 6004 || /insufficient[_ ]?quota|quota (exhausted|exceeded)|credit (balance|exhausted)/i.test(text)) {
+    return { failureKind: 'quota', retryable: false, failureAction: 'wait-reset' };
+  }
+  if (Number(code) === 11148 || /11148|tool calls and tool results/i.test(text)) {
+    return { failureKind: 'tool_history', retryable: false, failureAction: 'new-session' };
+  }
+  if (/stream ended|stream interrupted|no finish_reason|no parseable SSE|EMPTY_RESPONSE|no parseable SSE data/i.test(text)) {
+    return { failureKind: 'stream', retryable: true, failureAction: 'retry' };
+  }
+  if (status >= 500) return { failureKind: 'upstream', retryable: true, failureAction: 'retry' };
+  if (status >= 400) return { failureKind: 'request', retryable: false, failureAction: 'fix-request' };
+  if (status === 0) return { failureKind: 'stream', retryable: true, failureAction: 'retry' };
+  return { failureKind: 'unknown', retryable: false, failureAction: 'diagnose' };
+}
+
 function recordRequest(entry) {
   try {
     // 调用方归因（B2 凭据分层）： ALS 里带着本次请求的 client id（local 或
@@ -7222,6 +7255,9 @@ function recordRequest(entry) {
      * 账本**兜底的，老文件里已经存着未截断的原文。
      */
     if (typeof entry.error === 'string') entry = { ...entry, error: shortError(entry.error) };
+    if (entry.ok === false && !entry.failureKind) {
+      entry = { ...entry, ...classifyFailure(entry) };
+    }
     const file = usageFile();
     syncUsageMirror(file);
 
@@ -7336,6 +7372,9 @@ function recentRequests(limit = 50) {
     ...(typeof r.imageOmitted === 'number' ? { imageOmitted: r.imageOmitted } : {}),
     ...(typeof r.channelRejected === 'boolean' ? { channelRejected: r.channelRejected } : {}),
     ...(typeof r.channelAttempts === 'number' ? { channelAttempts: r.channelAttempts } : {}),
+    ...(typeof r.failureKind === 'string' ? { failureKind: r.failureKind } : {}),
+    ...(typeof r.retryable === 'boolean' ? { retryable: r.retryable } : {}),
+    ...(typeof r.failureAction === 'string' ? { failureAction: r.failureAction } : {}),
     ...(typeof r.credit === 'number' ? { credit: r.credit } : {}),
     // 生成类（视频/图片）的**估算**消耗：提交前后账号余额差。上游不回报单次积分，
     // 这个值可能为 null（余额没变化/读不到），调用方必须当“参考值”而非账单。
@@ -7463,6 +7502,8 @@ function summarizeUsage(days = 7, opts = {}) {
         code: r.code ?? null,
         error: shortError(r.error),
         kind: isVideo ? 'video' : (isImage ? 'image' : (isSearch ? 'search' : 'call')),
+        failureKind: r.failureKind || '',
+        retryable: r.retryable === true,
       });
       if (isVideo) {
         ensureDay(r.t).videoFailed += 1;
