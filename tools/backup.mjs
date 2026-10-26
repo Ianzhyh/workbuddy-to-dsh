@@ -112,7 +112,8 @@ function restore(srcArg) {
   }
   const dataDir = config.paths.data;
   const before = `${dataDir}.pre-restore-${stamp()}`;
-  if (existsSync(dataDir)) copyTree(dataDir, before);
+  const hadData = existsSync(dataDir);
+  if (hadData) copyTree(dataDir, before);
   mkdirSync(dataDir, { recursive: true });
   for (const name of DATA_FILES) {
     const local = join(src, name);
@@ -127,8 +128,8 @@ function restore(srcArg) {
     const local = join(src, name);
     if (existsSync(local)) copyTree(local, join(dataDir, name));
   }
-  console.log(`✅ 已恢复 ${manifest.files?.length || 0} 个文件到：${dataDir}`);
-  console.log(`   恢复前的数据保留在：${before}`);
+  console.log(`✅ 已恢复 ${manifest.files.length} 个文件到：${dataDir}`);
+  if (hadData) console.log(`   恢复前的数据保留在：${before}`);
   console.log('   现在可以重新启动桥/控制台；旧客户端令牌若未变化应可直接使用。');
 }
 

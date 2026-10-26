@@ -44,7 +44,13 @@ export const CONFIG_SCHEMA = Object.freeze({
 
   WORKBUDDY_RATE_LIMIT_MODE: { kind: 'enum', values: ['queue', 'reject'], fallback: 'queue', note: '限流模式' },
   WORKBUDDY_CREDENTIAL_SOURCE: { kind: 'enum', values: ['auto', 'desktop', 'plugin', 'api-key'], fallback: 'auto', lowercase: true, note: '凭据来源' },
-  WORKBUDDY_CREDENTIAL_STORE: { kind: 'enum', values: ['dpapi', 'memory'], fallback: 'dpapi', lowercase: true, note: '凭据存储' },
+  WORKBUDDY_CREDENTIAL_STORE: {
+    kind: 'enum',
+    values: ['dpapi', 'memory'],
+    fallback: process.platform === 'win32' ? 'dpapi' : 'memory',
+    lowercase: true,
+    note: '凭据存储',
+  },
   WORKBUDDY_CREDENTIAL_FAILOVER: { kind: 'enum', values: ['off', 'same-account', 'any'], fallback: 'same-account', lowercase: true, note: '凭据接管策略' },
   WORKBUDDY_LOGIN_REGION: { kind: 'enum', values: ['cn', 'global'], fallback: 'cn', lowercase: true, note: '登录区域' },
 
