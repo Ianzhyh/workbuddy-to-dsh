@@ -12,7 +12,9 @@
  * 用临时端口（18890/18892），不碰使用者正在跑的 8790/8792；
  * 全程在临时目录里操作，结束时清理。发版前跑一次，确保"别人拿到的那份"真能用。
  */
-import { cpSync, mkdirSync, mkdtempSync, rmSync, writeFileSync, existsSync, readdirSync } from 'node:fs';
+import {
+  copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync, existsSync, readdirSync, statSync,
+} from 'node:fs';
 import { spawn } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -43,6 +45,25 @@ const waitFor = async (url, ms = 20000, headers) => {
   return null;
 };
 
+/**
+ * 递归复制目录。
+ *
+ * 不用 `fs.cpSync`：在 Windows 上目标路径含非 ASCII / 空格时，Node 22 的
+ * `cpSync` 会**静默不复制**（不抛错、目标目录也不存在）。CI 的「中文/空格
+ * 路径独立演练」因此拿到一个空沙箱，import 时才发现 `lib/index.js` 不见了。
+ * `readdirSync` + `copyFileSync` 走的是逐文件路径，没这个问题。
+ */
+function copyTree(src, dest) {
+  const st = statSync(src);
+  if (st.isDirectory()) {
+    mkdirSync(dest, { recursive: true });
+    for (const entry of readdirSync(src)) copyTree(join(src, entry), join(dest, entry));
+  } else {
+    mkdirSync(dirname(dest), { recursive: true });
+    copyFileSync(src, dest);
+  }
+}
+
 let bridge = null;
 let consoleProc = null;
 try {
@@ -50,7 +71,7 @@ try {
   mkdirSync(pluginDir, { recursive: true });
   for (const name of ['lib', 'scripts', 'vendor', 'package.json', 'cordis.patch.yml', 'README.md']) {
     const src = join(PLUGIN, name);
-    if (existsSync(src)) cpSync(src, join(pluginDir, name), { recursive: true });
+    if (existsSync(src)) copyTree(src, join(pluginDir, name));
   }
   check(!existsSync(join(sandbox, 'bridge')), '沙箱里没有仓库（只有插件文件夹）');
 
