@@ -1,0 +1,66 @@
+name: Bug report
+description: 运行、接入、模型或界面问题
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        先跑 `node tools\doctor.mjs` 并阅读 `docs/TROUBLESHOOTING.md`。
+        **不要贴令牌、Authorization 头、登录文件内容、账号 UID 或完整对话**；需要诊断包时用
+        `node tools\doctor.mjs --bundle`（已脱敏）。
+  - type: input
+    id: version
+    attributes:
+      label: 版本
+      description: 插件/根包版本，例如 1.15.0
+      placeholder: "1.15.0"
+    validations:
+      required: true
+  - type: dropdown
+    id: install
+    attributes:
+      label: 安装形态
+      options:
+        - dsh 插件（GitHub 直装）
+        - dsh 插件（tgz / 文件夹）
+        - 只跑桥 + 控制台
+        - Docker（API key 模式）
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: 系统与 Node
+      description: 例如 Windows 11 / Node 22.22.2
+      placeholder: "Windows 11 / Node 22.22.2"
+    validations:
+      required: true
+  - type: textarea
+    id: symptom
+    attributes:
+      label: 现象与复现步骤
+      description: 客户端、模型、请求方式、是否稳定复现
+    validations:
+      required: true
+  - type: textarea
+    id: error
+    attributes:
+      label: 错误码 / 日志
+      description: 控制台「最近请求」里的状态码与 code；不要贴令牌或对话
+      render: text
+  - type: textarea
+    id: doctor
+    attributes:
+      label: 诊断包（可选）
+      description: `node tools\doctor.mjs --bundle` 的 JSON；已脱敏，可直接贴
+      render: json
+  - type: checkboxes
+    id: confirm
+    attributes:
+      label: 提交前确认
+      options:
+        - label: 我已移除令牌、凭据、账号 UID 和对话内容
+          required: true
+        - label: 我只驱动自己的账号，没有使用多账号池化/公网中转
+          required: true

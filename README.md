@@ -131,6 +131,10 @@ dsh plugin --profile desktop add github:Ianzhyh/workbuddy-to-dsh
 >   若你需要长期稳定、可商用的模型接入，**请申请官方 API**。
 > - **自担风险的分享是欢迎的**：转发仓库链接、写教程、提 PR 都可以；但请**不要**
 >   打包转售、绑定付费，或以本项目名义收集任何人的凭据。
+>
+> 兼容性分档见 [`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md)；上游失效/项目停更时
+> 怎么退回官方客户端、数据在哪，见 [`docs/SUNSET.md`](docs/SUNSET.md)。安全报告方式见
+> [`.github/SECURITY.md`](.github/SECURITY.md)。
 
 ### 这个项目与同类工具的关系
 

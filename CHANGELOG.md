@@ -49,6 +49,9 @@
   `max_tokens` / `capabilities` / `architecture.input_modalities` 别名；Responses
   带 `previous_response_id` 时明确回 400 `previous_response_not_found`，不再静默
   丢上下文。
+- **安全与运维文档**：新增 `.github/SECURITY.md`、Bug/Feature issue 表单、PR 模板、
+  [`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md) 与 [`docs/SUNSET.md`](docs/SUNSET.md)；
+  明确平台/客户端分档、上游失效处置、数据位置与不支持范围。
 
 ## [1.15.0] - 2026-10-26
 

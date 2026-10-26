@@ -1,0 +1,31 @@
+name: Feature request
+description: 客户端接入、使用体验或诊断能力建议
+title: "[Feature] "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: 你遇到的具体问题
+      description: 不要只写“希望支持 X”；说明现在卡在哪一步
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 期望的行为
+      description: 哪个客户端/场景、输入与期望输出
+    validations:
+      required: true
+  - type: input
+    id: client
+    attributes:
+      label: 客户端与版本
+      placeholder: "Claude Code / Codex / Cherry Studio / Open WebUI ..."
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: 边界确认
+      options:
+        - label: 这个需求不涉及多账号池化、凭据导出、绕过风控或公网中转
+          required: true
