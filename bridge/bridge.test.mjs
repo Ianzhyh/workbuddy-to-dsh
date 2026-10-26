@@ -1074,10 +1074,14 @@ test('/v1/quota：余额必须带上归属账号，供面板按身份作废缓�
     return res.end('{}');
   });
   await new Promise((r) => upstream.listen(0, '127.0.0.1', r));
+  const quotaDir = mkdtempSync(join(tmpdir(), 'wb-quota-history-'));
+  const quotaFile = join(quotaDir, 'quota-history.jsonl');
   const bridge = await startBridge(
     {
       CODEBUDDY_ENDPOINT: `http://127.0.0.1:${upstream.address().port}`,
       WORKBUDDY_BILLING_BASE: `http://127.0.0.1:${upstream.address().port}`,
+      WORKBUDDY_QUOTA_SNAPSHOT_MS: '0',
+      WORKBUDDY_QUOTA_HISTORY_FILE: quotaFile,
     },
     { auth: authFileFor('quota-account') },
   );
@@ -1089,12 +1093,23 @@ test('/v1/quota：余额必须带上归属账号，供面板按身份作废缓�
     assert.equal(body.total, 42);
     assert.equal(body.account, 'quota-account', '/v1/quota 必须说明这份余额属于哪个账号');
     assert.equal(body.source, 'desktop', '来源也要一并带回，面板才能解释账号与桌面文件为何不同');
+    assert.equal(body.snapshotIntervalMs, 0, '测试把快照间隔压到 0，便于验证历史');
+
+    // 账实核对：再取一次余额，应当留下两条快照；不足两条时页面必须显示“—”。
+    const res2 = await fetch(bridge.baseUrl + '/v1/quota', { headers: auth, signal: AbortSignal.timeout(15000) });
+    const body2 = await res2.json();
+    assert.ok(Array.isArray(body2.history) && body2.history.length >= 2,
+      `连续两次余额查询应留下至少两条快照，实际 ${JSON.stringify(body2.history)}`);
+    assert.equal(body2.history.at(-1).total, 42);
+    assert.equal(body2.history.at(-1).account, 'quota-account');
+    assert.ok(existsSync(quotaFile), '快照必须落盘，桥重启后仍可核对');
 
     const health = await (await fetch(bridge.baseUrl + '/health', { headers: auth })).json();
     assert.match(String(health.build || ''), /^[0-9a-f]{16}$/, '/health 必须带构建指纹（启动方据此重启旧桥）');
   } finally {
     await bridge.stop();
     upstream.close();
+    rmSync(quotaDir, { recursive: true, force: true });
   }
 });
 
@@ -4941,6 +4956,13 @@ test('桥：11148 工具历史不配对归因为 tool_history，且标记不可�
     assert.equal(ledger.at(-1).failureKind, 'tool_history');
     assert.equal(ledger.at(-1).retryable, false);
     assert.equal(ledger.at(-1).failureAction, 'new-session');
+
+    const usage = await (await fetch(bridge.baseUrl + '/v1/usage?days=1', { headers: auth })).json();
+    assert.equal(usage.total.failureKinds.tool_history, 1, '失败归因要进用量汇总');
+    const modelRow = usage.failureByModel.find((m) => m.model === 'tool-history-model');
+    assert.equal(modelRow?.failed, 1, '按模型也要能看到失败数');
+    assert.equal(modelRow?.byKind?.tool_history, 1);
+    assert.ok((usage.days.at(-1)?.failed || 0) >= 1, '按天也要能看到失败数');
   } finally {
     await bridge.stop();
     try { await stub.close(); } catch { /* 忽略 */ }

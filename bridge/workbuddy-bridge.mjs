@@ -7302,6 +7302,62 @@ function resetUsageLedger() {
   usageMtimeMs = usageStat(file).mtimeMs;
 }
 
+// ── 配额快照（账实核对用）────────────────────────────────────────────────
+/**
+ * 余额积分只在 `/v1/quota` 成功时取得到；把它按小时留一份快照，页面才能
+ * 回答“本地账本合计”和“账号余额变化”对不对得上。只存数字与套餐名，
+ * 不存任何对话内容；默认最多每小时一条，避免把轮询写成大文件。
+ */
+const QUOTA_SNAPSHOT_INTERVAL_MS = numEnv('WORKBUDDY_QUOTA_SNAPSHOT_MS', 3600000, { min: 0 });
+const QUOTA_HISTORY_MAX_LINES = 4000;
+let lastQuotaSnapshot = { at: 0, account: '' };
+function quotaHistoryFile() {
+  return process.env.WORKBUDDY_QUOTA_HISTORY_FILE
+    || join(RUNTIME_DATA_DIR, 'quota-history.jsonl');
+}
+function recordQuotaSnapshot(quota, auth) {
+  if (!quota || typeof quota.total !== 'number') return;
+  const account = auth?.userId || auth?.uid || '';
+  const now = Date.now();
+  if (lastQuotaSnapshot.account === account && now - lastQuotaSnapshot.at < QUOTA_SNAPSHOT_INTERVAL_MS) return;
+  lastQuotaSnapshot = { at: now, account };
+  const file = quotaHistoryFile();
+  const line = JSON.stringify({
+    t: now,
+    account,
+    total: quota.total,
+    packages: (quota.packages || []).map((p) => ({
+      name: p.name, remain: p.remain, size: p.size, monthly: p.monthly, expiresAt: p.expiresAt || '',
+    })),
+  });
+  try {
+    mkdirSync(dirname(file), { recursive: true });
+    const before = existsSync(file) ? readFileSync(file, 'utf8').split('\n').filter(Boolean) : [];
+    if (before.length >= QUOTA_HISTORY_MAX_LINES) {
+      const tmp = `${file}.tmp`;
+      writeFileSync(tmp, `${before.slice(-Math.floor(QUOTA_HISTORY_MAX_LINES / 2)).join('\n')}\n${line}\n`);
+      renameSync(tmp, file);
+    } else {
+      appendFileSync(file, `${line}\n`);
+    }
+    log('quota snapshot', quota.total);
+  } catch (e) {
+    log('quota snapshot failed', e.message); // 快照失败绝不影响余额查询
+  }
+}
+function readQuotaHistory(days = 7) {
+  const since = Date.now() - Math.max(1, Math.min(Number(days) || 7, 90)) * 86400000;
+  try {
+    const file = quotaHistoryFile();
+    if (!existsSync(file)) return [];
+    return readFileSync(file, 'utf8').split('\n').filter(Boolean).map((line) => {
+      try { return JSON.parse(line); } catch { return null; }
+    }).filter((row) => row && typeof row.t === 'number' && row.t >= since);
+  } catch {
+    return [];
+  }
+}
+
 /**
  * 读账本原始行（解析失败的行直接跳过）。
  *
@@ -7427,6 +7483,7 @@ function summarizeUsage(days = 7, opts = {}) {
   const byDay = new Map();
   const byHour = wantHours ? new Map() : null;
   const failures = [];
+  const failureByModel = new Map();
   // creditCalls 单独计数：上游**并非每次**都回报 credit。不区分「回报了 0」和
   // 「没回报」的话，两者在页面上只能显示成同一个「—」，看起来像统计坏了。
   // 另外上游是**两位小数**量化，几十 token 的小请求真实扣分就是 0.00——
@@ -7440,6 +7497,7 @@ function summarizeUsage(days = 7, opts = {}) {
     calls: 0, promptTokens: 0, completionTokens: 0, ms: 0,
     credit: 0, creditCalls: 0, failed: 0, searches: 0, searchFailed: 0,
     videos: 0, videoFailed: 0, images: 0, imageFailed: 0,
+    failureKinds: {},
     // 生成类的估算积分（提交前后余额差）。Known 表示有多少次采到了差值；
     // 0 次时界面要显示「—」而不是 0，避免把“没测到”说成“没花钱”。
     videoCredit: 0, videoCreditKnown: 0, imageCredit: 0, imageCreditKnown: 0,
@@ -7454,7 +7512,7 @@ function summarizeUsage(days = 7, opts = {}) {
       bucket = {
         day, calls: 0, promptTokens: 0, completionTokens: 0, credit: 0, creditCalls: 0,
         searches: 0, searchFailed: 0, videos: 0, videoFailed: 0,
-        images: 0, imageFailed: 0, byModel: new Map(),
+        images: 0, imageFailed: 0, failed: 0, byModel: new Map(),
       };
       byDay.set(day, bucket);
     }
@@ -7468,7 +7526,7 @@ function summarizeUsage(days = 7, opts = {}) {
       bucket = {
         key, calls: 0, promptTokens: 0, completionTokens: 0, credit: 0, creditCalls: 0,
         searches: 0, searchFailed: 0, videos: 0, videoFailed: 0,
-        images: 0, imageFailed: 0, byModel: new Map(),
+        images: 0, imageFailed: 0, failed: 0, byModel: new Map(),
       };
       byHour.set(key, bucket);
     }
@@ -7493,6 +7551,8 @@ function summarizeUsage(days = 7, opts = {}) {
       else if (isImage) total.imageFailed += 1;
       else if (isSearch) total.searchFailed += 1;
       else total.failed += 1;
+      const failureKind = r.failureKind || 'unknown';
+      total.failureKinds[failureKind] = (total.failureKinds[failureKind] || 0) + 1;
       failures.push({
         t: r.t,
         model: r.model || '',
@@ -7502,9 +7562,23 @@ function summarizeUsage(days = 7, opts = {}) {
         code: r.code ?? null,
         error: shortError(r.error),
         kind: isVideo ? 'video' : (isImage ? 'image' : (isSearch ? 'search' : 'call')),
-        failureKind: r.failureKind || '',
+        failureKind,
         retryable: r.retryable === true,
       });
+      const failModel = r.model || '(unknown)';
+      // `models` 保持“成功调用过的模型”这一既有契约（D4）；失败单独放
+      // `failureByModel`，否则图片/视频/搜索的失败会把模型排行污染成
+      // image / video / web-search（回归用例已钉住）。
+      const fm = failureByModel.get(failModel) || { model: failModel, failed: 0, byKind: {} };
+      fm.failed += 1;
+      fm.byKind[failureKind] = (fm.byKind[failureKind] || 0) + 1;
+      failureByModel.set(failModel, fm);
+      const existingModel = byModel.get(failModel);
+      if (existingModel) existingModel.failed = (existingModel.failed || 0) + 1;
+      const failDay = ensureDay(r.t);
+      failDay.failed = (failDay.failed || 0) + 1;
+      const failHour = ensureHour(r.t);
+      if (failHour) failHour.failed = (failHour.failed || 0) + 1;
       if (isVideo) {
         ensureDay(r.t).videoFailed += 1;
         const h = ensureHour(r.t);
@@ -7677,6 +7751,8 @@ function summarizeUsage(days = 7, opts = {}) {
     ...(hours ? { hours } : {}),
     // 最近 20 条失败，新的在前；页面用它做「为什么调不通」的第一手线索
     failures: failures.slice(-20).reverse(),
+    // 按模型的失败计数，与成功模型排行分开；byKind 便于直接看是通道还是限流
+    failureByModel: [...failureByModel.values()].sort((a, b) => b.failed - a.failed),
   };
 }
 
@@ -8552,7 +8628,9 @@ async function fetchQuota(auth, { timeoutMs = 15000 } = {}) {
       expiresAt: a.ExpiredTime || (monthly ? a.CycleEndTime : undefined) || undefined,
     });
   }
-  return { total, packages, productCode: 'p_tcaca' };
+  const result = { total, packages, productCode: 'p_tcaca' };
+  recordQuotaSnapshot(result, auth);
+  return result;
 }
 
 // ── HTTP server ──────────────────────────────────────────────────────────
@@ -9387,6 +9465,10 @@ async function handleRequest(req, res) {
           ...quota,
           account: auth.userId || auth.uid || '',
           source: auth.source,
+          // 账实核对：最近 7 天的余额快照 + 采集间隔。页面用首尾快照对比
+          // 本地账本；不足两条时显示“—”，不拿单点冒充变化。
+          history: readQuotaHistory(7),
+          snapshotIntervalMs: QUOTA_SNAPSHOT_INTERVAL_MS,
         });
       } catch (e) {
         return json(res, 502, { ok: false, error: e.message });

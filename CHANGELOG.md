@@ -25,6 +25,10 @@
   （channel / account / auth / rate_limit / quota / tool_history / stream /
   upstream / request / unknown）；请求页显示归因标签，概览对账号/通道/额度类失败
   直接给“先看请求页、不要连续重试”的风险提示；CSV/OpenAPI 同步。
+- **账实核对与失败统计**：`/v1/quota` 返回最近 30 天余额快照（按
+  `WORKBUDDY_QUOTA_SNAPSHOT_MS` 节流），用量页用首尾快照对比本地账本并显示
+  「账实差额」（差额注明可能是客户端内使用/其他工具/估算）；`total.failureKinds`
+  与按模型/按天的 `failed` 进入用量 API 和 CSV。
 
 ## [1.15.0] - 2026-10-26
 

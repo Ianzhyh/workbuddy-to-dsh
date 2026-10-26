@@ -998,6 +998,14 @@ body.dark .wb-root,
       '输出 tokens': 'Output tokens',
       '缓存命中率': 'Cache hit rate',
       '上游回报口径，不等于账单': 'Reported by upstream; not a bill',
+      '账实差额': 'Ledger vs balance',
+      '账实核对：余额变化 ': 'Ledger vs balance: balance change ',
+      '，本地账本 ': ', local ledger ',
+      '；差额可能是客户端内使用/其他工具/估算，不是账单。':
+        '; the difference may come from in-client use, other tools, or estimates — not a bill.',
+      '余额快照不足两条，账实差额暂时显示 —（桥运行后按小时采集）。':
+        'Fewer than two balance snapshots; the difference is shown as — (the bridge records hourly).',
+      '失败归因：': 'Failure attribution: ',
       '平均耗时': 'Avg duration',
       '只记元数据（时间 / 模型 / 耗时 / token / 积分），不含任何对话内容。':
         'Metadata only (time / model / duration / tokens / credit) — no conversation content.',
@@ -2080,6 +2088,18 @@ body.dark .wb-root,
       if (v >= 1000) return (v / 1000).toFixed(1) + 'k';
       return String(v);
     };
+    const failureKindLabel = (kind) => ({
+      channel: '通道校验',
+      account: '账号/权限',
+      auth: '登录态',
+      rate_limit: '限流',
+      quota: '额度',
+      tool_history: '工具历史',
+      stream: '流中断',
+      upstream: '上游',
+      request: '请求参数',
+      unknown: '未知',
+    }[kind] || '');
     /**
      * 上下文档位的人话写法：600000 → 600K，128000 → 128K，131072 → 128K。
      *
@@ -4116,6 +4136,8 @@ body.dark .wb-root,
       const hours = days <= 1;
       const path = `/workbuddy/usage?days=${days}${hours ? '&hours=1' : ''}`;
       const { data, error, reload, loading } = useJson(path, { interval: 60000 });
+      // 余额快照只用于“账实核对”；拉不到不影响用量主体，显示“—”即可。
+      const { data: quotaData } = useJson('/workbuddy/quota', { interval: 60000 });
       // 宿主的 /workbuddy/usage 是「摊平」的（{ok, total, models, days…}）；
       // 早期版本套了一层 {usage:{…}}。两种都认，免得版本错配时表格空白。
       // 首帧：数据还没到时给加载态，别先渲染一屏 0 / 空表
@@ -4137,6 +4159,23 @@ body.dark .wb-root,
       const videoCreditKnown = Number(total.videoCreditKnown) || 0;
       const imageCredit = Number(total.imageCredit) || 0;
       const imageCreditKnown = Number(total.imageCreditKnown) || 0;
+      const windowStart = Date.now() - days * 86400000;
+      // /workbuddy/quota 的桥响应可能直接摊平，也可能套在 {quota:{...}} 里。
+      const quotaHistory = Array.isArray(quotaData?.history)
+        ? quotaData.history
+        : (Array.isArray(quotaData?.quota?.history) ? quotaData.quota.history : []);
+      const quotaSnapshots = quotaHistory
+        .filter((row) => Number(row?.t) >= windowStart)
+        .sort((a, b) => Number(a.t) - Number(b.t));
+      const balanceDelta = quotaSnapshots.length >= 2
+        ? Number(quotaSnapshots[0].total) - Number(quotaSnapshots[quotaSnapshots.length - 1].total)
+        : null;
+      const ledgerCredit = Number(total.credit) || 0;
+      const reconcileDiff = balanceDelta === null
+        ? null
+        : Math.round((balanceDelta - ledgerCredit) * 100) / 100;
+      const failureKindEntries = Object.entries(total.failureKinds || {})
+        .filter(([, n]) => Number(n) > 0);
       // 只展示真正用过的类型：只用图片的人不必看一排视频 0。
       const hasVideoData = videos > 0 || videoFailed > 0 || videoCreditKnown > 0;
       const hasImageData = images > 0 || imageFailed > 0 || imageCreditKnown > 0;
@@ -4248,10 +4287,10 @@ body.dark .wb-root,
             h('div', { className: 'wb-actions-group' },
               h(Btn, { onClick: reload }, '刷新'),
               h(Btn, { onClick: () => downloadCsv('workbuddy-usage.csv',
-                ['day', 'calls', 'searches', 'searchFailed', 'promptTokens', 'completionTokens',
+                ['day', 'calls', 'failed', 'searches', 'searchFailed', 'promptTokens', 'completionTokens',
                   'cachedTokens', 'cacheMissTokens', 'credit',
                   'videos', 'videoFailed', 'images', 'imageFailed'],
-                series.map((d) => [d.day || d.key, d.calls, d.searches || 0, d.searchFailed || 0,
+                series.map((d) => [d.day || d.key, d.calls, d.failed || 0, d.searches || 0, d.searchFailed || 0,
                   d.promptTokens, d.completionTokens, d.cachedTokens || 0, d.cacheMissTokens || 0, d.credit,
                   d.videos || 0, d.videoFailed || 0, d.images || 0, d.imageFailed || 0])) }, '导出 CSV'),
               h(Btn, { disabled: clearing, onClick: clearLedger }, clearing ? '清空中…' : '清空账本'))),
@@ -4276,9 +4315,27 @@ body.dark .wb-root,
                 ? (total.cacheHitRate * 100).toFixed(1) + '%'
                 : '—')),
             h('div', { className: 'wb-metric brand' }, h('span', null, '消耗积分'), h('b', null, typeof total.credit === 'number' ? total.credit.toFixed(2) : '0')),
+            h('div', {
+              className: 'wb-metric' + (reconcileDiff !== null && Math.abs(reconcileDiff) > 0.5 ? ' warn' : ''),
+            }, h('span', null, '账实差额'), h('b', null,
+              reconcileDiff === null ? '—' : (reconcileDiff >= 0 ? '+' : '') + reconcileDiff.toFixed(2))),
             h('div', { className: 'wb-metric' }, h('span', null, '平均耗时'), h('b', null, totalCalls ? Math.round((total.ms || 0) / totalCalls) + ' ms' : '—'))),
           noteLine1 ? h('p', { className: 'wb-note' }, noteLine1) : null,
           noteLine2 ? h('p', { className: 'wb-note' }, noteLine2) : null,
+          h('p', { className: 'wb-note' },
+            '账实核对：余额变化 ',
+            balanceDelta === null ? '—' : (balanceDelta >= 0 ? '+' : '') + balanceDelta.toFixed(2),
+            '，本地账本 ',
+            ledgerCredit.toFixed(2),
+            '；差额可能是客户端内使用/其他工具/估算，不是账单。'),
+          quotaSnapshots.length < 2
+            ? h('p', { className: 'wb-note' }, '余额快照不足两条，账实差额暂时显示 —（桥运行后按小时采集）。')
+            : null,
+          failureKindEntries.length
+            ? h('p', { className: 'wb-note' }, '失败归因：',
+              failureKindEntries.map(([kind, count]) => h('span', { key: kind, style: { marginRight: '10px' } },
+                failureKindLabel(kind), ' ', String(count))))
+            : null,
           h(ModelProportionBar, { models: usage?.models || [], metric }),
           h('div', {
             key: chartView,
@@ -4388,18 +4445,6 @@ body.dark .wb-root,
       }, [directory, all]);
       if (isInitialLoading(loading, data, error)) return h(Card, { title: '最近请求' }, h(Loading, { text: '正在读取请求记录…' }));
       const rows = all.filter((r) => (!onlyFailed || !r.ok) && (!modelFilter || r.model === modelFilter));
-      const failureKindLabel = (kind) => ({
-        channel: '通道校验',
-        account: '账号/权限',
-        auth: '登录态',
-        rate_limit: '限流',
-        quota: '额度',
-        tool_history: '工具历史',
-        stream: '流中断',
-        upstream: '上游',
-        request: '请求参数',
-        unknown: '未知',
-      }[kind] || '');
       const failLabel = (r) => {
         const base = `失败${r.status ? ' HTTP ' + r.status : ''}${r.code ? ' · code ' + r.code : ''}`;
         const kind = failureKindLabel(r.failureKind);

@@ -512,7 +512,7 @@ paths:
     get:
       summary: 积分余额（带缓存，TTL 由 WORKBUDDY_QUOTA_TTL_MS 控制）
       responses:
-        '200': { description: 余额与套餐；`account` / `source` 标明这份余额属于哪个账号 }
+        '200': { description: 余额与套餐；`account` / `source` 标明这份余额属于哪个账号。`history` 是最近 30 天的余额快照（用于账实核对，按 `WORKBUDDY_QUOTA_SNAPSHOT_MS` 节流）；`snapshotIntervalMs` 是当前采集间隔 }
   /v1/usage:
     get:
       summary: 本地用量聚合（按天 / 按模型）
@@ -522,7 +522,7 @@ paths:
           schema: { type: integer }
       responses:
         '200':
-          description: 用量统计（来自本地账本）。`calls` / `promptTokens` / `completionTokens` / `credit` 只统计模型调用；网页搜索与接入自检单列为 `searches` / `searchFailed`，不计入模型 tokens 或积分。`cachedTokens` / `cacheMissTokens` / `cacheKnownCalls` / `cacheHitRate` 只统计上游明确回报了缓存字段的调用；`cacheHitRate` 为 null 表示没有数据，不能当成 0%。
+          description: 用量统计（来自本地账本）。`calls` / `promptTokens` / `completionTokens` / `credit` 只统计模型调用；网页搜索与接入自检单列为 `searches` / `searchFailed`，不计入模型 tokens 或积分。`cachedTokens` / `cacheMissTokens` / `cacheKnownCalls` / `cacheHitRate` 只统计上游明确回报了缓存字段的调用；`cacheHitRate` 为 null 表示没有数据，不能当成 0%。`total.failureKinds` 按 `failureKind` 汇总失败数；`failureByModel[].failed/byKind` 给按模型、按失败类别的计数（不与成功模型排行混在一起）；`days[].failed` 给按天失败数。
     delete:
       summary: 清空账本
       responses:
