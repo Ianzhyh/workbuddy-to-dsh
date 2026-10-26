@@ -6,7 +6,10 @@
  * spawn 时注入同样的环境变量，从而保持桥的单文件自包含特性；两边使用的
  * 变量名以本文件为准。
  */
-import { existsSync, readFileSync, readdirSync, statSync, writeFileSync, chmodSync } from 'node:fs';
+import {
+  existsSync, readFileSync, readdirSync, statSync, writeFileSync, chmodSync,
+  mkdirSync, copyFileSync,
+} from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { homedir } from 'node:os';
@@ -218,14 +221,51 @@ export function resolveAuthFile() {
  * 判据：本文件所在目录若有 `vendor/` 子目录，说明我们在分发形态里，往上一层
  * 取插件目录；否则就是仓库检出的布局。
  */
-function bridgeTokenPath() {
+/**
+ * 运行期数据目录 —— **不要放在安装目录里**。
+ *
+ * 插件用 pnpm 装到 profile 里，换 tgz / 重装 / 升级都会重写安装目录；把
+ * `.state.json`、`usage.jsonl`、`.bridge-token` 放在那里，用户一升级就会丢
+ * 账号钉住、用量历史和本地令牌（旧客户端随之 401）。同类项目已经把这个坑
+ * 踩成事故（CLIProxyAPI #4438、one-api #1207）。
+ *
+ * 默认 `~/.workbuddy-bridge`；与桥的插件凭据目录同一棵树。
+ * `WORKBUDDY_DATA_DIR` 可覆盖（测试、便携部署）。
+ */
+export function runtimeDataDir() {
+  const explicit = env.WORKBUDDY_DATA_DIR;
+  if (typeof explicit === 'string' && explicit.trim()) return resolve(explicit.trim());
+  return join(homedir(), '.workbuddy-bridge');
+}
+
+/** 旧版令牌位置：安装目录里的 `.bridge-token`。 */
+function legacyBridgeTokenPath() {
   const here = dirname(fileURLToPath(import.meta.url));
   const installed = basename(here) === 'vendor' && existsSync(join(here, '..', 'lib', 'index.js'));
   return installed
     ? join(here, '..', '.bridge-token')
     : join(ROOT, 'dsh-plugin', '.bridge-token');
 }
+
+function bridgeTokenPath() {
+  return join(runtimeDataDir(), 'bridge-token');
+}
 const BRIDGE_TOKEN_PATH = bridgeTokenPath();
+
+/**
+ * 把旧安装目录里的令牌搬到新数据目录。只复制，不删除旧文件 ——
+ * 旧文件留作回滚/降级时的备份；新路径写了之后所有新代码只读新路径。
+ */
+function migrateBridgeToken() {
+  if (existsSync(BRIDGE_TOKEN_PATH)) return;
+  const legacy = legacyBridgeTokenPath();
+  if (!existsSync(legacy) || legacy === BRIDGE_TOKEN_PATH) return;
+  try {
+    mkdirSync(dirname(BRIDGE_TOKEN_PATH), { recursive: true });
+    copyFileSync(legacy, BRIDGE_TOKEN_PATH);
+    chmodSync(BRIDGE_TOKEN_PATH, 0o600);
+  } catch { /* 迁移失败就继续走“生成新令牌”的路径，但别让启动失败 */ }
+}
 
 /**
  * 解析本地回环令牌：显式配置 > 已落盘 > 生成并落盘。
@@ -255,6 +295,7 @@ function resolveLocalToken() {
     localTokenCache = env.WORKBUDDY_LOCAL_TOKEN;
     return localTokenCache;
   }
+  migrateBridgeToken();
   try {
     const stored = readFileSync(BRIDGE_TOKEN_PATH, 'utf8').trim();
     /*
@@ -270,6 +311,7 @@ function resolveLocalToken() {
   } catch { /* 首次运行：文件还不存在 */ }
   const token = randomBytes(24).toString('base64url');
   try {
+    mkdirSync(dirname(BRIDGE_TOKEN_PATH), { recursive: true });
     writeFileSync(BRIDGE_TOKEN_PATH, `${token}\n`, { mode: 0o600 });
     tokenHardenResult = hardenTokenFile();
   } catch { /* 只读介质：本次运行有效，下次会换新（用户需重填客户端密钥） */ }
@@ -516,6 +558,7 @@ export const config = {
   },
   paths: {
     root: ROOT,
+    data: runtimeDataDir(),
     bridgeScript: join(ROOT, 'bridge', 'workbuddy-bridge.mjs'),
     bridgeLog: join(ROOT, 'bridge', 'bridge.log'),
     bridgeToken: BRIDGE_TOKEN_PATH,
@@ -548,6 +591,7 @@ export function bridgeEnv(overrides = {}) {
     ...process.env,
     WORKBUDDY_HOST: config.bridge.host,
     WORKBUDDY_PORT: String(config.bridge.port),
+    WORKBUDDY_DATA_DIR: config.paths.data,
     WORKBUDDY_LOCAL_TOKEN: config.bridge.token,
     WORKBUDDY_ANTHROPIC_MODEL: config.bridge.anthropicModel,
     WORKBUDDY_ANTHROPIC_FAST_MODEL: config.bridge.anthropicFastModel,

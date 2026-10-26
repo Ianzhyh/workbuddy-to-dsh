@@ -962,6 +962,8 @@ const I18N_EN = {
     'The running bridge is older, so search calls are still counted as calls. Restart the bridge to split them. The local ledger covers only this bridge and is not the same scope as the upstream balance or other clients.',
   '输入 tokens': 'Input tokens',
   '输出 tokens': 'Output tokens',
+  '缓存命中率': 'Cache hit rate',
+  '上游回报口径，不等于账单': 'Reported by upstream; not a bill',
   '平均耗时': 'Avg duration',
   '消耗积分': 'Credit spent',
 
@@ -4323,6 +4325,11 @@ function renderUsage() {
         : '') +
       card('输入 tokens', fmtNum(t.promptTokens), '') +
       card('输出 tokens', fmtNum(t.completionTokens), '') +
+      card('缓存命中率',
+        Number(t.cacheKnownCalls) > 0 && typeof t.cacheHitRate === 'number'
+          ? (t.cacheHitRate * 100).toFixed(1) + '%'
+          : '—',
+        '上游回报口径，不等于账单', true) +
       card('平均耗时', avg + ' ms', '', true) +
       card('消耗积分', fmtCredit(credit, creditCalls), creditNote, true) +
       (Number(t.failed) > 0
@@ -4621,9 +4628,17 @@ function renderRequests() {
         + (r.status ? 'HTTP ' + r.status : '失败')
         + (r.code === null || r.code === undefined ? '' : ' · ' + escapeAttr(r.code)) + '</button>';
     const hasTokens = typeof r.promptTokens === 'number' || typeof r.completionTokens === 'number';
+    const cachePct = typeof r.cachedTokens === 'number' && Number(r.promptTokens) > 0
+      ? Math.round((r.cachedTokens / r.promptTokens) * 100)
+      : null;
     const tokens = hasTokens
-      ? fmtNum(r.promptTokens || 0) + ' / ' + fmtNum(r.completionTokens || 0)
+      ? fmtNum(r.promptTokens || 0)
+        + (cachePct === null ? '' : ' <span class="hint" style="display:inline">· ' + cachePct + '%</span>')
+        + ' / ' + fmtNum(r.completionTokens || 0)
       : '—';
+    const cacheTitle = typeof r.cachedTokens === 'number'
+      ? ' title="缓存命中 ' + r.cachedTokens + ' / ' + (r.promptTokens || 0) + ' tokens"'
+      : '';
     // 悬停看时延拆分：总耗时里有多少是等上游首字、多少是桥自身前置处理。
     const timingTitle = typeof r.ttfbMs === 'number'
       ? ' title="TTFT ' + r.ttfbMs + ' ms · bridge overhead ' + (typeof r.overheadMs === 'number' ? r.overheadMs : 0) + ' ms"'
@@ -4633,7 +4648,7 @@ function renderRequests() {
       '<td class="mono" data-i18n-skip>' + escapeAttr(r.model) + '</td>' +
       '<td>' + (r.stream ? '流式' : '非流式') + '</td>' +
       '<td class="mono num"' + timingTitle + '>' + fmtNum(r.ms) + ' ms</td>' +
-      '<td class="mono num">' + tokens + '</td>' +
+      '<td class="mono num"' + cacheTitle + '>' + tokens + '</td>' +
       '<td class="mono num">' + fmtCredit(r.credit, typeof r.credit === 'number') + '</td>' +
       '<td>' + result + '</td>' +
       '</tr>';
@@ -5636,7 +5651,7 @@ async function syncUsableModels() {
 function exportRequestsCsv() {
   const shown = visibleRequests();
   if (!shown.length) { setRegMsg('当前筛选下没有可导出的明细', 'err'); return; }
-  const rows = [['时间', '模型', '方式', '耗时(ms)', '首字(ms)', '桥开销(ms)', '输入 tokens', '输出 tokens', '积分', '结果', '状态码', '错误码', '错误原文']];
+  const rows = [['时间', '模型', '方式', '耗时(ms)', '首字(ms)', '桥开销(ms)', '输入 tokens', '输出 tokens', '缓存命中 tokens', '缓存未命中 tokens', '积分', '结果', '状态码', '错误码', '错误原文']];
   for (const r of shown) {
     rows.push([
       new Date(r.t).toLocaleString('zh-CN', { hour12: false }),
@@ -5647,6 +5662,8 @@ function exportRequestsCsv() {
       typeof r.overheadMs === 'number' ? r.overheadMs : '',
       typeof r.promptTokens === 'number' ? r.promptTokens : '',
       typeof r.completionTokens === 'number' ? r.completionTokens : '',
+      typeof r.cachedTokens === 'number' ? r.cachedTokens : '',
+      typeof r.cacheMissTokens === 'number' ? r.cacheMissTokens : '',
       typeof r.credit === 'number' ? r.credit : '',
       r.ok ? '成功' : '失败',
       r.status || '',

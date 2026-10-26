@@ -18,6 +18,12 @@ import { apply } from '../lib/index.js';
 import { bridgeBuildHash } from '../lib/bridge.mjs';
 import { SEARCH_KEY_REF } from '../lib/web-search-config.mjs';
 
+/* 同 plugin.test：不读使用者真实的 ~/.workbuddy-bridge/state.json。 */
+if (!process.env.WORKBUDDY_STATE_FILE) {
+  process.env.WORKBUDDY_STATE_FILE = join(tmpdir(), `wb-search-test-state-${process.pid}.json`);
+}
+process.env.WORKBUDDY_DATA_DIR ||= mkdtempSync(join(tmpdir(), 'wb-search-test-data-'));
+
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 function makeSettings({ describeOnly = false } = {}) {

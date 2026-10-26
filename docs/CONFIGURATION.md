@@ -24,13 +24,18 @@ copy .env.example .env
 |---|---|---|
 | `WORKBUDDY_HOST` | `127.0.0.1` | 桥绑定地址。**不要改成 `0.0.0.0`** |
 | `WORKBUDDY_PORT` | `8790` | 桥监听端口 |
-| `WORKBUDDY_LOCAL_TOKEN` | 首次启动随机生成 | 本地回环令牌。仅用于阻止同机其它程序误用该端口，**不是**上游凭据。留空即自动生成并落到 `dsh-plugin/.bridge-token`（控制台与插件共用同一文件，保证一致）；需与 dsh 的 `WORKBUDDY_BRIDGE_KEY` 值一致 |
+| `WORKBUDDY_DATA_DIR` | `%USERPROFILE%\.workbuddy-bridge` | 运行期数据目录（state / usage / 本地令牌 / 媒体任务）。**不要放安装目录**：换 tgz / 重装会丢账号钉住、用量和令牌，旧客户端随之 401 |
+| `WORKBUDDY_LOCAL_TOKEN` | 首次启动随机生成 | 本地回环令牌。仅用于阻止同机其它程序误用该端口，**不是**上游凭据。留空即自动生成并落到 `<WORKBUDDY_DATA_DIR>/bridge-token`（控制台、插件与桥共用同一文件，保证一致）；需与 dsh 的 `WORKBUDDY_BRIDGE_KEY` 值一致 |
 | `WORKBUDDY_TIMEOUT_MS` | `0` | 上游**总**超时（毫秒）。`0` = 不限——长回答需要保持 0；卡死由下面的首字节/排队超时兜底 |
 | `WORKBUDDY_FIRST_BYTE_TIMEOUT_MS` | `120000` | 连接建立后多久没收到第一块响应体就放弃。只抓“上游不说话”，不限制长回答总时长；`0` = 关闭 |
 | `WORKBUDDY_QUEUE_TIMEOUT_MS` | `120000` | 连接池被长流占满时的排队超时；`0` = 关闭 |
 | `WORKBUDDY_MAX_SOCKETS` | `32` | 上游连接池上限。多会话 / 子 agent / 多客户端并发时调大 |
 | `WORKBUDDY_11128_FALLBACK` | `1` | 上游 11128（来源/模板校验）时是否自动降级 system 重试。`0` = 关闭，直接把错误交给客户端 |
-| `WORKBUDDY_SKIP_MODEL_PREFLIGHT` | 未设 | `1` = 跳过本地模型目录预校验，未知模型也转发给上游（目录漏列可用模型时用） |
+| `WORKBUDDY_SANITIZE_ASSISTANT_HISTORY` | `1` | assistant 历史里的 dsh 身份句也做精确中和。同类项目实测：assistant 历史里只要出现过同一句，之后每轮都会 11128；只改两句精确模板，不动普通正文 |
+| `WORKBUDDY_REPAIR_TOOL_HISTORY` | `1` | 工具调用历史自愈：重复/空 `tool_call_id` 改名并同步 result、缺 result 合成 `is_error` 结果、孤儿 result 丢弃、空 assistant 剔除。`0` = 关闭 |
+| `WORKBUDDY_CONVERSATION_ID_BODY` | `1` | 上游按 body 的 `conversation_id` 分前缀缓存槽。客户端没带时，桥用「首条 system + 首条 user + 模型」的指纹补稳定值；若上游把它当未知字段拒绝，会自动去掉并关闭本进程注入 |
+| `WORKBUDDY_SSE_NORMALIZE` | `1` | chat 流式帧归一：补齐缺失的 `choices[0].delta`、把逐字符 `reasoning_content` 聚合成一段、`[DONE]` 只发一次。`0` = 原始字节透传（用于 A/B 或客户端特殊兼容） |
+| `WORKBUDDY_SKIP_MODEL_PREFLIGHT` | 未设 | `1` = 跳过本地模型目录预校验，未知模型也转发给上游（目录漏列可用模型时用）。默认未知模型在本地回 **404**（OpenAI/Anthropic 客户端据此切模型） |
 | `WORKBUDDY_SHAPE` | 未设 | `1` = 额外打印请求形状（角色计数、工具名、客户端头；仍不含对话内容），排查 11128 字段用 |
 | `WORKBUDDY_LOG` | `1` | `1` 时打印每次请求的模型、消息数、工具数（**不含对话内容**） |
 | `WORKBUDDY_SEARCH_BASE` | 按账号区域自动选择 | WorkBuddy 原生搜索网关（`/agenttool/v1/search`）。国际版默认 `https://www.workbuddy.ai`，国内版默认 `https://www.workbuddy.cn`；仅自建网关/A/B 时覆盖 |

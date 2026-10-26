@@ -318,7 +318,7 @@ workbuddy_web_search 搜……」即可；`workbuddy_status` 也会报告内置�
 1. 打开 dsh **设置 → 插件 → 内置插件设置 → 网页搜索**；
 2. 使用 **Messages API**（不要选 DeepSeek Search API）；
 3. **接口地址**填 `http://127.0.0.1:8790/v1`；
-4. **API Key** 填桥的本地令牌（`dsh-plugin/.bridge-token`，或控制台「客户端接入」里显示的值）；
+4. **API Key** 填桥的本地令牌（`%USERPROFILE%\.workbuddy-bridge\bridge-token`，或控制台「客户端接入」里显示的值）；
 5. 保存后搜一次；桥日志会出现 `web_search (anthropic) results=...`，请求不会发往 DeepSeek。
    `node tools/dev/probe-web-search.mjs "DeepSeek latest news"` 只验证 `/v1/web_search`；
    dsh 实际走的 `/v1/messages` 用面板「重新检测」验证。
@@ -551,7 +551,15 @@ npm run panel:check                    # 上面两个一起跑
 
 ## 修复记录（都补了回归测试）
 
-### 1.14.0（本轮）
+### 1.15.0（本轮）
+
+| 症状 | 根因 | 修法 / 回归 |
+|---|---|---|
+| 浏览器登录账号看不到「夜间免费」等活动名，桌面登录同账号可见 | 插件来源的 `/v3/config` 用插件/CLI 身份，能拿到更全模型但不返回 `modelPromotions`；促销只认桌面身份 | 插件来源额外用桌面身份抓一份 `/v3/config`，**只合并 `modelPromotions`**，模型清单仍用插件身份（不丢 v2 独有模型）；诊断看 `upstreamShape.sources['/v3/config#desktopPromotions']`。回归：`bridge.test.mjs` 的插件登录用例 |
+| Cherry Studio 每个字符一条「深度思考」 | 上游每帧带空 `tool_calls: []`，Cherry 的解析器把 `tool_calls != null` 当成 reasoning 段结束 | chat SSE 归一先剔掉空 `tool_calls` / 空 content / null 占位，再聚合逐字符 reasoning；`WORKBUDDY_SSE_NORMALIZE=0` 可回退。回归：`bridge.test.mjs` 的 SSE 夹具 |
+| 升级/重装后账号钉住、用量与本地令牌丢失，旧客户端 401 | state / usage / token 在安装目录内，pnpm 换 tgz 会整个换掉 | 默认迁到 `%USERPROFILE%\.workbuddy-bridge\`（`WORKBUDDY_DATA_DIR` 可覆盖），旧路径首次启动复制迁移；插件与桥读同一份。回归：`state.test.mjs`、插件登录用例、`verify:standalone` |
+
+### 1.14.0
 
 | 症状 | 根因 | 修法 / 回归 |
 |---|---|---|

@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: WorkBuddy 本地 API 桥
-  version: 1.14.0
+  version: 1.15.0
   description: |
     把本机 WorkBuddy 桌面端已登录的模型能力，经本地回环桥暴露为
     OpenAI 兼容与 Anthropic 兼容两套接口。仅监听 127.0.0.1。
@@ -212,10 +212,11 @@ paths:
             schema: { $ref: '#/components/schemas/ChatCompletionRequest' }
       responses:
         '200':
-          description: 非流式返回聚合结果；stream=true 时返回 text/event-stream
+          description: 非流式返回聚合结果；stream=true 时返回 text/event-stream。用量里可能带上游回报的 `cachedTokens` / `cacheMissTokens`
+        '404': { description: 模型不在本地目录（`model_not_found`；目录漏列时可用 `WORKBUDDY_SKIP_MODEL_PREFLIGHT=1`） }
         '413': { description: 请求体超限 }
         '429': { description: 本地限流（需 opt-in），带 Retry-After }
-        '502': { description: 上游错误（透传状态码） }
+        '502': { description: 上游错误（透传状态码；11128 全降级失败时 code=CHANNEL_REJECTED） }
   /v1/web_search:
     post:
       summary: WorkBuddy 原生网页搜索（不经过 DeepSeek）
@@ -521,7 +522,7 @@ paths:
           schema: { type: integer }
       responses:
         '200':
-          description: 用量统计（来自本地账本）。`calls` / `promptTokens` / `completionTokens` / `credit` 只统计模型调用；网页搜索与接入自检单列为 `searches` / `searchFailed`，不计入模型 tokens 或积分。
+          description: 用量统计（来自本地账本）。`calls` / `promptTokens` / `completionTokens` / `credit` 只统计模型调用；网页搜索与接入自检单列为 `searches` / `searchFailed`，不计入模型 tokens 或积分。`cachedTokens` / `cacheMissTokens` / `cacheKnownCalls` / `cacheHitRate` 只统计上游明确回报了缓存字段的调用；`cacheHitRate` 为 null 表示没有数据，不能当成 0%。
     delete:
       summary: 清空账本
       responses:
@@ -535,7 +536,7 @@ paths:
           schema: { type: integer, default: 50 }
       responses:
         '200':
-          description: 明细（requests[]，只含元数据）与进行中（active[]，含 runningMs）及 activeAlertMs
+          description: 明细（requests[]，只含元数据）与进行中（active[]，含 runningMs）及 activeAlertMs。可选字段：`cachedTokens` / `cacheMissTokens`（上游回报才出现）、`toolRepair`（本次工具历史修复计数）、`imageOmitted`（非视觉模型忽略的图片数）、`channelRejected` / `channelAttempts`（11128 全降级失败）。
           content:
             application/json:
               schema:

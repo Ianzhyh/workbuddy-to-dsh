@@ -80,6 +80,7 @@ dsh 的模型选择器里，日常需要的接入、管理、监控、运维能�
 | 模型管理 | 勾选启用 / 禁用、同步到 dsh、**体检**（可用性 · 消耗倍率 · 实测成本）、详情与 CSV 导出 |
 | 账号切换 | 登录目录下多个账号一键切换（自动重启桥、清缓存）；**同一账号的多份登录快照自动合并成一行**（不会再看到两个一样的账号），可给账号起自定义名字便于区分 |
 | 积分与用量 | 积分余额；1 / 7 / 30 天趋势（次数 / tokens / 积分）、积分排行、CSV 导出；视频/图片单列提交次数与**消耗积分（提交前后余额差估算）** |
+| 缓存与成本 | 同一会话自动补稳定的 `conversation_id`（header + body），让上游前缀缓存真正命中；用量页与请求明细显示**上游回报的缓存命中率/命中 tokens**（没回报显示「—」，不写 0） |
 | 请求明细 | 逐条记录（模型 / 耗时 / token / 积分 / 结果），失败标红、上游错误码一键复制 |
 | 环境诊断 | 逐项检查按优先级排序（红色项不解决，模型就不会出现）；含**客户端安装布局体检**（两个 WorkBuddy 客户端被装进同一目录会被点名并给出修法）；另有 CLI 自检 `doctor.mjs` |
 | 对话测试 | 多轮流式对话，按轮次显示 token / 扣分 / 耗时，附桥日志 |
@@ -173,7 +174,7 @@ dsh plugin --profile desktop add github:Ianzhyh/workbuddy-to-dsh
 
 # 方式二：release 附件（tgz 安装包，无构建、无需 allowBuilds 授权）
 #   从 GitHub Releases 下载 dsh-plugin-workbuddy-<版本>.tgz 后：
-dsh plugin --profile desktop add ./dsh-plugin-workbuddy-1.14.0.tgz
+dsh plugin --profile desktop add ./dsh-plugin-workbuddy-1.15.0.tgz
 
 # 方式三：从源码（插件在 dsh-plugin/ 子目录，接第 1 步的 git clone）
 dsh plugin --profile desktop add workbuddy-to-dsh/dsh-plugin
@@ -420,7 +421,8 @@ node tools\connect.mjs apply codex --model glm-5.3
 
 > **本地令牌从哪来？** 首次启动时随机生成，控制台的「客户端接入」面板里直接显示并
 > 可一键复制（页面上的值就是准的，不用去翻文件）。需要手动读时它在
-> `dsh-plugin/.bridge-token`；也可在 `.env` 里用 `WORKBUDDY_LOCAL_TOKEN=` 显式指定。
+> `<WORKBUDDY_DATA_DIR>/bridge-token`（默认 `%USERPROFILE%\.workbuddy-bridge\bridge-token`）；
+> 也可在 `.env` 里用 `WORKBUDDY_LOCAL_TOKEN=` 显式指定。
 
 控制台的「客户端接入」页签里有每个客户端的完整配置片段，点一下即可复制。
 
@@ -474,7 +476,7 @@ node tools\connect.mjs apply codex --model glm-5.3
 | 模型注册 | 运行时注册 provider `workbuddy`，**不写任何配置文件** | 控制台写 `settings.yaml` + profile patch |
 | 模型增删 | 动态跟随上游目录，改完即生效 | 需要重新勾选并保存 |
 | 上下文 / 输出 | **模型详情顶部可编辑**：输入/输出并排，滑块 + 数值框，留空 = 自动，Token 改完自动保存 | 只能改 `.env` 的 `WORKBUDDY_CONTEXT_WINDOW`（全局默认） |
-| 活动倍率 | 解析上游 `schedule`：夜间免费（hy4）23:00–08:00 自动显示免费/0，夜间折扣（glm）显示折后倍率，过期活动自动隐藏；dsh/面板/控制台同源 | 静态倍率，需自己看公告 |
+| 活动倍率 | 解析上游 `schedule`：夜间免费（hy4）23:00–08:00 自动显示免费/0，夜间折扣（glm）显示折后倍率，过期活动自动隐藏；插件登录来源会额外用桌面身份补抓促销规则（模型清单仍用插件身份，不丢 v2 独有模型）；dsh/面板/控制台同源 | 静态倍率，需自己看公告 |
 | 桥的启停 | 插件自动复用/拉起 | 控制台按钮，或 `启动.cmd` |
 | 数据界面 | **dsh 设置页（9 个标签页）** + 控制台网页，两边同步 | 只有控制台网页 |
 | 网页搜索 | **启动后自动接入（默认）**，概览顶部独立状态卡 + 一键接入/恢复；令牌写独立引用，不覆盖 DeepSeek key | 需手动改 dsh 的 `web-search-deepseek` 配置 |
@@ -623,7 +625,8 @@ copy .env.example .env
 | 变量 | 默认值 | 说明 |
 |---|---|---|
 | `WORKBUDDY_PORT` | `8790` | 桥监听端口 |
-| `WORKBUDDY_LOCAL_TOKEN` | 首次启动随机生成 | 本地回环令牌，仅防同机误用，**不是**上游凭据。生成值落在 `dsh-plugin/.bridge-token` |
+| `WORKBUDDY_LOCAL_TOKEN` | 首次启动随机生成 | 本地回环令牌，仅防同机误用，**不是**上游凭据。生成值落在 `<WORKBUDDY_DATA_DIR>/bridge-token`（默认 `%USERPROFILE%\.workbuddy-bridge\bridge-token`） |
+| `WORKBUDDY_DATA_DIR` | `%USERPROFILE%\.workbuddy-bridge` | 运行期数据目录：state / 用量账本 / 本地令牌。**不要在安装目录里找它们**——换 tgz / 重装会丢 |
 | `DASHBOARD_PORT` | `8792` | 控制台端口 |
 | `WORKBUDDY_APP_EXECUTABLE` | 自动探测 | WorkBuddy 客户端路径 |
 | `WORKBUDDY_AUTH_FILE` | 自动定位 | 登录文件；多账号时务必显式指定 |
@@ -642,8 +645,16 @@ copy .env.example .env
 
 ```bash
 docker build -t workbuddy-bridge .
-docker run -d -p 8790:8790 -p 8792:8792 -e CODEBUDDY_API_KEY=<key> workbuddy-bridge
+docker run -d -p 8790:8790 -p 8792:8792 \
+  -e CODEBUDDY_API_KEY=<key> \
+  -e WORKBUDDY_LOCAL_TOKEN=<一串随机值> \
+  -v workbuddy-data:/data \
+  workbuddy-bridge
 ```
+
+> 容器里没有桌面端可供读取，**必须显式给 `WORKBUDDY_LOCAL_TOKEN`**；不给时
+> healthcheck 会如实判 unhealthy（不再用空 Bearer 假装健康）。`/data` 卷保存
+> 账本与令牌，重建容器不丢。
 
 非 root 用户运行，带 `/health` 健康检查。
 

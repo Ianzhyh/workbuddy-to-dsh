@@ -118,9 +118,9 @@ dsh plugin --profile desktop add workbuddy-to-dsh
 
 | 东西 | 位置 / 端口 | 备注 |
 |---|---|---|
-| 桥 | `127.0.0.1:8790`，脚本 `<插件>/vendor/bridge/workbuddy-bridge.mjs` | 本地 token 首次启动随机生成，落在 `<插件>/.bridge-token` |
+| 桥 | `127.0.0.1:8790`，脚本 `<插件>/vendor/bridge/workbuddy-bridge.mjs` | 本地 token 首次启动随机生成，落在 `%USERPROFILE%\.workbuddy-bridge\bridge-token`（`WORKBUDDY_DATA_DIR` 可覆盖） |
 | 控制台网页 | `127.0.0.1:8792`，脚本 `<插件>/vendor/dashboard/server.mjs` | 插件会复用/拉起，不自动弹浏览器 |
-| 运行期状态 | `<插件>/vendor/.state.json`、`.env`、`bridge/bridge.log`、`dashboard/console.log` | 全在插件目录内，不污染系统 |
+| 运行期状态 | `%USERPROFILE%\.workbuddy-bridge\{state.json,usage.jsonl,credentials/}`；日志在 `<插件>/vendor/bridge/bridge.log`、`dashboard/console.log` | 状态与账本**不放安装目录**，换 tgz/重装不丢；日志仍在插件目录 |
 | 凭据 | 只读 WorkBuddy 自己的登录文件，现取现解，不复制不外传 | — |
 
 改端口 / 指定登录文件：在 `<插件>/vendor/.env` 里写（见 `.env.example`）：
@@ -145,7 +145,7 @@ WORKBUDDY_AUTH_FILE=C:\Users\you\AppData\Local\CodeBuddyExtension\Data\Public\au
 | 模型列表为空 | 登录过期，或上游改了接口 | 重新登录 WorkBuddy；`node <插件>/vendor/bridge/workbuddy-bridge.mjs` 前台跑，看报错 |
 | 提示检测到**旧的 llm-pi-ai 路由**并撞名 | 对方之前手写过 `providers.workbuddy` | 用设置页概览的「清理旧路由」（会先备份），或 `/workbuddy cleanup` |
 | 体检 / 账号切换按钮点了没反应或提示需要控制台 | 控制台没跑（结论只由它写，保证两边一致） | 概览页点「启动控制台」 |
-| 想彻底卸载 | — | 设置 → 插件里停用/卸载；桥与控制台进程可留着（也可手动结束）；`<插件>/vendor/.state.json` 记录状态，删插件目录即清 |
+| 想彻底卸载 | — | 设置 → 插件里停用/卸载；桥与控制台进程可留着（也可手动结束）；运行期状态在 `%USERPROFILE%\.workbuddy-bridge\`，**删插件目录不会清它**，需要时手动删这个数据目录 |
 
 ---
 
@@ -162,4 +162,4 @@ WORKBUDDY_AUTH_FILE=C:\Users\you\AppData\Local\CodeBuddyExtension\Data\Public\au
   "忘了 vendor""路径写死""vendor 里混进敏感文件"这类只在分发时才暴露的问题。
 - 对方**同时有仓库和 vendor** 时，插件优先用仓库（本机开发改 bridge 立刻生效）；
   只有仓库不在旁边时才用 vendor —— 这条顺序有单测守着。
-- 版本升级：按 `CONTRIBUTING.md` 发版四步同步 5 处版本号（根/子包、lock、OpenAPI、README/tgz）→ `npm run release:check` → 重新打包/发布。对方覆盖安装即可，`vendor/.state.json` 与 `.env` 会保留。
+- 版本升级：按 `CONTRIBUTING.md` 发版四步同步 5 处版本号（根/子包、lock、OpenAPI、README/tgz）→ `npm run release:check` → 重新打包/发布。对方覆盖安装即可，运行期状态在 `%USERPROFILE%\.workbuddy-bridge\`，与安装目录无关；`.env` 仍由使用者自己保管。

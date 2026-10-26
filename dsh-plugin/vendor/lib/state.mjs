@@ -7,8 +7,11 @@
  *
  * 存放在项目根的 `.state.json`，已被 .gitignore 忽略。
  */
-import { existsSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import {
+  existsSync, readFileSync, renameSync, rmSync, writeFileSync, mkdirSync, copyFileSync,
+} from 'node:fs';
+import { homedir } from 'node:os';
+import { dirname, join } from 'node:path';
 import config from '../config.mjs';
 
 /**
@@ -25,14 +28,45 @@ import config from '../config.mjs';
  * 做成**函数**而不是常量：测试要在 `import` 之后才能设环境变量（ESM 的 import
  * 会被提升，没法在导入前设），所以这里必须**每次调用时**再读一次。
  */
-export const statePath = () => process.env.WORKBUDDY_STATE_FILE || join(config.paths.root, '.state.json');
+function runtimeDataDir() {
+  const explicit = process.env.WORKBUDDY_DATA_DIR;
+  if (typeof explicit === 'string' && explicit.trim()) return explicit.trim();
+  return join(homedir(), '.workbuddy-bridge');
+}
+
+export const statePath = () => process.env.WORKBUDDY_STATE_FILE
+  || join(runtimeDataDir(), 'state.json');
 /** 同目录临时文件：必须与目标同分区，rename 才是原子的。 */
 const tmpPath = () => `${statePath()}.tmp`;
 
 let cache = null;
+let migrated = false;
+
+/**
+ * 旧版 `.state.json` 在安装目录里（`config.paths.root`）。升级/重装会把
+ * 安装目录整个换掉，账号钉住、签到开关、体检结论一起丢。首次读到新路径
+ * 不存在时，从旧路径复制一份过去；只复制不删除，保留回滚余地。
+ *
+ * `WORKBUDDY_STATE_FILE` 显式指定时不迁移 —— 测试和便携部署要的就是
+ * “只认我给的路径”。
+ */
+function migrateStateIfNeeded() {
+  if (migrated) return;
+  migrated = true;
+  if (process.env.WORKBUDDY_STATE_FILE) return;
+  const target = statePath();
+  if (existsSync(target)) return;
+  const legacy = join(config.paths.root, '.state.json');
+  if (!existsSync(legacy) || legacy === target) return;
+  try {
+    mkdirSync(dirname(target), { recursive: true });
+    copyFileSync(legacy, target);
+  } catch { /* 迁移失败就按空状态启动；不阻塞主流程 */ }
+}
 
 function load() {
   if (cache) return cache;
+  migrateStateIfNeeded();
   try {
     cache = existsSync(statePath()) ? JSON.parse(readFileSync(statePath(), 'utf8')) : {};
   } catch {
@@ -62,6 +96,7 @@ export function writeState(patch) {
      * rename 在同一分区的 POSIX/NTFS 上是原子的：要么旧内容、要么新内容，
      * 不存在"读到一个写坏的中间态"。
      */
+    mkdirSync(dirname(statePath()), { recursive: true });
     writeFileSync(tmpPath(), `${JSON.stringify(next, null, 2)}\n`, 'utf8');
     renameSync(tmpPath(), statePath());
   } catch {

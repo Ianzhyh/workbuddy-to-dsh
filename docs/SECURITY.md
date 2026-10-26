@@ -85,7 +85,8 @@ store.key   32 字节随机密钥，DPAPI(CurrentUser) 保护
 > 客户端 —— 不给值，这个面板就没有意义。
 >
 > **默认值不再是固定串。** 首次运行时会生成一个 24 字节的随机令牌并写入
-> `dsh-plugin/.bridge-token`（权限 0600，已 gitignore），之后一直复用它；
+> `<WORKBUDDY_DATA_DIR>/bridge-token`（默认 `%USERPROFILE%\.workbuddy-bridge\bridge-token`，
+> 权限 0600/ACL 收紧，已 gitignore），之后一直复用它；
 > 控制台与 DSH 插件读同一个文件，保证两边一致。
 >
 > 早先的默认值是硬编码的 `wb-local-bridge` —— 那是个**公开口令**，任何人
@@ -179,7 +180,7 @@ icacls "%USERPROFILE%\.workbuddy-bridge\client-configs" /T
 | `~/.dsh/.credentials.yaml` | 各 provider 的 API key（含本项目写入的占位值） |
 | `~/.workbuddy/keyblob` | 客户端主密钥的包裹信息 |
 | `%USERPROFILE%\.workbuddy-bridge\credentials\` | **插件登录凭据**：`store.key`（DPAPI 保护）+ `.cred`（AES-GCM 密文）。复制到别的机器/用户不可用，但仍按敏感文件对待 |
-| `dsh-plugin/.bridge-token` | 本地回环令牌（随机生成；已 gitignore） |
+| `%USERPROFILE%\.workbuddy-bridge\bridge-token` | 本地回环令牌（随机生成；已 gitignore；`WORKBUDDY_DATA_DIR` 可覆盖） |
 | `~/.codex/config.toml`、`~/.claude/settings.json`、`opencode.json` | 一键接入写进去的**回环令牌**（写入后自动收紧权限） |
 | `.backup/client-configs/**` | 上述配置的**整份备份**（含历史令牌；已自动收紧） |
 
@@ -206,7 +207,7 @@ icacls "%USERPROFILE%\.workbuddy-bridge\client-configs" /T
 ## 计费与用量核对
 
 **桥不引入任何新的计费**：它只转发你自己账号的请求，消耗该账号的套餐额度；
-桥的本地账本（`bridge/usage.jsonl`，只含元数据）与控制台「用量统计」里的积分合计
+桥的本地账本（`%USERPROFILE%\.workbuddy-bridge\usage.jsonl`，只含元数据）与控制台「用量统计」里的积分合计
 取自这些响应里的 usage/credit 字段，**不上报给任何第三方**。
 
 但「经桥调用」与「在客户端里直接使用」**是否按同一口径计入**，取决于上游策略——

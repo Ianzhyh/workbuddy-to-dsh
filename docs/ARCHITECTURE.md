@@ -703,7 +703,7 @@ hack 全部删掉，换成平台的 View Transitions API（`withViewTransition()
 
 ### 本地用量账本
 
-`bridge/usage.jsonl` 由桥自己维护，**只记元数据，从不记对话内容**：
+`%USERPROFILE%\.workbuddy-bridge\usage.jsonl`（`WORKBUDDY_DATA_DIR` 可覆盖）由桥自己维护，**只记元数据，从不记对话内容**：
 
 ```json
 {"t":1791035034979,"model":"glm-5.3","stream":false,"ms":1419,"ok":true,"promptTokens":20,"completionTokens":1,"credit":0.06}

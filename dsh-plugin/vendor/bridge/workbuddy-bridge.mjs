@@ -23,7 +23,7 @@
  */
 import {
   readFileSync, writeFileSync, appendFileSync, existsSync, readdirSync, statSync, renameSync,
-  mkdirSync, chmodSync, unlinkSync, openSync, closeSync,
+  mkdirSync, chmodSync, unlinkSync, openSync, closeSync, copyFileSync,
 } from 'node:fs';
 import { createServer, request as httpRequest } from 'node:http';
 import { request as httpsRequest } from 'node:https';
@@ -253,6 +253,16 @@ const TRANSIENT_400_RETRY_ENABLED = process.env.WORKBUDDY_TRANSIENT_400_RETRY !=
 const CHANNEL_FALLBACK_ENABLED = process.env.WORKBUDDY_11128_FALLBACK !== '0';
 const CHANNEL_FALLBACK_HEADER = 'X-WorkBuddy-11128-Fallback';
 const NEUTRAL_SYSTEM = 'You are a helpful AI assistant.';
+/**
+ * assistant 历史也做**精确身份模板**中和（默认开）。
+ *
+ * 同类项目已实测（hub #574）：assistant 历史里只要出现
+ * `You are an AI agent powered by DeepSeek Harness.`，之后每一轮都会 11128；
+ * 换 key/换账号都没用，新会话才正常。这里只替换两句精确模板，不碰普通正文，
+ * 避免把用户在界面上看到的回答语义改掉。设置 `WORKBUDDY_SANITIZE_ASSISTANT_HISTORY=0`
+ * 可关闭，便于真机 A/B。
+ */
+const SANITIZE_ASSISTANT_HISTORY = process.env.WORKBUDDY_SANITIZE_ASSISTANT_HISTORY !== '0';
 
 /** 上游函数名规则。与 OpenAI/Anthropic/Codex 实际接受的字符集一致。 */
 const TOOL_NAME_RE = /^[A-Za-z0-9_-]{1,64}$/;
@@ -261,13 +271,15 @@ const TOOL_NAME_RE = /^[A-Za-z0-9_-]{1,64}$/;
  * 11128 的渐进降级候选。
  *
  * 顺序刻意从“只动最小范围”到“牺牲 system”：
- *   1. 删除含宿主品牌的整行（保留其余 instructions）；
+ *   1. 删除 system 里含宿主品牌的整行（保留其余 instructions）；
  *   2. 删除第一条 system 的首段（identity/persona 通常在第一段），保留后面的
  *      skills/workspace/安全规则；
- *   3. 整段换成中性 system（最后手段）。
+ *   3. 删除 assistant 历史里含宿主品牌的整行（hub #574：assistant 历史也会
+ *      被同一套指纹校验，且一处命中会让整条会话之后每轮都挂）；
+ *   4. 整段换成中性 system（最后手段）。
  *
- * user / assistant / tool / tools 永远不动。返回**去重后的候选列表**；调用方
- * 只在仍收到 11128 时才继续试下一个。
+ * user / tool / tools 永远不动。返回**去重后的候选列表**；调用方只在仍收到
+ * 11128 时才继续试下一个。
  */
 function channelFallbackCandidates(payload) {
   if (!CHANNEL_FALLBACK_ENABLED) return [];
@@ -313,7 +325,26 @@ function channelFallbackCandidates(payload) {
   }).filter((m) => !(isSystem(m) && !m.content));
   if (dropped && droppedMessages.some(isSystem)) push('drop-first-system-paragraph', droppedMessages);
 
-  // 3) 最后手段：整段中性 system，保住这次调用。
+  // 3) assistant 历史里的品牌行：assistant 正文只删含品牌词的整行，其余保留。
+  //    带 tool_calls 的 assistant 即使 content 被删空也要留下，否则工具配对会断。
+  let assistantChanged = false;
+  const assistantTrimmed = messages.map((m) => {
+    if (!m || m.role !== 'assistant' || typeof m.content !== 'string') return m;
+    const next = m.content
+      .split(/\r?\n/)
+      .filter((line) => !/deepseek\s+harness/i.test(line))
+      .join('\n')
+      .trim();
+    if (next !== m.content) {
+      assistantChanged = true;
+      return { ...m, content: next };
+    }
+    return m;
+  }).filter((m) => !(m && m.role === 'assistant' && !m.content
+    && !(Array.isArray(m.tool_calls) && m.tool_calls.length)));
+  if (assistantChanged) push('remove-brand-lines-assistant', assistantTrimmed);
+
+  // 4) 最后手段：整段中性 system，保住这次调用。
   push('neutral-system', [
     { role: 'system', content: NEUTRAL_SYSTEM },
     ...messages.filter((m) => !isSystem(m)),
@@ -857,6 +888,18 @@ const HOME_FOR_AUTH = (() => {
   const h = homedir();
   if (h && h.trim()) return h.trim();
   try { return userInfo().homedir || ''; } catch { return ''; }
+})();
+/**
+ * 运行期数据目录（账本、状态、令牌）。默认 `~/.workbuddy-bridge`，与插件
+ * 凭据目录同一棵树；`WORKBUDDY_DATA_DIR` 可覆盖（测试 / 便携部署）。
+ *
+ * 不放在安装目录的原因：pnpm 换 tgz / 重装会重写安装目录，账本与令牌
+ * 都会丢（同类项目已多次因此让客户端 401、历史清零）。
+ */
+const RUNTIME_DATA_DIR = (() => {
+  const raw = String(process.env.WORKBUDDY_DATA_DIR || '').trim();
+  if (raw) return isAbsolute(raw) ? raw : join(process.cwd(), raw);
+  return join(HOME_FOR_AUTH || homedir(), '.workbuddy-bridge');
 })();
 const WIN_LOCAL_APPDATA = process.env.LOCALAPPDATA
   || (process.platform === 'win32' ? join(HOME_FOR_AUTH, 'AppData', 'Local') : '');
@@ -1876,7 +1919,7 @@ const CREDENTIAL_STORE_MODE = (() => {
 const CREDENTIAL_DIR = (() => {
   const raw = String(process.env.WORKBUDDY_CREDENTIAL_DIR || '').trim();
   if (raw) return isAbsolute(raw) ? raw : join(process.cwd(), raw);
-  return join(HOME_FOR_AUTH || homedir(), '.workbuddy-bridge', 'credentials');
+  return join(RUNTIME_DATA_DIR, 'credentials');
 })();
 
 /** DPAPI 失败后的进程内回退原因（空串 = 未回退）。 */
@@ -2920,26 +2963,52 @@ const AUDIT_TEMPLATE_REWRITES = [
 // 否则 `Harness v5.8.3. Keep this rule.` 会变成 `NEUTRAL8.3. Keep this rule.`。
 const DSH_IDENTITY_RE = /You are an AI agent powered by DeepSeek\s+Harness(?:\s+(?:version|build|v)?\s*\d+(?:\.\d+){0,3}(?:[-+][0-9A-Za-z.-]+)?)?\.?/gi;
 const DSH_IDENTITY_NEUTRAL = "You are an AI agent running inside the user's development environment.";
+/**
+ * system 里除首句身份之外，**其它行**也可能带 `DeepSeek Harness` 品牌词。
+ *
+ * 2026-10 同类项目逐句 A/B（hub #570）：DSH 的 developer 提示第 33/35 行
+ * `The runtime context names the DeepSeek Harness implementation checkout.` /
+ * `You are interacting with the user through the DeepSeek Harness Web GUI ...`
+ * 同样会被上游 11128 拦。只洗首句不够，但**不能删整行**（会丢语义）——
+ * 把品牌名换成中性称呼，保留该行其余指令。
+ */
+const DSH_BRAND_RE = /\bDeepSeek\s+Harness\b/gi;
+const DSH_BRAND_NEUTRAL = 'the local runtime';
+/**
+ * 另一句会被 11128 拦的自述：`You are a coding agent powered by the
+ * cn-deepseek-v4.1-flash-0.11x model.`。只替换这一整句，不动后面的内容；
+ * 模型名本身可能随账号/区域变化，所以用非贪婪到 `model.` 收尾。
+ */
+const DSH_AGENT_MODEL_RE = /You are a coding agent powered by the [^\n.]{1,120}? model\./gi;
+const DSH_AGENT_MODEL_NEUTRAL = "You are a coding agent running in the user's development environment.";
 
-/** system 文本的最小改写；无命中时返回原值（引用不变，便于命中计数）。 */
-function rewriteAuditTemplate(text) {
+/**
+ * system / assistant 文本的最小改写；无命中时返回原值（引用不变，便于命中计数）。
+ *
+ * `assistant` 作用域刻意**只洗两句精确身份模板**，不替换任意品牌词：
+ * assistant 正文可能是用户正在看的回答，广泛改写会改变语义。system 才是
+ * 模板指纹的主要来源，允许把其余品牌词做中性替换。
+ */
+function rewriteAuditTemplate(text, { assistant = false } = {}) {
   if (typeof text !== 'string' || text === '') return text;
   let out = text;
   for (const [from, to] of AUDIT_TEMPLATE_REWRITES) {
     if (out.includes(from)) out = out.split(from).join(to);
   }
   out = out.replace(DSH_IDENTITY_RE, DSH_IDENTITY_NEUTRAL);
+  out = out.replace(DSH_AGENT_MODEL_RE, DSH_AGENT_MODEL_NEUTRAL);
+  if (!assistant) out = out.replace(DSH_BRAND_RE, DSH_BRAND_NEUTRAL);
   return out;
 }
 
 /** content 可能是 string 或 parts 数组（Anthropic 的 [{type:'text',text}]）。 */
-function rewriteAuditContent(content) {
-  if (typeof content === 'string') return rewriteAuditTemplate(content);
+function rewriteAuditContent(content, options = {}) {
+  if (typeof content === 'string') return rewriteAuditTemplate(content, options);
   if (Array.isArray(content)) {
     let changed = false;
     const nextParts = content.map((part) => {
       if (part && typeof part === 'object' && typeof part.text === 'string') {
-        const t = rewriteAuditTemplate(part.text);
+        const t = rewriteAuditTemplate(part.text, options);
         if (t !== part.text) {
           changed = true;
           return { ...part, text: t };
@@ -2976,6 +3045,198 @@ function toolNameError(tools) {
   return null;
 }
 
+/**
+ * 模型是否支持图片输入。`true/false` 来自目录或精选表；未知模型返回 null。
+ *
+ * 不用“默认支持”猜：上游目录对没有视觉能力的模型通常省略 `images`，
+ * 把它当 true 会让客户端收到上游 400；把它当 false 又可能误伤新模型。
+ * 只有明确为 false 时才降级。
+ */
+function modelVisionSupport(modelId) {
+  const id = String(modelId || '');
+  if (!id) return null;
+  const catalog = Array.isArray(catalogCache.models) ? catalogCache.models : [];
+  const hit = catalog.find((m) => m && m.id === id);
+  if (hit) {
+    // 只有上游**明确**给过 supportsImages 才下结论；缺失当未知（不敢降级，
+    // 否则会把实际上能看图的模型错误降级成文本）。
+    if (hit.imagesKnown === true) return hit.images === true;
+    if (hit.images === true) return true;
+    return null;
+  }
+  const featured = FEATURED.find((f) => f.id === id);
+  if (featured) {
+    if (featured.images === true) return true;
+    if (featured.images === false) return false;
+    return null;
+  }
+  return null;
+}
+
+/**
+ * 非视觉模型收到图片时，把图片块降级成文本占位，而不是原样上行吃 400。
+ *
+ * 同类客户端实测（Chatbox #1638）：历史里一旦带过图，非视觉模型之后每一轮
+ * 都会 400，用户只能清会话。降级不完美（模型看不到图），但比整条会话死掉好，
+ * 而且账本会记下 `imageOmitted`，面板可以解释“这次图片被忽略了”。
+ */
+function degradeImagesForModel(payload, model) {
+  if (modelVisionSupport(model) !== false) return { payload, omitted: 0 };
+  const messages = Array.isArray(payload?.messages) ? payload.messages : null;
+  if (!messages) return { payload, omitted: 0 };
+  let omitted = 0;
+  const nextMessages = messages.map((m) => {
+    if (!m || typeof m !== 'object' || !Array.isArray(m.content)) return m;
+    let changed = false;
+    const nextContent = m.content.map((part) => {
+      if (!part || typeof part !== 'object') return part;
+      if (part.type === 'image_url' || part.type === 'image' || part.type === 'input_image') {
+        omitted += 1;
+        changed = true;
+        return { type: 'text', text: '[image omitted: model has no vision]' };
+      }
+      return part;
+    });
+    return changed ? { ...m, content: nextContent } : m;
+  });
+  if (!omitted) return { payload, omitted: 0 };
+  return { payload: { ...payload, messages: nextMessages }, omitted };
+}
+
+/** 应用图片降级，并把次数记进本次请求的账本上下文。 */
+function applyVisionDegrade(payload, model) {
+  const vision = degradeImagesForModel(payload, model);
+  if (!vision.omitted) return payload;
+  const scope = requestScope.getStore();
+  if (scope) scope.imageOmitted = vision.omitted;
+  log(`image(s) omitted for non-vision model ${model}: ${vision.omitted}`);
+  return vision.payload;
+}
+
+/**
+ * 工具调用历史自愈。
+ *
+ * 上游对工具历史的要求比 OpenAI 规范更严（panel #81 / xdpool #73 / Codex #7051）：
+ *   - 同一个 `tool_call.id` 在历史里重复出现 → 400/11148；
+ *   - assistant 发了 tool_calls 但后面没有对应 tool result → 400；
+ *   - 只有 reasoning、没有正文和 tool_calls 的空 assistant → 400/11151，且之后
+ *     每轮都挂；
+ *   - 孤儿 tool result（没有对应 call）同样会被拒。
+ *
+ * 这里做**最小必要修复**：重复 id 改名并同步 result；缺 result 合成一条
+ * `is_error:true` 的结果；孤儿 result 丢弃；空 assistant 剔除。合法历史原样
+ * 返回（引用不变），不改变正常请求的字节。
+ *
+ * 默认开启；`WORKBUDDY_REPAIR_TOOL_HISTORY=0` 可关闭。
+ */
+const REPAIR_TOOL_HISTORY_ENABLED = !/^(0|false|off|no)$/i.test(
+  String(process.env.WORKBUDDY_REPAIR_TOOL_HISTORY || '1').trim(),
+);
+
+function repairToolHistory(messages) {
+  if (!REPAIR_TOOL_HISTORY_ENABLED || !Array.isArray(messages) || messages.length === 0) {
+    return { messages, changed: false, renames: 0, synthesized: 0, dropped: 0 };
+  }
+  let changed = false;
+  let renames = 0;
+  let synthesized = 0;
+  let dropped = 0;
+  let seq = 0;
+  const used = new Set();
+  const out = [];
+  let pending = []; // 当前 assistant 回合尚未收到 result 的调用
+
+  const freshId = (original) => {
+    const base = String(original || 'call').replace(/[^A-Za-z0-9_-]/g, '_').slice(0, 32) || 'call';
+    let id;
+    do {
+      seq += 1;
+      id = `repair_${seq}_${base}`;
+    } while (used.has(id));
+    used.add(id);
+    return id;
+  };
+  const flushMissing = () => {
+    for (const p of pending) {
+      if (p.done) continue;
+      out.push({
+        role: 'tool',
+        tool_call_id: p.newId,
+        content: 'tool result unavailable (bridge repaired a missing tool result)',
+      });
+      synthesized += 1;
+      changed = true;
+    }
+    pending = [];
+  };
+
+  for (const m of messages) {
+    if (!m || typeof m !== 'object') { out.push(m); continue; }
+
+    if (m.role === 'assistant') {
+      const toolCalls = Array.isArray(m.tool_calls) ? m.tool_calls : [];
+      // content 可能是字符串、parts 数组，或 null；图片等非文本块也算内容，
+      // 不能因为 messageText() 为空就把一条有内容的 assistant 消息丢掉。
+      const hasContent = typeof m.content === 'string'
+        ? m.content.trim().length > 0
+        : (Array.isArray(m.content) ? m.content.length > 0 : Boolean(m.content));
+      // 只有 reasoning / 什么都没有的空 assistant：上游会判 11151，整条会话之后
+      // 每轮都失败。剔除它不会丢失可回放的内容（reasoning 不是正文）。
+      if (!toolCalls.length && !hasContent) {
+        dropped += 1;
+        changed = true;
+        continue;
+      }
+      flushMissing();
+      if (!toolCalls.length) { out.push(m); continue; }
+
+      const rewrittenCalls = toolCalls.map((call) => {
+        const original = typeof call?.id === 'string' ? call.id : '';
+        let id = original;
+        if (!id || used.has(id)) {
+          id = freshId(original);
+          renames += 1;
+          changed = true;
+        } else {
+          used.add(id);
+        }
+        pending.push({ origId: original, newId: id, done: false });
+        return { ...call, id };
+      });
+      out.push({ ...m, tool_calls: rewrittenCalls });
+      continue;
+    }
+
+    if (m.role === 'tool') {
+      const original = m.tool_call_id;
+      const idx = pending.findIndex((p) => !p.done && p.origId === original);
+      if (idx >= 0) {
+        const p = pending[idx];
+        p.done = true;
+        if (p.newId !== original) {
+          changed = true;
+          out.push({ ...m, tool_call_id: p.newId });
+        } else {
+          out.push(m);
+        }
+      } else {
+        // 孤儿 result：没有对应 call（或 call 已被处理过）。原样上行必 400。
+        dropped += 1;
+        changed = true;
+      }
+      continue;
+    }
+
+    // user / system / 其它角色之前，把上一轮缺失的 result 补齐，避免下一轮
+    // assistant 消息把 pending 冲掉后上游看到“有 call 无 result”。
+    flushMissing();
+    out.push(m);
+  }
+  flushMissing();
+
+  return { messages: changed ? out : messages, changed, renames, synthesized, dropped };
+}
+
 function normalizePayload(payload) {
   let next = payload;
 
@@ -3001,9 +3262,22 @@ function normalizePayload(payload) {
     }
   }
 
-  // ── messages：developer → system，并保证首条是 system ──────────────────
-  const messages = next.messages;
-  if (!Array.isArray(messages) || messages.length === 0) return next;
+  // ── messages：工具历史自愈 → developer → system → 首条 system ─────────
+  const originalMessages = next.messages;
+  if (!Array.isArray(originalMessages) || originalMessages.length === 0) return next;
+  const repaired = repairToolHistory(originalMessages);
+  const messages = repaired.messages;
+  if (repaired.changed) {
+    log(`normalize: repaired tool history (renamed=${repaired.renames}`
+      + ` synthesized=${repaired.synthesized} dropped=${repaired.dropped})`);
+    // 账本只记计数，便于面板回答“这次为什么被修过”，不记任何内容。
+    const scope = requestScope.getStore();
+    if (scope) scope.toolRepair = {
+      renames: repaired.renames,
+      synthesized: repaired.synthesized,
+      dropped: repaired.dropped,
+    };
+  }
 
   let rewritten = 0;
   const fixed = messages.map((m) => {
@@ -3014,13 +3288,18 @@ function normalizePayload(payload) {
     return m;
   });
 
-  // ── 内容审核模板的最小改写（对全部 system 消息；命中才动）───────────────
-  let auditFixed = 0;
+  // ── 内容审核模板的最小改写（system + 可选 assistant；命中才动）───────────
+  let auditFixedSystem = 0;
+  let auditFixedAssistant = 0;
   const sanitized = fixed.map((m) => {
-    if (!m || (m.role !== 'system' && m.role !== 'System')) return m;
-    const nextContent = rewriteAuditContent(m.content);
+    if (!m) return m;
+    const isSystem = m.role === 'system' || m.role === 'System';
+    const isAssistant = m.role === 'assistant' && SANITIZE_ASSISTANT_HISTORY;
+    if (!isSystem && !isAssistant) return m;
+    const nextContent = rewriteAuditContent(m.content, { assistant: isAssistant });
     if (nextContent !== m.content) {
-      auditFixed++;
+      if (isSystem) auditFixedSystem++;
+      else auditFixedAssistant++;
       return { ...m, content: nextContent };
     }
     return m;
@@ -3034,14 +3313,82 @@ function normalizePayload(payload) {
   }
 
   if (rewritten) log(`normalize: rewrote ${rewritten} developer message(s) -> system`);
-  if (auditFixed) log(`normalize: rewrote ${auditFixed} audit-template system message(s)`);
+  if (auditFixedSystem) log(`normalize: rewrote ${auditFixedSystem} audit-template system message(s)`);
+  if (auditFixedAssistant) log(`normalize: rewrote ${auditFixedAssistant} audit-template assistant message(s)`);
   if (prepended) log('normalize: prepended a system message (upstream requires one first)');
-  if (!rewritten && !prepended && !auditFixed) return next;
+  if (!rewritten && !prepended && !auditFixedSystem && !auditFixedAssistant && !repaired.changed) return next;
   return { ...next, messages: sanitized };
 }
 
 // ── Request header construction ──────────────────────────────────────────
 const trace = () => randomUUID().replace(/-/g, '');
+
+/**
+ * 会话 ID 的解析与稳定化。
+ *
+ * 背景（同类项目实测，hub #99 / panel #169）：
+ *   - 上游**按 body 的 `conversation_id` 分前缀缓存槽**；只发 header 不发 body
+ *     时，长会话的缓存命中率可能一直是 0。
+ *   - 部分客户端（尤其 DSH）不传 `X-Conversation-ID`；旧实现每轮 `trace()`，
+ *     等于每轮都换一个缓存槽，既贵又慢。
+ *
+ * 解析顺序：
+ *   1. 客户端显式 `x-conversation-id` 或 body `conversation_id` —— 尊重原值；
+ *   2. 会话指纹：第一条 system + 第一条 user + 模型 的 SHA-256 前 32 位；
+ *   3. 都没有（空请求）才回退随机值。
+ *
+ * 指纹只算文本，不落盘、不打印正文；日志最多打前 8 位与来源。
+ */
+function messageText(content) {
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content)) return '';
+  return content
+    .filter((part) => part && typeof part === 'object' && typeof part.text === 'string')
+    .map((part) => part.text)
+    .join('\n');
+}
+
+function resolveConversationId(req, payload) {
+  const explicit = req?.headers?.['x-conversation-id'] || payload?.conversation_id;
+  if (typeof explicit === 'string' && explicit.trim()) {
+    const raw = explicit.trim();
+    // header 对非法字符敏感：客户端给了超长/怪字符时先哈希，避免 400 500 难排查。
+    const id = /^[A-Za-z0-9._:-]{1,200}$/.test(raw)
+      ? raw
+      : createHash('sha256').update(raw).digest('hex');
+    return { id, source: 'client' };
+  }
+  const messages = Array.isArray(payload?.messages) ? payload.messages : [];
+  const system = messages.find((m) => m && (m.role === 'system' || m.role === 'System'));
+  const user = messages.find((m) => m && m.role === 'user');
+  const seed = [messageText(system?.content), messageText(user?.content), payload?.model || ''].join('\u0000');
+  if (seed.trim()) {
+    const id = createHash('sha256').update(seed).digest('hex').slice(0, 32);
+    return { id, source: 'derived' };
+  }
+  return { id: trace(), source: 'random' };
+}
+
+/**
+ * body `conversation_id` 注入开关（默认开）。
+ *
+ * 上游是官方客户端协议的一部分；如果未来某个上游 build 把它当未知字段拒绝，
+ * `callUpstreamWithChannelFallback` 会自动去掉字段重试一次并关闭本进程的注入，
+ * 不需要用户改配置。`WORKBUDDY_CONVERSATION_ID_BODY=0` 可永久关闭。
+ */
+const CONVERSATION_ID_BODY_ENABLED = !/^(0|false|off|no)$/i.test(
+  String(process.env.WORKBUDDY_CONVERSATION_ID_BODY || '1').trim(),
+);
+let conversationIdBodyEnabled = CONVERSATION_ID_BODY_ENABLED;
+
+/** 上游是否明确在抱怨 `conversation_id` 这个字段（不是 11128 的缺会话 id）。 */
+function isConversationIdFieldRejected(parsed, text) {
+  const hay = [
+    parsed?.msg, parsed?.message, parsed?.displayMsg?.zh, parsed?.displayMsg?.en, text,
+  ].filter((s) => typeof s === 'string').join(' ');
+  if (!/conversation[_ ]?id/i.test(hay)) return false;
+  return /unknown|unexpected|unrecognized|invalid|not allowed|extra field|additional propert/i.test(hay);
+}
 
 function buildHeaders(auth, model, conversationId) {
   const messageId = trace();
@@ -4309,14 +4656,34 @@ async function callUpstreamWithChannelFallback(payload, model, conversationId, c
     return { ...attempt, bodyText: text, parsed, fallback: null };
   };
 
+  /*
+   * body 级 conversation_id：上游按它分前缀缓存槽（panel #169 的决定性实验）。
+   * 同时保留 header（部分客户端/风控头族需要它）。若某个上游 build 把它当
+   * 未知字段拒绝，就自动去掉并关闭本进程注入 —— 不让用户为兼容性改配置。
+   */
+  const withBodyId = (p) => (conversationIdBodyEnabled && conversationId
+    ? { ...p, conversation_id: conversationId }
+    : p);
+  let payloadForUpstream = withBodyId(payload);
   let attempt = await readFailure(
-    await callUpstream(JSON.stringify(payload), model, conversationId, clientSignal),
+    await callUpstream(JSON.stringify(payloadForUpstream), model, conversationId, clientSignal),
   );
+  if (!attempt.res.ok && payloadForUpstream !== payload
+    && isConversationIdFieldRejected(attempt.parsed, attempt.bodyText)) {
+    conversationIdBodyEnabled = false;
+    log('upstream rejected conversation_id body field; disabling body injection for this process');
+    payloadForUpstream = payload;
+    attempt = await readFailure(
+      await callUpstream(JSON.stringify(payloadForUpstream), model, conversationId, clientSignal),
+    );
+  }
   if (!is11128Response(attempt.res, attempt.parsed)) return attempt;
 
   let lastFallback = null;
-  for (const candidate of channelFallbackCandidates(payload)) {
+  let tried = 0;
+  for (const candidate of channelFallbackCandidates(payloadForUpstream)) {
     if (clientSignal?.aborted) break;
+    tried += 1;
     lastFallback = candidate.strategy;
     log(`upstream 11128; retrying with ${candidate.strategy}`);
     attempt = await readFailure(
@@ -4334,7 +4701,34 @@ async function callUpstreamWithChannelFallback(payload, model, conversationId, c
   }
   log('channel fallback exhausted', attempt.res.status, String(attempt.bodyText || '').slice(0, 300));
   attempt.fallback = lastFallback;
+  /*
+   * 兜底全失败且最终仍是 11128：给调用方一个明确的「通道拒绝」信号。
+   * 这不是普通上游 4xx，重复点一次不会有不同的结果；UI 应该提示用户
+   * 停止重试并查看诊断，而不是把 11128 原样丢回去让人反复试。
+   */
+  if (is11128Response(attempt.res, attempt.parsed)) {
+    attempt.channelRejected = true;
+    attempt.channelAttempts = 1 + tried;
+  }
   return attempt;
+}
+
+/** 一次上游尝试的账本/响应头元数据（三条协议共用）。 */
+function channelAttemptMeta(attempt, up) {
+  return {
+    ...(attempt.fallback ? { fallback: attempt.fallback, fallbackOk: up.ok } : {}),
+    ...(attempt.channelRejected
+      ? { channelRejected: true, channelAttempts: attempt.channelAttempts }
+      : {}),
+  };
+}
+
+/** 11128 全降级失败时给用户的可操作文案（不包含任何对话内容）。 */
+function channelRejectedMessage(attempt) {
+  const n = Math.max(1, Number(attempt?.channelAttempts) || 1);
+  return 'workbuddy-bridge: upstream channel verification rejected this request'
+    + ` after ${n} attempt(s). The bridge already neutralized the known host/identity templates;`
+    + ' resending the same payload is unlikely to help. See docs/TROUBLESHOOTING.md (11128).';
 }
 
 /**
@@ -6182,7 +6576,7 @@ function openAIToResponsesResponse(agg, model, routes = null) {
  *
  * 返回 `{ finishReason, usage, streamError }` 供调用方记账。
  */
-async function relayResponsesStream(up, res, model, routes = null) {
+async function relayResponsesStream(up, res, model, routes = null, options = {}) {
   const customTools = routes?.custom ?? new Set();
   let backpressured = false;
   const send = (type, obj) => {
@@ -6254,7 +6648,19 @@ async function relayResponsesStream(up, res, model, routes = null) {
    * 所以做成开关：**默认行为一个字节不变**（丢弃 + 记一条日志），想试的人自己开，
    * 试坏了把开关去掉即可。验证办法见 `docs/TROUBLESHOOTING.md`。
    */
-  const forwardReasoning = process.env.WORKBUDDY_FORWARD_REASONING === '1';
+  /*
+   * 思维链事件只发给**明确要它的客户端**。
+   *
+   * 背景（Cherry Studio #20940）：Cherry 的 Responses 解析器是 Zod 白名单，
+   * 只认 `response.output_text.delta` 一类事件；收到
+   * `response.reasoning_summary_text.delta` / `response.output_item.added`
+   * 会直接 abort 整轮。Codex 则需要 reasoning summary 事件才会显示摘要。
+   *
+   * 因此即使打开 `WORKBUDDY_FORWARD_REASONING=1`，也只对 Codex UA、请求里
+   * 显式声明 reasoning summary、或带 `x-workbuddy-forward-reasoning: 1` 的
+   * 请求转发；其它客户端保持最小事件集。
+   */
+  const forwardReasoning = options.forwardReasoning === true;
   let reasoningSlot = null;
 
   /** 关闭打开中的 reasoning 项（幂等）。必须在文本/工具块之前调用。 */
@@ -6706,10 +7112,26 @@ let usageLines = null;
  */
 let usageBytes = 0;
 let usageMtimeMs = -1;
-/** 账本位置：与脚本同目录（即 bridge/），可用环境变量覆盖。 */
+/** 账本位置：运行期数据目录，可用 `WORKBUDDY_USAGE_FILE` 覆盖。 */
+let usageMigrated = false;
 function usageFile() {
-  return process.env.WORKBUDDY_USAGE_FILE
-    || join(dirname(fileURLToPath(import.meta.url)), 'usage.jsonl');
+  if (process.env.WORKBUDDY_USAGE_FILE) return process.env.WORKBUDDY_USAGE_FILE;
+  const target = join(RUNTIME_DATA_DIR, 'usage.jsonl');
+  if (!usageMigrated) {
+    usageMigrated = true;
+    // 旧版账本在 bridge/ 脚本目录；升级后第一次启动复制过去。只复制不删除。
+    if (!existsSync(target)) {
+      const legacy = join(dirname(fileURLToPath(import.meta.url)), 'usage.jsonl');
+      if (existsSync(legacy) && legacy !== target) {
+        try {
+          mkdirSync(dirname(target), { recursive: true });
+          copyFileSync(legacy, target);
+          log('usage ledger migrated to runtime data dir');
+        } catch { /* 迁移失败就起一份新账本；不阻塞请求 */ }
+      }
+    }
+  }
+  return target;
 }
 
 /** 读文件指纹；文件不存在时返回 { size: 0, mtimeMs: -1 }。 */
@@ -6780,6 +7202,11 @@ function recordRequest(entry) {
     // key 哈希前 8 位）—— 桥不可用时静默跳过，不影响记账主流程。
     const client = requestScope.getStore()?.client;
     if (client) entry = { ...entry, client };
+    // 工具历史修复计数：只记数字，便于面板回答“这次为什么被修过”。
+    const toolRepair = requestScope.getStore()?.toolRepair;
+    if (toolRepair) entry = { ...entry, toolRepair };
+    const imageOmitted = requestScope.getStore()?.imageOmitted;
+    if (imageOmitted) entry = { ...entry, imageOmitted };
     // 面板「体检」是主动探测，失败是预期结果之一；单独标记，避免计入待办。
     if (requestScope.getStore()?.probe === true) entry = { ...entry, probe: true };
     /*
@@ -6902,6 +7329,13 @@ function recentRequests(limit = 50) {
       : {}),
     ...(typeof r.promptTokens === 'number' ? { promptTokens: r.promptTokens } : {}),
     ...(typeof r.completionTokens === 'number' ? { completionTokens: r.completionTokens } : {}),
+    // 缓存命中量：上游不一定回报，缺字段就不写 0（0 是“确实未命中”）。
+    ...(typeof r.cachedTokens === 'number' ? { cachedTokens: r.cachedTokens } : {}),
+    ...(typeof r.cacheMissTokens === 'number' ? { cacheMissTokens: r.cacheMissTokens } : {}),
+    ...(r.toolRepair && typeof r.toolRepair === 'object' ? { toolRepair: r.toolRepair } : {}),
+    ...(typeof r.imageOmitted === 'number' ? { imageOmitted: r.imageOmitted } : {}),
+    ...(typeof r.channelRejected === 'boolean' ? { channelRejected: r.channelRejected } : {}),
+    ...(typeof r.channelAttempts === 'number' ? { channelAttempts: r.channelAttempts } : {}),
     ...(typeof r.credit === 'number' ? { credit: r.credit } : {}),
     // 生成类（视频/图片）的**估算**消耗：提交前后账号余额差。上游不回报单次积分，
     // 这个值可能为 null（余额没变化/读不到），调用方必须当“参考值”而非账单。
@@ -6970,6 +7404,8 @@ function summarizeUsage(days = 7, opts = {}) {
     // 生成类的估算积分（提交前后余额差）。Known 表示有多少次采到了差值；
     // 0 次时界面要显示「—」而不是 0，避免把“没测到”说成“没花钱”。
     videoCredit: 0, videoCreditKnown: 0, imageCredit: 0, imageCreditKnown: 0,
+    // 提示缓存：上游回报了才计数。cacheKnownCalls 区分「没命中」与「没回报」。
+    cachedTokens: 0, cacheMissTokens: 0, cacheKnownCalls: 0, cacheHitRate: null,
   };
 
   const ensureDay = (ts) => {
@@ -7080,22 +7516,35 @@ function summarizeUsage(days = 7, opts = {}) {
     const ct = Number(r.completionTokens) || 0;
     const hasCredit = typeof r.credit === 'number';
     const cr = hasCredit ? r.credit : 0;
+    // 缓存字段缺失 ≠ 未命中：只有上游真的回报了才计入命中率。
+    const hasCache = typeof r.cachedTokens === 'number' || typeof r.cacheMissTokens === 'number';
+    const cached = Number(r.cachedTokens) || 0;
+    const cacheMiss = Number(r.cacheMissTokens) || 0;
+    const addCache = (bucket) => {
+      if (!hasCache) return;
+      bucket.cachedTokens = (bucket.cachedTokens || 0) + cached;
+      bucket.cacheMissTokens = (bucket.cacheMissTokens || 0) + cacheMiss;
+    };
 
     total.calls += 1;
     total.promptTokens += pt;
     total.completionTokens += ct;
     total.ms += Number(r.ms) || 0;
     if (hasCredit) { total.credit += cr; total.creditCalls += 1; }
+    if (hasCache) total.cacheKnownCalls += 1;
+    addCache(total);
 
     const m = byModel.get(r.model)
       || { model: r.model, calls: 0, promptTokens: 0, completionTokens: 0, ms: 0, credit: 0, creditCalls: 0 };
     m.calls += 1; m.promptTokens += pt; m.completionTokens += ct; m.ms += Number(r.ms) || 0;
     if (hasCredit) { m.credit += cr; m.creditCalls += 1; }
+    addCache(m);
     byModel.set(r.model, m);
 
     const d = ensureDay(r.t);
     d.calls += 1; d.promptTokens += pt; d.completionTokens += ct;
     if (hasCredit) { d.credit += cr; d.creditCalls += 1; }
+    addCache(d);
     /*
      * 当天 × 该模型的小计。
      *
@@ -7107,17 +7556,20 @@ function summarizeUsage(days = 7, opts = {}) {
       || { model: r.model, calls: 0, promptTokens: 0, completionTokens: 0, credit: 0, creditCalls: 0 };
     dm.calls += 1; dm.promptTokens += pt; dm.completionTokens += ct;
     if (hasCredit) { dm.credit += cr; dm.creditCalls += 1; }
+    addCache(dm);
     d.byModel.set(r.model, dm);
 
     const h = ensureHour(r.t);
     if (h) {
       h.calls += 1; h.promptTokens += pt; h.completionTokens += ct;
       if (hasCredit) { h.credit += cr; h.creditCalls += 1; }
+      addCache(h);
       // 小时桶同样带按模型小计 —— 否则切到「最近 24 小时」这个功能就没了
       const hm = h.byModel.get(r.model)
         || { model: r.model, calls: 0, promptTokens: 0, completionTokens: 0, credit: 0, creditCalls: 0 };
       hm.calls += 1; hm.promptTokens += pt; hm.completionTokens += ct;
       if (hasCredit) { hm.credit += cr; hm.creditCalls += 1; }
+      addCache(hm);
       h.byModel.set(r.model, hm);
     }
   }
@@ -7127,7 +7579,21 @@ function summarizeUsage(days = 7, opts = {}) {
   total.credit = round4(total.credit);
   total.videoCredit = round4(total.videoCredit);
   total.imageCredit = round4(total.imageCredit);
-  for (const m of byModel.values()) m.credit = round4(m.credit);
+  /*
+   * 命中率 = cachedTokens / promptTokens。分母用 promptTokens 而不是
+   * cached + miss：上游可能只回报其中一项，cacheMissTokens 也并非每个
+   * 模型都给。没有 promptTokens 或上游一次都没回报缓存时保持 null，
+   * 页面显示「—」，不能把“没数据”写成 0%。
+   */
+  if (total.cacheKnownCalls > 0 && total.promptTokens > 0) {
+    total.cacheHitRate = round4(total.cachedTokens / total.promptTokens);
+  }
+  for (const m of byModel.values()) {
+    m.credit = round4(m.credit);
+    if (m.promptTokens > 0 && (m.cachedTokens || m.cacheMissTokens)) {
+      m.cacheHitRate = round4((m.cachedTokens || 0) / m.promptTokens);
+    }
+  }
   for (const d of byDay.values()) {
     d.credit = round4(d.credit);
     for (const dm of d.byModel.values()) dm.credit = round4(dm.credit);
@@ -7524,6 +7990,53 @@ async function fetchCatalog(generation = catalogGeneration) {
       }
     }
 
+    /*
+     * 浏览器登录来源的促销补抓。
+     *
+     * 实测（同账号只读 A/B，issue #10）：
+     *   - 桌面来源 `/v3/config`：25 个模型 + 8 条 modelPromotions；
+     *   - 插件来源（默认 WorkBuddy/CLI 身份）：34 个模型，但 **0 条促销**；
+     *   - 插件来源 + `WORKBUDDY_PLUGIN_IDENTITY=vscode`：25 个模型 + 8 条促销。
+     * 也就是说插件身份能拿到更全的模型清单（v2 独有 13 个），但拿不到促销规则；
+     * 促销只认桌面身份。不能整体切回 vscode 身份（会丢那 13 个模型），
+     * 所以这里**额外用桌面身份只抓一份 /v3/config，只合并 modelPromotions**，
+     * 模型清单仍以插件身份那份为准。
+     *
+     * 这是只读请求；失败只写进 shape 诊断，不影响模型目录和请求主链路。
+     */
+    if (auth.source === 'plugin' && PLUGIN_IDENTITY !== 'vscode') {
+      try {
+        const res = await fetch(`${auth.endpoint}/v3/config`, {
+          headers: buildHeaders(auth, '', ''),
+          signal: AbortSignal.timeout(8000),
+        });
+        if (res.ok) {
+          const body = await res.json();
+          const promos = body?.data?.modelPromotions;
+          if (Array.isArray(promos) && promos.length) {
+            shape.sources['/v3/config#desktopPromotions'] = promos.length;
+            for (const [modelId, rules] of groupPromotions(promos)) {
+              const existing = promotions.get(modelId) || [];
+              const mergedRules = [...existing];
+              for (const rule of rules) {
+                if (!mergedRules.some((r) => JSON.stringify(r) === JSON.stringify(rule))) {
+                  mergedRules.push(rule);
+                }
+              }
+              promotions.set(modelId, mergedRules);
+            }
+            log(`plugin catalog: merged ${promos.length} promotion rule(s) from desktop identity`);
+          } else {
+            shape.sources['/v3/config#desktopPromotions'] = 0;
+          }
+        } else {
+          shape.sources['/v3/config#desktopPromotions'] = `HTTP ${res.status}`;
+        }
+      } catch (e) {
+        shape.sources['/v3/config#desktopPromotions'] = `error: ${e.message}`;
+      }
+    }
+
     // 在这里定格「上游给了几个模型」：**必须**在下面 FEATURED 补全之前取，
     // 因为补全之后 merged 至少会有 3 条，那个数字就不再代表上游了。
     // 用 merged.size 而不是各端点 list 长度之和：merged 是去重后的 Map，
@@ -7644,7 +8157,10 @@ async function fetchCatalog(generation = catalogGeneration) {
           defaultTemperature: m.temperature != null && Number.isFinite(Number(m.temperature)) && Number(m.temperature) >= 0
             ? Number(m.temperature)
             : null,
-          images: !!m.supportsImages,
+          // 只有上游明确给了 supportsImages 才落 imagesKnown；缺失当未知，
+          // 避免把“没上报”误判成“不支持图片”而错误降级。
+          ...(m.supportsImages === true ? { images: true, imagesKnown: true } : {}),
+          ...(m.supportsImages === false ? { images: false, imagesKnown: true } : {}),
           // 基础倍率；真正展示给客户端的是按当前促销时段算出的有效倍率，
           // 见 /v1/models 的输出层。
           credits: m.credits,
@@ -7740,7 +8256,8 @@ function pickFeatured(catalog, region = '') {
       context: f.context,
       maxOutput: f.maxOutput,
       credits: f.credits,
-      ...(f.images ? { images: true } : {}),
+      ...(f.images ? { images: true, imagesKnown: true } : {}),
+      ...(f.images === false ? { images: false, imagesKnown: true } : {}),
       ...(f.supportsReasoning ? { supportsReasoning: true } : {}),
     });
 }
@@ -9068,11 +9585,11 @@ async function handleRequest(req, res) {
           stream: wantStream,
           ms: 0,
           ok: false,
-          status: 400,
-          code: null,
+          status: 404,
+          code: 'model_not_found',
           error: modelError,
         });
-        return json(res, 400, { error: { message: modelError, type: 'model_not_found' } });
+        return json(res, 404, { error: { message: modelError, type: 'model_not_found' } });
       }
 
       // 每日自动签到：**先转发、后台补签**。放在这里是因为「有人调模型」
@@ -9104,7 +9621,10 @@ async function handleRequest(req, res) {
       trackInflight(req, res, model, wantStream);
 
       // the backend is streaming-only: always stream upstream, aggregate for non-streaming clients
-      const upstream = normalizePayload({ ...payload, stream: true, stream_options: { include_usage: true } });
+      const upstream = applyVisionDegrade(
+        normalizePayload({ ...payload, stream: true, stream_options: { include_usage: true } }),
+        model,
+      );
       /*
        * `max_completion_tokens` 是**新式写法**（OpenAI 现行字段），上游 Go 结构体只认
        * `max_tokens`。原先这里直接 `delete` —— 于是客户端给的**输出上限静默消失**：
@@ -9135,7 +9655,11 @@ async function handleRequest(req, res) {
           delete upstream.reasoning_effort;
         }
       }
-      const conversationId = req.headers['x-conversation-id'] || trace();
+      const conv = resolveConversationId(req, upstream);
+      const conversationId = conv.id;
+      if (conv.source !== 'client') {
+        log(`conversation id: source=${conv.source} id=${conversationId.slice(0, 8)}…`);
+      }
 
       const ac = new AbortController();
       req.on('aborted', () => ac.abort());
@@ -9149,12 +9673,12 @@ async function handleRequest(req, res) {
         const upstreamStartedAt = attempt.upstreamStartedAt;
         const text = attempt.bodyText ?? (up.ok ? '' : await up.text().catch(() => ''));
         const parsed = attempt.parsed;
-        const fallbackInfo = attempt.fallback
-          ? { fallback: attempt.fallback, fallbackOk: up.ok }
-          : {};
+        const fallbackInfo = channelAttemptMeta(attempt, up);
         if (attempt.fallback) res.setHeader(CHANNEL_FALLBACK_HEADER, attempt.fallback);
         if (!up.ok) {
           log('upstream error', up.status, text.slice(0, 300));
+          const channelRejected = attempt.channelRejected === true;
+          const upstreamMessage = upstreamErrorText(parsed, text, up);
           recordRequest({
             model,
             stream: wantStream,
@@ -9162,7 +9686,7 @@ async function handleRequest(req, res) {
             ok: false,
             status: up.status,
             code: upstreamLedgerCode(parsed),
-            error: upstreamErrorText(parsed, text, up),
+            error: channelRejected ? channelRejectedMessage(attempt) : upstreamMessage,
             overheadMs: Math.max(0, upstreamStartedAt - startedAt),
             ...fallbackInfo,
           });
@@ -9177,16 +9701,21 @@ async function handleRequest(req, res) {
            * 实际是上游登录态失效。回 502 + 明确文案，修法只有一个 ——
            * 在 WorkBuddy 桌面端重新登录。
            */
-          const upstreamMessage = upstreamErrorText(parsed, text, up);
           const extCode = upstreamErrorCode(parsed);
           const authFailure = upstreamAuthFailure(up);
           return json(res, up.status === 200 || authFailure ? 502 : up.status, {
             error: {
               message: authFailure
                 ? upstreamAuthMessage(parsed)
-                : `workbuddy-bridge: upstream ${up.status}: ${upstreamMessage}`,
-              type: authFailure ? 'upstream_auth_error' : (up.status === 429 ? 'rate_limit_error' : 'upstream_error'),
-              ...(extCode ? { code: extCode } : {}),
+                : channelRejected
+                  ? channelRejectedMessage(attempt)
+                  : `workbuddy-bridge: upstream ${up.status}: ${upstreamMessage}`,
+              type: authFailure
+                ? 'upstream_auth_error'
+                : channelRejected
+                  ? 'upstream_channel_error'
+                  : (up.status === 429 ? 'rate_limit_error' : 'upstream_error'),
+              ...(channelRejected ? { code: 'CHANNEL_REJECTED' } : (extCode ? { code: extCode } : {})),
             },
           });
         }
@@ -9209,10 +9738,6 @@ async function handleRequest(req, res) {
            * 才能区分"上游排队/预填充慢"与"桥自己慢"。
            */
           let firstChunkAt = 0;
-          // 逐行解析，不用正则：上游的 usage 里含 completion_tokens_details /
-          // prompt_tokens_details 这类**嵌套对象**，`\{[^{}]*\}` 根本匹配不上，
-          // 结果是流式请求的 token 与扣分全被记成 0。
-          let tail = '';
           let streamError = null;
           /*
            * 「这一轮到底跑完了没有」—— 与非流式路径（`aggregateStream` 的
@@ -9226,50 +9751,136 @@ async function handleRequest(req, res) {
           let sawDone = false;
           let sawFinish = false;
           let sawToolCall = false;
+
+          /*
+           * 流式帧归一（`WORKBUDDY_SSE_NORMALIZE=0` 可整段关掉）。
+           *
+           * 上游是能跑的，但它的帧不是所有客户端都吃得下：
+           *   - Cline 在 `choices[0].delta` 缺失时直接 `reading 'type'` 崩（#939）；
+           *   - Cherry Studio 会把逐字符的 `reasoning_content` 当成一个个独立
+           *     思考块（issue #9），这里把 reasoning 聚合到内容/工具/终止帧前
+           *     一次性发出；
+           *   - 顺手补齐缺失的 `delta`，不改 content/tool 的顺序与内容。
+           *
+           * 按 **SSE block**（空行分隔）处理，而不是按行/按字节：块边界是协议
+           * 语义，拆行会把一个事件拆散。没有 data 的注释块原样透传。
+           */
+          const normalizeSse = process.env.WORKBUDDY_SSE_NORMALIZE !== '0';
+          let sseBuf = '';
+          let reasoningBuf = '';
+          let chunkMeta = null;
+          const writeOut = async (text) => {
+            // 背压：写不动就等排空，别把上游的数据堆进内存（见 waitDrain）。
+            if (!res.write(text)) await waitDrain(res);
+          };
+          const flushReasoning = async () => {
+            if (!reasoningBuf) return;
+            const obj = {
+              id: chunkMeta?.id || 'chatcmpl-bridge',
+              object: 'chat.completion.chunk',
+              created: chunkMeta?.created || Math.floor(Date.now() / 1000),
+              ...(chunkMeta?.model ? { model: chunkMeta.model } : {}),
+              choices: [{ index: 0, delta: { reasoning_content: reasoningBuf }, finish_reason: null }],
+            };
+            reasoningBuf = '';
+            await writeOut(`data: ${JSON.stringify(obj)}\n\n`);
+          };
+          const inspectBlock = (block) => {
+            const dataLine = block.split('\n').find((line) => line.startsWith('data:'));
+            if (!dataLine) return;
+            const raw = dataLine.slice(5).trim();
+            if (!raw) return;
+            if (raw === '[DONE]') { sawDone = true; return; }
+            // 只解析可能带终止/用量信息的块；纯内容帧不值得逐块 JSON.parse。
+            if (!raw.includes('"usage"') && !raw.includes('"finish_reason"') && !raw.includes('"tool_calls"')) return;
+            try {
+              const j = JSON.parse(raw);
+              if (j.usage) usageSeen = j.usage; // 最后一帧的 usage 胜出
+              const choice = j.choices?.[0];
+              if (choice?.finish_reason) sawFinish = true;
+              if (Array.isArray(choice?.delta?.tool_calls) && choice.delta.tool_calls.length) sawToolCall = true;
+            } catch { /* 半截帧，忽略 */ }
+          };
+          const normalizeBlock = (block) => {
+            const lines = block.split('\n');
+            const dataIdx = lines.findIndex((line) => line.startsWith('data:'));
+            if (dataIdx < 0) return block;
+            const raw = lines[dataIdx].slice(5).trim();
+            if (!raw || raw === '[DONE]') return block;
+            let j;
+            try { j = JSON.parse(raw); } catch { return block; }
+            if (!chunkMeta && j && typeof j === 'object') {
+              chunkMeta = { id: j.id, created: j.created, model: j.model };
+            }
+            if (!Array.isArray(j?.choices) || !j.choices.length) return block;
+
+            let hasNonReasoning = false;
+            for (const choice of j.choices) {
+              if (!choice || typeof choice !== 'object') continue;
+              if (!choice.delta || typeof choice.delta !== 'object') {
+                // Cline #939：没有 delta 时客户端直接崩；把顶层 content 挪进去。
+                choice.delta = {};
+                if (typeof choice.content === 'string') {
+                  choice.delta.content = choice.content;
+                  delete choice.content;
+                }
+              }
+              /*
+               * 上游每帧都会带一堆**空占位**（实测 deepseek-v4.1-flash）：
+               *   {"content":"","reasoning_content":"We","function_call":null,
+               *    "refusal":"","tool_calls":[],"extra_fields":null}
+               * Cherry Studio 的 @ai-sdk/openai-compatible 把 `tool_calls != null`
+               * 当成“reasoning 段结束”，空数组 `[]` 也满足——于是每个字符都被切成
+               * 一个独立思考块（issue #9）。桥在转发前剔掉空占位，既修 Cherry，
+               * 也不影响其它客户端（它们本来就忽略空数组）。
+               */
+              for (const key of Object.keys(choice.delta)) {
+                const value = choice.delta[key];
+                const emptyToolCalls = key === 'tool_calls' && Array.isArray(value) && value.length === 0;
+                const emptyText = (key === 'content' || key === 'reasoning_content' || key === 'refusal')
+                  && value === '';
+                const nullPlaceholder = (key === 'function_call' || key === 'extra_fields')
+                  && (value === null || value === undefined);
+                if (emptyToolCalls || emptyText || nullPlaceholder) delete choice.delta[key];
+              }
+              if (typeof choice.delta.reasoning_content === 'string' && choice.delta.reasoning_content) {
+                reasoningBuf += choice.delta.reasoning_content;
+                delete choice.delta.reasoning_content;
+              }
+              if (Object.keys(choice.delta).length || choice.finish_reason) hasNonReasoning = true;
+            }
+            // 纯 reasoning 帧先扣住，等正文/工具/终止帧来了再合并发出。
+            if (!hasNonReasoning) return null;
+            lines[dataIdx] = `data: ${JSON.stringify(j)}`;
+            return lines.join('\n');
+          };
+          const handleBlock = async (block) => {
+            inspectBlock(block);
+            if (!normalizeSse) {
+              await writeOut(`${block}\n\n`);
+              return;
+            }
+            const next = normalizeBlock(block);
+            if (next === null) return;
+            if (reasoningBuf) await flushReasoning();
+            await writeOut(`${next}\n\n`);
+          };
+
           try {
             for (;;) {
               const { done, value } = await reader.read();
               if (done) break;
               if (!firstChunkAt) firstChunkAt = Date.now();
-              // 背压：写不动就等排空，别把上游的数据堆进内存（见 waitDrain）。
-              // 直接写 Uint8Array：再包一次 Buffer.from 会把每个流块整块拷贝一遍。
-              if (!res.write(value)) await waitDrain(res);
-              tail += decoder.decode(value, { stream: true });
-              const lines = tail.split('\n');
-              tail = lines.pop() ?? '';
-              for (const line of lines) {
-                if (!line.startsWith('data:')) continue;
-                const chunk = line.slice(5).trim();
-                if (!chunk) continue;
-                if (chunk === '[DONE]') { sawDone = true; continue; }
-                /*
-                 * 只解析**可能带终止信号**的帧：内容帧占绝大多数，逐帧 JSON.parse
-                 * 只为看 finish_reason 不划算（大流里是纯粹的 CPU 开销）。
-                 */
-                if (!chunk.includes('"usage"') && !chunk.includes('"finish_reason"') && !chunk.includes('"tool_calls"')) continue;
-                try {
-                  const j = JSON.parse(chunk);
-                  if (j.usage) usageSeen = j.usage; // 最后一帧的 usage 胜出
-                  const choice = j.choices?.[0];
-                  if (choice?.finish_reason) sawFinish = true;
-                  if (Array.isArray(choice?.delta?.tool_calls) && choice.delta.tool_calls.length) sawToolCall = true;
-                } catch { /* 半个包，忽略 */ }
-              }
-              // 兜底：上游若不按行收尾，别让 tail 无限增长
-              if (tail.length > 100000) tail = tail.slice(-4096);
+              sseBuf += decoder.decode(value, { stream: true });
+              const blocks = sseBuf.split('\n\n');
+              sseBuf = blocks.pop() ?? '';
+              for (const block of blocks) await handleBlock(block);
+              // 上游若不按空行收尾，别让缓冲无限增长（异常流保护）
+              if (sseBuf.length > 200000) sseBuf = sseBuf.slice(-4096);
             }
-            // 最后一行可能没有换行符结尾：`[DONE]` / finish_reason 可能在 tail 里
-            if (tail.trim()) {
-              const chunk = tail.trim().startsWith('data:') ? tail.trim().slice(5).trim() : '';
-              if (chunk === '[DONE]') sawDone = true;
-              else if (chunk && (chunk.includes('"finish_reason"') || chunk.includes('"usage"'))) {
-                try {
-                  const j = JSON.parse(chunk);
-                  if (j.usage) usageSeen = j.usage;
-                  if (j.choices?.[0]?.finish_reason) sawFinish = true;
-                } catch { /* 半截帧，忽略 */ }
-              }
-            }
+            // 最后一个块可能没有结尾空行
+            if (sseBuf.trim()) await handleBlock(sseBuf);
+            if (reasoningBuf) await flushReasoning();
           } catch (e) {
             streamError = e;
             log('stream interrupted', e.message);
@@ -9556,6 +10167,18 @@ async function handleRequest(req, res) {
         });
       }
 
+      const modelError = preflightModelError(model);
+      if (modelError) {
+        log('rejected unknown model (anthropic)', model);
+        recordRequest({
+          model, stream: wantStream, ms: 0, ok: false, status: 404, code: 'model_not_found', error: modelError,
+        });
+        return json(res, 404, {
+          type: 'error',
+          error: { type: 'not_found_error', message: modelError },
+        });
+      }
+
       maybeAutoCheckin();
       log(`→ [anthropic] ${body.model || '(no model)'} => ${model} stream=${wantStream} msgs=${messages.length} tools=${tools?.length ?? 0}`);
 
@@ -9566,25 +10189,31 @@ async function handleRequest(req, res) {
       res.on('close', () => { if (!res.writableEnded) ac.abort(); });
 
       try {
+        const upstreamPayload = applyVisionDegrade(normalizePayload(oai), model);
+        const conv = resolveConversationId(req, upstreamPayload);
+        if (conv.source !== 'client') {
+          log(`conversation id: source=${conv.source} id=${conv.id.slice(0, 8)}…`);
+        }
         const attempt = await callUpstreamWithChannelFallback(
-          normalizePayload(oai),
+          upstreamPayload,
           model,
-          req.headers['x-conversation-id'] || trace(),
+          conv.id,
           ac.signal,
         );
         const up = attempt.res;
         const upstreamStartedAt = attempt.upstreamStartedAt;
         const text = attempt.bodyText ?? (up.ok ? '' : await up.text().catch(() => ''));
         const parsed = attempt.parsed;
-        const fallbackInfo = attempt.fallback
-          ? { fallback: attempt.fallback, fallbackOk: up.ok }
-          : {};
+        const fallbackInfo = channelAttemptMeta(attempt, up);
         if (attempt.fallback) res.setHeader(CHANNEL_FALLBACK_HEADER, attempt.fallback);
         if (!up.ok) {
           const authFailure = upstreamAuthFailure(up);
+          const channelRejected = attempt.channelRejected === true;
           const message = authFailure
             ? upstreamAuthMessage(parsed)
-            : upstreamErrorText(parsed, text, up);
+            : channelRejected
+              ? channelRejectedMessage(attempt)
+              : upstreamErrorText(parsed, text, up);
           const code = upstreamErrorCode(parsed);
           log('upstream error (anthropic)', up.status, text.slice(0, 300));
           recordRequest({
@@ -9601,9 +10230,11 @@ async function handleRequest(req, res) {
           return json(res, up.status === 200 || authFailure ? 502 : up.status, {
             type: 'error',
             error: {
-              type: authFailure ? 'authentication_error' : 'api_error',
+              type: authFailure
+                ? 'authentication_error'
+                : channelRejected ? 'upstream_channel_error' : 'api_error',
               message,
-              ...(code !== null ? { code } : {}),
+              ...(channelRejected ? { code: 'CHANNEL_REJECTED' } : (code !== null ? { code } : {})),
             },
           });
         }
@@ -9708,6 +10339,16 @@ async function handleRequest(req, res) {
         routes.deferred,
       );
       const toolChoice = responsesToolChoiceToOpenAI(body.tool_choice);
+      const modelError = preflightModelError(model);
+      if (modelError) {
+        log('rejected unknown model (responses)', model);
+        recordRequest({
+          model, stream: wantStream, ms: 0, ok: false, status: 404, code: 'model_not_found', error: modelError,
+        });
+        return json(res, 404, {
+          error: { type: 'invalid_request_error', code: 'model_not_found', message: modelError },
+        });
+      }
       /*
        * 请求里声明为 custom（freeform）的工具名 —— 回包侧要按 `custom_tool_call`
        * 回（Codex 的 apply_patch 就是这一类）。丢了这份名单，工具调用就会被当成
@@ -9762,29 +10403,37 @@ async function handleRequest(req, res) {
       res.on('close', () => { if (!res.writableEnded) ac.abort(); });
 
       try {
+        const upstreamPayload = applyVisionDegrade(normalizePayload(oai), model);
+        const conv = resolveConversationId(req, upstreamPayload);
+        if (conv.source !== 'client') {
+          log(`conversation id: source=${conv.source} id=${conv.id.slice(0, 8)}…`);
+        }
         const attempt = await callUpstreamWithChannelFallback(
-          normalizePayload(oai),
+          upstreamPayload,
           model,
-          req.headers['x-conversation-id'] || trace(),
+          conv.id,
           ac.signal,
         );
         const up = attempt.res;
         const upstreamStartedAt = attempt.upstreamStartedAt;
         const text = attempt.bodyText ?? (up.ok ? '' : await up.text().catch(() => ''));
         const parsed = attempt.parsed;
-        const fallbackInfo = attempt.fallback
-          ? { fallback: attempt.fallback, fallbackOk: up.ok }
-          : {};
+        const fallbackInfo = channelAttemptMeta(attempt, up);
         if (attempt.fallback) res.setHeader(CHANNEL_FALLBACK_HEADER, attempt.fallback);
         if (!up.ok) {
           log('upstream error (responses)', up.status, text.slice(0, 300));
           const authFailure = upstreamAuthFailure(up);
+          const channelRejected = attempt.channelRejected === true;
           const message = authFailure
             ? upstreamAuthMessage(parsed)
-            : upstreamErrorText(parsed, text, up);
+            : channelRejected
+              ? channelRejectedMessage(attempt)
+              : upstreamErrorText(parsed, text, up);
           const errorCode = authFailure
             ? 'upstream_auth_error'
-            : responsesErrorCode(up.status, message, parsed?.code ?? parsed?.error?.code);
+            : channelRejected
+              ? 'CHANNEL_REJECTED'
+              : responsesErrorCode(up.status, message, parsed?.code ?? parsed?.error?.code);
           recordRequest({
             model,
             stream: wantStream,
@@ -9799,7 +10448,9 @@ async function handleRequest(req, res) {
           if (!wantStream) {
             return json(res, up.status === 200 || authFailure ? 502 : up.status, {
               error: {
-                type: authFailure ? 'upstream_auth_error' : 'upstream_error',
+                type: authFailure
+                  ? 'upstream_auth_error'
+                  : channelRejected ? 'upstream_channel_error' : 'upstream_error',
                 code: errorCode,
                 message,
               },
@@ -9853,7 +10504,19 @@ async function handleRequest(req, res) {
 
         if (wantStream) {
           res.__overheadMs = Math.max(0, upstreamStartedAt - startedAt);
-          const r = await relayResponsesStream(up, res, model, routes);
+          const wantsReasoning = process.env.WORKBUDDY_FORWARD_REASONING === '1' && (
+            /codex/i.test(String(req.headers['user-agent'] || ''))
+            || req.headers['x-workbuddy-forward-reasoning'] === '1'
+            || (Array.isArray(body.include) && body.include.some((v) => /reasoning/i.test(String(v))))
+            || (body.reasoning && typeof body.reasoning === 'object'
+              && (body.reasoning.summary != null || body.reasoning.generate_summary != null))
+          );
+          if (process.env.WORKBUDDY_FORWARD_REASONING === '1' && !wantsReasoning) {
+            log('responses: reasoning summary suppressed for non-Codex client');
+          }
+          const r = await relayResponsesStream(up, res, model, routes, {
+            forwardReasoning: wantsReasoning,
+          });
           if (r.streamError && !ac.signal.aborted) {
             recordRequest({ model, stream: true, ms: Date.now() - startedAt, ok: false, status: 0, code: null, error: r.streamError.message, ...fallbackInfo });
           } else {

@@ -349,10 +349,10 @@ async function waitReady() {
 }
 
 /** 发一个 /v1/responses 请求，回原始文本 + 状态码。 */
-async function post(payload) {
+async function post(payload, extraHeaders = {}) {
   const r = await fetch(`${BASE}/v1/responses`, {
     method: 'POST',
-    headers: auth,
+    headers: { ...auth, ...extraHeaders },
     body: JSON.stringify(payload),
   });
   return { status: r.status, text: await r.text(), headers: r.headers };
@@ -1009,9 +1009,9 @@ async function startBridge(extraEnv = {}) {
         return {
           base,
           kill: () => proc.kill(),
-          post: async (payload) => {
+          post: async (payload, extraHeaders = {}) => {
             const rr = await fetch(`${base}/v1/responses`, {
-              method: 'POST', headers: auth, body: JSON.stringify(payload),
+              method: 'POST', headers: { ...auth, ...extraHeaders }, body: JSON.stringify(payload),
             });
             return { status: rr.status, text: await rr.text() };
           },
@@ -1048,7 +1048,18 @@ test('思维链：默认丢弃；开开关后按 reasoning 项转发且顺序正
   // 2) 开开关：另起一个桥
   const b = await startBridge({ WORKBUDDY_FORWARD_REASONING: '1' });
   try {
-    const evs = parseSse((await b.post(payload)).text);
+    /*
+     * 只对 Codex / 显式请求 reasoning 的客户端转发。Cherry Studio 的严格
+     * 解析器收到 reasoning summary 事件会整轮 abort（#20940），所以即使
+     * 开关打开，非 Codex 客户端也必须拿到最小事件集。
+     */
+    const nonCodex = parseSse((await b.post(payload, { 'user-agent': 'CherryStudio/1.0' })).text);
+    assert.equal(nonCodex.some((e) => /reasoning/.test(e.event || '')), false,
+      '非 Codex 客户端即使开了开关也不能收到 reasoning 事件');
+    assert.ok(nonCodex.some((e) => e.event === 'response.output_text.delta'), '正文仍要正常');
+    assert.ok(nonCodex.some((e) => e.event === 'response.completed'), '仍要正常收尾');
+
+    const evs = parseSse((await b.post(payload, { 'user-agent': 'codex_cli_rs/0.59.0' })).text);
     const names = evs.map((e) => e.event);
     const first = evs.find((e) => e.event === 'response.reasoning_summary_text.delta');
     assert.ok(first, '开了开关就要转发思维链 delta');

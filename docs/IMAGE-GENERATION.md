@@ -172,7 +172,7 @@ GET /v1/images/{id}/content    # completed 且有产物 → 302 签名 URL
 ## 6. 客户端示例
 
 ```bash
-TOKEN="$(cat dsh-plugin/.bridge-token)"
+TOKEN="$(cat "${WORKBUDDY_DATA_DIR:-$HOME/.workbuddy-bridge}/bridge-token")"
 
 # 文生图
 curl -sS http://127.0.0.1:8790/v1/images \

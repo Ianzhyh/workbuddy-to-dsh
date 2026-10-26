@@ -19,7 +19,60 @@
 
 ## [Unreleased]
 
+## [1.15.0] - 2026-10-26
+
+### Added
+
+- **缓存命中可见 + 稳定会话 ID**：桥会优先用客户端给的 `X-Conversation-ID` /
+  body `conversation_id`，缺省时按「首条 system + 首条 user + 模型」算稳定指纹，
+  header 与 body 双写（`WORKBUDDY_CONVERSATION_ID_BODY=0` 可关；上游把该字段当
+  未知字段拒绝时自动去掉并关闭本进程注入）。`/v1/requests` 与 `/v1/usage` 增加
+  `cachedTokens` / `cacheMissTokens` / `cacheHitRate`，插件与控制台显示命中率
+  （上游回报口径，缺报显示「—」）。
+- **运行期数据外置**：state / usage / 本地令牌迁到 `%USERPROFILE%\.workbuddy-bridge\`
+  （`WORKBUDDY_DATA_DIR` 可覆盖），旧安装目录的文件首次启动复制迁移，换 tgz /
+  重装不再丢账号钉住、用量与令牌。插件与桥读同一份；旧令牌路径只读兜底。
+- **CI 门禁**：主门禁增加 `check:pack`、`panel:render`、Windows 中文/空格路径
+  独立演练；新增 `docker-build` job。Docker healthcheck 要求显式
+  `WORKBUDDY_LOCAL_TOKEN`，数据落 `/data` 卷。
+
 ### Fixed
+
+- **11128 清洗范围不够**（同类项目实证）：system 首句之外的 `DeepSeek Harness`
+  品牌行、assistant 历史里的身份句也会让整条会话持续 400。现在 system 做全文
+  品牌词中和，assistant 做两句精确身份模板中和；新增 `remove-brand-lines-assistant`
+  兜底级；全部降级失败回 `CHANNEL_REJECTED`，明确提示不要原样重试。
+- **工具调用历史一处坏、整会话 503**：新增 `repairToolHistory`——重复/空
+  `tool_call_id` 改名并同步 result，缺 result 合成 `is_error` 结果，孤儿 result
+  丢弃，只有 reasoning 的空 assistant 剔除；账本记 `toolRepair`，合法历史不改写。
+- **非视觉模型收到图片直接 400**：目录明确 `images=false` 时把图片块降级成
+  `[image omitted: ...]` 文本并记 `imageOmitted`，不再让历史里的一张图毒死整条会话。
+- **Responses 的 reasoning summary 事件发给所有客户端**：即使打开
+  `WORKBUDDY_FORWARD_REASONING=1`，也只对 Codex UA、显式请求 reasoning 或带
+  `x-workbuddy-forward-reasoning: 1` 的请求转发；Cherry Studio 等严格解析器
+  不会再被未知事件 abort。
+- **chat 流式帧不合法/思考逐字符**：上游的 SSE 先按 block 归一——缺失
+  `choices[0].delta` 时补 `{}`（Cline #939），剔掉空 `tool_calls: []` /
+  空 `content` / `null` 占位（Cherry issue #9：空数组也会被当成 reasoning 段
+  结束），逐字符的 `reasoning_content` 聚合成一段。正文/工具顺序与 `[DONE]`
+  保持；设置 `WORKBUDDY_SSE_NORMALIZE=0` 可退回原始字节透传。
+- **浏览器登录看不到夜间免费/促销**（issue #10）：插件来源的 `/v3/config`
+  能拿到更全模型但不返回 `modelPromotions`，而桌面身份才返回。现在插件来源会
+  **额外用桌面身份抓一份 `/v3/config`，只合并促销规则**，模型清单仍用插件
+  身份那份（不丢 v2 独有模型）。诊断字段：`upstreamShape.sources['/v3/config#desktopPromotions']`。
+- **自动签到双真源**：插件没显式配 `autoCheckin` 时跟随 `.state.json` 的
+  `checkin.auto`；面板显示桥的实际开关，并提示“已保存、重启桥后生效”；签到缓存
+  按自然日失效，跨午夜不再误报“今日已签到”。
+- **未知模型状态码**：本地预校验从 400 改为 **404** `model_not_found`
+  （OpenAI/Anthropic 客户端据此切模型），账本同步记录。
+
+### Changed
+
+- 面板请求明细的输入列附带缓存命中百分比；用量页新增「缓存命中率」卡片；
+  请求/用量 CSV 增加缓存列。
+- Docker 文档要求显式本地令牌并挂载 `/data`；healthcheck 不再用空 Bearer 假健康。
+
+### Fixed（媒体生成）
 
 - **上游同步完成（`mode:"sync"`）的图片/视频被当成异步任务**（真机复现）：
   2026-10-26 两次图生图提交都在 submit 里同步返回 `failed`，桥却回 `202`、

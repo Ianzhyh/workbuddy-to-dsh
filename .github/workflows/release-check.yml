@@ -49,10 +49,28 @@ jobs:
       - name: 桥测试（合约 + 启动参数）
         run: npm run test:bridge
 
+      # 1.13.0 的 npm 包曾漏掉 bridge/miora-video.mjs —— check:pack 专防这类漏打包。
+      - name: npm 包文件清单（防漏打包）
+        run: npm run check:pack
+
       # 面板 i18n 要真实浏览器（findChrome 会找本机 Chrome/Edge）。
       # 只在 Windows 主门禁跑：这是实际使用环境，也避免给跨平台矩阵加浏览器依赖。
       - name: 面板 i18n 验收（真实浏览器）
         run: npm run panel:i18n
+
+      - name: 面板渲染验收（真实浏览器）
+        run: npm run panel:render
+
+      # Windows 中文/空格路径是现场高频故障（安装路径、TEMP、账号目录）。
+      # 让独立分发包演练在含中文与空格的 TEMP 下再跑一次。
+      - name: Windows 中文/空格路径独立演练
+        shell: pwsh
+        run: |
+          $root = Join-Path $env:RUNNER_TEMP '工作 buddy 验证'
+          New-Item -ItemType Directory -Force $root | Out-Null
+          $env:TEMP = $root
+          $env:TMP = $root
+          node dsh-plugin/scripts/verify-standalone.mjs
 
       - name: 独立分发包演练（没有仓库时也能跑起来）
         run: node dsh-plugin/scripts/verify-standalone.mjs
@@ -97,3 +115,13 @@ jobs:
 
       - name: 桥测试（假凭据，不触真上游）
         run: npm run test:bridge
+
+  docker-build:
+    # Dockerfile 是 API-key 网关形态；这里只做构建门禁，避免再次出现
+    # “文档说支持、实际构建就坏”的纸面能力。
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build Docker image
+        run: docker build -t workbuddy-bridge:ci .

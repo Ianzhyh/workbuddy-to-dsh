@@ -105,7 +105,8 @@ request ledger when the host exposes them, otherwise a clearly-labelled estimate
    - OpenAI-compatible: `http://127.0.0.1:8790/v1`
    - Anthropic: `http://127.0.0.1:8790` (no `/v1`)
    - API key: the random local token shown in the console's **Client Access** tab
-     (also stored in `dsh-plugin/.bridge-token`, or set `WORKBUDDY_LOCAL_TOKEN`)
+     (also stored in `<WORKBUDDY_DATA_DIR>/bridge-token`, default
+     `%USERPROFILE%\.workbuddy-bridge\bridge-token`; or set `WORKBUDDY_LOCAL_TOKEN`)
 
 No WorkBuddy desktop app? Install the dsh plugin, open its **Account** tab and use
 **Plugin sign-in** — no desktop download is required.

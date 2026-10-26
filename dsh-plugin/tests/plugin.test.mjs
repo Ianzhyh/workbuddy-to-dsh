@@ -21,6 +21,16 @@ import { BridgeSupervisor, bridgeBuildHash } from '../lib/bridge.mjs';
 /** 真实插件目录（测试里要用它当"源"来造分发布的副本）。 */
 const PLUGIN_ROOT = fileURLToPath(new URL('..', import.meta.url));
 
+/*
+ * 运行期状态隔离：新版默认从 ~/.workbuddy-bridge/state.json 读账号钉住
+ * （升级不丢数据的代价）。测试不能读使用者真实的那份，否则 .env 断言会
+ * 被真实账号覆盖；显式指到临时文件。
+ */
+if (!process.env.WORKBUDDY_STATE_FILE) {
+  process.env.WORKBUDDY_STATE_FILE = join(tmpdir(), `wb-plugin-test-state-${process.pid}.json`);
+}
+process.env.WORKBUDDY_DATA_DIR ||= mkdtempSync(join(tmpdir(), 'wb-plugin-test-data-'));
+
 test('数据面的方法 / 权限矩阵：只读路由拒绝写方法，写路由要求面板头', async () => {
   const { createRouteTable } = await import('../lib/routes.mjs');
   const routes = createRouteTable({
@@ -926,6 +936,33 @@ test('readProjectEnv 解析 .env，且只在 config 未显式指定时生效', (
     const explicit = apply(ctx2, { projectRoot: dir, bridgePort: 9911, autoStart: false, tools: false, commands: false, routes: false, migrateLegacy: false });
     assert.equal(explicit.state.config.bridgePort, 9911, '显式配置优先于 .env');
   } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('插件自动签到：未显式配置时跟随 .state.json，显式配置优先', () => {
+  const stateFile = process.env.WORKBUDDY_STATE_FILE;
+  const backup = existsSync(stateFile) ? readFileSync(stateFile, 'utf8') : null;
+  const dir = mkdtempSync(join(tmpdir(), 'wb-auto-checkin-'));
+  try {
+    writeFileSync(stateFile, JSON.stringify({ checkin: { auto: false } }), 'utf8');
+
+    const { ctx } = fakeCtx();
+    const off = apply(ctx, {
+      projectRoot: dir, autoStart: false, tools: false, commands: false, routes: false, migrateLegacy: false,
+    });
+    assert.equal(off.supervisor.autoCheckin, false,
+      '面板关了签到，插件拉起的桥也必须关，不能按默认值继续签');
+
+    const { ctx: ctx2 } = fakeCtx();
+    const on = apply(ctx2, {
+      projectRoot: dir, autoStart: false, tools: false, commands: false, routes: false, migrateLegacy: false,
+      autoCheckin: true,
+    });
+    assert.equal(on.supervisor.autoCheckin, true, '插件显式配置必须高于 .state.json');
+  } finally {
+    if (backup === null) rmSync(stateFile, { force: true });
+    else writeFileSync(stateFile, backup, 'utf8');
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('probe-audit-template：桥不可达时必须退出码非 0（不能永远“通过”）', () => {

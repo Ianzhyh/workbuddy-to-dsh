@@ -988,6 +988,8 @@ body.dark .wb-root,
       '失败': 'Failed',
       '输入 tokens': 'Input tokens',
       '输出 tokens': 'Output tokens',
+      '缓存命中率': 'Cache hit rate',
+      '上游回报口径，不等于账单': 'Reported by upstream; not a bill',
       '平均耗时': 'Avg duration',
       '只记元数据（时间 / 模型 / 耗时 / token / 积分），不含任何对话内容。':
         'Metadata only (time / model / duration / tokens / credit) — no conversation content.',
@@ -1040,6 +1042,11 @@ body.dark .wb-root,
       '账号当前无签到活动': 'This account has no check-in activity',
       '上次尝试': 'Last attempt',
       '自动签到': 'Auto check-in',
+      '桥侧实际': 'Bridge actual',
+      '已开启': 'On',
+      '已关闭': 'Off',
+      '自动签到设置已保存，但桥仍在按旧值运行；重启桥后生效。':
+        'Auto check-in was saved, but the bridge is still using the old value; restart the bridge to apply.',
       '领取中…': 'Claiming…',
       '立即领取': 'Claim now',
 
@@ -4219,10 +4226,11 @@ body.dark .wb-root,
             h('div', { className: 'wb-actions-group' },
               h(Btn, { onClick: reload }, '刷新'),
               h(Btn, { onClick: () => downloadCsv('workbuddy-usage.csv',
-                ['day', 'calls', 'searches', 'searchFailed', 'promptTokens', 'completionTokens', 'credit',
+                ['day', 'calls', 'searches', 'searchFailed', 'promptTokens', 'completionTokens',
+                  'cachedTokens', 'cacheMissTokens', 'credit',
                   'videos', 'videoFailed', 'images', 'imageFailed'],
                 series.map((d) => [d.day || d.key, d.calls, d.searches || 0, d.searchFailed || 0,
-                  d.promptTokens, d.completionTokens, d.credit,
+                  d.promptTokens, d.completionTokens, d.cachedTokens || 0, d.cacheMissTokens || 0, d.credit,
                   d.videos || 0, d.videoFailed || 0, d.images || 0, d.imageFailed || 0])) }, '导出 CSV'),
               h(Btn, { disabled: clearing, onClick: clearLedger }, clearing ? '清空中…' : '清空账本'))),
           error ? h(Alert, { bad: true }, error) : null,
@@ -4238,6 +4246,13 @@ body.dark .wb-root,
               : null,
             h('div', { className: 'wb-metric' }, h('span', null, '输入 tokens'), h('b', null, fmtTokens(total.promptTokens))),
             h('div', { className: 'wb-metric' }, h('span', null, '输出 tokens'), h('b', null, fmtTokens(total.completionTokens))),
+            h('div', {
+              className: 'wb-metric',
+              title: '上游回报口径，不等于账单',
+            }, h('span', null, '缓存命中率'), h('b', null,
+              Number(total.cacheKnownCalls) > 0 && typeof total.cacheHitRate === 'number'
+                ? (total.cacheHitRate * 100).toFixed(1) + '%'
+                : '—')),
             h('div', { className: 'wb-metric brand' }, h('span', null, '消耗积分'), h('b', null, typeof total.credit === 'number' ? total.credit.toFixed(2) : '0')),
             h('div', { className: 'wb-metric' }, h('span', null, '平均耗时'), h('b', null, totalCalls ? Math.round((total.ms || 0) / totalCalls) + ' ms' : '—'))),
           noteLine1 ? h('p', { className: 'wb-note' }, noteLine1) : null,
@@ -4379,8 +4394,8 @@ body.dark .wb-root,
           h('div', { className: 'wb-actions-group' },
             h(Btn, { onClick: reload }, '刷新'),
             h(Btn, { onClick: () => downloadCsv('workbuddy-requests.csv',
-              ['time', 'model', 'stream', 'ok', 'ms', 'ttfbMs', 'overheadMs', 'promptTokens', 'completionTokens', 'credit', 'status', 'code', 'error'],
-              rows.map((r) => [new Date(r.t).toISOString(), r.model, r.stream ? 1 : 0, r.ok ? 1 : 0, r.ms, r.ttfbMs ?? '', r.overheadMs ?? '', r.promptTokens || 0, r.completionTokens || 0, r.credit || 0, r.status || '', r.code || '', r.error || ''])) }, '导出当前筛选 CSV'))),
+              ['time', 'model', 'stream', 'ok', 'ms', 'ttfbMs', 'overheadMs', 'promptTokens', 'completionTokens', 'cachedTokens', 'cacheMissTokens', 'credit', 'status', 'code', 'error'],
+              rows.map((r) => [new Date(r.t).toISOString(), r.model, r.stream ? 1 : 0, r.ok ? 1 : 0, r.ms, r.ttfbMs ?? '', r.overheadMs ?? '', r.promptTokens || 0, r.completionTokens || 0, typeof r.cachedTokens === 'number' ? r.cachedTokens : '', typeof r.cacheMissTokens === 'number' ? r.cacheMissTokens : '', r.credit || 0, r.status || '', r.code || '', r.error || ''])) }, '导出当前筛选 CSV'))),
         h('div', { className: 'wb-scroll' },
           h('table', { className: 'wb-table' },
             h('thead', null, h('tr', null,
@@ -4397,7 +4412,17 @@ body.dark .wb-root,
                   ? `TTFT ${r.ttfbMs} ms · bridge overhead ${typeof r.overheadMs === 'number' ? r.overheadMs : 0} ms`
                   : '',
               }, fmtInt(r.ms) + ' ms'),
-              h('td', { className: 'num' }, fmtTokens(r.promptTokens || 0)),
+              h('td', {
+                className: 'num',
+                title: typeof r.cachedTokens === 'number'
+                  ? `缓存命中 ${r.cachedTokens} / ${r.promptTokens || 0} tokens`
+                  : '',
+              },
+                fmtTokens(r.promptTokens || 0),
+                typeof r.cachedTokens === 'number' && Number(r.promptTokens) > 0
+                  ? h('span', { style: { opacity: 0.65, marginLeft: '4px' } },
+                    `· ${Math.round((r.cachedTokens / r.promptTokens) * 100)}%`)
+                  : null),
               h('td', { className: 'num' }, fmtTokens(r.completionTokens || 0)),
               h('td', { className: 'num' }, typeof r.credit === 'number' ? r.credit.toFixed(3) : '—'),
               h('td', { className: r.ok ? '' : 'click', title: r.ok ? '' : (String(r.error || '').slice(0, 300) + '\n（点击复制完整详情）'), onClick: r.ok ? undefined : () => copyText(JSON.stringify(r, null, 2)) },
@@ -4406,7 +4431,7 @@ body.dark .wb-root,
     }
 
     // ─────────────────────────── 签到 ───────────────────────────
-    function CheckinPanel({ onStartConsole, busy, autoCheckinAt }) {
+    function CheckinPanel({ onStartConsole, busy, autoCheckinAt, autoCheckinEnabled }) {
       /**
        * 签到状态用 `refreshKey` 跟着**桥侧的自动签到时刻**走，而不是靠高频轮询。
        *
@@ -4432,6 +4457,11 @@ body.dark .wb-root,
       const status = data && data.status ? data.status : (data || {});
       const runtime = cstate?.checkin || null;
       const consoleReady = cstateApi.availability.state === 'ok' && cstate?.ok !== false;
+      // 桥的**实际**开关（启动时注入）vs 面板里保存的偏好：两者可能因“改完没重启桥”
+      // 而不同。界面必须把事实和偏好分开说，不能拿偏好冒充桥的行为。
+      const bridgeAuto = typeof autoCheckinEnabled === 'boolean' ? autoCheckinEnabled : null;
+      const savedAuto = runtime ? runtime.auto !== false : null;
+      const autoMismatch = bridgeAuto !== null && savedAuto !== null && savedAuto !== bridgeAuto;
       const claim = async () => {
         setWorking(true);
         setMessage('');
@@ -4464,6 +4494,12 @@ body.dark .wb-root,
         runtime ? h(Row, { label: '自动签到' }, h('label', { className: 'wb-check' },
           h('input', { type: 'checkbox', checked: runtime.auto !== false, disabled: working || !consoleReady, onChange: (e) => toggleAuto(e.target.checked) }),
           runtime.auto !== false ? '开启' : '关闭')) : null,
+        bridgeAuto !== null
+          ? h(Row, { label: '桥侧实际' }, h(Pill, { tone: bridgeAuto ? 'ok' : 'warn', text: bridgeAuto ? '已开启' : '已关闭' }))
+          : null,
+        autoMismatch
+          ? h(Alert, null, '自动签到设置已保存，但桥仍在按旧值运行；重启桥后生效。')
+          : null,
         !consoleReady ? h('p', { className: 'wb-note' }, '自动签到开关存在 .state.json，由控制台负责读写；控制台没跑时这项不可改（可先启动控制台）。签到本身由**桥**执行 —— 只要桥在跑，不开控制台也会自动签。') : null,
         !consoleReady && cstatus === 404 ? h(Alert, { bad: true }, '宿主端还是旧构建（重启一次 dsh 后，自动签到开关与「上次尝试」才会出现）。') : null,
         h('div', { className: 'wb-actions', style: { marginTop: '10px' } },
@@ -6958,6 +6994,9 @@ body.dark .wb-root,
              * 高频轮询 `/workbuddy/checkin`（那个要打上游计费端点）。
              */
             autoCheckinAt: status?.bridge?.health?.autoCheckin?.at || null,
+            autoCheckinEnabled: typeof status?.bridge?.health?.autoCheckinEnabled === 'boolean'
+              ? status.bridge.health.autoCheckinEnabled
+              : null,
           }) : null,
           tab === 'diagnose' ? h(DiagnosePanel, { onStartConsole: startConsole, busy, status }) : null,
           tab === 'models' ? h(ModelsPanel, {

@@ -11,6 +11,24 @@ node tools\doctor.mjs
 
 ---
 
+## 运行期数据在哪（升级后数据丢了先看这里）
+
+默认全部在 `%USERPROFILE%\.workbuddy-bridge\`，**不在插件安装目录**：
+
+| 文件 | 内容 |
+|---|---|
+| `state.json` | 账号钉住、签到偏好、账号排序/隐藏 |
+| `usage.jsonl` | 本地用量账本（只含元数据） |
+| `bridge-token` | 本地回环令牌（旧客户端配置里填的就是它） |
+| `credentials/` | 插件登录凭据（DPAPI + AES-GCM 信封） |
+
+可用 `WORKBUDDY_DATA_DIR` 覆盖。旧版把 state/usage/token 放在安装目录里；
+新版首次启动会从旧路径**复制**一份到新目录（旧文件保留作回滚备份），
+所以升级后旧客户端不会突然 401。若发现仍在读旧路径，确认启动桥时注入的
+`WORKBUDDY_DATA_DIR` 与插件/控制台一致。
+
+---
+
 ## 按症状定位
 
 ### dsh 启动失败：`workbuddy-to-dsh: import failed`
@@ -95,12 +113,14 @@ node %USERPROFILE%\DeepSeek-Harness\runtime\node_modules\@deepseek-ai\dsh\lib\bi
 >
 > **处理（三选一）**：
 > 1. 打开控制台 →「客户端接入」面板 → 复制新令牌 → 填进客户端（推荐）。
-> 2. 读文件：`type dsh-plugin\.bridge-token`
+> 2. 读文件：`type %USERPROFILE%\.workbuddy-bridge\bridge-token`（旧版在
+>    `dsh-plugin\.bridge-token`，新版只读兜底、不再写旧路径）
 > 3. 想固定回自己习惯的值：在 `.env` 里写 `WORKBUDDY_LOCAL_TOKEN=你的值`，
 >    重启桥。显式配置优先级最高，桥 / 控制台 / dsh 插件三处都会用它，
 >    不会再自动生成。
 >
-> **dsh 插件用户不受影响** —— 插件与桥读同一个 `.bridge-token`，自动一致。
+> **dsh 插件用户不受影响** —— 插件与桥读同一个
+> `<WORKBUDDY_DATA_DIR>/bridge-token`（默认 `%USERPROFILE%\.workbuddy-bridge\bridge-token`），自动一致。
 > 会断的只有你**手工填过密钥**的外部客户端（Claude Code、opencode、图形表单等）。
 >
 > 顺带一提：桥的 401 响应体现在会直接打印上面这段指引，所以你也可以
@@ -134,7 +154,8 @@ refreshToken : envelope keyId=9127dea1b44020a7 -> DECRYPTED len=698 jws-like=tru
 |---|---|---|
 | `11101` | `Non-stream chat request is currently not supported` | 上游只接受流式。桥已自动转换；若仍出现，说明请求绕过了桥 |
 | `11101` | `cannot unmarshal object into Go struct field Request.tool_choice of type string` | 客户端发了 **OpenAI 对象形式**的 `tool_choice`（`{"type":"function",...}`），而上游的 Go 结构体只收字符串。桥已在 `normalizePayload` 里归一化，正常不会出现；若出现，说明请求绕过了桥 |
-| `11128` | `Illegal API invocation from an unapproved channel` | 请求结构或调用方身份不被认可。常见于 `system` 提示词被放在 `developer` 角色、User-Agent 不匹配、**Claude Code 的固定 system 模板被逐字拉黑**（2026-10-08），或 **dsh 身份句 `You are an AI agent powered by DeepSeek Harness.`**（2026-10-21）。桥已内置对这两类 system 模板的最小改写，并在三条协议路径上做渐进兜底（删品牌行 → 删首段 → 中性 system）；成功时响应头带 `X-WorkBuddy-11128-Fallback`。若再现：看桥日志 `normalize:` / `retrying with` 行与「2026-10-21」小节，确认是否出现新的模板句或 tools/工具结果触发 |
+| `11128` | `Illegal API invocation from an unapproved channel` | 请求结构或调用方身份不被认可。常见于 `system` 提示词被放在 `developer` 角色、User-Agent 不匹配、**Claude Code 的固定 system 模板被逐字拉黑**（2026-10-08）、**dsh 身份句 `You are an AI agent powered by DeepSeek Harness.`**（2026-10-21），以及 **system 首句之外的其它 `DeepSeek Harness` 行 / assistant 历史里的同句**（2026-10-26 同类项目实测）。桥会对 system 全文做品牌词中和，并对 assistant 的两句精确身份模板做中和；三条协议路径上仍有渐进兜底（删品牌行 → 删首段 → assistant 品牌行 → 中性 system）。成功时响应头带 `X-WorkBuddy-11128-Fallback`。若仍再现：看桥日志 `normalize:` / `retrying with` 行，确认是否出现新的模板句；全部降级失败会回 `CHANNEL_REJECTED`，**不要原样反复重试** |
+| `11148` | `tool calls and tool results do not match` | 历史里 `tool_call_id` 重复、缺 result 或出现孤儿 result。桥默认会自愈（改名 / 补 `is_error` 结果 / 丢弃孤儿），账本记 `toolRepair`；若自定义关了 `WORKBUDDY_REPAIR_TOOL_HISTORY=0`，先打开。仍失败时新建会话 |
 | `11133` | 网关包装的上游故障 —— **但真因在 `extError.code` 里** | 桥会看 `extError.code` 分流（见下）：**确定性**的（`model_param_invalid` / `invalid_reasoning_effort` …）立刻返回，**瞬时**的才退避重试 |
 
 > **`11133` 为什么要分流（2026-10-13 修）**：`11133` 只是网关的**包装码**，
@@ -219,7 +240,7 @@ DeepSeek key；一键接入用独立引用，不会动它。
 
 1. 选 **Messages API**；
 2. 接口地址填 `http://127.0.0.1:8790/v1`；
-3. API Key 填桥本地令牌（`dsh-plugin/.bridge-token` 或控制台「客户端接入」）；
+3. API Key 填桥本地令牌（`%USERPROFILE%\.workbuddy-bridge\bridge-token` 或控制台「客户端接入」）；
 4. 保存后搜一次，桥日志应出现 `web_search (anthropic) results=...`。
    也可以先运行 `node tools/dev/probe-web-search.mjs "DeepSeek latest news"` 单独验证
    `/v1/web_search`；dsh 实际走的 `/v1/messages` 请用面板「重新检测」验证。
@@ -265,6 +286,36 @@ WORKBUDDY_IDE_NAME=VSCode
 > 插件自动拉起的桥也会读取 `.env` 里的这三个变量（以及 `WORKBUDDY_11128_FALLBACK`、
 > `WORKBUDDY_SKIP_MODEL_PREFLIGHT`、超时/连接池等）；改完重启桥即可。
 > `npm run bridge` 现在走 `bridge/launch.mjs`，同样会加载 `.env`。
+
+### 模型目录里看不到「夜间免费」/ 促销（issue #10）
+
+2026-10-26 只读 A/B 定位：浏览器登录（插件来源）的目录请求默认用插件/CLI 身份，
+`/v3/config` 能拿到更全的模型（含只在 v2 目录里的 13 个），但**不返回
+`modelPromotions`**；桌面身份才返回。桥现在在插件来源下**额外用桌面身份抓一份
+`/v3/config`，只合并 `modelPromotions`**，模型清单仍用插件身份那份。
+
+若仍看不到：
+
+1. 看 `GET /health` 的 `upstreamShape.sources` 里有没有
+   `/v3/config#desktopPromotions`；`0` 表示桌面身份这次也没返回活动。
+2. 「夜间免费」是活动名，白天也会显示；**是否真的免费**看返回里的
+   `promotion_active` / `credits === 0`，不要只看徽章。
+3. 不要为了促销设 `WORKBUDDY_PLUGIN_IDENTITY=vscode` —— 那会拿回促销，但会丢掉
+   v2 目录独有的模型，不是最终修法。
+
+### Cherry Studio 每个字符一条「深度思考」（issue #9）
+
+上游每帧都带空占位：
+
+```json
+"delta":{"content":"","reasoning_content":"We","function_call":null,
+         "refusal":"","tool_calls":[],"extra_fields":null}
+```
+
+Cherry 的 `@ai-sdk/openai-compatible` 把 `tool_calls != null` 当作 reasoning 段结束，
+空数组 `[]` 也满足，于是每个字符被切成一段。桥现在的 chat SSE 归一会在转发前
+剔掉空 `tool_calls` / 空 `content` / `null` 占位，并把逐字符 reasoning 聚合成一段。
+若你手动设了 `WORKBUDDY_SSE_NORMALIZE=0`，先改回 `1`。
 
 ### 模型名含中文 / 特殊字符 → 500 且报 `Invalid character in header content`
 
@@ -370,7 +421,7 @@ claude
 ```bash
 # 一张 1×1 红点图，问模型颜色；答"红色"就说明桥和上游都没问题，问题在插件侧
 node -e "
-const t=require('fs').readFileSync('dsh-plugin/.bridge-token','utf8').trim();
+const t=require('fs').readFileSync(require('path').join(require('os').homedir(),'.workbuddy-bridge','bridge-token'),'utf8').trim();
 const png='data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg==';
 fetch('http://127.0.0.1:8790/v1/chat/completions',{method:'POST',
  headers:{authorization:'Bearer '+t,'content-type':'application/json'},

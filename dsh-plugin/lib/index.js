@@ -25,7 +25,9 @@
  * （只调用 providerInfo / providerRetryPolicy，没有 instanceof 检查）。
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync, chmodSync, unlinkSync } from 'node:fs';
+import {
+  existsSync, mkdirSync, readFileSync, writeFileSync, chmodSync, unlinkSync,
+} from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { homedir } from 'node:os';
@@ -220,17 +222,43 @@ export function writeModelPrefs(prefs) {
  *
  * 只读两个字段，**不写**这份文件（它的唯一写者是控制台）。
  */
+/**
+ * 运行期数据目录。不要放安装目录：pnpm 换 tgz/重装会整个换掉，账号钉住、
+ * 账本、本地令牌都会丢。默认 `~/.workbuddy-bridge`；`WORKBUDDY_DATA_DIR` 可覆盖。
+ */
+function runtimeDataDir() {
+  const explicit = process.env.WORKBUDDY_DATA_DIR;
+  if (typeof explicit === 'string' && explicit.trim()) return explicit.trim();
+  return join(homedir(), '.workbuddy-bridge');
+}
+
+/**
+ * 读取桥的账号钉住状态；旧版在安装目录 `.state.json`，首次读取时迁移到
+ * 数据目录（只复制，不删除，保留回滚余地）。
+ */
+function stateFilePath(projectRoot) {
+  const explicit = process.env.WORKBUDDY_STATE_FILE;
+  if (explicit) return explicit;
+  const target = join(runtimeDataDir(), 'state.json');
+  // 新版数据目录优先；还没迁移过就读旧安装目录（只读，不复制）。
+  if (existsSync(target)) return target;
+  return join(projectRoot || PLUGIN_DIR, '.state.json');
+}
+
 function readBridgeAccountState(projectRoot) {
-  const file = process.env.WORKBUDDY_STATE_FILE || (projectRoot ? join(projectRoot, '.state.json') : '');
+  const file = stateFilePath(projectRoot);
   if (!file) return { authFile: '', desktopUid: '' };
   try {
     const state = JSON.parse(readFileSync(file, 'utf8'));
     return {
       authFile: typeof state?.authFile === 'string' ? state.authFile : '',
       desktopUid: typeof state?.authFileDesktopUid === 'string' ? state.authFileDesktopUid : '',
+      // 自动签到的唯一用户设置存在 .state.json；插件没显式配 autoCheckin 时要跟随它，
+      // 否则面板关了、插件拉起的桥仍按默认开启，出现“关了还签”。
+      auto: typeof state?.checkin?.auto === 'boolean' ? state.checkin.auto : undefined,
     };
   } catch {
-    return { authFile: '', desktopUid: '' };
+    return { authFile: '', desktopUid: '', auto: undefined };
   }
 }
 
@@ -249,12 +277,16 @@ function readBridgeAccountState(projectRoot) {
  * 文件里是本地回环口令，泄漏不等于泄漏上游
  * 凭据，但也没有理由让同机其它用户读到。
  */
-const BRIDGE_TOKEN_PATH = join(PLUGIN_DIR, '.bridge-token');
+const LEGACY_BRIDGE_TOKEN_PATH = join(PLUGIN_DIR, '.bridge-token');
+const BRIDGE_TOKEN_PATH = join(runtimeDataDir(), 'bridge-token');
+const bridgeTokenFilePath = () => (existsSync(BRIDGE_TOKEN_PATH)
+  ? BRIDGE_TOKEN_PATH
+  : (existsSync(LEGACY_BRIDGE_TOKEN_PATH) ? LEGACY_BRIDGE_TOKEN_PATH : BRIDGE_TOKEN_PATH));
 
-/** 读取已持久化的令牌；没有 / 读不通都返回 ''。 */
+/** 读取已持久化的令牌；没有 / 读不通都返回 ''。旧路径只读兜底，不复制。 */
 function readBridgeToken() {
   try {
-    const text = readFileSync(BRIDGE_TOKEN_PATH, 'utf8').trim();
+    const text = readFileSync(bridgeTokenFilePath(), 'utf8').trim();
     // 同样的正则在仓库根的 `config.mjs:218` 还有一份 —— 改动时两处一起改，
     // 否则会出现「桥认、插件不认」的怪现象。
     return /^[A-Za-z0-9._-]{16,}$/.test(text) ? text : '';
@@ -285,6 +317,7 @@ function resolveLocalToken(rawToken) {
   }
   const token = randomBytes(24).toString('base64url');
   try {
+    mkdirSync(dirname(BRIDGE_TOKEN_PATH), { recursive: true });
     writeFileSync(BRIDGE_TOKEN_PATH, `${token}\n`, { mode: 0o600 });
     bridgeTokenHardenResult = hardenBridgeTokenFile();
   } catch { /* 只读介质：本次运行用这个值，下次会换新的（用户需重填密钥） */ }
@@ -313,7 +346,7 @@ function resolveLocalToken(rawToken) {
 function hardenBridgeTokenFile() {
   try {
     if (process.platform !== 'win32') {
-      chmodSync(BRIDGE_TOKEN_PATH, 0o600);
+      chmodSync(bridgeTokenFilePath(), 0o600);
       return { ok: true, code: 'ok' };
     }
     const user = process.env.USERNAME || process.env.USER;
@@ -330,7 +363,7 @@ function hardenBridgeTokenFile() {
      *   `stdio[0]: 'ignore'`      → 0/22 失败
      * 也就是说「连打同一个可执行文件会 EBUSY」是误判，真正的触发条件是这个管道。
      */
-    const r = spawnSync('icacls', [BRIDGE_TOKEN_PATH, '/inheritance:r', '/grant:r', `${user}:F`],
+    const r = spawnSync('icacls', [bridgeTokenFilePath(), '/inheritance:r', '/grant:r', `${user}:F`],
       { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
     if (r.error) {
       return { ok: false, code: 'spawn-failed', reason: `icacls 起不来：${r.error.code || r.error.message}` };
@@ -573,6 +606,8 @@ export function readProjectEnv(projectRoot) {
  * 的开关；凭据、令牌、API key 一律不在此列，避免把秘密复制进子进程环境。
  */
 export const BRIDGE_ENV_PASSTHROUGH = Object.freeze([
+  // 运行期数据目录（测试 / 便携部署）
+  'WORKBUDDY_DATA_DIR',
   // 插件登录身份
   'WORKBUDDY_PLUGIN_IDENTITY',
   'WORKBUDDY_PLUGIN_APP_VERSION_CN',
@@ -739,13 +774,14 @@ export function apply(ctx, rawConfig = {}) {
     authFile: initialAccountState.authFile || config.authFile || '',
     followAuthFile: followDesktop ? 'auto' : '',
     followUid: followDesktop ? initialAccountState.desktopUid : '',
-    autoCheckin: config.autoCheckin,
+    autoCheckin: config.autoCheckin !== undefined ? config.autoCheckin : initialAccountState.auto,
     autoStart: config.autoStart,
     nodePath: config.nodePath || undefined,
     timeoutMs: 8000,
     // 插件 config / .env / 进程环境三处的凭据来源设置都注入桥，启动方之间不漂移。
     env: {
       ...bridgeExtraEnv,
+      WORKBUDDY_DATA_DIR: runtimeDataDir(),
       ...(config.credentialSource ? { WORKBUDDY_CREDENTIAL_SOURCE: config.credentialSource } : {}),
       ...(config.credentialStore ? { WORKBUDDY_CREDENTIAL_STORE: config.credentialStore } : {}),
       ...(config.credentialDir ? { WORKBUDDY_CREDENTIAL_DIR: config.credentialDir } : {}),
@@ -808,7 +844,7 @@ export function apply(ctx, rawConfig = {}) {
     lastEnsure: null,
     lastConsoleEnsure: null,
     quotaCache: { at: 0, value: null, error: '', account: null },
-    checkinCache: { at: 0, value: null, error: '', account: null },
+    checkinCache: { at: 0, value: null, error: '', account: null, day: '' },
     checkinInflight: null,
     bridgeAccount: null,
     /** 桥进程身份：PID 或构建变了 = 模型目录/档位可能已经换代，必须让 dsh 重拉。 */
@@ -1104,6 +1140,12 @@ export function apply(ctx, rawConfig = {}) {
 
   // ── 3. 运行态快照（入口页 / 工具共用） ─────────────────────────────────
   const CHECKIN_TTL_MS = 30 * 60 * 1000;
+  /** 本地自然日键：缓存跨午夜必须失效，否则 00:00 后仍显示“今日已签到”。 */
+  const localDayKey = () => {
+    const d = new Date();
+    const p = (n) => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+  };
   const QUOTA_TTL_MS = 120 * 1000;
 
   /**
@@ -1160,7 +1202,7 @@ export function apply(ctx, rawConfig = {}) {
     if (state.bridgeAccount !== account) {
       log(`桥的登录账号已变化（${state.bridgeAccount} → ${account}）：作废积分/签到缓存`);
       state.quotaCache = { at: 0, value: null, error: '', account: null };
-      state.checkinCache = { at: 0, value: null, error: '', account: null };
+      state.checkinCache = { at: 0, value: null, error: '', account: null, day: '' };
       // 模型目录也属于"账号视角"的数据（不同账号可见模型可能不同）。
       // 只作废并通知选择器；让 listModels 在 UI 需要时再取，避免在探测路径里
       // 额外打一次上游（控制台切号后桥可能还在重启）。
@@ -1181,7 +1223,9 @@ export function apply(ctx, rawConfig = {}) {
     if (state.checkinInflight) return;
     // 缓存里记录的账号与当前账号不一致时必须刷新（换账号后的第一次快照就要新值）
     const stale = state.checkinCache.value && state.checkinCache.account !== state.bridgeAccount;
-    if (state.checkinCache.value && !stale && Date.now() - state.checkinCache.at < CHECKIN_TTL_MS) return;
+    const expiredByDay = state.checkinCache.day !== localDayKey();
+    if (state.checkinCache.value && !stale && !expiredByDay
+      && Date.now() - state.checkinCache.at < CHECKIN_TTL_MS) return;
     if (!state.checkinCache.value && Date.now() - state.checkinCache.at < 5_000) return; // 刚失败过，别打爆
     const account = state.bridgeAccount;
     state.checkinInflight = (async () => {
@@ -1189,11 +1233,17 @@ export function apply(ctx, rawConfig = {}) {
         const value = await client.checkin({});
         // 只有身份没再变时才入缓存（极端：刷新期间又切了账号）
         if (state.bridgeAccount === account) {
-          state.checkinCache = { at: Date.now(), value, error: '', account };
+          state.checkinCache = { at: Date.now(), value, error: '', account, day: localDayKey() };
         }
       } catch (error) {
         if (state.bridgeAccount === account) {
-          state.checkinCache = { ...state.checkinCache, at: Date.now(), error: String(error?.message || error), account };
+          state.checkinCache = {
+          ...state.checkinCache,
+          at: Date.now(),
+          error: String(error?.message || error),
+          account,
+          day: localDayKey(),
+        };
         }
       } finally {
         state.checkinInflight = null;
