@@ -15,7 +15,7 @@ import {
   mediaClientOptions,
   mediaPayload,
   mioraRequest,
-  normalizeMediaStatus,
+  normalizeMediaEntry,
   pollMediaTask,
   rememberSubmission,
   resolveImageInput,
@@ -243,31 +243,14 @@ export async function buildVideoSubmitBody(input, options = {}) {
 }
 
 function normalizeResult({ id, data, entry, meta = null }) {
-  const rawStatus = String(entry?.status ?? data?.status ?? 'pending');
-  const files = Array.isArray(entry?.resultFiles)
-    ? entry.resultFiles
-    : (Array.isArray(data?.resultFiles) ? data.resultFiles : []);
-  const urls = files
-    .map((file) => (isObject(file) ? (file.signedUrl || file.url) : ''))
-    .filter((value) => typeof value === 'string' && /^https:\/\//i.test(value));
-  const failed = entry?.status === 'failed' || entry?.status === 'cancelled';
-  const errorMessage = failed ? (entry?.errorMessage ?? `Miora task ${rawStatus}.`) : '';
-
+  // 状态归一、失败原因与产物地址都走共用实现：两处各写一份时，
+  // 「status 是 FAILED 但 error 是 null」和「产物字段换了名字」都会只修好一边。
   return {
-    id: String(data?.upstreamTaskId || id || ''),
-    object: 'video',
-    status: normalizeMediaStatus(rawStatus),
-    upstream_status: rawStatus,
-    created_at: meta?.createdAt ?? null,
-    model: data?.model ?? meta?.model ?? null,
-    provider: data?.provider ?? meta?.provider ?? 'copilot-video',
+    ...normalizeMediaEntry({ id, data, entry, meta, object: 'video', defaultProvider: 'copilot-video' }),
     mode: meta?.mode ?? null,
     seconds: meta?.duration ?? null,
     resolution: meta?.resolution ?? null,
     aspect_ratio: meta?.aspectRatio ?? null,
-    result_files: files,
-    output: urls.length ? { url: urls[0], urls } : null,
-    error: errorMessage ? { message: String(errorMessage).replace(/\s+/g, ' ').trim().slice(0, 300) } : null,
   };
 }
 

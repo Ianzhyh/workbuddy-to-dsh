@@ -55,7 +55,7 @@ test('文生图：只传 prompt → mode=generate，返回任务 id 并禁止重
   assert.match(output, /workbuddy_image_status/);
 });
 
-test('图生图：给 images → mode=edit，空项被过滤', async () => {
+test('图生图：给 images → mode=edit，空串按「没给」过滤', async () => {
   let seen;
   const submit = tool('workbuddy_generate_image', {
     imageSubmit: async (args) => {
@@ -63,9 +63,56 @@ test('图生图：给 images → mode=edit，空项被过滤', async () => {
       return { id: 'img-2', status: 'queued', mode: 'edit' };
     },
   });
-  await submit.execute({ prompt: 'purple sky', images: [' file/abc/ref.png ', '', 3] });
+  // 空串是模型常填的占位（"没给"），按原语义丢掉；非字符串则**必须报错**，
+  // 见下一条用例 —— 静默丢掉会让图生图退化成文生图，但照常计费。
+  await submit.execute({ prompt: 'purple sky', images: [' file/abc/ref.png ', ''] });
   assert.equal(seen.mode, 'edit');
   assert.deepEqual(seen.images, ['file/abc/ref.png']);
+});
+
+test('图生图：图片输入认出 path/url/file_key/base64 包装，绝不再静默丢弃', async () => {
+  let seen;
+  const submit = tool('workbuddy_generate_image', {
+    imageSubmit: async (args) => {
+      seen = args;
+      return { id: 'img-3', status: 'queued', mode: 'edit' };
+    },
+  });
+  await submit.execute({
+    prompt: 'purple sky',
+    images: [
+      { url: 'https://cdn.example/ref.png' },
+      { path: ' C:/Users/me/ref.png ' },
+      { file_key: 'file/abc/style.png' },
+      { base64: 'AAAA', mime_type: 'image/jpeg' },
+      'data:image/png;base64,BBBB',
+    ],
+  });
+  assert.equal(seen.mode, 'edit');
+  assert.deepEqual(seen.images, [
+    'https://cdn.example/ref.png',
+    'C:/Users/me/ref.png',
+    'file/abc/style.png',
+    'data:image/jpeg;base64,AAAA',
+    'data:image/png;base64,BBBB',
+  ]);
+});
+
+test('图生图：认不出的图片输入直接拒绝，不提交（否则会退化成文生图并计费）', async () => {
+  let submitted = false;
+  const submit = tool('workbuddy_generate_image', {
+    imageSubmit: async () => { submitted = true; return { id: 'x', status: 'queued' }; },
+  });
+
+  const numberItem = await submit.execute({ prompt: 'x', images: [3] });
+  assert.match(numberItem, /没有提交（未计费）/);
+  assert.match(numberItem, /images\[0\]/);
+
+  const shapeless = await submit.execute({ prompt: 'x', images: [{ blob: 'zzz' }] });
+  assert.match(shapeless, /没有提交（未计费）/);
+  assert.match(shapeless, /path\/url\/file_key\/base64/);
+
+  assert.equal(submitted, false, '认不出图片输入时绝不能提交');
 });
 
 test('图片错误：400/403/429/NO_OUTPUT 都是「图片」口径且不暗示重提', async () => {

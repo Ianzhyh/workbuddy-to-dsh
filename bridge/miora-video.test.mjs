@@ -539,3 +539,215 @@ test('查询：任务不存在返回 404，失败任务保留 errorMessage', asy
     (err) => { assert.equal(err.code, 'VIDEO_NOT_FOUND'); assert.equal(err.status, 404); return true; },
   );
 });
+
+test('状态归一：FAILED / Cancelled 等大小写变体也要带上失败原因', async () => {
+  /*
+   * 回归：归一化用 normalizeMediaStatus（大小写不敏感），失败判定却曾写成
+   * `entry.status === 'failed'`。上游回 `FAILED` 时，对外 status 是 failed、
+   * error 却是 null —— 用户只看到「上游未给失败原因」，真正原因被吞掉。
+   */
+  const cases = [
+    ['FAILED', 'failed'],
+    [' failed ', 'failed'],
+    ['Failed', 'failed'],
+    ['CANCELLED', 'cancelled'],
+    ['Cancelled', 'cancelled'],
+  ];
+  for (const [raw, expected] of cases) {
+    resetTempKeyCache();
+    const fetchImpl = async (url) => {
+      if (String(url).endsWith('/v2/api-keys')) {
+        return jsonResponse(200, { code: 0, data: { key: 'ck_t_case' } });
+      }
+      if (String(url).endsWith('/video/query-task')) {
+        return jsonResponse(200, {
+          code: 0,
+          failed: false,
+          data: { 'task-case': { status: raw, errorMessage: 'blocked by content safety' } },
+        });
+      }
+      throw new Error(`unexpected ${url}`);
+    };
+    const result = await queryVideo(AUTH, 'task-case', { fetchImpl, baseUrl: BASE });
+    assert.equal(result.status, expected, `status=${raw}`);
+    assert.equal(result.upstream_status, raw.trim(), '上游原值原样保留（去掉首尾空白）');
+    assert.equal(result.error?.message, 'blocked by content safety', `error 不能丢（status=${raw}）`);
+  }
+});
+
+test('产物地址：downloadUrl / 裸字符串 / 嵌套 file 都认，不能误报 NO_OUTPUT', async () => {
+  /*
+   * 回归：原先只取 `signedUrl || url`，上游换成 downloadUrl 或直接给字符串时，
+   * 「completed 且有产物」会被报成没有可下载产物。
+   */
+  const shapes = [
+    [[{ signedUrl: 'https://cdn.example/a.mp4' }], 'https://cdn.example/a.mp4'],
+    [[{ downloadUrl: 'https://cdn.example/b.mp4' }], 'https://cdn.example/b.mp4'],
+    [[{ signed_url: 'https://cdn.example/c.mp4' }], 'https://cdn.example/c.mp4'],
+    [['https://cdn.example/d.mp4'], 'https://cdn.example/d.mp4'],
+    [[{ file: { url: 'https://cdn.example/e.mp4' } }], 'https://cdn.example/e.mp4'],
+    [[{ result: { signedUrl: 'https://cdn.example/f.mp4' } }], 'https://cdn.example/f.mp4'],
+  ];
+  for (const [resultFiles, expected] of shapes) {
+    resetTempKeyCache();
+    const fetchImpl = async (url) => {
+      if (String(url).endsWith('/v2/api-keys')) {
+        return jsonResponse(200, { code: 0, data: { key: 'ck_t_out' } });
+      }
+      if (String(url).endsWith('/video/query-task')) {
+        return jsonResponse(200, {
+          code: 0,
+          failed: false,
+          data: { 'task-out': { status: 'completed', resultFiles } },
+        });
+      }
+      throw new Error(`unexpected ${url}`);
+    };
+    const result = await queryVideo(AUTH, 'task-out', { fetchImpl, baseUrl: BASE });
+    assert.equal(result.status, 'completed');
+    assert.equal(result.output?.url, expected, JSON.stringify(resultFiles));
+    assert.deepEqual(result.output.urls, [expected]);
+  }
+
+  // 非 https / 重复项要被过滤，且不产生重复 url
+  resetTempKeyCache();
+  const fetchImpl = async (url) => {
+    if (String(url).endsWith('/v2/api-keys')) {
+      return jsonResponse(200, { code: 0, data: { key: 'ck_t_out2' } });
+    }
+    return jsonResponse(200, {
+      code: 0,
+      failed: false,
+      data: {
+        'task-out': {
+          status: 'completed',
+          resultFiles: [
+            { url: 'https://cdn.example/a.mp4' },
+            { url: 'https://cdn.example/a.mp4' },
+            { url: 'http://cdn.example/insecure.mp4' },
+            { mimeType: 'video/mp4' },
+          ],
+        },
+      },
+    });
+  };
+  const filtered = await queryVideo(AUTH, 'task-out', { fetchImpl, baseUrl: BASE });
+  assert.deepEqual(filtered.output.urls, ['https://cdn.example/a.mp4']);
+});
+
+test('图片输入：公网域名不再被私有地址规则误杀，内网字面量仍拒绝', async () => {
+  /*
+   * 回归：原先用 /^(?:fc|fd|fe8|fe9|fea|feb)/ 同时判域名和 IPv6 字面量，
+   * `fc2.com`、`fcdn.cloudflare.net`、`fd.example.com` 都被当成内网拒掉；
+   * 而 `[::ffff:127.0.0.1]` 这种 IPv4-mapped 地址反而能绕过。
+   */
+  const built = await buildVideoSubmitBody({
+    mode: 'frame',
+    prompt: 'x',
+    first_frame: 'https://fc2.com/a.png',
+    last_frame: 'https://fcdn.cloudflare.net/b.png',
+  });
+  assert.deepEqual(built.body.input, {
+    first_frame_image: { url: 'https://fc2.com/a.png' },
+    last_frame_image: { url: 'https://fcdn.cloudflare.net/b.png' },
+  });
+
+  const rejected = [
+    'https://localhost/a.png',
+    'https://127.0.0.1/a.png',
+    'https://10.1.2.3/a.png',
+    'https://192.168.1.1/a.png',
+    'https://100.64.0.1/a.png',
+    'https://[::1]/a.png',
+    'https://[::]/a.png',
+    'https://[fe80::1]/a.png',
+    'https://[fc00::1]/a.png',
+    'https://[2001:db8::1]/a.png',
+    'http://example.com/a.png',
+  ];
+  for (const url of rejected) {
+    await assert.rejects(
+      () => buildVideoSubmitBody({ mode: 'frame', prompt: 'x', first_frame: url }),
+      (err) => {
+        assert.equal(err.code, 'VIDEO_INVALID_INPUT');
+        assert.match(err.message, /public https URL|must be a public/);
+        return true;
+      },
+      url,
+    );
+  }
+});
+
+test('图片输入：IPv4-mapped 地址的两种写法都要拦住（点分 与 十六进制）', async () => {
+  /*
+   * 回归（真机发现）：`https://[::ffff:127.0.0.1]/` 曾被**放到上游**去提交。
+   *
+   * 第一版改法把 `::ffff:` 判成了「第 3 段是 ffff」，可它的真实结构是
+   * 前 5 段为 0、第 6 段是 ffff、最后两段才是 IPv4 —— 段位判错就整条判据失效。
+   * 同一个地址还有 `::ffff:7f00:1` 这种纯十六进制写法，两种都必须拦住。
+   */
+  const mapped = [
+    'https://[::ffff:127.0.0.1]/a.png',
+    'https://[::ffff:7f00:1]/a.png',
+    'https://[::ffff:a00:1]/a.png',
+    'https://[::ffff:c0a8:101]/a.png',
+    'https://[::127.0.0.1]/a.png',
+  ];
+  for (const url of mapped) {
+    await assert.rejects(
+      () => buildVideoSubmitBody({ mode: 'frame', prompt: 'x', first_frame: url }),
+      (err) => {
+        assert.equal(err.code, 'VIDEO_INVALID_INPUT');
+        return true;
+      },
+      url,
+    );
+  }
+
+  // 公网 IPv6 与公网 IPv4-mapped 地址不能被误杀
+  const built = await buildVideoSubmitBody({
+    mode: 'frame',
+    prompt: 'x',
+    first_frame: 'https://[2606:4700::1111]/a.png',
+    last_frame: 'https://[::ffff:8.8.8.8]/b.png',
+  });
+  assert.equal(built.body.input.first_frame_image.url, 'https://[2606:4700::1111]/a.png');
+  // 公网 IPv4-mapped 会被 URL 规范化成十六进制写法（::ffff:808:808），只断言「放行」
+  assert.match(built.body.input.last_frame_image.url, /^https:\/\/\[::ffff:[0-9a-f]+:[0-9a-f]+\]\/b\.png$/);
+});
+
+test('图片输入：超限文件在读盘之前就被拒绝（不先把整个文件读进内存）', async () => {
+  const readCalls = [];
+  const statFile = async () => ({ size: 40 * 1024 * 1024 });
+  await assert.rejects(
+    () => buildVideoSubmitBody(
+      { mode: 'frame', prompt: 'x', first_frame: localPng },
+      {
+        statFile,
+        readFile: async (file) => { readCalls.push(file); return Buffer.alloc(40 * 1024 * 1024); },
+      },
+    ),
+    (err) => {
+      assert.equal(err.code, 'VIDEO_INVALID_INPUT');
+      assert.match(err.message, /exceeds .*B/);
+      return true;
+    },
+  );
+  assert.deepEqual(readCalls, [], '超限时不应该读文件内容');
+
+  // 空文件也要在读之前拒绝，且文案说清楚是「空」
+  await assert.rejects(
+    () => buildVideoSubmitBody(
+      { mode: 'frame', prompt: 'x', first_frame: localPng },
+      { statFile: async () => ({ size: 0 }), readFile: async () => Buffer.alloc(0) },
+    ),
+    (err) => { assert.match(err.message, /is empty/); return true; },
+  );
+
+  // 正常大小放行
+  const ok = await buildVideoSubmitBody(
+    { mode: 'frame', prompt: 'x', first_frame: localPng },
+    { statFile: async () => ({ size: 8 }), readFile: async () => Buffer.from('fake-png') },
+  );
+  assert.equal(ok.body.input.first_frame_image.base64, Buffer.from('fake-png').toString('base64'));
+});

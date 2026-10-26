@@ -104,6 +104,8 @@ GET /v1/images/{id}/content    # completed 且有产物 → 302 签名 URL
 
 图片输入与视频共用一套归一化：只接受 https 公网地址（拒绝 localhost / 私有网段 /
 带账号密码）、data URI 必须是 `image/*`、本地路径扩展名必须是 png/jpg/jpeg/gif/webp/bmp/svg。
+公网判定按 IP 字面量做（不再误杀 `fc2.com` 这类域名，也能识别 `[::ffff:127.0.0.1]`），
+详见 [`VIDEO-GENERATION.md`](VIDEO-GENERATION.md) 第 2.1 节的说明。
 
 ## 4. 错误码
 
@@ -161,6 +163,11 @@ curl -sS "http://127.0.0.1:8790/v1/images/<id>?wait=30" -H "Authorization: Beare
 | 图片上限 | 帧 10 MB | 20 MB |
 | 产物 | `object: "video"` | `object: "image"` |
 | 查询/下载 | 同一套 `?wait` + `/content` | 同左 |
+
+> 两者共用同一套**状态归一与产物识别**：`status` 的大小写/首尾空白不影响归一结果
+> （`FAILED` 也会正确给出 `error.message`），产物地址除 `signedUrl` 外也认
+> `downloadUrl` / `signed_url` / 裸字符串 / 嵌套 `{file:{url}}` —— 否则「已完成且有产物」
+> 会被误报成 `*_NO_OUTPUT`。
 
 ## 8. 验证与后续
 

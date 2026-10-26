@@ -18,7 +18,7 @@ import {
   mediaClientOptions,
   mediaPayload,
   mioraRequest,
-  normalizeMediaStatus,
+  normalizeMediaEntry,
   pollMediaTask,
   rememberSubmission,
   resolveImageInput,
@@ -170,30 +170,12 @@ export async function buildImageSubmitBody(input, options = {}) {
 }
 
 function normalizeResult({ id, data, entry, meta = null }) {
-  const rawStatus = String(entry?.status ?? data?.status ?? 'pending');
-  const files = Array.isArray(entry?.resultFiles)
-    ? entry.resultFiles
-    : (Array.isArray(data?.resultFiles) ? data.resultFiles : []);
-  const urls = files
-    .map((file) => (isObject(file) ? (file.signedUrl || file.url) : ''))
-    .filter((value) => typeof value === 'string' && /^https:\/\//i.test(value));
-  const failed = entry?.status === 'failed' || entry?.status === 'cancelled';
-  const errorMessage = failed ? (entry?.errorMessage ?? `Miora task ${rawStatus}.`) : '';
-
+  // 与视频共用同一套状态/失败原因/产物归一（见 normalizeMediaEntry 的注释）。
   return {
-    id: String(data?.upstreamTaskId || id || ''),
-    object: 'image',
-    status: normalizeMediaStatus(rawStatus),
-    upstream_status: rawStatus,
-    created_at: meta?.createdAt ?? null,
-    model: data?.model ?? meta?.model ?? null,
-    provider: data?.provider ?? meta?.provider ?? 'copilot-image',
+    ...normalizeMediaEntry({ id, data, entry, meta, object: 'image', defaultProvider: 'copilot-image' }),
     mode: meta?.mode ?? null,
     size: meta?.size ?? null,
     quality: meta?.quality ?? null,
-    result_files: files,
-    output: urls.length ? { url: urls[0], urls } : null,
-    error: errorMessage ? { message: String(errorMessage).replace(/\s+/g, ' ').trim().slice(0, 300) } : null,
   };
 }
 

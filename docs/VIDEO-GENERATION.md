@@ -123,6 +123,19 @@ Content-Type: application/json
 
 > 本地路径只对**本地管理令牌**开放（见第 5 节），因为它能读本机文件。
 
+**私有地址判定按 IP 字面量做，不按域名前缀**。早期版本用一条
+`/^(?:fc|fd|fe8|fe9|fea|feb)/` 正则同时匹配域名与 IPv6，结果把 `fc2.com`、
+`fcdn.cloudflare.net`、`fd.example.com` 这类**公网域名**也拒了；反过来
+`https://[::ffff:127.0.0.1]/` 这种 IPv4-mapped 地址又能绕过。现在：
+
+- 域名只按 `localhost` / `*.local` 判；
+- 含 `:` 的主机先解析成 16 位段，再按 ULA `fc00::/7`、link-local `fe80::/10`、
+  站点本地 `fec0::/10`、文档段 `2001:db8::/32` 判，IPv4-mapped/compatible
+  取内嵌的 IPv4 交给同一套 IPv4 规则（含 CGNAT `100.64/10`）。
+
+**本地文件先看大小再读内容**：超过上限时在读盘之前就返回 400，不会先把整个文件
+读进内存（再 base64 膨胀 1/3）才告诉用户「太大了」。
+
 成功返回 `202`：
 
 ```json

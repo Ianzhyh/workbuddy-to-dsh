@@ -13,7 +13,7 @@
  * 能力区分；`prefix` 由各模块通过 options 传下来，默认 VIDEO。
  */
 import { createHash } from 'node:crypto';
-import { readFile } from 'node:fs/promises';
+import { readFile, stat as statFile } from 'node:fs/promises';
 import { extname, isAbsolute } from 'node:path';
 
 export const DEFAULT_MIORA_BASE = 'https://public.miora.qq.com';
@@ -114,6 +114,67 @@ export function normalizeMediaStatus(status) {
 /** 兼容旧名（视频的对外字段就叫 status 归一，测试直接测它）。 */
 export const normalizeVideoStatus = normalizeMediaStatus;
 
+/**
+ * 上游产物文件列表 → https 地址。
+ *
+ * 上游给的不只是 `signedUrl`：实测里还见过 `url` / `downloadUrl` / 裸字符串，
+ * 以及被包在 `{file:{...}}` 里的形态。只认 `signedUrl || url` 会让「任务已完成、
+ * 也有产物」被报成 `*_NO_OUTPUT`（用户看到的是「上游没给产物」，其实给了）。
+ */
+export function collectOutputUrls(files) {
+  if (!Array.isArray(files)) return [];
+  const pick = (item) => {
+    if (typeof item === 'string') return item;
+    if (!isObject(item)) return '';
+    const nested = isObject(item.file) ? item.file : (isObject(item.result) ? item.result : null);
+    const value = item.signedUrl || item.signed_url || item.url || item.downloadUrl
+      || item.download_url || (nested ? (nested.signedUrl || nested.signed_url || nested.url) : '');
+    return typeof value === 'string' ? value : '';
+  };
+  const urls = [];
+  for (const item of files) {
+    const url = pick(item).trim();
+    if (/^https:\/\//i.test(url) && !urls.includes(url)) urls.push(url);
+  }
+  return urls;
+}
+
+/**
+ * 归一化状态 + 失败原因（两个模块共用）。
+ *
+ * 踩过的坑：`status` 归一用的是**大小写不敏感**的 `normalizeMediaStatus`，
+ * 但判断「是不是失败」时却写了 `entry.status === 'failed'`。上游回过
+ * `FAILED` / `Failed` / ` failed ` 时，对外状态是 `failed`，`error` 却是 `null`
+ * —— 用户和 agent 都拿不到失败原因，只能看到一句「任务未成功：上游未给失败原因」。
+ * 所以失败判定必须和归一化用同一套比较。
+ */
+export function normalizeMediaEntry({ id, data, entry, meta = null, object, defaultProvider }) {
+  const rawStatus = String(entry?.status ?? data?.status ?? 'pending').trim();
+  const status = normalizeMediaStatus(rawStatus);
+  const files = Array.isArray(entry?.resultFiles)
+    ? entry.resultFiles
+    : (Array.isArray(data?.resultFiles) ? data.resultFiles : []);
+  const urls = collectOutputUrls(files);
+  const failed = status === 'failed' || status === 'cancelled';
+  const rawMessage = failed
+    ? (entry?.errorMessage ?? entry?.error_message ?? entry?.error ?? entry?.failReason ?? data?.errorMessage)
+    : '';
+  return {
+    id: String(data?.upstreamTaskId || id || ''),
+    object,
+    status,
+    upstream_status: rawStatus,
+    created_at: meta?.createdAt ?? null,
+    model: data?.model ?? meta?.model ?? null,
+    provider: data?.provider ?? meta?.provider ?? defaultProvider,
+    result_files: files,
+    output: urls.length ? { url: urls[0], urls } : null,
+    error: rawMessage
+      ? { message: String(rawMessage).replace(/\s+/g, ' ').trim().slice(0, 300) }
+      : null,
+  };
+}
+
 export function mediaPayload(resolved) {
   if (resolved.origin === 'url') return { url: resolved.url };
   if (resolved.origin === 'fileKey') return { file_key: resolved.fileKey };
@@ -128,7 +189,84 @@ function isPrivateIpv4(host) {
     || (parts[0] === 169 && parts[1] === 254)
     || (parts[0] === 172 && parts[1] >= 16 && parts[1] <= 31)
     || (parts[0] === 192 && parts[1] === 168)
+    // CGNAT 100.64/10：云厂商的「内网」常落在这段，和 10/8 一样不该被公网接口打到。
+    || (parts[0] === 100 && parts[1] >= 64 && parts[1] <= 127)
     || parts[0] === 0;
+}
+
+/**
+ * IPv6 字面量的私有/保留判定。
+ *
+ * 这里收口两类历史问题（都用桩输入实测过）：
+ *
+ *   1. **误杀合法公网域名**。原先用 `/^(?:fc|fd|fe8|fe9|fea|feb)/` 判 ULA/link-local，
+ *      但那是对**域名字符串**做前缀比对 —— `fc2.com`、`fcdn.cloudflare.net`、
+ *      `fd.example.com`、`fe8.images.xyz` 全部被当成内网地址拒掉。用户拿公网图片
+ *      URL 做首帧时，会收到一条「private/reserved hosts are rejected」，可主机根本
+ *      是公网。域名和 IPv6 字面量必须分开判。
+ *   2. **IPv4-mapped 绕过**。`https://[::ffff:127.0.0.1]/` 规范化后是 `[::ffff:7f00:1]`，
+ *      既不是 `::1`、也不命中那条前缀正则、`isPrivateIpv4` 又只认点分格式 —— 于是
+ *      直接放行，等于把回环地址塞进了上游。
+ *
+ * 所以这里先把 IPv6 **解析成分段**再判断，而不是对字符串做前缀比对。
+ */
+function isPrivateIpv6(host) {
+  const text = host.toLowerCase();
+  if (text === '::' || text === '::1') return true;
+  /*
+   * 先把地址**严格展开成 8 个 16 位段**再判断。
+   *
+   * 不能只按字符串前缀猜：`::ffff:127.0.0.1` 与 `::ffff:7f00:1` 是同一个地址，
+   * 但写法完全不同；末尾的点分 IPv4 会占**两个**段，所以段数要在展开时一并算准，
+   * 否则补零的数量会错，后面的段位判断全部跟着错。
+   */
+  const expand = (group) => {
+    if (!group.includes('.')) return [group];
+    const v4 = group.split('.').map(Number);
+    if (v4.length !== 4 || v4.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) return null;
+    return [(((v4[0] << 8) | v4[1]) >>> 0).toString(16), (((v4[2] << 8) | v4[3]) >>> 0).toString(16)];
+  };
+  const [headRaw, tailRaw] = text.includes('::') ? text.split('::') : [text, null];
+  const split = (part) => (part ? part.split(':').filter((piece) => piece !== '') : []);
+  const head = [];
+  for (const group of split(headRaw)) {
+    const expanded = expand(group);
+    if (!expanded) return true;
+    head.push(...expanded);
+  }
+  const tail = [];
+  for (const group of split(tailRaw === null ? '' : tailRaw)) {
+    const expanded = expand(group);
+    if (!expanded) return true;
+    tail.push(...expanded);
+  }
+  const fill = tailRaw === null ? 0 : 8 - head.length - tail.length;
+  // 段数不合法（含 `::` 但补不齐、或不含 `::` 却不是 8 段）→ 按不可信处理
+  if (fill < 0 || head.length + fill + tail.length !== 8) return true;
+  const groups = [...head, ...Array.from({ length: fill }, () => '0'), ...tail];
+
+  const nums = [];
+  for (const group of groups) {
+    const n = Number.parseInt(group, 16);
+    if (!Number.isFinite(n) || n < 0 || n > 0xffff) return true;
+    nums.push(n);
+  }
+
+  const words = (hi, lo) => `${(hi >> 8) & 0xff}.${hi & 0xff}.${(lo >> 8) & 0xff}.${lo & 0xff}`;
+  const isZero = (n) => n === 0;
+  // ::ffff:a.b.c.d（IPv4-mapped，前 5 段为 0、第 6 段是 ffff）
+  if (nums.slice(0, 5).every(isZero) && nums[5] === 0xffff) {
+    return isPrivateIpv4(words(nums[6], nums[7]));
+  }
+  // ::a.b.c.d（IPv4-compatible，前 6 段为 0）—— 已弃用但仍可能出现在输入里
+  if (nums.slice(0, 6).every(isZero)) {
+    return isPrivateIpv4(words(nums[6], nums[7]));
+  }
+  if ((nums[0] & 0xfe00) === 0xfc00) return true; // ULA fc00::/7
+  if ((nums[0] & 0xffc0) === 0xfe80) return true; // link-local fe80::/10
+  if ((nums[0] & 0xffc0) === 0xfec0) return true; // 站点本地 fec0::/10
+  if (nums[0] === 0x2001 && nums[1] === 0x0db8) return true; // 文档段 2001:db8::/32
+  return false;
 }
 
 function publicHttpsUrl(raw, field, invalidCode) {
@@ -145,8 +283,15 @@ function publicHttpsUrl(raw, field, invalidCode) {
     throw new MioraMediaError(invalidCode, `${field} must not contain credentials.`, { status: 400 });
   }
   const host = url.hostname.toLowerCase().replace(/^\[|\]$/g, '');
-  if (host === 'localhost' || host.endsWith('.local') || host === '::1'
-    || /^(?:fc|fd|fe8|fe9|fea|feb)/.test(host) || isPrivateIpv4(host)) {
+  /*
+   * 域名与 IP 字面量分开判：`fc2.com` 是公网域名，`fc00::1` 才是内网地址。
+   * 早先两者共用一条前缀正则，结果公网域名被误杀（见 isPrivateIpv6 的注释）。
+   */
+  const rejected = host === 'localhost'
+    || host.endsWith('.localhost')
+    || host.endsWith('.local')
+    || (host.includes(':') ? isPrivateIpv6(host) : isPrivateIpv4(host));
+  if (rejected) {
     throw new MioraMediaError(
       invalidCode,
       `${field} must be a public https URL (private/reserved hosts are rejected).`,
@@ -194,7 +339,7 @@ function parseDataUri(raw, field, { maxBytes, invalidCode }) {
  * 支持：绝对本地路径、miora fileKey（bga/… 或 file/…）、公网 https URL、base64 data URI。
  *
  * @param {string} raw
- * @param {{ fieldName?: string, maxBytes?: number, invalidCode?: string, readFile?: Function }} [options]
+ * @param {{ fieldName?: string, maxBytes?: number, invalidCode?: string, readFile?: Function, statFile?: Function }} [options]
  */
 export async function resolveImageInput(raw, options = {}) {
   const field = options.fieldName || 'image';
@@ -211,13 +356,31 @@ export async function resolveImageInput(raw, options = {}) {
   if (!isAbsolute(text)) {
     throw invalid(`${field} must be an absolute local path, miora fileKey, public https URL, or data URI.`);
   }
-  const buffer = await (options.readFile || readFile)(text).catch((err) => {
+  const mimeType = EXT_TO_MIME.get(extname(text).toLowerCase());
+  if (!mimeType) throw invalid(`${field} has an unsupported image extension: ${text}`);
+  /*
+   * **先看大小再读内容**。原先直接 `readFile()` 拿到 Buffer 之后才比 maxBytes：
+   * 传一个 2 GB 的文件时，桥会先把 2 GB 读进内存（base64 之前还要再涨 1/3），
+   * 然后才告诉用户「太大了」。这既是明显的浪费，也让一个坏输入能把本地进程
+   * 的堆打穿 —— 而判断所需的信息（文件长度）在读之前就能拿到。
+   *
+   * 只有**真实读盘**才做这道预检：注入了 `readFile`（测试桩、虚拟文件）却没给
+   * `statFile` 时，磁盘上未必真有那个路径，拿 stat 的失败去否决调用是不对的。
+   */
+  const readImpl = options.readFile || readFile;
+  const statImpl = options.statFile || (options.readFile ? null : statFile);
+  if (statImpl) {
+    const info = await statImpl(text).catch(() => null);
+    if (!info || !Number.isFinite(info.size)) throw invalid(`${field} could not be read: ${text}`);
+    if (info.size === 0) throw invalid(`${field} is empty: ${text}`);
+    if (info.size > maxBytes) throw invalid(`${field} exceeds ${maxBytes}B (${info.size}B): ${text}`);
+  }
+  const buffer = await readImpl(text).catch((err) => {
     throw invalid(`${field} could not be read: ${text} (${err.message})`);
   });
   if (buffer.length === 0) throw invalid(`${field} is empty: ${text}`);
+  // 读的过程中文件可能被换掉/变大：仍要按真实长度兜一次，不能只信 stat。
   if (buffer.length > maxBytes) throw invalid(`${field} exceeds ${maxBytes}B (${buffer.length}B): ${text}`);
-  const mimeType = EXT_TO_MIME.get(extname(text).toLowerCase());
-  if (!mimeType) throw invalid(`${field} has an unsupported image extension: ${text}`);
   return { origin: 'path', base64: buffer.toString('base64'), mimeType };
 }
 

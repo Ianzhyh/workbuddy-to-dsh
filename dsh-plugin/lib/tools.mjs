@@ -7,6 +7,7 @@
  * 这里统一用「返回格式化好的字符串 + render 成文本块」，好读也好测。
  */
 import { humanDuration } from './models.mjs';
+import { formatBytes, saveMediaFile } from './media-file.mjs';
 
 /** 把一次调用包装成 TextBlock 数组。 */
 const asText = (value) => [{ type: 'text', text: typeof value === 'string' ? value : JSON.stringify(value, null, 2) }];
@@ -26,9 +27,114 @@ function textTool({ name, description, parameters, execute, timeoutMs }) {
 const fmtTokens = (n) => (Number(n) >= 1000 ? `${(Number(n) / 1000).toFixed(1)}k` : String(Number(n) || 0));
 
 /**
- * 视频接口错误 → 模型能直接转述给用户的话。
- * 提交失败最怕 agent 自动重试：那可能重复计费，所以文案必须明确“不要重提”。
+ * 模型给「图片输入」时可能出现的几种形状。
+ *
+ * 这是踩过的真实体验问题：工具层原先用
+ *   `typeof item === 'string' && item.trim()`
+ * 过滤参考图/首帧，非字符串**静默丢弃**。于是模型把首帧写成
+ * `{ "path": "C:/x.png" }` 或 `{ "url": "https://…" }`（这在多模态协议里很常见）
+ * 时，图片被悄悄扔掉 → 模式退化成文生视频 / 文生图 → **照常计费，但图根本没带上**。
+ * 桥侧那条「未知字段一律 400」的防线拦不住这种情况，因为到达桥时字段已经是空数组了。
+ *
+ * 所以工具层现在负责**认形状**：认得出来的就取出字符串（含常见的 `path`/`url`/
+ * `file_key`/`base64` 包装），认不出来的直接拒绝调用 —— 宁可让模型重发一次参数，
+ * 也不能让它以为图带上了。
+ *
+ * @param {unknown} value
+ * @param {string} field 用于错误文案的字段名
+ * @returns {string} 归一化后的图片输入
  */
+function imageInputString(value, field) {
+  if (typeof value === 'string') {
+    const text = value.trim();
+    if (!text) throw new Error(`${field} 是空字符串；要么给一个有效的图片来源，要么不要传这个参数。`);
+    return text;
+  }
+  if (value && typeof value === 'object' && !Array.isArray(value)) {
+    for (const key of ['path', 'file', 'url', 'file_key', 'fileKey', 'base64', 'data']) {
+      const inner = value[key];
+      if (typeof inner === 'string' && inner.trim()) {
+        // base64 裸串补成 data URI，否则桥会把它当成「相对路径」拒掉。
+        if ((key === 'base64' || key === 'data') && !/^data:/i.test(inner.trim())) {
+          const mime = typeof value.mime_type === 'string' ? value.mime_type : 'image/png';
+          return `data:${mime};base64,${inner.trim()}`;
+        }
+        return inner.trim();
+      }
+    }
+    throw new Error(`${field} 是一个对象，但没有 path/url/file_key/base64 字段；`
+      + '请直接传字符串（本地绝对路径 / 公网 https URL / data URI / miora fileKey）。');
+  }
+  if (typeof value === 'number' || typeof value === 'boolean') {
+    throw new Error(`${field} 必须是字符串，收到的是 ${typeof value}。`);
+  }
+  throw new Error(`${field} 的取值无法识别；请传字符串（本地绝对路径 / 公网 https URL / data URI / miora fileKey）。`);
+}
+
+/**
+ * 归一化 `images[]`（图生图）。
+ *
+ * 与 `imageInputString` 同一动机：任何一项认不出来都让整次调用失败，
+ * 不留下「看起来成功、其实少带了图」的提交。
+ */
+function imageInputList(value, field) {
+  if (value === undefined || value === null) return [];
+  const list = Array.isArray(value) ? value : [value];
+  const out = [];
+  for (let index = 0; index < list.length; index += 1) {
+    const item = list[index];
+    if (item === undefined || item === null) continue;
+    if (typeof item === 'string' && !item.trim()) continue; // 空串按「没给」处理（模型常填 ""）
+    out.push(imageInputString(item, `${field}[${index}]`));
+  }
+  return out;
+}
+
+/**
+ * 产物交付文案（视频 / 图片共用）。
+ *
+ * 默认只给 URL 并说明它会过期；用户传了 `save_to` 就**当场落盘**，回执给的是
+ * 本地绝对路径 —— 那才是用户能双击打开、能拖进剪辑软件的东西。下载失败不抛错，
+ * 而是把原因写进文案再退回 URL：产物已经生成、钱已经花了，绝不能因为
+ * 「存不下来」就让这次查询看起来失败。
+ *
+ * @param {{ urls: string[], kind: 'video'|'image', id: string, saveTo?: unknown, mimeType?: string }} input
+ */
+async function describeArtifacts({ urls, kind, id, saveTo, mimeType }) {
+  const noun = kind === 'image' ? '图片' : '视频';
+  const list = urls.map((url) => `- ${url}`).join('\n');
+  const wantSave = typeof saveTo === 'string' && saveTo.trim();
+  if (!wantSave) {
+    return `${noun}已生成。以下签名 URL 有时效，请尽快下载或转存：\n${list}\n`
+      + '（要直接拿到不过期的文件，下次查询时传 save_to=<绝对路径>，工具会帮你下载到本地。）';
+  }
+
+  const saved = [];
+  const failed = [];
+  // 最多存 4 个：一次生成返回几十个产物时不该把工具调用拖成批量下载。
+  for (const url of urls.slice(0, 4)) {
+    try {
+      const result = await saveMediaFile({ url, saveTo, id, kind, mimeType });
+      saved.push(result);
+    } catch (error) {
+      failed.push({ url, reason: error?.message || String(error) });
+    }
+  }
+
+  const lines = [];
+  if (saved.length) {
+    lines.push(`${noun}已生成，并已保存到本地（不会过期）：`);
+    for (const item of saved) lines.push(`- ${item.path}（${formatBytes(item.bytes)}）`);
+  }
+  if (saved.length < urls.length) {
+    lines.push(saved.length ? `另外 ${urls.length - saved.length} 个产物未保存：` : `${noun}已生成，但下载到本地失败：`);
+    for (const item of failed) lines.push(`- ${item.reason}`);
+    lines.push('以下签名 URL 仍可临时访问（有时效，请尽快处理）：');
+    for (const url of urls) lines.push(`- ${url}`);
+  }
+  return lines.join('\n');
+}
+
 /**
  * 媒体接口错误 → 模型能直接转述给用户的话。
  * 提交失败最怕 agent 自动重试：那可能重复计费，所以文案必须明确“不要重提”。
@@ -358,15 +464,24 @@ export function createTools(deps) {
       + '这是高积分计费操作，**只在用户明确要求生成视频时调用**；同一需求只提交一次。'
       + '提交是异步的：本工具返回任务 id，之后用 workbuddy_video_status 查询；'
       + '不要因为等待时间长就重复提交（会重复扣费）。'
+      + '图片输入（first_frame / last_frame / references[]）请**传字符串**：'
+      + '本地绝对路径、公网 https URL、data URI 或 miora fileKey。'
       + '参数会严格校验：拼错的键（如 size / image）会直接返回 400，而不是被忽略后按文生视频计费。',
     parameters: {
       type: 'object',
       properties: {
         prompt: { type: 'string', description: '视频描述；文生视频/参考图必填，首尾帧模式可选（描述运动与镜头）' },
         mode: { type: 'string', enum: ['text', 'frame', 'reference'], description: '不传时按输入自动推断' },
-        first_frame: { type: 'string', description: '起始帧：绝对本地路径 / 公网 https URL / data URI / miora fileKey' },
-        last_frame: { type: 'string', description: '结束帧（可选），格式同 first_frame' },
-        references: { type: 'array', items: { type: 'string' }, description: '参考图（一张或多张），格式同 first_frame' },
+        first_frame: {
+          type: 'string',
+          description: '起始帧（字符串）：绝对本地路径 / 公网 https URL / data URI / miora fileKey',
+        },
+        last_frame: { type: 'string', description: '结束帧（可选，字符串），格式同 first_frame' },
+        references: {
+          type: 'array',
+          items: { type: 'string' },
+          description: '参考图（字符串数组，一张或多张），格式同 first_frame',
+        },
         duration: { type: 'integer', minimum: 1, description: '目标时长（正整数秒）。本次实测支持 4–15 秒，3 秒会被上游拒绝' },
         resolution: { type: 'string', description: '分辨率。本次实测支持 768P / 2K（大小写不敏感），720p 会被上游拒绝' },
         aspect_ratio: { type: 'string', description: '画幅，如 16:9 / 9:16 / 1:1' },
@@ -375,16 +490,33 @@ export function createTools(deps) {
     },
     timeoutMs: 410_000,
     async execute(args, exec) {
-      const references = Array.isArray(args?.references)
-        ? args.references.filter((item) => typeof item === 'string' && item.trim()).map((item) => item.trim())
-        : [];
+      /*
+       * 先把图片输入归一化。这一步**在调用桥之前**做，且失败就直接返回说明：
+       * 原先用 `typeof === 'string'` 静默过滤，模型把 first_frame 写成
+       * `{path: …}` 时图片被丢掉，请求退化成文生视频却照样计费。
+       */
+      let firstFrame;
+      let lastFrame;
+      let references;
+      try {
+        firstFrame = args?.first_frame === undefined || args.first_frame === null
+          ? ''
+          : imageInputString(args.first_frame, 'first_frame');
+        lastFrame = args?.last_frame === undefined || args.last_frame === null
+          ? ''
+          : imageInputString(args.last_frame, 'last_frame');
+        references = imageInputList(args?.references, 'references');
+      } catch (error) {
+        return `视频参数无法识别，没有提交（未计费）：${error.message}
+修法：图片输入统一用字符串（本地绝对路径 / 公网 https URL / data URI / miora fileKey），然后原样重试本次提交。`;
+      }
       let video;
       try {
         video = await client.videoSubmit({
           prompt: typeof args?.prompt === 'string' ? args.prompt : '',
           mode: typeof args?.mode === 'string' ? args.mode : '',
-          firstFrame: typeof args?.first_frame === 'string' ? args.first_frame : '',
-          lastFrame: typeof args?.last_frame === 'string' ? args.last_frame : '',
+          firstFrame,
+          lastFrame,
           references,
           duration: args?.duration,
           resolution: typeof args?.resolution === 'string' ? args.resolution : '',
@@ -410,7 +542,9 @@ export function createTools(deps) {
       '查询 workbuddy_generate_video 提交的视频任务状态。'
       + '默认会在本工具里等待最多 20 秒（桥代轮询），通常能直接拿到 completed；'
       + 'queued/in_progress 时告诉用户还在生成，稍后再查，**不要重新提交**；'
-      + 'completed 时返回有时效的下载 URL；failed/cancelled 时返回失败原因。',
+      + 'completed 时返回有时效的下载 URL；failed/cancelled 时返回失败原因。'
+      + '产物是**会过期**的签名 URL：要交付给用户时请传 save_to（绝对路径，目录或文件），'
+      + '工具会把视频下载到本地并返回真实文件路径 —— 否则链接过期后只能重新生成（再扣一次积分）。',
     parameters: {
       type: 'object',
       properties: {
@@ -421,11 +555,16 @@ export function createTools(deps) {
           maximum: 45,
           description: '在本工具内等待多少秒再返回（0 = 立即返回；默认 20，最大 45）',
         },
+        save_to: {
+          type: 'string',
+          description: '可选：绝对路径（目录或完整文件名）。给定时把产物下载到本地并返回文件路径，'
+            + '目录会自动创建；不给则只返回签名 URL',
+        },
       },
       required: ['id'],
       additionalProperties: false,
     },
-    timeoutMs: 90_000,
+    timeoutMs: 300_000,
     async execute(args, exec) {
       const id = typeof args?.id === 'string' ? args.id.trim() : '';
       if (!id) throw new Error('id 不能为空：请传 workbuddy_generate_video 返回的任务 id');
@@ -449,8 +588,9 @@ export function createTools(deps) {
       if (video.status === 'completed') {
         const urls = Array.isArray(video.output?.urls) ? video.output.urls : [];
         if (urls.length) {
-          lines.push('视频已生成。以下签名 URL 有时效，请尽快下载或转存：');
-          for (const url of urls) lines.push(`- ${url}`);
+          lines.push(await describeArtifacts({
+            urls, kind: 'video', id, saveTo: args?.save_to, mimeType: 'video/mp4',
+          }));
         } else {
           lines.push('上游标记完成，但没有返回 https 产物 URL。稍后再查一次，或到 WorkBuddy 客户端查看该任务。');
         }
@@ -479,6 +619,7 @@ export function createTools(deps) {
       + '这是高积分计费操作，**只在用户明确要求生成/修改图片时调用**；同一需求只提交一次。'
       + '提交是异步的：本工具返回任务 id，之后用 workbuddy_image_status 查询；'
       + '不要因为等待时间长就重复提交（会重复扣费）。'
+      + '图片输入请**传字符串**：本地绝对路径、公网 https URL、data URI 或 miora fileKey。'
       + '参数会严格校验：拼错的键（如 aspect_ratio / width）会直接返回 400，而不是被忽略。',
     parameters: {
       type: 'object',
@@ -487,7 +628,7 @@ export function createTools(deps) {
         images: {
           type: 'array',
           items: { type: 'string' },
-          description: '参考图（给了就是图生图）：绝对本地路径 / 公网 https URL / data URI / miora fileKey，每张 ≤ 20 MB',
+          description: '参考图字符串数组（给了就是图生图）：绝对本地路径 / 公网 https URL / data URI / miora fileKey，每张 ≤ 20 MB',
         },
         size: { type: 'string', description: '输出尺寸 WIDTHxHEIGHT，如 1024x1024；不传用模型默认' },
         quality: { type: 'string', description: '文生图的质量档（如 standard / hd），图生图忽略' },
@@ -497,9 +638,18 @@ export function createTools(deps) {
     },
     timeoutMs: 410_000,
     async execute(args, exec) {
-      const images = Array.isArray(args?.images)
-        ? args.images.filter((item) => typeof item === 'string' && item.trim()).map((item) => item.trim())
-        : [];
+      /*
+       * 与视频同一道防线：图片输入认不出来时**不要提交**。
+       * 原先非字符串项被静默过滤，模型传 `images: [{url: …}]` 时会变成
+       * `images: []` → 请求退化成文生图 → 图没带上但照常计费。
+       */
+      let images;
+      try {
+        images = imageInputList(args?.images, 'images');
+      } catch (error) {
+        return `图片参数无法识别，没有提交（未计费）：${error.message}
+修法：images[] 每项都用字符串（本地绝对路径 / 公网 https URL / data URI / miora fileKey），然后原样重试本次提交。`;
+      }
       const mode = images.length ? 'edit' : 'generate';
       let image;
       try {
@@ -531,7 +681,9 @@ export function createTools(deps) {
       '查询 workbuddy_generate_image 提交的图片任务状态。'
       + '默认会在本工具里等待最多 20 秒（桥代轮询），通常能直接拿到 completed；'
       + 'queued/in_progress 时告诉用户还在生成，稍后再查，**不要重新提交**；'
-      + 'completed 时返回有时效的下载 URL；failed/cancelled 时返回失败原因。',
+      + 'completed 时返回有时效的下载 URL；failed/cancelled 时返回失败原因。'
+      + '产物是**会过期**的签名 URL：要交付给用户时请传 save_to（绝对路径，目录或文件），'
+      + '工具会把图片下载到本地并返回真实文件路径 —— 否则链接过期后只能重新生成（再扣一次积分）。',
     parameters: {
       type: 'object',
       properties: {
@@ -542,11 +694,16 @@ export function createTools(deps) {
           maximum: 45,
           description: '在本工具内等待多少秒再返回（0 = 立即返回；默认 20，最大 45）',
         },
+        save_to: {
+          type: 'string',
+          description: '可选：绝对路径（目录或完整文件名）。给定时把产物下载到本地并返回文件路径，'
+            + '目录会自动创建；不给则只返回签名 URL',
+        },
       },
       required: ['id'],
       additionalProperties: false,
     },
-    timeoutMs: 90_000,
+    timeoutMs: 300_000,
     async execute(args, exec) {
       const id = typeof args?.id === 'string' ? args.id.trim() : '';
       if (!id) throw new Error('id 不能为空：请传 workbuddy_generate_image 返回的任务 id');
@@ -567,8 +724,12 @@ export function createTools(deps) {
       if (image.status === 'completed') {
         const urls = Array.isArray(image.output?.urls) ? image.output.urls : [];
         if (urls.length) {
-          lines.push('图片已生成。以下签名 URL 有时效，请尽快下载或转存：');
-          for (const url of urls) lines.push(`- ${url}`);
+          const mimeType = Array.isArray(image.result_files)
+            ? image.result_files.map((f) => f?.mimeType).find((v) => typeof v === 'string')
+            : '';
+          lines.push(await describeArtifacts({
+            urls, kind: 'image', id, saveTo: args?.save_to, mimeType,
+          }));
         } else {
           lines.push('上游标记完成，但没有返回 https 产物 URL。稍后再查一次，或到 WorkBuddy 客户端查看该任务。');
         }

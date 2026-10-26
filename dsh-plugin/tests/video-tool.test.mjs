@@ -174,3 +174,91 @@ test('查询工具：404 与空 id 都给人话', async () => {
   const empty = tool('workbuddy_video_status', async () => ({}), async () => ({}));
   await assert.rejects(empty.execute({ id: '  ' }), /id 不能为空/);
 });
+
+test('生成工具：图片输入认出对象包装，认不出就拒绝提交', async () => {
+  let seen;
+  const submit = tool('workbuddy_generate_video', async (args) => {
+    seen = args;
+    return { id: 'task-1', status: 'queued', mode: 'frame' };
+  });
+
+  // 模型常把首帧写成 {url}/{path}：原先会被静默丢掉 → 退化成文生视频却照常计费。
+  await submit.execute({
+    prompt: 'move',
+    first_frame: { path: ' C:/frames/start.png ' },
+    last_frame: { url: 'https://cdn.example/end.png' },
+    references: [{ file_key: 'file/abc/ref.png' }],
+  });
+  assert.equal(seen.firstFrame, 'C:/frames/start.png');
+  assert.equal(seen.lastFrame, 'https://cdn.example/end.png');
+  assert.deepEqual(seen.references, ['file/abc/ref.png']);
+
+  let submitted = false;
+  const strict = tool('workbuddy_generate_video', async () => {
+    submitted = true;
+    return { id: 'task-2', status: 'queued' };
+  });
+  const rejected = await strict.execute({ prompt: 'x', first_frame: { blob: 'zzz' } });
+  assert.match(rejected, /没有提交（未计费）/);
+  assert.match(rejected, /first_frame/);
+  assert.equal(submitted, false);
+});
+
+test('查询工具：save_to 把签名 URL 落盘成本地文件', async () => {
+  const { mkdtempSync, readFileSync, rmSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const dir = mkdtempSync(join(tmpdir(), 'wb-tool-save-'));
+
+  // saveMediaFile 只允许 https；这里替换 fetch 挡住真实网络，但仍走完整下载路径。
+  const payload = Buffer.from('MP4-FAKE-CONTENT');
+  const original = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    assert.match(String(url), /^https:\/\//);
+    return new Response(payload, { status: 200, headers: { 'content-type': 'video/mp4' } });
+  };
+  try {
+    const status = tool('workbuddy_video_status', async () => ({}), async () => ({
+      status: 'completed',
+      upstream_status: 'completed',
+      output: { url: 'https://cdn.example/v.mp4', urls: ['https://cdn.example/v.mp4'] },
+    }));
+    const output = await status.execute({ id: 'task-1', save_to: dir });
+    assert.match(output, /已保存到本地/);
+    const match = /- (.+\.mp4)/.exec(output);
+    assert.ok(match, `回执里应有本地路径：${output}`);
+    assert.equal(readFileSync(match[1]).toString(), 'MP4-FAKE-CONTENT');
+  } finally {
+    globalThis.fetch = original;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('查询工具：不给 save_to 时仍只回 URL，并提示可以直接落盘', async () => {
+  const status = tool('workbuddy_video_status', async () => ({}), async () => ({
+    status: 'completed',
+    upstream_status: 'completed',
+    output: { urls: ['https://cdn.example/v.mp4'] },
+  }));
+  const output = await status.execute({ id: 'task-1' });
+  assert.match(output, /有时效/);
+  assert.match(output, /https:\/\/cdn\.example\/v\.mp4/);
+  assert.match(output, /save_to/);
+});
+
+test('查询工具：save_to 下载失败时不报错，退回 URL 并说明原因', async () => {
+  const original = globalThis.fetch;
+  globalThis.fetch = async () => new Response('nope', { status: 403 });
+  try {
+    const status = tool('workbuddy_video_status', async () => ({}), async () => ({
+      status: 'completed',
+      upstream_status: 'completed',
+      output: { urls: ['https://cdn.example/v.mp4'] },
+    }));
+    const output = await status.execute({ id: 'task-1', save_to: 'C:/definitely/not/writable' });
+    assert.doesNotMatch(output, /^视频.*失败：/, '落盘失败不该让整次查询看起来失败');
+    assert.match(output, /https:\/\/cdn\.example\/v\.mp4/, '失败后仍应给出可临时访问的 URL');
+  } finally {
+    globalThis.fetch = original;
+  }
+});
