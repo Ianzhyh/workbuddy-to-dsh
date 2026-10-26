@@ -65,6 +65,13 @@ test('图生图：images 支持 fileKey / URL / data URI / 本地路径', async 
     { readFile: async () => Buffer.from('png-bytes') },
   );
   assert.equal(local.body.images[0].base64, Buffer.from('png-bytes').toString('base64'));
+
+  // data URI 的 scheme 大小写不敏感（RFC 2397）。
+  const upper = await buildImageSubmitBody({
+    prompt: 'x',
+    images: ['DATA:image/png;base64,AAAA'],
+  });
+  assert.deepEqual(upper.body.images, [{ base64: 'AAAA' }]);
 });
 
 test('图生图：单张 image 是 images[] 的别名', async () => {
@@ -242,6 +249,54 @@ test('同步完成：提交响应即终态，查询命中缓存、不再打上�
   assert.equal(calls, 2, '缓存命中不应再查询上游');
 });
 
+test('同步缓存按账号隔离：切号后不能读到旧账号的产物；同账号换 token 仍可命中', async () => {
+  let calls = 0;
+  let queryCalls = 0;
+  const fetchImpl = async (url) => {
+    calls += 1;
+    if (String(url).endsWith('/v2/api-keys')) {
+      return tempKeyResponse(`ck_t_account_${calls}`);
+    }
+    if (String(url).endsWith('/image/generate/submit')) {
+      return jsonResponse(200, {
+        code: 0,
+        failed: false,
+        data: {
+          upstreamTaskId: 'wb-sync-account',
+          mode: 'sync',
+          status: 'completed',
+          resultFiles: [{ signedUrl: 'https://cdn.example/account.png' }],
+        },
+      });
+    }
+    if (String(url).endsWith('/image/query-task')) {
+      queryCalls += 1;
+      return jsonResponse(200, { code: 0, failed: false, data: {} });
+    }
+    throw new Error(`unexpected ${url}`);
+  };
+
+  await submitImage(AUTH, { prompt: 'x' }, { fetchImpl, baseUrl: BASE });
+
+  // 同账号、access token 轮换：作用域用 endpoint+userId，缓存仍命中。
+  const rotated = await queryImage({ ...AUTH, access: 'rotated-login-token' }, 'wb-sync-account', {
+    fetchImpl, baseUrl: BASE,
+  });
+  assert.equal(rotated.status, 'completed');
+  assert.equal(rotated.output.url, 'https://cdn.example/account.png');
+  assert.equal(queryCalls, 0, '同账号换 token 不应失效');
+
+  // 换账号：必须重新走上游，不能从本进程缓存里读别人的结果。
+  await assert.rejects(
+    () => queryImage({ ...AUTH, userId: 'user-2' }, 'wb-sync-account', { fetchImpl, baseUrl: BASE }),
+    (err) => {
+      assert.equal(err.code, 'IMAGE_NOT_FOUND');
+      return true;
+    },
+  );
+  assert.equal(queryCalls, 1, '不同账号必须重新查询上游');
+});
+
 test('同步失败：真实失败原因随提交返回；图生图不再回显未生效的 quality', async () => {
   let calls = 0;
   const fetchImpl = async (url) => {
@@ -275,6 +330,47 @@ test('同步失败：真实失败原因随提交返回；图生图不再回显�
   assert.equal(queried.status, 'failed');
   assert.equal(queried.error.message, 'content safety');
   assert.equal(calls, 2, '同步失败的结果也来自提交缓存');
+});
+
+test('mode=sync 但 status 非终态：不缓存成永远 in_progress，按异步查询上游', async () => {
+  let queryCalls = 0;
+  const fetchImpl = async (url) => {
+    if (String(url).endsWith('/v2/api-keys')) return tempKeyResponse('ck_t_sync_running');
+    if (String(url).endsWith('/image/generate/submit')) {
+      return jsonResponse(200, {
+        code: 0,
+        failed: false,
+        data: {
+          upstreamTaskId: 'wb-sync-running',
+          mode: 'sync',
+          status: 'processing',
+        },
+      });
+    }
+    if (String(url).endsWith('/image/query-task')) {
+      queryCalls += 1;
+      return jsonResponse(200, {
+        code: 0,
+        failed: false,
+        data: {
+          'wb-sync-running': {
+            status: 'completed',
+            resultFiles: [{ signedUrl: 'https://cdn.example/running.png' }],
+          },
+        },
+      });
+    }
+    throw new Error(`unexpected ${url}`);
+  };
+
+  const submitted = await submitImage(AUTH, { prompt: 'x' }, { fetchImpl, baseUrl: BASE });
+  assert.equal(submitted.status, 'in_progress');
+  assert.equal(submitted.sync, false, '非终态不能标成同步完成');
+
+  const done = await queryImage(AUTH, 'wb-sync-running', { fetchImpl, baseUrl: BASE });
+  assert.equal(done.status, 'completed');
+  assert.equal(done.output.url, 'https://cdn.example/running.png');
+  assert.equal(queryCalls, 1, '非终态应重新查上游');
 });
 
 test('同步任务缓存丢失：查询伪失败被标记 sync_result_unavailable，并给出人话', async () => {

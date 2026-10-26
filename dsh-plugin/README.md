@@ -468,7 +468,7 @@ lib/bridge.mjs     桥进程管理 + HTTP 客户端
 lib/console.mjs    控制台进程管理（识别 / 复用 / 拉起）
 lib/consoleApi.mjs 控制台 API 的白名单透传（同步设计的关键）
 lib/models.mjs     模型目录归一化
-lib/tools.mjs      5 个模型可见工具
+lib/tools.mjs      10 个模型可见工具（含视频/图片生成与状态）
 lib/routes.mjs     HTTP 数据面（同源）
 lib/legacy.mjs     旧路由探测与文本级清理（带备份）
 lib/client.js      客户端半边：dsh 设置里的 9 标签页

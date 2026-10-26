@@ -448,6 +448,7 @@ test('视频请求体：未知字段/空帧/坏参考图一律本地 400（不�
     [{ prompt: 'x', references: 'file/a' }, /must be an array/],
     [{ prompt: 'x', last_frame: 'file/a' }, /last_frame alone is not enough/],
     [{ prompt: 'x', duration: 4.5 }, /positive integer/],
+    [{ prompt: 'x', duration: true }, /positive integer/],
     [{ prompt: 'x', duration: 5, seconds: 6 }, /disagree/],
     [{ prompt: 'x', aspect_ratio: '0:0' }, /positive ratio/],
     [{ prompt: 'x', references: ['data:text/plain;base64,AAAA'] }, /image\//],
@@ -731,14 +732,19 @@ test('图片输入：公网域名不再被私有地址规则误杀，内网字�
 
   const rejected = [
     'https://localhost/a.png',
-    // 根点写法解析结果一样，不能绕过 localhost 判定。
+    // 根点写法与常见 hosts 别名解析结果一样，不能绕过 localhost 判定。
     'https://localhost./a.png',
+    'https://localhost.localdomain/a.png',
+    'https://ip6-localhost/a.png',
     'https://127.0.0.1/a.png',
     'https://127.0.0.1./a.png',
     'https://10.1.2.3/a.png',
     'https://192.168.1.1/a.png',
     'https://100.64.0.1/a.png',
+    'https://224.0.0.1/a.png',
+    'https://240.0.0.1/a.png',
     'https://[::1]/a.png',
+    'https://[ff02::1]/a.png',
     'https://[::]/a.png',
     'https://[fe80::1]/a.png',
     'https://[fc00::1]/a.png',

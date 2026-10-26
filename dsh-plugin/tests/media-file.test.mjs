@@ -269,11 +269,15 @@ test('下载地址：本机/内网字面量在发请求前就被拒绝', async (
     for (const url of [
       'https://localhost/a.mp4',
       'https://localhost./a.mp4',
+      'https://localhost.localdomain/a.mp4',
+      'https://ip6-localhost/a.mp4',
       'https://127.0.0.1/a.mp4',
       'https://127.0.0.1./a.mp4',
       'https://192.168.1.10/a.mp4',
       'https://10.0.0.2/a.mp4',
+      'https://224.0.0.1/a.mp4',
       'https://[::1]/a.mp4',
+      'https://[ff02::1]/a.mp4',
       'https://[::ffff:127.0.0.1]/a.mp4',
     ]) {
       await assert.rejects(
@@ -282,6 +286,35 @@ test('下载地址：本机/内网字面量在发请求前就被拒绝', async (
       );
     }
     assert.equal(fetched, 0, '拒绝发生在 fetch 之前');
+    assert.deepEqual(readdirSync(dir), []);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('下载地址：跟随重定向后的最终 URL 也要复核', async () => {
+  const dir = tmp();
+  const fakeResponse = (url) => async () => ({
+    ok: true,
+    url,
+    headers: new Headers(),
+    body: null,
+  });
+  try {
+    await assert.rejects(
+      () => saveMediaFile(
+        { url: 'https://cdn.example/redirect.mp4', saveTo: dir },
+        { fetchImpl: fakeResponse('https://127.0.0.1/secret.mp4') },
+      ),
+      /private\/local host/,
+    );
+    await assert.rejects(
+      () => saveMediaFile(
+        { url: 'https://cdn.example/redirect2.mp4', saveTo: dir },
+        { fetchImpl: fakeResponse('http://cdn.example/insecure.mp4') },
+      ),
+      /non-https/,
+    );
     assert.deepEqual(readdirSync(dir), []);
   } finally {
     rmSync(dir, { recursive: true, force: true });

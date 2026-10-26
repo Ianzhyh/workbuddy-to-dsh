@@ -14,7 +14,7 @@
  *   3. 用 `ctx.llm.registerAdapter(['workbuddy'], adapter)` 注册一条原生路由：
  *      模型直接出现在 dsh 的模型选择器里，**不再需要**改 settings.yaml，
  *      也不再依赖 llm-pi-ai 那一行；
- *   4. 注册 5 个模型可见的工具（状态 / 模型 / 用量 / 签到 / 启停桥）；
+ *   4. 注册模型可见的工具（状态 / 模型 / 用量 / 签到 / 搜索 / 视频 / 图片 / 启停桥）；
  *   5. 注册 `/workbuddy` 斜杠命令，人可以直接在输入框里操作；
  *   6. 挂一组 `/workbuddy/*` 同源 HTTP 路由，给 dsh 里的入口页当数据面；
  *   7. 首次启动时把旧的 `llm-pi-ai.providers.workbuddy` 手写路由清理掉
@@ -1527,7 +1527,7 @@ export function apply(ctx, rawConfig = {}) {
           log(`注册工具 ${definition.name} 失败`, error);
         }
       }
-      log(`已注册 ${count} 个工具（workbuddy_status/models/usage/checkin/web_search/video/bridge）`);
+      log(`已注册 ${count} 个工具（workbuddy_status/models/usage/checkin/web_search/video/image/bridge）`);
     });
   }
 
@@ -1537,7 +1537,7 @@ export function apply(ctx, rawConfig = {}) {
       try {
         commands.register({
           name: 'workbuddy',
-          description: 'WorkBuddy 中转：状态 / 登录 / 模型 / 用量 / 签到 / 启停桥 / 网页搜索 / 打开控制台 / 清理旧路由',
+          description: 'WorkBuddy 中转：状态 / 登录 / 模型 / 用量 / 签到 / 启停桥 / 网页搜索 / 打开控制台 / 清理旧路由（视频/图片生成用工具，不占斜杠命令）',
           input: { hint: 'status | login | logout [uid前缀] | models | usage | checkin | console | websearch | start | stop | restart | cleanup' },
           async handler({ rawInput, signal }) {
             const parts = String(rawInput || '').trim().split(/\s+/).filter(Boolean);

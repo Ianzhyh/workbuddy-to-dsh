@@ -114,6 +114,8 @@ GET /v1/images/{id}/content    # completed 且有产物 → 302 签名 URL
 - `sync: true` 表示这个结果来自提交时的同步响应（或它的 6 小时缓存）。
 - `sync_result_unavailable: true` 表示你查的是同步任务、但缓存已经没了；响应里的
   `failed` 不是上游的生成结论，别照着它重试。
+- 任务与**提交时的账号**绑定。切换账号后再查同一个 id 会得到 `404 IMAGE_NOT_FOUND`，
+  切回原账号（同一 endpoint + userId；无 userId 的 API key 模式按 token 指纹）才能命中缓存/上游任务。
 - `/content`：未完成 → `409 IMAGE_NOT_READY`；已完成但上游没给 https 产物 →
   `502 IMAGE_NO_OUTPUT`（重查也许能拿到，**不要重提**）。
 
@@ -160,7 +162,8 @@ GET /v1/images/{id}/content    # completed 且有产物 → 302 签名 URL
 - **提交成功即按账号积分计费**；查询与下载不计费。图片不是幂等操作，不要因超时自动重提交。
 - 上游**不回报**单次图片的积分/token：本地账本只记「图片提交 / 失败」次数
   （`kind=image`，不计入模型调用与 tokens）。同步失败/取消记 `imageFailed`，
-  `code=IMAGE_GENERATION_FAILED`，不会再算一次“成功提交”。
+  `code=IMAGE_GENERATION_FAILED`，不会再算一次“成功提交”。**异步任务提交后
+  在上游失败，查询是只读的，不会回写账本**，以查询结果为准。
   用量页单列「图片消耗积分」，值是
   **提交前后账号余额差**（`creditEstimate`，估算；并发生成或模型调用会混入）。
   读不到余额或差值 ≤ 0 时显示「—」，不会写成 0。

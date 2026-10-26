@@ -197,6 +197,9 @@ export class BridgeClient {
       const error = new Error(String(message).slice(0, 400));
       error.status = res.status;
       error.payload = parsed;
+      // 429 的 Retry-After 在头里，不解析出来工具只能干说“稍后”。
+      const retryAfter = Number(res.headers.get('retry-after'));
+      if (Number.isFinite(retryAfter) && retryAfter > 0) error.retryAfter = retryAfter;
       throw error;
     }
     return parsed;

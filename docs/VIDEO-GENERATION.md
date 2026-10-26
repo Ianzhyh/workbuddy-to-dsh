@@ -189,6 +189,8 @@ Authorization: Bearer <本地桥令牌>
   `upstream_status` 保留上游原值。
 - 同步任务（`sync: true`）的查询优先命中提交缓存；`sync_result_unavailable: true`
   表示缓存已失效，别把它当普通失败重试。
+- 任务与**提交时的账号**绑定。切换账号后再查同一个 id 会得到 `404 VIDEO_NOT_FOUND`；
+  切回原账号（endpoint + userId 相同；无 userId 的 API key 模式按 token 指纹）才能命中缓存/上游任务。
 
 **提交元数据是 best-effort 回填**：`mode` / `seconds` / `resolution` / `aspect_ratio` /
 `created_at` / `model` 只有提交时才知道，上游查询接口不返回。桥在内存里记 6 小时
@@ -226,7 +228,7 @@ GET /v1/videos/{upstreamTaskId}/content
 | 提交超时 | 桥给提交预留 390 秒（异步接口正常几秒返回）；客户端超时先断开时任务可能已创建 —— 先查，不要重提 |
 | 查询超时 | 单次 30 秒；`wait=N` 的总预算最多 60 秒（按真实时间计，客户端把超时设得比它长） |
 | 请求体 | 沿用 `WORKBUDDY_MAX_BODY_BYTES`（默认 32 MB）；内联图片按 base64 膨胀 4/3 预留预算，超出在提交前 400；客户端硬塞到 413 时 code=`VIDEO_PAYLOAD_TOO_LARGE` |
-| 账本 | 视频提交按 `kind=video` 单独计数（控制台用量页显示「视频提交/视频失败」），不计入模型调用与 tokens；上游不回报视频积分，桥记录**提交前后账号余额差**为 `creditEstimate`（估算，并发生成/模型调用会混入），用量页单列「视频消耗积分」 |
+| 账本 | 视频提交按 `kind=video` 单独计数（控制台用量页显示「视频提交/视频失败」），不计入模型调用与 tokens；上游不回报视频积分，桥记录**提交前后账号余额差**为 `creditEstimate`（估算，并发生成/模型调用会混入），用量页单列「视频消耗积分」。**失败数只覆盖提交阶段/同步失败**：异步任务提交后在上游失败，查询是只读的，不会回写账本，以查询结果为准 |
 
 > 视频是高积分工具（客户端里单独审批，和图片分组），桥不会替你估算成本。
 > 需要控制消耗时先用短时长/低分辨率，或先在 WorkBuddy 客户端里确认当前账号额度。

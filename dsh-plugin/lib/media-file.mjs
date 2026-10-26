@@ -160,13 +160,15 @@ function assertDownloadUrl(raw) {
   // 根点（`localhost.`）不是另一个主机，归一后再判，避免绕过。
   const host = url.hostname.toLowerCase().replace(/^\[|\]$/g, '').replace(/\.+$/, '');
   if (!host) throw new Error('artifact URL has no usable host');
-  const localName = host === 'localhost' || host.endsWith('.localhost') || host.endsWith('.local');
+  const localName = host === 'localhost' || host === 'localhost.localdomain'
+    || host === 'ip6-localhost' || host === 'ip6-loopback'
+    || host.endsWith('.localhost') || host.endsWith('.local');
   let localIp = false;
   if (host.includes(':')) {
     // 只对 IPv6 字面量做保守判定：:: / ::1 / IPv4-mapped(::ffff:) / ULA / link-local。
     localIp = host === '::' || host === '::1'
       || host.startsWith('::')
-      || /^(?:fc|fd|fe[89a-f])/i.test(host);
+      || /^(?:fc|fd|fe[89a-f]|ff)/i.test(host);
   } else {
     const parts = host.split('.').map(Number);
     if (parts.length === 4 && parts.every((n) => Number.isInteger(n) && n >= 0 && n <= 255)) {
@@ -236,6 +238,18 @@ export async function saveMediaFile(request, options = {}) {
   }
   if (!response.ok) {
     throw new Error(`download failed: HTTP ${response.status}`);
+  }
+  /*
+   * fetch 默认跟随重定向。起始 URL 校验过，不代表**最终落点**也安全：
+   * 公网签名地址 302 到 `http://127.0.0.1/…` 时，Node 会照跟。这里再按
+   * `response.url`（最终 URL）复核一次；stub/无 url 时沿用起始地址。
+   */
+  const finalUrl = typeof response.url === 'string' && response.url ? response.url : target;
+  try {
+    assertDownloadUrl(finalUrl);
+  } catch (error) {
+    try { await response.body?.cancel?.(); } catch { /* 已关闭/不可取消 */ }
+    throw error;
   }
   const declared = Number(response.headers?.get?.('content-length')) || 0;
   if (declared > maxBytes) {

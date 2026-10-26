@@ -313,6 +313,7 @@ paths:
             当前任务状态（pending 归一到 queued，processing 归一到 in_progress）。
             若是同步完成的任务，响应来自桥的提交缓存；缓存丢失时返回
             status=failed + sync_result_unavailable=true，而不是普通生成失败。
+            任务与提交时的账号绑定：切换账号后同一个 id 会得到 404。
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Video' }
@@ -417,6 +418,7 @@ paths:
           description: |
             当前任务状态。同步完成的任务从桥的提交缓存返回；缓存丢失时返回
             status=failed + sync_result_unavailable=true，而不是普通生成失败。
+            任务与提交时的账号绑定：切换账号后同一个 id 会得到 404。
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Image' }

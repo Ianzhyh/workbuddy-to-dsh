@@ -13,6 +13,7 @@ import {
   SUBMIT_TIMEOUT_MS,
   assertInlineInputBudget,
   isObject,
+  isTerminalMediaStatus,
   mediaClientOptions,
   mediaPayload,
   mioraRequest,
@@ -21,6 +22,7 @@ import {
   recallSubmission,
   rememberSubmission,
   resolveImageInput,
+  submissionScope,
 } from './miora-media-core.mjs';
 
 export const VIDEO_SUBMIT_PATH = '/api/ai/workbuddy-proxy/video/submit';
@@ -116,6 +118,10 @@ function parseReferences(input) {
 
 function optionalDuration(value) {
   if (value === undefined || value === null || value === '') return undefined;
+  // Number(true) === 1：布尔值不能因为“能转成数字”就当成 1 秒提交。
+  if (typeof value === 'boolean') {
+    throw invalid('duration must be a positive integer number of seconds.');
+  }
   const number = Number(value);
   if (!Number.isFinite(number) || !Number.isInteger(number) || number <= 0) {
     throw invalid('duration must be a positive integer number of seconds.');
@@ -286,8 +292,12 @@ export async function submitVideo(auth, input, options = {}) {
       errorMessage: data.errorMessage ?? data.error_message ?? data.error ?? data.failReason,
     }
     : null;
+  // 只有终态才值得缓存；非终态的 mode=sync 按异步任务处理，交给查询接口。
+  const syncTerminal = Boolean(syncEntry && isTerminalMediaStatus(syncEntry.status));
   const meta = {
     kind: 'video',
+    // 产物/失败原因只在当前账号下可查；切号后不能从缓存里读到别人的结果。
+    account: submissionScope(auth),
     mode: built.mode,
     duration: built.duration,
     resolution: built.resolution,
@@ -296,8 +306,8 @@ export async function submitVideo(auth, input, options = {}) {
     provider: data.provider ?? null,
     createdAt: Math.floor(startedAt / 1000),
     savedAt: Date.now(),
-    sync: Boolean(syncEntry),
-    ...(syncEntry ? { syncEntry } : {}),
+    sync: syncTerminal,
+    ...(syncTerminal ? { syncEntry } : {}),
   };
   rememberSubmission(String(data.upstreamTaskId), meta);
   return normalizeResult({ id: data.upstreamTaskId, data, entry: syncEntry, meta });
@@ -309,7 +319,7 @@ export async function submitVideo(auth, input, options = {}) {
  */
 export async function queryVideo(auth, id, options = {}) {
   const taskId = typeof id === 'string' ? id.trim() : '';
-  const remembered = taskId ? recallSubmission(taskId) : null;
+  const remembered = taskId ? recallSubmission(taskId, submissionScope(auth)) : null;
   if (remembered?.kind === 'video' && remembered.syncEntry) {
     return normalizeResult({
       id: taskId,

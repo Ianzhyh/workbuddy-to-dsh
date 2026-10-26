@@ -54,15 +54,23 @@ function imageInputString(value, field) {
     for (const key of ['path', 'file', 'url', 'file_key', 'fileKey', 'base64', 'data']) {
       const inner = value[key];
       if (typeof inner === 'string' && inner.trim()) {
-        // base64 裸串补成 data URI，否则桥会把它当成「相对路径」拒掉。
-        if ((key === 'base64' || key === 'data') && !/^data:/i.test(inner.trim())) {
-          const mime = typeof value.mime_type === 'string' ? value.mime_type : 'image/png';
-          return `data:${mime};base64,${inner.trim()}`;
+        const text = inner.trim();
+        // base64/data 裸串补成 data URI，否则桥会把它当成「相对路径」拒掉。
+        // 但 `data` 这个键也可能是 URL/fileKey（多模态协议里两种写法都见过），
+        // 只有既不像 URI 也不像 fileKey 时才按 base64 处理。
+        const looksLikeRef = /^data:/i.test(text)
+          || /^https?:\/\//i.test(text)
+          || /^(?:bga|file)\//.test(text);
+        if ((key === 'base64' || key === 'data') && !looksLikeRef) {
+          const mime = typeof value.mime_type === 'string'
+            ? value.mime_type
+            : (typeof value.mimeType === 'string' ? value.mimeType : 'image/png');
+          return `data:${mime};base64,${text}`;
         }
-        return inner.trim();
+        return text;
       }
     }
-    throw new Error(`${field} 是一个对象，但没有 path/url/file_key/base64 字段；`
+    throw new Error(`${field} 是一个对象，但没有 path/url/file_key/base64/data 字段；`
       + '请直接传字符串（本地绝对路径 / 公网 https URL / data URI / miora fileKey）。');
   }
   if (typeof value === 'number' || typeof value === 'boolean') {
@@ -157,6 +165,8 @@ function mediaFailureText(error, { action = 'submit', label = '视频' } = {}) {
   const status = Number(error?.status) || 0;
   const code = String(error?.payload?.error?.code || error?.code || '');
   const upstreamCode = error?.payload?.error?.upstream_code;
+  const retryAfter = Number(error?.retryAfter) || 0;
+  const retryHint = retryAfter > 0 ? `约 ${retryAfter} 秒后` : '稍后';
   const message = String(error?.message || error || '').slice(0, 300);
   const noun = label;
   const statusTool = noun === '图片' ? 'workbuddy_image_status' : 'workbuddy_video_status';
@@ -167,7 +177,7 @@ function mediaFailureText(error, { action = 'submit', label = '视频' } = {}) {
   }
   if (code.endsWith('_KEY_RATE_LIMITED')) {
     return `申请临时 key 被 Miora 限流（${message || 'HTTP 429'}），生成任务尚未提交、不会计费。`
-      + '稍后直接重试即可，不需要查任务。';
+      + `${retryHint}直接重试即可，不需要查任务。`;
   }
   if (status === 413 || code.endsWith('_PAYLOAD_TOO_LARGE')) {
     return `${noun}请求体太大（图片 base64 内联会膨胀 1/3）：${message || 'HTTP 413'}。`
@@ -193,10 +203,11 @@ function mediaFailureText(error, { action = 'submit', label = '视频' } = {}) {
   }
   if (status === 429) {
     if (action === 'status') {
-      return `${noun}查询被 Miora 限流：${message || 'HTTP 429'}。任务本身不受影响，稍后重试查询即可；不要重新提交。`;
+      return `${noun}查询被 Miora 限流：${message || 'HTTP 429'}。任务本身不受影响，`
+        + `${retryHint}重试查询即可；不要重新提交。`;
     }
     return `${noun}提交被 Miora 限流：${message || 'HTTP 429'}。`
-      + `任务可能已经创建：稍后先调用 ${statusTool} 查已有任务，不要重复提交。`;
+      + `任务可能已经创建：${retryHint}先调用 ${statusTool} 查已有任务，不要重复提交。`;
   }
   if (status === 400) {
     return `${noun}请求被拒绝${upstreamCode ? `（上游码 ${upstreamCode}）` : ''}：${message || '参数不合法'}。`
@@ -204,7 +215,8 @@ function mediaFailureText(error, { action = 'submit', label = '视频' } = {}) {
   }
   if (status === 404) {
     return `没有找到这个${noun}任务：${message || 'unknown id'}。确认 id 来自${noun}提交工具的返回；`
-      + `视频和图片的查询接口不互通（不要拿图片 id 查视频，反之亦然）。`;
+      + '视频和图片的查询接口不互通（不要拿图片 id 查视频，反之亦然）；'
+      + '如果中途切换过 WorkBuddy 账号，任务在提交时的账号下，切回原账号再查。';
   }
   if (/ECONNREFUSED|fetch failed|socket hang up/i.test(message)) {
     return `${noun}请求失败：本地桥未运行。先调用 workbuddy_bridge（action=start），再重试。`;
@@ -226,6 +238,9 @@ const MAX_STATUS_WAIT_SECONDS = 120;
 const STATUS_WAIT_CHUNK_SECONDS = 60;
 
 function clampWaitSeconds(raw, fallback = 20) {
+  // null / 空串在“模型没填”的语义下按默认值处理，不能因为 Number(null)=0
+  // 变成立即返回（那会让“默认代等 20 秒”在模型传 null 时失效）。
+  if (raw === undefined || raw === null || raw === '') return fallback;
   const value = Number(raw);
   if (!Number.isFinite(value)) return fallback;
   return Math.min(Math.max(Math.trunc(value), 0), MAX_STATUS_WAIT_SECONDS);
@@ -632,17 +647,22 @@ export function createTools(deps) {
         return `视频参数无法识别，没有提交（未计费）：${error.message}
 修法：图片输入统一用字符串（本地绝对路径 / 公网 https URL / data URI / miora fileKey），然后原样重试本次提交。`;
       }
+      if (args?.prompt !== undefined && args?.prompt !== null && typeof args.prompt !== 'string') {
+        return '视频 prompt 必须是字符串；这次没有提交（未计费）。';
+      }
       let video;
       try {
         video = await client.videoSubmit({
           prompt: typeof args?.prompt === 'string' ? args.prompt : '',
-          mode: typeof args?.mode === 'string' ? args.mode : '',
+          // 显式给了但类型不对时**透传给桥**，让桥的严格校验报 400；
+          // 这里如果按 typeof 过滤，会把“resolution: 1080”静默变成默认分辨率。
+          mode: args?.mode ?? '',
           firstFrame,
           lastFrame,
           references,
           duration: args?.duration,
-          resolution: typeof args?.resolution === 'string' ? args.resolution : '',
-          aspectRatio: typeof args?.aspect_ratio === 'string' ? args.aspect_ratio : '',
+          resolution: args?.resolution ?? '',
+          aspectRatio: args?.aspect_ratio ?? '',
           signal: exec?.signal,
         });
       } catch (error) {
@@ -681,7 +701,9 @@ export function createTools(deps) {
       }
       if (video.status === 'failed' || video.status === 'cancelled') {
         const lines = [
-          video.status === 'cancelled' ? '视频任务已取消（上游同步返回）。' : '视频生成失败（上游同步返回失败）。',
+          video.status === 'cancelled'
+            ? (video.sync ? '视频任务已取消（上游同步返回）。' : '视频任务已取消。')
+            : (video.sync ? '视频生成失败（上游同步返回失败）。' : '视频生成失败。'),
           summary,
           `原因：${video.error?.message || '上游未给失败原因'}`,
           '本次没有可交付产物。不要原样重提；先和用户确认是否调整参数/内容，再决定是否重新生成（会再次计费）。',
@@ -709,7 +731,8 @@ export function createTools(deps) {
       + 'queued/in_progress 时告诉用户还在生成，稍后再查，**不要重新提交**；'
       + 'completed 时返回有时效的下载 URL；failed/cancelled 时返回失败原因。'
       + '产物是**会过期**的签名 URL：要交付给用户时请传 save_to（绝对路径，目录或文件），'
-      + '工具会把视频下载到本地并返回真实文件路径 —— 否则链接过期后只能重新生成（再扣一次积分）。',
+      + '工具会把视频下载到本地并返回真实文件路径 —— 否则链接过期后只能重新生成（再扣一次积分）。'
+      + '一次调用最多保存前 4 个产物，其余仍返回 URL。',
     parameters: {
       type: 'object',
       properties: {
@@ -771,7 +794,8 @@ export function createTools(deps) {
       } else if (video.sync_result_unavailable
         || /INVALID_TASK_ID_FOR_SYNC_MODE/i.test(video.error?.message || '')) {
         lines.push('这次查询没有拿到结果：该任务在上游是**同步完成**的，结果只出现在提交响应里，'
-          + '桥的短期缓存已不包含它（过期或重启）。不要把它当成普通失败反复重提；'
+          + '桥的短期缓存已不包含它（过期、重启，或当前不是提交时的账号）。'
+          + '如果刚切换过账号，切回提交时的账号再查；不要把它当成普通失败反复重提，'
           + '需要产物时请向用户确认后重新生成（会再次计费）。');
       } else if (video.status === 'failed' || video.status === 'cancelled') {
         lines.push(video.status === 'cancelled'
@@ -839,14 +863,18 @@ export function createTools(deps) {
         return `图片参数无法识别，没有提交（未计费）：${error.message}
 修法：images[] 每项都用字符串（本地绝对路径 / 公网 https URL / data URI / miora fileKey），然后原样重试本次提交。`;
       }
+      if (args?.prompt !== undefined && args?.prompt !== null && typeof args.prompt !== 'string') {
+        return '图片 prompt 必须是字符串；这次没有提交（未计费）。';
+      }
       const mode = images.length ? 'edit' : 'generate';
       let image;
       try {
         image = await client.imageSubmit({
           prompt: typeof args?.prompt === 'string' ? args.prompt : '',
           images,
-          size: typeof args?.size === 'string' ? args.size : '',
-          quality: typeof args?.quality === 'string' ? args.quality : '',
+          // 同视频：类型不对的值交给桥报 400，不能静默忽略后按默认尺寸生成。
+          size: args?.size ?? '',
+          quality: args?.quality ?? '',
           mode,
           signal: exec?.signal,
         });
@@ -884,7 +912,9 @@ export function createTools(deps) {
       }
       if (image.status === 'failed' || image.status === 'cancelled') {
         const lines = [
-          image.status === 'cancelled' ? '图片任务已取消（上游同步返回）。' : '图片生成失败（上游同步返回失败）。',
+          image.status === 'cancelled'
+            ? (image.sync ? '图片任务已取消（上游同步返回）。' : '图片任务已取消。')
+            : (image.sync ? '图片生成失败（上游同步返回失败）。' : '图片生成失败。'),
           summary,
           `原因：${image.error?.message || '上游未给失败原因'}`,
           '本次没有可交付产物。不要原样重提；先和用户确认是否调整提示词/参考图，再决定是否重新生成（会再次计费）。',
@@ -914,7 +944,8 @@ export function createTools(deps) {
       + 'queued/in_progress 时告诉用户还在生成，稍后再查，**不要重新提交**；'
       + 'completed 时返回有时效的下载 URL；failed/cancelled 时返回失败原因。'
       + '产物是**会过期**的签名 URL：要交付给用户时请传 save_to（绝对路径，目录或文件），'
-      + '工具会把图片下载到本地并返回真实文件路径 —— 否则链接过期后只能重新生成（再扣一次积分）。',
+      + '工具会把图片下载到本地并返回真实文件路径 —— 否则链接过期后只能重新生成（再扣一次积分）。'
+      + '一次调用最多保存前 4 个产物，其余仍返回 URL。',
     parameters: {
       type: 'object',
       properties: {
@@ -975,7 +1006,8 @@ export function createTools(deps) {
       } else if (image.sync_result_unavailable
         || /INVALID_TASK_ID_FOR_SYNC_MODE/i.test(image.error?.message || '')) {
         lines.push('这次查询没有拿到结果：该任务在上游是**同步完成**的，结果只出现在提交响应里，'
-          + '桥的短期缓存已不包含它（过期或重启）。不要把它当成普通失败反复重提；'
+          + '桥的短期缓存已不包含它（过期、重启，或当前不是提交时的账号）。'
+          + '如果刚切换过账号，切回提交时的账号再查；不要把它当成普通失败反复重提，'
           + '需要产物时请向用户确认后重新生成（会再次计费）。');
       } else if (image.status === 'failed' || image.status === 'cancelled') {
         lines.push(image.status === 'cancelled'

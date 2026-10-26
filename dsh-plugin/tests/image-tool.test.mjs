@@ -86,6 +86,7 @@ test('图生图：图片输入认出 path/url/file_key/base64 包装，绝不再
       { path: ' C:/Users/me/ref.png ' },
       { file_key: 'file/abc/style.png' },
       { base64: 'AAAA', mime_type: 'image/jpeg' },
+      { data: 'https://cdn.example/data.png' },
       'data:image/png;base64,BBBB',
     ],
   });
@@ -95,6 +96,7 @@ test('图生图：图片输入认出 path/url/file_key/base64 包装，绝不再
     'C:/Users/me/ref.png',
     'file/abc/style.png',
     'data:image/jpeg;base64,AAAA',
+    'https://cdn.example/data.png',
     'data:image/png;base64,BBBB',
   ]);
 });
@@ -114,6 +116,19 @@ test('图生图：认不出的图片输入直接拒绝，不提交（否则会�
   assert.match(shapeless, /path\/url\/file_key\/base64/);
 
   assert.equal(submitted, false, '认不出图片输入时绝不能提交');
+});
+
+test('图片工具：size/quality 类型不对要透传给桥报 400，不能被静默忽略', async () => {
+  let seen;
+  const submit = tool('workbuddy_generate_image', {
+    imageSubmit: async (args) => {
+      seen = args;
+      return { id: 'img-1', status: 'queued', mode: 'generate' };
+    },
+  });
+  await submit.execute({ prompt: 'x', size: 1024, quality: 1 });
+  assert.equal(seen.size, 1024);
+  assert.equal(seen.quality, 1);
 });
 
 test('图片工具：上游同步完成时直接交付产物与 fileKey，不再让用户查任务', async () => {

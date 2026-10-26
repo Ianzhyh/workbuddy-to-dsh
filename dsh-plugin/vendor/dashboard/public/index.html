@@ -4295,15 +4295,23 @@ function renderUsage() {
       : '上游未回报（' + t.calls + ' 次调用）';
 
   // 「生成消耗」单独一块：次数 + 提交前后余额差（估算）。不混进模型调用的卡片网格里。
-  const generationCards = (hasVideoMetric || hasImageMetric)
+  // 没有任何生成记录时不铺全 0 卡片（容易被误认为统计坏了）。
+  const hasVideoData = videos > 0 || videoFailed > 0 || videoCreditKnown > 0;
+  const hasImageData = images > 0 || imageFailed > 0 || imageCreditKnown > 0;
+  const hasGenerationData = hasVideoData || hasImageData;
+  const generationCards = (hasVideoMetric || hasImageMetric) && hasGenerationData
     ? '<p class="hint" style="margin:14px 0 8px"><b>生成消耗</b>（提交前后账号余额差估算）</p>'
       + '<div class="cards" style="margin-bottom:14px">'
-        + card('视频提交', String(videos), '不计入模型调用/tokens', true)
-        + card('视频消耗积分', fmtCredit(videoCredit, videoCreditKnown), '余额差估算', true)
-        + (videoFailed > 0 ? card('视频失败', String(videoFailed), '不计入模型调用/tokens', true) : '')
-        + card('图片提交', String(images), '不计入模型调用/tokens', true)
-        + card('图片消耗积分', fmtCredit(imageCredit, imageCreditKnown), '余额差估算', true)
-        + (imageFailed > 0 ? card('图片失败', String(imageFailed), '不计入模型调用/tokens', true) : '')
+        + (hasVideoData
+          ? card('视频提交', String(videos), '不计入模型调用/tokens', true)
+            + card('视频消耗积分', fmtCredit(videoCredit, videoCreditKnown), '余额差估算', true)
+            + (videoFailed > 0 ? card('视频失败', String(videoFailed), '不计入模型调用/tokens', true) : '')
+          : '')
+        + (hasImageData
+          ? card('图片提交', String(images), '不计入模型调用/tokens', true)
+            + card('图片消耗积分', fmtCredit(imageCredit, imageCreditKnown), '余额差估算', true)
+            + (imageFailed > 0 ? card('图片失败', String(imageFailed), '不计入模型调用/tokens', true) : '')
+          : '')
       + '</div>'
     : '';
 
@@ -4327,10 +4335,10 @@ function renderUsage() {
     '<p class="hint">' + (hasSearchMetric
       ? '搜索调用不计入模型调用、tokens 与积分；本地账本只覆盖本桥流量，与上游余额/其它客户端不是同一口径。'
       : '当前桥版本较旧，搜索调用仍计入调用次数；重启桥后可按新口径拆分。本地账本只覆盖本桥流量，与上游余额/其它客户端不是同一口径。')
-      + (hasVideoMetric
+      + (hasVideoData
         ? '<br>视频提交按次计费，但上游不回报 token/积分；单独计数，积分以上游余额为准。本地账本只覆盖本桥流量，与上游余额/其它客户端不是同一口径。'
         : '')
-      + (hasImageMetric
+      + (hasImageData
         ? '<br>图片提交按次计费，但上游不回报 token/积分；单独计数，积分以上游余额为准。本地账本只覆盖本桥流量，与上游余额/其它客户端不是同一口径。'
         : '')
       + ((videoCreditKnown || imageCreditKnown)
@@ -5706,6 +5714,23 @@ function exportUsageCsv() {
     '合计', t.calls, t.promptTokens, t.completionTokens,
     creditCell(t.credit, tc), tc, perCell(t.credit, tc), t.ms,
   ]);
+  /*
+   * 生成类没有模型行，单独一段；积分为“提交前后余额差估算”，
+   * 没采到（Known=0）时留空而不是写 0。
+   */
+  const hasVideo = Number.isFinite(Number(t.videos));
+  const hasImage = Number.isFinite(Number(t.images));
+  if (hasVideo || hasImage) {
+    const vk = Number(t.videoCreditKnown) || 0;
+    const ik = Number(t.imageCreditKnown) || 0;
+    rows.push([]);
+    rows.push(['生成消耗（提交前后余额差估算）']);
+    rows.push(['视频提交', '视频失败', '视频消耗积分', '图片提交', '图片失败', '图片消耗积分']);
+    rows.push([
+      Number(t.videos) || 0, Number(t.videoFailed) || 0, vk ? r4(t.videoCredit) : '',
+      Number(t.images) || 0, Number(t.imageFailed) || 0, ik ? r4(t.imageCredit) : '',
+    ]);
+  }
   downloadCsv('workbuddy-usage-' + localDateStr() + '.csv', rows);
   setMsg('已导出用量 CSV（最近 ' + u.windowDays + ' 天）', 'good');
 }

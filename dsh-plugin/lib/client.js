@@ -4108,7 +4108,12 @@ body.dark .wb-root,
       const videoCreditKnown = Number(total.videoCreditKnown) || 0;
       const imageCredit = Number(total.imageCredit) || 0;
       const imageCreditKnown = Number(total.imageCreditKnown) || 0;
-      const showGenerationCard = hasVideoMetric || hasImageMetric;
+      // 只展示真正用过的类型：只用图片的人不必看一排视频 0。
+      const hasVideoData = videos > 0 || videoFailed > 0 || videoCreditKnown > 0;
+      const hasImageData = images > 0 || imageFailed > 0 || imageCreditKnown > 0;
+      // 没有任何生成记录时不铺全 0 的卡：那更像统计坏了，也会把用量页拉长。
+      const hasGenerationData = hasVideoData || hasImageData;
+      const showGenerationCard = (hasVideoMetric || hasImageMetric) && hasGenerationData;
       const generationNote = t('上游不回报积分，消耗 = 提交前后账号余额差（估算；并发生成或模型调用会混入）。');
       const creditNote = totalCalls
         ? (creditCalls
@@ -4162,14 +4167,22 @@ body.dark .wb-root,
         showGenerationCard
           ? h(Card, { title: '生成消耗' },
             h('div', { className: 'wb-usage-grid' },
-              h('div', { className: 'wb-metric' }, h('span', null, '视频提交'), h('b', null, fmtInt(videos))),
-              h('div', { className: 'wb-metric brand' }, h('span', null, '视频消耗积分'), h('b', null, videoCreditKnown ? videoCredit.toFixed(2) : '—')),
-              videoFailed > 0
+              hasVideoData
+                ? h('div', { className: 'wb-metric' }, h('span', null, '视频提交'), h('b', null, fmtInt(videos)))
+                : null,
+              hasVideoData
+                ? h('div', { className: 'wb-metric brand' }, h('span', null, '视频消耗积分'), h('b', null, videoCreditKnown ? videoCredit.toFixed(2) : '—'))
+                : null,
+              hasVideoData && videoFailed > 0
                 ? h('div', { className: 'wb-metric warn' }, h('span', null, '视频失败'), h('b', null, fmtInt(videoFailed)))
                 : null,
-              h('div', { className: 'wb-metric' }, h('span', null, '图片提交'), h('b', null, fmtInt(images))),
-              h('div', { className: 'wb-metric brand' }, h('span', null, '图片消耗积分'), h('b', null, imageCreditKnown ? imageCredit.toFixed(2) : '—')),
-              imageFailed > 0
+              hasImageData
+                ? h('div', { className: 'wb-metric' }, h('span', null, '图片提交'), h('b', null, fmtInt(images)))
+                : null,
+              hasImageData
+                ? h('div', { className: 'wb-metric brand' }, h('span', null, '图片消耗积分'), h('b', null, imageCreditKnown ? imageCredit.toFixed(2) : '—'))
+                : null,
+              hasImageData && imageFailed > 0
                 ? h('div', { className: 'wb-metric warn' }, h('span', null, '图片失败'), h('b', null, fmtInt(imageFailed)))
                 : null),
             h('p', { className: 'wb-note' }, generationNote))
@@ -4206,9 +4219,11 @@ body.dark .wb-root,
             h('div', { className: 'wb-actions-group' },
               h(Btn, { onClick: reload }, '刷新'),
               h(Btn, { onClick: () => downloadCsv('workbuddy-usage.csv',
-                ['day', 'calls', 'searches', 'searchFailed', 'promptTokens', 'completionTokens', 'credit'],
+                ['day', 'calls', 'searches', 'searchFailed', 'promptTokens', 'completionTokens', 'credit',
+                  'videos', 'videoFailed', 'images', 'imageFailed'],
                 series.map((d) => [d.day || d.key, d.calls, d.searches || 0, d.searchFailed || 0,
-                  d.promptTokens, d.completionTokens, d.credit])) }, '导出 CSV'),
+                  d.promptTokens, d.completionTokens, d.credit,
+                  d.videos || 0, d.videoFailed || 0, d.images || 0, d.imageFailed || 0])) }, '导出 CSV'),
               h(Btn, { disabled: clearing, onClick: clearLedger }, clearing ? '清空中…' : '清空账本'))),
           error ? h(Alert, { bad: true }, error) : null,
           message ? h(Alert, null, message) : null,

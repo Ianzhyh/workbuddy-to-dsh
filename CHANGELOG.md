@@ -43,9 +43,21 @@
 - **失败原因/产物字段的兼容面**：`error.message` 是对象时不再变成 `[object Object]`；
   `result_files` 的 snake_case 变体也认；`success` / `done` / `timeout` / `expired`
   等状态有明确归一。
+- **同步结果缓存未按账号隔离**：同一台机器切换账号后，新账号拿到旧账号的任务 id
+  仍可能从桥内存里读到旧账号的产物 URL/失败原因。现在缓存作用域是
+  `endpoint + userId`（无 userId 时回退 token 指纹），查询只命中当前账号；
+  token 刷新不受影响，切号后查询会重新走上游并得到 404。
+- **`mode:"sync"` 但状态非终态会被缓存成永远 in_progress**：现在只有终态
+  （completed/failed/cancelled）才进同步缓存；非终态按异步任务去查上游。
+- **413 请求体超限没有进账本**：此前用量页只能看到成功和参数错误；现在记
+  `*_PAYLOAD_TOO_LARGE` 失败行。
+- **429 的 Retry-After 被客户端丢掉**：桥客户端现在把响应头里的秒数附到错误上，
+  工具会直接说“约 N 秒后重试”，不再只写“稍后”。
 - **私有地址判定漏到下载器**：`save_to` 下载产物时只校验了 https，没挡住
-  `https://127.0.0.1/…`、`[::1]`、内网段等本机/私有**字面量**地址；现在在 fetch 之前拒绝。
-  输入 URL 也补上了末尾根点归一（`https://localhost./` 不再绕过 localhost 判定）。
+  `https://127.0.0.1/…`、`[::1]`、内网段等本机/私有**字面量**地址；现在在 fetch 之前拒绝，
+  并复核 fetch 跟随重定向后的**最终 URL**（公网签名地址 302 到 `http://127.0.0.1` 也会被拒）。
+  输入 URL 也补上了末尾根点归一（`https://localhost./` 不再绕过 localhost 判定）、
+  `localhost.localdomain` / `ip6-localhost` 等回环别名，以及 IPv4/IPv6 组播段。
 - **视频/图片输入的私有地址判定既误杀又漏判**（真机可复现）：
   - 旧规则用 `/^(?:fc|fd|fe8|fe9|fea|feb)/` 同时匹配域名与 IPv6 字面量，结果把
     `fc2.com`、`fcdn.cloudflare.net`、`fd.example.com`、`fe8.images.xyz` 这类**公网域名**
@@ -87,6 +99,10 @@
   403 区分「本地令牌用错」与「账号没有权限」。
 - **inline 图片预算**：本地路径/data URI 多张图在提交前按 `WORKBUDDY_MAX_BODY_BYTES`
   折算（base64 膨胀 4/3），超预算直接 400 并建议改用 fileKey/URL，不再读完几十 MB 才 413。
+- **用量页不再铺全 0 的生成卡**：没有视频/图片记录时隐藏「生成消耗」块，避免被误认为
+  统计坏了；有数据时不变。用量 CSV 增加视频/图片列（面板按天）和独立生成段（控制台汇总）。
+- **媒体能力文案补齐**：插件工具注册日志、入口注释、`/workbuddy` 命令说明和架构文档
+  都不再漏掉图片生成；`.env.example` 同步写上图片接口与请求体预算。
 - **生成产物可落盘**：`workbuddy_video_status` / `workbuddy_image_status` 新增 `save_to`
   参数（绝对路径，目录或完整文件名）。给定时把签名 URL **流式下载**到本地并回传真实
   文件路径 —— 上游签名 URL 有时效（视频实测约 12 小时），过期后想再要只能重新提交

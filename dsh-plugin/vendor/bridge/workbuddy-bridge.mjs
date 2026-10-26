@@ -3265,6 +3265,17 @@ async function handleMediaSubmit(req, res, { submit, kind, label, prefix, defaul
     raw = await readBody(req);
   } catch (e) {
     if (e.code === 'BODY_TOO_LARGE') {
+      // 413 也是一次真实的媒体请求失败，进账本（否则用量页只能看到成功/参数错误）。
+      recordRequest({
+        model: kind,
+        kind,
+        stream: false,
+        ms: Date.now() - startedAt,
+        ok: false,
+        status: 413,
+        code: `${prefix}_PAYLOAD_TOO_LARGE`,
+        error: `${label} request body exceeds ${MAX_BODY_BYTES} bytes`,
+      });
       return rejectTooLarge(
         req,
         res,

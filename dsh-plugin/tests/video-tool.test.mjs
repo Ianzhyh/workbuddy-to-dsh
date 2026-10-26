@@ -62,6 +62,28 @@ test('生成工具：映射参数，返回任务 id 并明确不要重复提交'
   assert.match(output, /workbuddy_video_status/);
 });
 
+test('生成工具：显式参数类型不对要透传给桥报 400，不能被静默丢掉', async () => {
+  let seen;
+  const submit = tool('workbuddy_generate_video', async (args) => {
+    seen = args;
+    return { id: 'task-1', status: 'queued' };
+  });
+  await submit.execute({ prompt: 'x', resolution: 1080, aspect_ratio: 16, mode: 1 });
+  assert.equal(seen.resolution, 1080);
+  assert.equal(seen.aspectRatio, 16);
+  assert.equal(seen.mode, 1);
+
+  let submitted = false;
+  const strict = tool('workbuddy_generate_video', async () => {
+    submitted = true;
+    return { id: 'task-2', status: 'queued' };
+  });
+  const badPrompt = await strict.execute({ prompt: 123 });
+  assert.match(badPrompt, /prompt 必须是字符串/);
+  assert.match(badPrompt, /没有提交/);
+  assert.equal(submitted, false);
+});
+
 test('生成工具：429/401/400/桥未运行都给可执行结论，且不暗示重提', async () => {
   const failed = (status, message = 'boom') => tool('workbuddy_generate_video', async () => {
     const error = new Error(message);
@@ -161,6 +183,14 @@ test('错误文案：413 / 账号无权限 / 临时 key 限流各有可执行结
   assert.match(keyLimited, /尚未提交/);
   assert.match(keyLimited, /不会计费/);
   assert.match(keyLimited, /直接重试/);
+
+  const withRetryAfter = tool('workbuddy_generate_video', async () => {
+    const error = new Error('slow down');
+    error.status = 429;
+    error.retryAfter = 7;
+    throw error;
+  });
+  assert.match(await withRetryAfter.execute({ prompt: 'x' }), /7 秒后/);
 });
 
 test('查询工具：completed 返回有时效 URL，processing 不催重提，failed 给原因', async () => {
@@ -221,6 +251,12 @@ test('查询工具：默认代等 20 秒，wait_seconds=0 立即返回，超预�
   assert.deepEqual(seen.slice(2).map((entry) => entry.waitMs), [60_000, 60_000]);
   assert.match(long, /最多等待约 120 秒/);
   assert.deepEqual(status.parameters.properties.wait_seconds.maximum, 120);
+
+  // null / 空串 = 没填，不能因为 Number(null)=0 变成立即返回。
+  await status.execute({ id: 'task-1', wait_seconds: null });
+  assert.equal(seen.at(-1).waitMs, 20_000);
+  await status.execute({ id: 'task-1', wait_seconds: '' });
+  assert.equal(seen.at(-1).waitMs, 20_000);
 });
 
 test('查询工具：409 与 VIDEO_NO_OUTPUT 都给出「别重提」的可执行结论', async () => {

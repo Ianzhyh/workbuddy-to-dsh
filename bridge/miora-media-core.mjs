@@ -120,6 +120,12 @@ export function normalizeMediaStatus(status) {
 /** 兼容旧名（视频的对外字段就叫 status 归一，测试直接测它）。 */
 export const normalizeVideoStatus = normalizeMediaStatus;
 
+/** 终态判断统一走归一化：`FAILED` / `success` / `done` 等都算。 */
+export function isTerminalMediaStatus(status) {
+  const normalized = normalizeMediaStatus(status);
+  return normalized === 'completed' || normalized === 'failed' || normalized === 'cancelled';
+}
+
 /**
  * 上游产物文件列表 → https 地址。
  *
@@ -158,6 +164,7 @@ const SYNC_QUERY_MISS_RE = /INVALID_TASK_ID_FOR_SYNC_MODE/i;
 /** 失败原因可能是字符串、Error 形状或 `{message}`：统一取出可读文本。 */
 function errorMessageOf(value) {
   if (typeof value === 'string') return value;
+  if (typeof value === 'number' && Number.isFinite(value)) return String(value);
   if (isObject(value)) {
     const nested = value.message ?? value.msg ?? value.errorMessage ?? value.error;
     if (typeof nested === 'string') return nested;
@@ -238,7 +245,9 @@ function isPrivateIpv4(host) {
     || (parts[0] === 192 && parts[1] === 168)
     // CGNAT 100.64/10：云厂商的「内网」常落在这段，和 10/8 一样不该被公网接口打到。
     || (parts[0] === 100 && parts[1] >= 64 && parts[1] <= 127)
-    || parts[0] === 0;
+    || parts[0] === 0
+    // 组播 / 保留段：不是可抓取的公网 HTTPS 主机。
+    || parts[0] >= 224;
 }
 
 /**
@@ -312,6 +321,7 @@ function isPrivateIpv6(host) {
   if ((nums[0] & 0xfe00) === 0xfc00) return true; // ULA fc00::/7
   if ((nums[0] & 0xffc0) === 0xfe80) return true; // link-local fe80::/10
   if ((nums[0] & 0xffc0) === 0xfec0) return true; // 站点本地 fec0::/10
+  if ((nums[0] & 0xff00) === 0xff00) return true; // 组播 ff00::/8
   if (nums[0] === 0x2001 && nums[1] === 0x0db8) return true; // 文档段 2001:db8::/32
   return false;
 }
@@ -339,7 +349,11 @@ function publicHttpsUrl(raw, field, invalidCode) {
    * 域名与 IP 字面量分开判：`fc2.com` 是公网域名，`fc00::1` 才是内网地址。
    * 早先两者共用一条前缀正则，结果公网域名被误杀（见 isPrivateIpv6 的注释）。
    */
-  const rejected = host === 'localhost'
+  // 常见 hosts 别名（Debian 系默认把 localhost.localdomain / ip6-localhost
+  // 指到回环）；只按精确主机名判，不误伤 localhost.example.com。
+  const loopbackAlias = host === 'localhost' || host === 'localhost.localdomain'
+    || host === 'ip6-localhost' || host === 'ip6-loopback';
+  const rejected = loopbackAlias
     || host.endsWith('.localhost')
     || host.endsWith('.local')
     || (host.includes(':') ? isPrivateIpv6(host) : isPrivateIpv4(host));
@@ -362,7 +376,8 @@ function safeFileKey(raw, field, invalidCode) {
 }
 
 function parseDataUri(raw, field, { maxBytes, invalidCode }) {
-  const match = /^data:([^;,]+)?(;base64)?,(.*)$/s.exec(raw);
+  // 方案名大小写不敏感（RFC 2397）：DATA: 与 data: 等价。
+  const match = /^data:([^;,]+)?(;base64)?,(.*)$/is.exec(raw);
   if (!match) throw new MioraMediaError(invalidCode, `${field} is not a valid data URI.`, { status: 400 });
   if (!match[2]) {
     throw new MioraMediaError(invalidCode, `${field} data URI must use ;base64 encoding.`, { status: 400 });
@@ -416,7 +431,7 @@ export function assertInlineInputBudget(resolvedList, maxBodyBytes, { prefix = '
   if (total <= budget) return;
   throw new MioraMediaError(
     `${prefix}_INVALID_INPUT`,
-    `inline ${what} data is ${mb(total)} (base64), which exceeds the request body budget (${mb(budget)} of raw data). `
+    `inline ${what} data is ${mb(total)} raw, which exceeds the request body budget (${mb(budget)} of raw data; base64 expands by 4/3). `
       + 'Use a miora fileKey or public https URL instead of local paths/data URIs, or send fewer/smaller inputs.',
     { status: 400 },
   );
@@ -436,7 +451,7 @@ export async function resolveImageInput(raw, options = {}) {
   const invalid = (message) => new MioraMediaError(invalidCode, message, { status: 400 });
   const text = typeof raw === 'string' ? raw.trim() : '';
   if (!text) throw invalid(`${field} is empty.`);
-  if (text.startsWith('data:')) return parseDataUri(text, field, { maxBytes, invalidCode });
+  if (/^data:/i.test(text)) return parseDataUri(text, field, { maxBytes, invalidCode });
   if (/^https?:\/\//i.test(text)) {
     return { origin: 'url', url: publicHttpsUrl(text, field, invalidCode), sizeBytes: 0 };
   }
@@ -569,9 +584,26 @@ export function rememberSubmission(id, meta) {
   }
 }
 
-export function recallSubmission(id) {
+/**
+ * 提交缓存的**账号作用域**。
+ *
+ * 缓存里有同步任务的产物 URL / 失败原因，不能只按 taskId 命中：同一台机器
+ * 切换账号后，新账号拿到旧账号的任务 id 时，必须重新走上游（通常 404），
+ * 而不是从本进程缓存里读到别人的产物。用 endpoint + userId 做作用域，
+ * 这样同账号 token 刷新后仍能命中；没有 userId 的 API key 模式才退回 token 指纹。
+ */
+export function submissionScope(auth) {
+  const id = auth?.userId || auth?.uid || '';
+  const endpoint = trimSlash(auth?.endpoint);
+  if (id) return `${endpoint}|${id}`;
+  return cacheKeyFor(auth);
+}
+
+export function recallSubmission(id, scope = null) {
   const meta = submissionMeta.get(id);
   if (!meta) return null;
+  // 老进程里可能残留没有 account 的条目；有 account 且与当前账号不符时绝不返回。
+  if (scope && meta.account && meta.account !== scope) return null;
   // TTL 用真实时钟：`now` 是可注入的（测试用来固定 created_at），不该影响缓存寿命。
   if (Date.now() - meta.savedAt > META_TTL_MS) {
     submissionMeta.delete(id);
@@ -781,7 +813,7 @@ export async function pollMediaTask(auth, id, options = {}) {
     last = options.normalize({
       id: taskId,
       entry,
-      meta: recallSubmission(taskId),
+      meta: recallSubmission(taskId, submissionScope(auth)),
     });
     const terminal = last.status === 'completed' || last.status === 'failed' || last.status === 'cancelled';
     if (terminal || attempt === attempts - 1) return last;

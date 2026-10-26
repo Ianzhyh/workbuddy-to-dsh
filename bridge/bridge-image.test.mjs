@@ -392,6 +392,11 @@ test('请求体超限：413 带 IMAGE_PAYLOAD_TOO_LARGE 与可执行建议', asy
   const body = await huge.json();
   assert.equal(body.error.code, 'IMAGE_PAYLOAD_TOO_LARGE');
   assert.match(body.error.message, /fileKey|https|WORKBUDDY_MAX_BODY_BYTES/);
+
+  const ledger = await (await get('/v1/requests?limit=100')).json();
+  assert.ok(ledger.requests.some((row) => row.kind === 'image'
+    && row.ok === false
+    && row.code === 'IMAGE_PAYLOAD_TOO_LARGE'), '413 也要进账本失败列表');
 });
 
 test('账本：图片提交单独计数，不污染模型调用/tokens/积分', async () => {
