@@ -120,7 +120,8 @@ export const FIXTURES = {
     quotaError: '',
     checkin: { status: { todayCheckedIn: true, todayCredit: 18, streakDays: 6 }, auto: { auto: true } },
     dsh: { home: 'C:\\Users\\demo\\.dsh', profileDir: 'C:\\Users\\demo\\.dsh\\profiles\\desktop' },
-    runtime: { node: 'v24.8.0', pid: 1234 },
+    // 插件自述版本：面板的「插件版本 / 检查更新」行依赖它；缺了这行就永远不渲染
+    runtime: { version: '1.15.0', node: 'v24.8.0', pid: 1234 },
     sampleModel: 'deepseek-v4.1-flash',
   },
   models: { ok: true, at: now - 300_000, models: [], error: '' },

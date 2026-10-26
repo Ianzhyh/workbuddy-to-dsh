@@ -146,6 +146,7 @@ WORKBUDDY_AUTH_FILE=C:\Users\you\AppData\Local\CodeBuddyExtension\Data\Public\au
 | 提示检测到**旧的 llm-pi-ai 路由**并撞名 | 对方之前手写过 `providers.workbuddy` | 用设置页概览的「清理旧路由」（会先备份），或 `/workbuddy cleanup` |
 | 体检 / 账号切换按钮点了没反应或提示需要控制台 | 控制台没跑（结论只由它写，保证两边一致） | 概览页点「启动控制台」 |
 | 想彻底卸载 | — | 设置 → 插件里停用/卸载；桥与控制台进程可留着（也可手动结束）；运行期状态在 `%USERPROFILE%\.workbuddy-bridge\`，**删插件目录不会清它**，需要时手动删这个数据目录 |
+| 想换机 / 重装前留一份运行期数据 | — | 在**仓库检出目录**停桥与控制台后运行 `node tools\backup.mjs --out D:\wb-backup`；恢复用 `node tools\backup.mjs --restore D:\wb-backup --yes`。备份含令牌与插件加密凭据，按敏感文件保管，详见 `docs/TROUBLESHOOTING.md` |
 
 ---
 

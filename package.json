@@ -36,6 +36,7 @@
     "cordis.patch.yml",
     "lib/atrest.mjs",
     "lib/client-connect.mjs",
+    "lib/config-schema.mjs",
     "lib/diagnostics.mjs",
     "lib/dsh.mjs",
     "lib/find-dsh.mjs",

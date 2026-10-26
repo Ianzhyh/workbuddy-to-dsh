@@ -1095,6 +1095,12 @@ body.dark .wb-root,
       'AtRest 密钥': 'AtRest key',
       '凭据解密': 'Credential decryption',
       '桥服务': 'Bridge service',
+      '插件版本': 'Plugin version',
+      '检查更新': 'Check for updates',
+      '配置取值': 'Config values',
+      '使用默认值（未自定义数值 / 枚举配置）': 'Using defaults (no numeric / enum settings customized)',
+      '按提示修正 .env（或系统环境变量）后重启桥与控制台。格式错误的值不会生效，也不会阻止启动。':
+        'Fix the .env (or system environment variables) as suggested, then restart the bridge and console. Invalid values neither take effect nor block startup.',
       '凭据引用': 'Credential reference',
       '未找到 WorkBuddy 客户端（已探测默认位置并扫描常见安装目录）':
         'WorkBuddy client not found (probed the default location and scanned common install dirs)',
@@ -2337,7 +2343,7 @@ body.dark .wb-root,
     function Row(props) {
       return h('div', { className: 'wb-row' },
         h('span', { className: 'wb-label' }, props.label),
-        h('span', { className: 'wb-value' }, props.children));
+        h('span', { className: 'wb-value', ...(props.align ? { style: { textAlign: props.align } } : {}) }, props.children));
     }
     function Pill(props) {
       return h('span', { className: 'wb-pill', ...(props.title ? { title: props.title } : {}) }, h('span', { className: 'wb-dot ' + (props.tone || '') }), props.text);
@@ -3343,6 +3349,7 @@ body.dark .wb-root,
             ? '登录后可用'
             : fmtInt((status?.directory || []).length) + ' 个' + (status?.sampleModel ? '，推荐 ' + status.sampleModel : '')),
           h(Row, { label: 'dsh 原生路由' }, status?.route?.registered ? '已注册 provider=' + status.route.provider + (status.route.fallback ? '（兜底）' : '') : '未注册'),
+          h(PluginVersionRow, { status }),
           h(Row, { label: '数据控制台' }, h(Pill, { tone: con.state === 'running' ? 'ok' : 'bad', text: con.state === 'running' ? '运行中' : (con.state || '未运行') })),
           status?.config?.projectRoot ? h(Row, { label: '检出目录' }, status.config.projectRoot) : null),
 
@@ -4603,6 +4610,20 @@ body.dark .wb-root,
           !consoleReady ? h(Btn, { disabled: busy, onClick: onStartConsole }, '启动控制台') : null));
     }
 
+    /*
+     * 版本只读展示 + 发布页链接：不做联网检查、也不自动升级 ——
+     * 插件装在 dsh 的 profile 里，升级必须由用户显式操作（pnpm / 安装包）。
+     * 把「当前是哪一代」摆出来，至少能排除「装了新版但宿主还在跑旧代码」。
+     */
+    const RELEASES_URL = 'https://github.com/Ianzhyh/workbuddy-to-dsh/releases/latest';
+    function PluginVersionRow({ status: pluginStatus }) {
+      const version = pluginStatus?.runtime?.version;
+      if (!version) return null;
+      return h(Row, { label: '插件版本', align: 'left' },
+        h('span', null, 'v' + version + ' · ',
+          h('a', { href: RELEASES_URL, target: '_blank', rel: 'noreferrer' }, '检查更新')));
+    }
+
     // ─────────────────────────── 环境诊断 ───────────────────────────
     function DiagnosePanel({ onStartConsole, busy, status: pluginStatus }) {
       const api = useConsoleApi(CONSOLE_API + '/diagnose', { interval: 60000 });
@@ -4658,6 +4679,7 @@ body.dark .wb-root,
 
       const tone = (s) => (s === 'ok' ? 'ok' : s === 'warn' ? 'warn' : 'bad');
       return h(Card, { title: '环境诊断' },
+        h(PluginVersionRow, { status: pluginStatus }),
         error ? h(Alert, { bad: true }, error) : null,
         Object.keys(adjSummary).length
           ? h('p', { className: 'wb-note', style: { marginTop: 0 } }, `${adjSummary.ok || 0} 项通过 / ${adjSummary.warn || 0} 项警告 / ${adjSummary.fail || 0} 项失败 —— 红色项不解决，模型就不会出现。`)

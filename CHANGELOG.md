@@ -52,6 +52,13 @@
 - **安全与运维文档**：新增 `.github/SECURITY.md`、Bug/Feature issue 表单、PR 模板、
   [`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md) 与 [`docs/SUNSET.md`](docs/SUNSET.md)；
   明确平台/客户端分档、上游失效处置、数据位置与不支持范围。
+- **配置取值校验与备份恢复**：诊断页新增「配置取值」——用与 `numEnv()` 相同的
+  判据检查数值 / 枚举 / 开关项，格式错误（如端口 `879O`、搜索条数 `50`）会明确
+  指出「值不会被采用、实际按什么运行」，不再静默回退。新增
+  `tools/backup.mjs`：备份 state / usage / quota-history / media-tasks / token /
+  credentials，`manifest.json` 带 SHA-256；恢复前逐文件校验并先把当前数据目录
+  复制到 `.pre-restore-<时间>`。插件概览与诊断页显示「插件版本 vX.Y.Z · 检查更新」
+  （只链接到 Release 页，不联网检查、不自动升级）。
 
 ## [1.15.0] - 2026-10-26
 

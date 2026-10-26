@@ -266,6 +266,7 @@ WorkBuddy 的上游后端本身就讲 OpenAI 协议，官方只是没有开放�
 ```cmd
 bridge\start-bridge.cmd     :: 只起桥
 node tools\doctor.mjs       :: 命令行自检，输出缺失项与修法
+node tools\backup.mjs       :: 备份运行期数据（--restore <目录> --yes 恢复）
 ```
 
 ### 把安装交给 Agent
@@ -687,10 +688,12 @@ dashboard/
   public/index.html        控制台前端（单文件）
 lib/
   atrest.mjs               AtRest 密钥获取与信封解密
+  config-schema.mjs        数值 / 枚举配置的取值校验（诊断页「配置取值」）
   diagnostics.mjs          环境诊断（页面与 CLI 共用；含客户端安装布局体检）
   dsh.mjs                  dsh 配置读取与模型注册写入
 tools/
   doctor.mjs               命令行自检（doctor --json 可选）
+  backup.mjs               运行期数据备份 / 恢复（含 SHA-256 清单）
   verify-atrest.mjs        凭据解密自检
   dev/                     开发期探查脚本，日常无需使用
 scripts/
@@ -738,6 +741,8 @@ docs/                      架构、配置、排错、安全、接入链路审�
 ```cmd
 node tools\doctor.mjs
 node tools\doctor.mjs --bundle   :: 可分享的诊断包（版本/路径/PID/端口/vendor 指纹/最近失败，脱敏）
+node tools\backup.mjs --out D:\wb-backup   :: 备份运行期数据（换机 / 重装前）
+node tools\backup.mjs --restore D:\wb-backup --yes   :: 恢复（先停桥与控制台）
 ```
 
 完整排查表见 [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md)。
