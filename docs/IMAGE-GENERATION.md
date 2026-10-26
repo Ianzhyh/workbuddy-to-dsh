@@ -187,6 +187,34 @@ curl -sS http://127.0.0.1:8790/v1/images/edits \
 curl -sS "http://127.0.0.1:8790/v1/images/<id>?wait=30" -H "Authorization: Bearer $TOKEN"
 ```
 
+## 6.5 OpenAI Images 兼容端点（标准客户端）
+
+标准客户端（Cherry Studio / Open WebUI / LobeChat 等）只认同步语义：
+
+```http
+POST /v1/images/generations
+Authorization: Bearer <本地桥令牌>
+Content-Type: application/json
+
+{
+  "model": "gpt-image-1",
+  "prompt": "雪地里的红狐，逆光",
+  "n": 1,
+  "size": "1024x1024",
+  "response_format": "url"
+}
+```
+
+- `n` 只支持 1（多张会成倍扣积分，>1 直接 400）。
+- `model` / `style` / `user` 等标准字段接受但忽略；真正用哪个模型由上游决定。
+- `response_format=url` 返回 `{created,data:[{url}]}`；`b64_json` 会把产物下载后内联
+  （单张上限 `WORKBUDDY_IMAGE_B64_MAX_BYTES`，默认 20MB）。
+- 提交后最多等 `WORKBUDDY_IMAGE_SYNC_WAIT_S`（默认 90 秒）；同步完成直接 200；
+  仍未完成回 **202** + `X-WorkBuddy-Job-Id` / `Location: /v1/images/{id}`。
+  标准客户端可能不认 202，这是非标准降级；自定义 `/v1/images` 仍是完整的异步接口。
+- `stream=true` 不支持，返回 400（避免客户端误以为有 SSE）。
+- 只接受本地管理令牌；client key 仍只能聊天。
+
 ## 7. 与视频的差异
 
 | 项 | 视频 | 图片 |

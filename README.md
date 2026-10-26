@@ -88,7 +88,7 @@ dsh 的模型选择器里，日常需要的接入、管理、监控、运维能�
 | 每日签到 | 自动签到（不开控制台也会签）+ 手动领取 |
 | 同时服务其它客户端 | 桥讲 OpenAI / Anthropic / Responses 三套协议 —— Claude Code、Codex、opencode、Cherry Studio 等直接接入 |
 | 视频生成（本地 API） | 文生视频 / 首尾帧 / 参考图三种模式，异步提交 + 查询（可长轮询，上游同步完成时 200 直接返回）+ 下载跳转；走 WorkBuddy 账号积分，详见 [`docs/VIDEO-GENERATION.md`](docs/VIDEO-GENERATION.md) |
-| 图片生成（本地 API） | 文生图 / 图生图两种模式，异步提交 + 查询（可长轮询，上游同步完成时 200 直接返回产物/失败原因）+ 下载跳转；与视频共用临时 key 与错误契约，详见 [`docs/IMAGE-GENERATION.md`](docs/IMAGE-GENERATION.md) |
+| 图片生成（本地 API） | 文生图 / 图生图两种模式，异步提交 + 查询（可长轮询，上游同步完成时 200 直接返回产物/失败原因）+ 下载跳转；**另提供标准 `POST /v1/images/generations`**（URL/b64_json、同步等待/202 降级），Cherry Studio / Open WebUI 等可直接用；与视频共用临时 key 与错误契约，详见 [`docs/IMAGE-GENERATION.md`](docs/IMAGE-GENERATION.md) |
 | 中英双语 | 控制台与 dsh 设置页（9 个标签页）全部双语，右上角 `EN` / `中` 切换 |
 
 **在 dsh 里直接装**：设置 → 插件 → 添加插件，填

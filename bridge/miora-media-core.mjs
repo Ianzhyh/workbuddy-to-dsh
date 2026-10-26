@@ -326,7 +326,7 @@ function isPrivateIpv6(host) {
   return false;
 }
 
-function publicHttpsUrl(raw, field, invalidCode) {
+export function publicHttpsUrl(raw, field, invalidCode) {
   let url;
   try {
     url = new URL(raw);

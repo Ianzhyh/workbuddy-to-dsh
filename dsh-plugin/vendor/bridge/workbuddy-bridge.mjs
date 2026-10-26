@@ -39,6 +39,7 @@ import { waitDrain } from './wait-drain.mjs';
 import { applyPromotion, groupPromotions } from './promotions.mjs';
 import { submitVideo, queryVideo, MioraVideoError, MAX_VIDEO_WAIT_MS } from './miora-video.mjs';
 import { submitImage, queryImage } from './miora-image.mjs';
+import { publicHttpsUrl } from './miora-media-core.mjs';
 
 /**
  * 本桥源码的构建指纹。
@@ -3811,6 +3812,202 @@ const handleVideoLookup = (req, res, pathname, url) => handleMediaLookup(req, re
 const handleImageLookup = (req, res, pathname, url) => handleMediaLookup(req, res, pathname, url, {
   basePath: '/v1/images/', query: queryImage, label: 'image', prefix: 'IMAGE',
 });
+
+// ── OpenAI Images 兼容门面 ────────────────────────────────────────────────
+/*
+ * 标准客户端（Cherry Studio / Open WebUI / LobeChat）只认
+ * `POST /v1/images/generations` 的同步语义，不认本项目的异步任务 id。
+ * 这里复用现有 submitImage/queryImage：提交后最多等 N 秒；同步完成直接回
+ * `{created,data:[{url|b64_json}]}`，仍未完成回 202 + job id（非标准降级，
+ * 文档会说明客户端可能不认）。自定义 `/v1/images` 保持原样。
+ */
+const OPENAI_IMAGE_SYNC_WAIT_S = numEnv('WORKBUDDY_IMAGE_SYNC_WAIT_S', 90, { min: 0, max: 300 });
+const OPENAI_IMAGE_B64_MAX_BYTES = numEnv('WORKBUDDY_IMAGE_B64_MAX_BYTES', 20 * 1024 * 1024, { min: 1024 });
+const OPENAI_IMAGE_ALLOWED_FIELDS = new Set([
+  'prompt', 'model', 'n', 'size', 'quality', 'response_format', 'style', 'user',
+  'background', 'moderation', 'output_compression', 'output_format', 'partial_images', 'stream',
+]);
+const isOpenAIImageTerminal = (status) => ['completed', 'failed', 'cancelled'].includes(status);
+
+function openAIImageError(res, status, message, code = 'IMAGE_INVALID_INPUT') {
+  return json(res, status, {
+    error: { message: `workbuddy-bridge: ${message}`, type: 'image_generation_error', code },
+  });
+}
+
+async function imageUrlToBase64(url) {
+  const safe = publicHttpsUrl(url, 'image output URL', 'IMAGE_NO_OUTPUT');
+  const res = await fetch(safe, { signal: AbortSignal.timeout(30_000) });
+  if (!res.ok) throw new Error(`image download failed HTTP ${res.status}`);
+  const declared = Number(res.headers.get('content-length') || 0);
+  if (declared > OPENAI_IMAGE_B64_MAX_BYTES) {
+    throw new Error(`image is larger than ${OPENAI_IMAGE_B64_MAX_BYTES} bytes`);
+  }
+  const buf = Buffer.from(await res.arrayBuffer());
+  if (buf.length > OPENAI_IMAGE_B64_MAX_BYTES) {
+    throw new Error(`image is larger than ${OPENAI_IMAGE_B64_MAX_BYTES} bytes`);
+  }
+  return buf.toString('base64');
+}
+
+async function handleOpenAIImagesGenerations(req, res) {
+  const startedAt = Date.now();
+  let raw;
+  try {
+    raw = await readBody(req);
+  } catch (e) {
+    if (e.code === 'BODY_TOO_LARGE') {
+      recordRequest({
+        model: 'image', kind: 'image', stream: false, ms: Date.now() - startedAt,
+        ok: false, status: 413, code: 'IMAGE_PAYLOAD_TOO_LARGE',
+        error: `image request body exceeds ${MAX_BODY_BYTES} bytes`,
+      });
+      return rejectTooLarge(req, res, 'openai', `image request body too large (limit ${MAX_BODY_BYTES} bytes)`,
+        'IMAGE_PAYLOAD_TOO_LARGE');
+    }
+    throw e;
+  }
+  let body;
+  try { body = JSON.parse(raw); }
+  catch { return openAIImageError(res, 400, 'invalid JSON body'); }
+  if (!body || typeof body !== 'object' || Array.isArray(body)) {
+    return openAIImageError(res, 400, 'body must be a JSON object');
+  }
+  const unknown = Object.keys(body).filter((key) => !OPENAI_IMAGE_ALLOWED_FIELDS.has(key));
+  if (unknown.length) {
+    return openAIImageError(res, 400,
+      `unknown field(s): ${unknown.join(', ')}; accepted: ${[...OPENAI_IMAGE_ALLOWED_FIELDS].join(', ')}`);
+  }
+  if (typeof body.prompt !== 'string' || !body.prompt.trim()) {
+    return openAIImageError(res, 400, 'prompt is required');
+  }
+  const n = body.n === undefined ? 1 : Number(body.n);
+  if (!Number.isInteger(n) || n !== 1) {
+    return openAIImageError(res, 400, 'n must be 1 (multiple images would multiply billing)');
+  }
+  const responseFormat = body.response_format === undefined ? 'url' : body.response_format;
+  if (responseFormat !== 'url' && responseFormat !== 'b64_json') {
+    return openAIImageError(res, 400, 'response_format must be "url" or "b64_json"');
+  }
+  if (body.stream === true) {
+    return openAIImageError(res, 400, 'stream=true is not supported; use the custom /v1/images job API');
+  }
+
+  const input = {
+    prompt: body.prompt,
+    mode: 'generate',
+    ...(body.size !== undefined ? { size: body.size } : {}),
+    ...(body.quality !== undefined ? { quality: body.quality } : {}),
+  };
+  const resolved = await mediaAuth('IMAGE');
+  if (resolved.error) return json(res, resolved.error.status, resolved.error.body);
+  try {
+    let balanceBefore = null;
+    const submitted = await submitImage(resolved.auth, input, {
+      baseUrl: VIDEO_BASE_OVERRIDE || undefined,
+      maxBodyBytes: MAX_BODY_BYTES,
+      onBeforeRequest: async () => { balanceBefore = await quotaBalance(resolved.auth); },
+    });
+    const failedAtSubmit = submitted.status === 'failed' || submitted.status === 'cancelled';
+    const balanceAfter = failedAtSubmit ? null : await quotaBalance(resolved.auth);
+    const creditEstimate = balanceBefore !== null && balanceAfter !== null && balanceBefore > balanceAfter
+      ? Math.round((balanceBefore - balanceAfter) * 10000) / 10000
+      : null;
+
+    let media = submitted;
+    const deadline = Date.now() + OPENAI_IMAGE_SYNC_WAIT_S * 1000;
+    while (!isOpenAIImageTerminal(media.status) && Date.now() < deadline) {
+      const waitMs = Math.min(Math.max(0, deadline - Date.now()), MAX_VIDEO_WAIT_MS);
+      try {
+        media = await queryImage(resolved.auth, media.id, {
+          baseUrl: VIDEO_BASE_OVERRIDE || undefined,
+          waitMs,
+        });
+      } catch (e) {
+        log('openai images: query while waiting failed', e.message);
+        break;
+      }
+    }
+
+    const failed = media.status === 'failed' || media.status === 'cancelled';
+    const terminal = isOpenAIImageTerminal(media.status);
+    let httpStatus = terminal ? (failed ? 400 : 200) : 202;
+    let payload;
+    if (terminal && failed) {
+      payload = {
+        error: {
+          message: `workbuddy-bridge: ${media.error?.message || 'image generation failed'}`,
+          type: 'image_generation_error',
+          code: 'IMAGE_GENERATION_FAILED',
+        },
+      };
+    } else if (terminal) {
+      const url = media.output?.url;
+      if (!url) {
+        httpStatus = 502;
+        payload = {
+          error: {
+            message: 'workbuddy-bridge: image completed but upstream returned no https output; query again later',
+            type: 'image_generation_error',
+            code: 'IMAGE_NO_OUTPUT',
+          },
+        };
+      } else if (responseFormat === 'b64_json') {
+        try {
+          payload = { created: Math.floor(Date.now() / 1000), data: [{ b64_json: await imageUrlToBase64(url) }] };
+        } catch (e) {
+          httpStatus = 502;
+          payload = {
+            error: {
+              message: `workbuddy-bridge: ${e.message}`,
+              type: 'image_generation_error',
+              code: 'IMAGE_NO_OUTPUT',
+            },
+          };
+        }
+      } else {
+        payload = { created: Math.floor(Date.now() / 1000), data: [{ url }] };
+      }
+    } else {
+      // 非标准降级：标准客户端可能不认 202；文档要求调用方按 job id 查询。
+      payload = {
+        id: media.id,
+        object: 'image',
+        status: media.status,
+        sync: false,
+        created: Math.floor(Date.now() / 1000),
+        model: media.model || '',
+      };
+    }
+
+    recordRequest({
+      model: 'image', kind: 'image', stream: false, ms: Date.now() - startedAt,
+      ok: httpStatus === 200 || httpStatus === 202,
+      status: httpStatus,
+      code: httpStatus === 400 ? 'IMAGE_GENERATION_FAILED'
+        : httpStatus === 502 ? 'IMAGE_NO_OUTPUT' : null,
+      ...(httpStatus === 400 || httpStatus === 502
+        ? { error: payload?.error?.message || 'image generation failed' }
+        : {}),
+      ...(!failed && creditEstimate !== null ? { creditEstimate } : {}),
+    });
+    const headers = {
+      'Cache-Control': 'no-store',
+      ...(httpStatus === 202 ? {
+        'X-WorkBuddy-Job-Id': media.id,
+        Location: `/v1/images/${media.id}`,
+        'Retry-After': '5',
+      } : {}),
+    };
+    return json(res, httpStatus, payload, headers);
+  } catch (e) {
+    recordRequest({
+      model: 'image', kind: 'image', stream: false, ms: Date.now() - startedAt,
+      ok: false, status: e?.status || 502, code: e?.code || null, error: e?.message || String(e),
+    });
+    return respondMediaError(res, e, 'IMAGE');
+  }
+}
 
 /**
  * 搜索端的头与 chat 不同：WorkBuddy CLI 的 WebSearch 用的是 WorkBuddy 身份
@@ -9516,6 +9713,9 @@ async function handleRequest(req, res) {
     }
     if (url.pathname.startsWith('/v1/videos/') && req.method === 'GET') {
       return handleVideoLookup(req, res, url.pathname, url);
+    }
+    if (url.pathname === '/v1/images/generations' && req.method === 'POST') {
+      return handleOpenAIImagesGenerations(req, res);
     }
     if (url.pathname === '/v1/images' && req.method === 'POST') {
       return handleImageGenerate(req, res);

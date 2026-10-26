@@ -58,6 +58,8 @@ copy .env.example .env
 | `DASHBOARD_AUTO_START_BRIDGE` | `1` | 控制台启动时自动拉起桥（"双击即用"的关键）。设为 `0` 则改为手动点「启动桥服务」 |
 | `WORKBUDDY_QUOTA_TTL_MS` | `60000` | 积分余额的缓存时长。总览每 20 秒轮询一次，而积分要打上游计费网关；调小可更快反映余额变化（如签到后），代价是更频繁的上游查询 |
 | `WORKBUDDY_QUOTA_SNAPSHOT_MS` | `3600000` | 余额快照采集间隔（毫秒）。用量页「账实差额」用首尾快照对比本地账本；`0` = 每次读到余额都记一条（只建议测试用） |
+| `WORKBUDDY_IMAGE_SYNC_WAIT_S` | `90` | OpenAI Images 兼容端点提交后最多等待秒数；超时回 202 + job id |
+| `WORKBUDDY_IMAGE_B64_MAX_BYTES` | `20971520` | `response_format=b64_json` 时单张产物上限（字节），超过回 502 |
 
 ### WorkBuddy 客户端
 

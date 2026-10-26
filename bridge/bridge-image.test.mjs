@@ -76,6 +76,14 @@ const stub = createServer((req, res) => {
           },
         });
       }
+      if (prompt.includes('processing')) {
+        quotaRemain -= 1.5;
+        return json(200, {
+          code: 0,
+          failed: false,
+          data: { upstreamTaskId: 'img-processing', model: 'miora-image', provider: 'copilot-image', mode: 'async' },
+        });
+      }
       if (prompt.includes('sync-ok')) {
         // 不改余额：同步完成不一定当场扣分（也可能延迟出账），估算应保持 null。
         return json(200, {
@@ -177,6 +185,8 @@ const child = spawn(process.execPath, [BRIDGE], {
     WORKBUDDY_SKIP_MODEL_PREFLIGHT: '1',
     WORKBUDDY_AUTO_CHECKIN: '0',
     WORKBUDDY_LOG: '0',
+    // 长轮询测试只需要确认“等不到会回 202”，不要真等 90 秒。
+    WORKBUDDY_IMAGE_SYNC_WAIT_S: '1',
     // 小上限只用于验证 413 的形状；正常提交（含 prompt）远低于它。
     WORKBUDDY_MAX_BODY_BYTES: '65536',
   },
@@ -417,4 +427,49 @@ test('账本：图片提交单独计数，不污染模型调用/tokens/积分', 
   assert.equal(usage.total.promptTokens + usage.total.completionTokens, 0, '图片没有模型 token');
   assert.equal(usage.models.some((model) => model.model === 'image'), false, '模型排行不应出现 image');
   assert.ok(usage.failures.some((failure) => failure.kind === 'image'), '失败列表要能区分图片');
+});
+
+test('OpenAI Images：同步完成回 200 + data[].url，并剥掉标准字段', async () => {
+  const res = await post('/v1/images/generations', {
+    model: 'gpt-image-1',
+    prompt: 'sync-ok',
+    n: 1,
+    size: '1024x1024',
+    response_format: 'url',
+  });
+  assert.equal(res.status, 200);
+  const body = await res.json();
+  assert.equal(typeof body.created, 'number');
+  assert.deepEqual(body.data, [{ url: 'https://cdn.example/sync.png' }]);
+  const sent = submitCalls.at(-1);
+  assert.equal(sent.path, '/api/ai/workbuddy-proxy/image/generate/submit');
+  assert.deepEqual(sent.body, { prompt: 'sync-ok', size: '1024x1024' },
+    'model/n/response_format 是标准客户端字段，不能原样塞给上游');
+});
+
+test('OpenAI Images：等待超时回 202 + job id，不伪装成成功', async () => {
+  const res = await post('/v1/images/generations', { prompt: 'processing' });
+  assert.equal(res.status, 202);
+  assert.equal(res.headers.get('x-workbuddy-job-id'), 'img-processing');
+  assert.match(res.headers.get('location') || '', /\/v1\/images\/img-processing$/);
+  const body = await res.json();
+  assert.equal(body.id, 'img-processing');
+  assert.equal(body.status, 'in_progress', '上游 processing 归一成 in_progress');
+  assert.equal(body.data, undefined, '未完成时不能给 data');
+});
+
+test('OpenAI Images：n>1 / stream / 未知字段在本地 400，不提交上游', async () => {
+  const before = submitCalls.length;
+  const multi = await post('/v1/images/generations', { prompt: 'x', n: 2 });
+  assert.equal(multi.status, 400);
+  assert.match((await multi.json()).error.message, /n must be 1/);
+
+  const streamed = await post('/v1/images/generations', { prompt: 'x', stream: true });
+  assert.equal(streamed.status, 400);
+  assert.match((await streamed.json()).error.message, /stream=true/);
+
+  const unknown = await post('/v1/images/generations', { prompt: 'x', made_up: 1 });
+  assert.equal(unknown.status, 400);
+  assert.match((await unknown.json()).error.message, /unknown field/);
+  assert.equal(submitCalls.length, before, '校验失败不能提交上游（否则会白扣积分）');
 });
