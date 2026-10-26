@@ -15,6 +15,8 @@ import {
   bridgeHealth,
   bridgeIdentity,
   bridgeModels,
+  bridgeModelsDefault,
+  bridgeSaveModelsDefault,
   bridgeQuota,
   bridgeRequests,
   bridgeUsage,
@@ -1550,12 +1552,60 @@ const server = createServer(async (req, res) => {
       // refresh=1 透传给桥（强制重取上游）；失败时桥会带回 staleMs，
       // 页面据此提示「仍显示 HH:MM 的缓存」，而不是假装刷新成功。
       const refresh = url.searchParams.get('refresh') === '1';
-      const result = await bridgeModels(25000, refresh);
+      const [result, modelsDefault] = await Promise.all([
+        bridgeModels(25000, refresh),
+        bridgeModelsDefault(),
+      ]);
       sendJson(res, 200, {
         models: result.models,
+        // 「客户端一键拉取会看到几个」的当前设置：面板顶部那一行据此渲染。
+        // 桥没起来时它是 null（页面据此隐藏那一行，而不是显示一个假的默认值）。
+        modelsDefault,
         ...(result.staleMs !== null ? { staleMs: result.staleMs } : {}),
         ...(result.error ? { error: result.error } : {}),
       });
+      return;
+    }
+
+    /*
+     * 「桥默认返回几个模型」的读写。
+     *
+     * 为什么不是写 `.env`：`.env` 是**部署级**配置、改了要重启桥；而这是
+     * 「我现在想让客户端都看到全量」这种随手调整，放在桥的数据目录里能立刻
+     * 生效。桥侧是唯一真源（它自己解析、自己校验），这里只做转发 + 超时兜底。
+     */
+    if (route === '/api/models/default' && req.method === 'GET') {
+      sendJson(res, 200, { ok: true, modelsDefault: await bridgeModelsDefault() });
+      return;
+    }
+
+    if (route === '/api/models/default' && req.method === 'POST') {
+      let body;
+      try {
+        body = JSON.parse(await readBody(req));
+      } catch (err) {
+        if (err.code === 'BODY_TOO_LARGE') return bodyTooLarge(req, res);
+        return sendJson(res, 400, { ok: false, error: `请求体不是合法 JSON：${err.message}` });
+      }
+      try {
+        /*
+         * 原样转发两种形状（`{ value }` / `{ ids }`），**不要在这里挑字段**。
+         *
+         * 踩过的坑：这里曾写成 `body?.value ?? null`，于是面板提交的
+         * `{ ids: [...] }` 被丢掉变成 `{ value: null }` —— 效果是"清空偏好"，
+         * 用户勾选完点保存，客户端清单直接跳回精选 3 个。
+         * 语义由桥侧判定，转发层只负责透传。
+         */
+        const payload = {};
+        if (Array.isArray(body?.ids)) payload.ids = body.ids;
+        if (body?.value !== undefined) payload.value = body.value;
+        if (!payload.ids && payload.value === undefined) payload.value = null;
+        const saved = await bridgeSaveModelsDefault(payload);
+        sendJson(res, 200, saved);
+      } catch (err) {
+        // 桥的 400（不认识的取值）要原样带回，页面据此提示；500 同理。
+        sendJson(res, err.status || 502, { ok: false, error: String(err.message || err) });
+      }
       return;
     }
 

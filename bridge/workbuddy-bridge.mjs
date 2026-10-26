@@ -590,6 +590,125 @@ function featuredAllowedIn(f, region) {
 }
 
 /**
+ * 默认视图给几个模型：`WORKBUDDY_MODELS_DEFAULT` / 面板里保存的偏好。
+ *
+ * ## 为什么需要它（2026-10-26 反馈）
+ *
+ * `/v1/models` 不带 `all=1` 时**只回 3 个精选**，而几乎所有客户端的「获取模型
+ * 列表 / 一键同步」按钮打的就是这个不带参数的地址 —— 于是用户看到「桥只认三个
+ * 模型」，完整目录其实躺在 `?all=1` 里。精选是**给默认视图收窄噪音**的默认值，
+ * 不该是唯一选项：用户想把 32 个全灌进客户端，必须有办法说出口。
+ *
+ * ## 取值
+ *
+ * - 不设（默认）→ `curated`：精选集，行为与之前完全一致；
+ * - `all`        → 全量目录（等价于让客户端自动带 `all=1`）；
+ * - 正整数 N     → 精选在前、其余按目录顺序补上，取前 N 个。
+ *
+ * ## 两个来源，优先级明确
+ *
+ * ① 面板「可用模型」里保存的值（`models-default.json`，改了**立即生效**）；
+ * ② 环境变量 `WORKBUDDY_MODELS_DEFAULT`（部署级默认）。
+ *
+ * 面板存的优先 —— 用户点了保存就该立刻看到效果，不该被 `.env` 里一个旧值压回去。
+ * 面板没存过（文件不存在 / 空）才用环境变量。
+ *
+ * 另外 `/v1/models?limit=N` 是**请求级**覆盖，两者取更宽的那个。
+ *
+ * 非法值**不报错**：回退 `curated` 并记一次日志 —— 与 `numEnv()` 同一套纪律
+ * （写错一个环境变量不应该让桥起不来，但也不能静默假装生效）。
+ */
+function parseModelsDefault(raw) {
+  const text = String(raw ?? '').trim().toLowerCase();
+  if (!text) return { mode: 'curated' };
+  if (text === 'all' || text === 'full') return { mode: 'all' };
+  if (text === 'curated') return { mode: 'curated' };
+  const n = Number(text);
+  if (Number.isFinite(n) && n > 0) return { mode: 'limit', limit: Math.trunc(n) };
+  return { mode: 'curated', invalid: String(raw) };
+}
+
+/**
+ * 「只给这几个模型」——`{ mode: 'ids', ids: [...] }`。
+ *
+ * 与 `all` / 数字三选一：数字按**目录顺序**取前 N 个（用户不关心是哪几个），
+ * 而这里是用户**逐个点名**的（比如"只要三个能看图的和一个便宜的快模型"）。
+ * 顺序按用户提交的顺序保留 —— 它同时决定了客户端模型列表里的先后。
+ *
+ * id 会过一遍可见 ASCII 与长度校验（与 `HEADER_SAFE_RE` 同一套理由：这些 id
+ * 之后要作为 `X-Model-ID` 发上游，含中文/换行的 id 会让请求在更远的地方炸）。
+ * **不能直接引用 `HEADER_SAFE_RE` / `MAX_MODEL_ID_LEN`**：它们定义在本文件后段，
+ * 模块顶层求值的解析函数引用了它们会撞 TDZ（报错还跟"选哪几个模型"毫无关系）。
+ *
+ * 不存在的 id **不在这里剔除**：目录可能只是暂时没刷到，硬删等于把用户的选择
+ * 静默改掉；由 `/v1/models` 返回时与实际目录求交集即可。
+ */
+const MODELS_DEFAULT_ID_MAX = 200;
+const MODELS_DEFAULT_ID_RE = /^[\x20-\x7e]+$/;
+function parseIdsDefault(raw) {
+  const list = Array.isArray(raw) ? raw : [];
+  const seen = new Set();
+  const ids = [];
+  for (const item of list) {
+    const id = typeof item === 'string' ? item.trim() : '';
+    if (!id || id.length > MODELS_DEFAULT_ID_MAX) continue;
+    if (!MODELS_DEFAULT_ID_RE.test(id)) continue;
+    if (seen.has(id)) continue;
+    seen.add(id);
+    ids.push(id);
+  }
+  return ids.length ? { mode: 'ids', ids } : null;
+}
+/**
+ * 面板保存的偏好文件（`WORKBUDDY_MODELS_DEFAULT_FILE` 仅供测试覆盖）。
+ *
+ * **惰性求值**：`RUNTIME_DATA_DIR` 在本文件后面才定义（它还要读 HOME 兜底），
+ * 在模块顶层直接引用会撞 TDZ —— 表现为桥启动即 `Cannot access before
+ * initialization`，而这个错误跟"默认给几个模型"毫无关系，极难对上号。
+ */
+function modelsDefaultFile() {
+  return process.env.WORKBUDDY_MODELS_DEFAULT_FILE
+    || join(RUNTIME_DATA_DIR, 'models-default.json');
+}
+/**
+ * 已保存面板偏好（内存副本）。`undefined` = 还没读过，`null` = 读过但没有偏好。
+ * 每次读文件太亏（`/v1/models` 是客户端的高频路径），但**改了要立刻生效**：
+ * 保存接口会就地更新这份内存副本，不需要重启桥。
+ */
+let savedModelsDefault = undefined;
+function readSavedModelsDefault() {
+  if (savedModelsDefault !== undefined) return savedModelsDefault;
+  try {
+    const raw = JSON.parse(readFileSync(modelsDefaultFile(), 'utf8'));
+    // 指定清单优先：文件里两种形状都认（`value` 字符串 = curated/all/N，
+    // `ids` 数组 = 用户逐个点名的模型）。写成数组而不是把 id 拼成逗号串，
+    // 是为了让 id 里的逗号 / 空格不需要转义。
+    const ids = parseIdsDefault(raw?.ids);
+    if (ids) { savedModelsDefault = ids; return savedModelsDefault; }
+    const value = typeof raw?.value === 'string' ? raw.value.trim() : '';
+    savedModelsDefault = value ? parseModelsDefault(value) : null;
+  } catch {
+    savedModelsDefault = null; // 没有文件 / 读坏了：都当「没保存过」
+  }
+  return savedModelsDefault;
+}
+/**
+ * 当前生效的默认视图规模。
+ *
+ * `source` 只用于展示与排查（面板要能说清「这个数是从哪来的」）：
+ * `panel` = 面板保存的；`env` = 环境变量；`builtin` = 都没设，用精选。
+ */
+function effectiveModelsDefault() {
+  const saved = readSavedModelsDefault();
+  if (saved) return { ...saved, source: 'panel' };
+  const fromEnv = parseModelsDefault(process.env.WORKBUDDY_MODELS_DEFAULT);
+  if (process.env.WORKBUDDY_MODELS_DEFAULT && process.env.WORKBUDDY_MODELS_DEFAULT.trim()) {
+    return { ...fromEnv, source: 'env' };
+  }
+  return { ...fromEnv, source: 'builtin' };
+}
+
+/**
  * 每个模型**实测**支持的 `reasoning_effort` 档位。
  *
  * ## 为什么需要它（2026-10-12 用户反馈）
@@ -8620,6 +8739,110 @@ function pickFeatured(catalog, region = '') {
     });
 }
 
+/** 目录为空时的兜底视图：直接照 FEATURED 的定义造（过区域过滤）。 */
+function fallbackCatalog(region = '') {
+  return FEATURED
+    .filter((f) => featuredAllowedIn(f, region))
+    .map((f) => ({
+      id: f.id,
+      name: f.name,
+      context: f.context,
+      maxOutput: f.maxOutput,
+      images: f.images === true,
+      supportsReasoning: f.supportsReasoning === true,
+    }));
+}
+
+/**
+ * 把「保存的默认值」（面板 / 环境变量）与 `?limit=N`（请求级）合流成一次生效值。
+ *
+ * 语义：**请求级优先**。显式在 URL 里写 `limit=2` 就是"这次只要 2 个"，
+ * 不该被桥里保存的那个更大的默认值放大回去（早先写成取更宽的那个，
+ * 实测 `?limit=2` 在默认值 4 的情况下回了 4 个 —— 与用户的字面要求相反）。
+ * 返回 `Infinity` 表示全量。
+ *
+ * @param {number} [requestLimit] `?limit=N` 解析后的值（非法/缺省传 0）
+ */
+function effectiveModelLimit(requestLimit = 0) {
+  if (requestLimit > 0) return requestLimit;
+  const current = effectiveModelsDefault();
+  return current.mode === 'all' ? Infinity : (current.limit || 0);
+}
+
+/**
+ * 精选里某个 id 的兜底条目（目录里暂时没它时用）。
+ *
+ * 只认**精选定义里有的** id：不在精选里、又不在当前目录里的 id，我们既不知道
+ * 它的能力也不知道它还能不能用 —— 发给客户端只会得到一个必然失败的条目
+ * （模型下架后尤其明显：用户点名过一个已下架的 id，不该继续挂在客户端列表里）。
+ */
+function fallbackCatalogEntry(id, region = '') {
+  const f = FEATURED.find((x) => x.id === id);
+  if (!f || !featuredAllowedIn(f, region)) return null;
+  return {
+    id: f.id,
+    name: f.name,
+    context: f.context,
+    maxOutput: f.maxOutput,
+    images: f.images === true,
+    supportsReasoning: f.supportsReasoning === true,
+  };
+}
+
+/**
+ * 默认视图（不带 `all=1`）到底给哪些模型。
+ *
+ * `/v1/models` 与 `/health.modelsDefault.count` **必须**走同一个函数 —— 否则
+ * 面板说「一键拉取会拿到 8 个」、客户端真拉到 3 个，就是又一处自相矛盾。
+ *
+ * @param {Array<{ id: string, [key: string]: any }>} catalog 完整目录（可能为空）
+ * @param {string} region 区域（只影响精选兜底那部分）
+ * @param {number} [requestLimit] `?limit=N`
+ */
+function defaultViewModels(catalog, region = '', requestLimit = 0) {
+  const current = effectiveModelsDefault();
+  /*
+   * 「只给这几个」（面板里勾选的模型）：**先于**数量规则。
+   *
+   * 三个来源的优先级在这一个函数里定死，别处不要再判一次：
+   *   ① `?limit=N`（请求级，最具体）
+   *   ② 面板/环境变量里点名的 `ids`
+   *   ③ `all` / 数字 / curated
+   *
+   * 点名清单与目录求交集：用户勾的时候它在目录里，之后上游下架了就不该继续
+   * 冒充"可用"（客户端会拿着它去调，必然 404/400）。**顺序按用户点的顺序**，
+   * 因为那同时是客户端列表里的显示顺序。
+   */
+  if (!(requestLimit > 0) && current.mode === 'ids' && Array.isArray(current.ids)) {
+    const byId = new Map(catalog.map((m) => [m.id, m]));
+    return current.ids
+      .map((id) => byId.get(id) ?? fallbackCatalogEntry(id, region))
+      .filter(Boolean);
+  }  const wanted = effectiveModelLimit(requestLimit);
+  /*
+   * 精选集是**保底**：`wanted` 没设（0 = curated）时全给；设了就给到 `wanted`
+   * 个 —— 包括**少于**精选数的情况。
+   *
+   * 早先这里写成"少于精选数就照旧全给"，看起来更安全（别把精选砍掉），
+   * 但直接违背了用户的字面要求：`?limit=2` 回了 3 个。精选的用处是"默认视图
+   * 先给几个"，用户显式要 2 个时，priority 是**他要 2 个**。
+   */
+  const slice = (list) => (wanted > 0 && wanted !== Infinity ? list.slice(0, wanted) : list);
+  if (!catalog.length) return slice(fallbackCatalog(region));
+  const curated = pickFeatured(catalog, region).map((u) => ({
+    ...u,
+    name: FEATURED.find((f) => f.id === u.id)?.name || u.name,
+  }));
+  if (wanted === Infinity) return catalog;
+  if (wanted === 0 || wanted <= curated.length) return slice(curated);
+  /*
+   * 精选在前，其余按目录顺序补齐到 wanted。用 id 去重：目录里**有**的精选条目
+   * 本身就在 catalog 里，不去重会重复列出同一个模型。
+   */
+  const seen = new Set(curated.map((m) => m.id));
+  return [...curated, ...catalog.filter((m) => !seen.has(m.id))].slice(0, wanted);
+}
+
 // ── Billing / credits ────────────────────────────────────────────────────
 /**
  * 计费网关与 chat 网关**不是同一个主机**：
@@ -9448,7 +9671,26 @@ async function handleRequest(req, res) {
         // 客户端定位结果（**只读内存缓存、绝不触发探测** —— /health 有 4 秒超时
         // 约束，慢探测会让控制台把桥误判成"未运行"；没定位过就显示空）
         clientExe: atRestUsedExe || wbExeCache || '',
-        models: (catalog.length ? pickFeatured(catalog, region) : FEATURED.filter((f) => featuredAllowedIn(f, region))).map((m) => m.id),
+        /*
+         * 默认视图**实际**给哪些模型：与 `GET /v1/models`（不带参数）走同一个
+         * 函数。面板拿它当「客户端一键拉取会看到什么」的权威口径 —— 早先这里
+         * 写死 `pickFeatured`，一改默认规模就会与客户端真正拉到的对不上。
+         */
+        models: defaultViewModels(catalog, region).map((m) => m.id),
+        /*
+         * 默认视图的规模设置。
+         *
+         * 面板与「接入」卡片要能说清三件事：客户端一键拉取会看到几个（`count`）、
+         * 这个数**从哪来**（`source`：panel / env / builtin）、全量目录有多少
+         * （`total`）。写错值时 `invalid` 会带上原始字符串，诊断页据此提示
+         * 「这个值没被采用」—— 而不是让用户以为配置生效了。
+         */
+        modelsDefault: {
+          ...effectiveModelsDefault(),
+          total: catalog.length || fallbackCatalog(region).length,
+          /** 客户端不带参数时（`GET /v1/models`）实际会拿到几个。 */
+          count: defaultViewModels(catalog, region).length,
+        },
         catalogSize: catalog.length,
         catalogAt: catalogCache.at ? new Date(catalogCache.at).toISOString() : null,
         catalogRefreshing: !!catalogRefreshing,
@@ -9465,6 +9707,94 @@ async function handleRequest(req, res) {
         // 自动签到的内存态：桥重启后清空、重新判定（上游幂等兜底）
         autoCheckinEnabled: AUTO_CHECKIN_ENABLED,
         autoCheckin: autoCheckinState,
+      });
+    }
+
+    // ── 默认视图规模（面板「可用模型」里的「桥返回几个模型」）─────────────
+    /*
+     * 这条不是 OpenAI 协议的一部分，是本项目自己的设置面：客户端的「获取模型
+     * 列表」按钮不会带 `all=1`，用户想让它们看到全部就得改**默认视图**。
+     *
+     * 存在桥的数据目录（不是 `.env`）：改了**立即生效**、不需要重启桥，也不需要
+     * 用户去手改配置文件。环境变量仍是部署级默认，面板没存过时才用。
+     */
+    if (url.pathname === '/v1/models/default' && req.method === 'GET') {
+      const current = effectiveModelsDefault();
+      return json(res, 200, {
+        ok: true,
+        ...current,
+        env: process.env.WORKBUDDY_MODELS_DEFAULT || '',
+        saved: readSavedModelsDefault(),
+        file: modelsDefaultFile(),
+      });
+    }
+
+    if (url.pathname === '/v1/models/default' && req.method === 'POST') {
+      let body;
+      try { body = JSON.parse(await readBody(req)); } catch { body = null; }
+      if (!body || typeof body !== 'object') {
+        return json(res, 400, { ok: false, error: 'body must be a JSON object' });
+      }
+      /*
+       * 两种提交形状，二选一：
+       *   - `{ value }` → `curated` / `all` / 正整数（按数量给）；
+       *        传 `null` / 空串 = 清掉面板偏好，回落到环境变量或内建精选。
+       *   - `{ ids: [...] }` → **只给这几个**（按名字点名，保持提交顺序）。
+       *
+       * 非法值**直接 400**（与配置校验同一套判据）：这是用户主动提交的设置，
+       * 静默回退会让面板显示的和实际生效的不是一回事。
+       */
+      const rawIds = body.ids;
+      const wantsIds = Array.isArray(rawIds);
+      const rawValue = body.value;
+      const clearing = !wantsIds && (rawValue === null || rawValue === undefined
+        || (typeof rawValue === 'string' && rawValue.trim() === ''));
+      const parsedIds = wantsIds ? parseIdsDefault(rawIds) : null;
+      if (wantsIds && !parsedIds) {
+        return json(res, 400, {
+          ok: false,
+          error: 'ids 里没有可用的模型 id（不能为空，且必须是可见 ASCII）',
+        });
+      }
+      const parsed = wantsIds ? parsedIds : (clearing ? null : parseModelsDefault(rawValue));
+      if (!wantsIds && !clearing
+        && (parsed.invalid || (parsed.mode === 'curated' && String(rawValue).trim().toLowerCase() !== 'curated'))) {
+        return json(res, 400, {
+          ok: false,
+          error: `不认识的取值：${String(rawValue)}（只能是 curated / all / 正整数）`,
+        });
+      }
+      try {
+        if (clearing) {
+          if (existsSync(modelsDefaultFile())) unlinkSync(modelsDefaultFile());
+          savedModelsDefault = null;
+        } else {
+          mkdirSync(dirname(modelsDefaultFile()), { recursive: true });
+          // 原子写：半截 JSON 会让下次启动读到「没保存过」，看似回滚、毫无提示
+          const tmp = `${modelsDefaultFile()}.tmp`;
+          const record = wantsIds
+            ? { ids: parsed.ids, savedAt: new Date().toISOString() }
+            : {
+              value: String(typeof rawValue === 'number' ? rawValue : String(rawValue).trim()),
+              savedAt: new Date().toISOString(),
+            };
+          writeFileSync(tmp, `${JSON.stringify(record, null, 2)}\n`, 'utf8');
+          renameSync(tmp, modelsDefaultFile());
+          savedModelsDefault = parsed;
+        }
+      } catch (e) {
+        return json(res, 500, { ok: false, error: `保存失败：${e.message}` });
+      }
+      const current = effectiveModelsDefault();
+      const catalog = await upstreamCatalog().catch(() => []);
+      let region = '';
+      try { region = upstreamRegion(await resolveAuth()); } catch { region = ''; }
+      return json(res, 200, {
+        ok: true,
+        ...current,
+        saved: readSavedModelsDefault(),
+        total: catalog.length || fallbackCatalog(region).length,
+        count: defaultViewModels(catalog, region).length,
       });
     }
 
@@ -9585,23 +9915,22 @@ async function handleRequest(req, res) {
         // 上游目录取不到：退回精选定义，至少让客户端能用。
         // 能力标记照抄 FEATURED 的定义（原先这里给所有模型硬写 `images: true`
         // 且从不给 reasoning —— 对非视觉模型是**多报**，对推理模型是**漏报**）。
-        models = FEATURED
-          .filter((f) => featuredAllowedIn(f, region))
-          .map((f) => ({
-            id: f.id,
-            name: f.name,
-            context: f.context,
-            maxOutput: f.maxOutput,
-            images: f.images === true,
-            supportsReasoning: f.supportsReasoning === true,
-          }));
+        models = fallbackCatalog(region);
       } else if (all) {
         models = catalog;
       } else {
-        models = pickFeatured(catalog, region).map((u) => ({
-          ...u,
-          name: FEATURED.find((f) => f.id === u.id)?.name || u.name,
-        }));
+        /*
+         * 默认视图：精选集 + 可选放大。
+         *
+         * `WORKBUDDY_MODELS_DEFAULT`（桥级）与 `?limit=N`（请求级）在
+         * `defaultViewModels` 里合流：没配就是原来的 3 个精选，配了才放宽。
+         */
+        const rawLimit = Number(url.searchParams.get('limit'));
+        models = defaultViewModels(
+          catalog,
+          region,
+          Number.isFinite(rawLimit) && rawLimit > 0 ? Math.trunc(rawLimit) : 0,
+        );
       }
 
       // 促销是否生效按“现在”算，而不是目录抓取那一刻：夜间免费/折扣在

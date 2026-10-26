@@ -13,7 +13,12 @@
 /** @typedef {{ kind: 'number', min: number, max: number, integer?: boolean, fallback: number, note: string }} NumberRule */
 /** @typedef {{ kind: 'enum', values: string[], fallback: string, lowercase?: boolean, note: string }} EnumRule */
 /** @typedef {{ kind: 'bool', on: '1'|'not-0', fallback: boolean, note: string }} BoolRule */
-/** @typedef {NumberRule | EnumRule | BoolRule} ConfigRule */
+/**
+ * `curated` / `all` 或任意正整数。判据**必须**与桥侧 `parseModelsDefault()`
+ * 一致 —— 两处说法不同就会出现「诊断页说写错了、桥其实接受了」。
+ */
+/** @typedef {{ kind: 'modelsDefault', values: string[], fallback: string, lowercase?: boolean, note: string }} ModelsDefaultRule */
+/** @typedef {NumberRule | EnumRule | BoolRule | ModelsDefaultRule} ConfigRule */
 
 /** @type {Record<string, ConfigRule>} */
 export const CONFIG_SCHEMA = Object.freeze({
@@ -53,6 +58,12 @@ export const CONFIG_SCHEMA = Object.freeze({
   },
   WORKBUDDY_CREDENTIAL_FAILOVER: { kind: 'enum', values: ['off', 'same-account', 'any'], fallback: 'same-account', lowercase: true, note: '凭据接管策略' },
   WORKBUDDY_LOGIN_REGION: { kind: 'enum', values: ['cn', 'global'], fallback: 'cn', lowercase: true, note: '登录区域' },
+  /*
+   * 模型默认视图规模：`curated` / `all` / 正整数（`8`）。
+   * **不是**纯枚举 —— `values` 列不全，所以单独一种 kind，判据与桥侧
+   * `parseModelsDefault()` 一致，避免诊断页把合法的 `=8` 报成写错了。
+   */
+  WORKBUDDY_MODELS_DEFAULT: { kind: 'modelsDefault', values: ['curated', 'all', 'full'], fallback: 'curated', lowercase: true, note: '默认视图模型数（curated / all / 正整数）' },
 
   WORKBUDDY_LOG: { kind: 'bool', on: '1', fallback: true, note: '桥日志' },
   DASHBOARD_OPEN_BROWSER: { kind: 'bool', on: '1', fallback: false, note: '自动开浏览器' },
@@ -83,6 +94,20 @@ export function validateConfigEnv(env = process.env) {
           key,
           value: text,
           reason: `只接受 ${rule.values.join(' / ')}`,
+          fallback: rule.fallback,
+          note: rule.note,
+        });
+      }
+      continue;
+    }
+    if (rule.kind === 'modelsDefault') {
+      const value = rule.lowercase ? text.toLowerCase() : text;
+      const positive = /^[1-9]\d*$/.test(value);
+      if (!rule.values.includes(value) && !positive) {
+        issues.push({
+          key,
+          value: text,
+          reason: `只接受 ${rule.values.join(' / ')} 或正整数`,
           fallback: rule.fallback,
           note: rule.note,
         });

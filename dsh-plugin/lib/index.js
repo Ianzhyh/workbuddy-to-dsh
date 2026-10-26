@@ -650,6 +650,9 @@ export const BRIDGE_ENV_PASSTHROUGH = Object.freeze([
   'WORKBUDDY_RATE_LIMIT_RPM',
   'WORKBUDDY_RATE_LIMIT_MIN_INTERVAL_MS',
   'WORKBUDDY_RATE_LIMIT_MODE',
+  // 默认视图给几个模型（curated / all / N）。插件拉起的桥必须跟控制台同口径，
+  // 否则「插件起的桥只回 3 个、控制台起的回全部」——同一台机器两种行为。
+  'WORKBUDDY_MODELS_DEFAULT',
   // 另外两条协议默认模型（其它客户端用）
   'WORKBUDDY_ANTHROPIC_MODEL',
   'WORKBUDDY_ANTHROPIC_FAST_MODEL',

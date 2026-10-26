@@ -157,6 +157,44 @@ async function bridgeJsonCall(path, { method = 'GET', body, timeoutMs = 15000 } 
   return data;
 }
 
+/**
+ * 「桥默认返回哪些模型」的当前设置（面板「可用模型」里那一行）。
+ *
+ * 桥没起来 / 旧版桥没有这个端点时返回 `null` —— 页面据此**隐藏**那一行，
+ * 而不是显示一个假的默认值（用户会以为保存生效了）。
+ */
+export async function bridgeModelsDefault() {
+  try {
+    const body = await bridgeJsonCall('/v1/models/default', { timeoutMs: 5000 });
+    return body && typeof body === 'object' ? body : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 保存「桥默认返回哪些模型」。
+ *
+ * **两种形状都要原样转发**，别在这里归一成 `{ value }`：
+ *   - `{ value: 'curated' | 'all' | 数字 }` —— 按数量给；
+ *   - `{ ids: [...] }` —— 按名字点名（面板「表格里勾选的」）。
+ *   - `{ value: null }` —— 清掉面板偏好、回落到环境变量。
+ *
+ * 这里曾经写成 `body: { value: value ?? null }`，于是 `ids` 被**静默丢掉**、
+ * 变成"清空偏好"：用户勾选后点保存，客户端清单直接跳回精选 3 个 ——
+ * 看起来像"保存把我选的改成了精选"。转发层不要替调用方解释语义。
+ */
+export function bridgeSaveModelsDefault(payload) {
+  const body = (payload && typeof payload === 'object')
+    ? payload
+    : { value: payload ?? null };
+  return bridgeJsonCall('/v1/models/default', {
+    method: 'POST',
+    body,
+    timeoutMs: 15000,
+  });
+}
+
 /** 插件登录：来源状态 / 凭据清单（永不含令牌）。 */
 export const bridgeAuthSource = () => bridgeJsonCall('/v1/auth/source');
 export const bridgeAuthCredentials = () => bridgeJsonCall('/v1/auth/credentials');

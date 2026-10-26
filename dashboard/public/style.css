@@ -2233,6 +2233,39 @@ input[type="checkbox"]:active {
   font-weight: 600;
 }
 
+/*
+ * 「客户端一键拉取给 ___」那一行。
+ *
+ * 两个坑都在 flex 布局里，不写就会复现：
+ *   ① 原生 <select> 会被 flex 收缩到比内容还窄 ——「精选（默认…」直接截断，
+ *      即使整行还有大片空白。`flex: 0 0 auto` 让它按内容宽度定；
+ *   ② 这一行的提示文案（`.filterinfo`）比别的工具栏长得多，需要允许换行，
+ *      否则会把同一行的按钮挤出去。
+ */
+.regbar-modeldefault {
+  margin-top: calc(-1 * var(--space-2));
+}
+.regbar-modeldefault .check {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+.regbar-modeldefault select {
+  flex: 0 0 auto;
+  /* 宽度跟着最长 option 走，别被 flex 压扁（上面那条注释①） */
+  width: auto;
+  min-width: 9.5em;
+}
+.regbar-modeldefault button {
+  flex: 0 0 auto;
+}
+.regbar-modeldefault .filterinfo {
+  flex: 1 1 12em;
+  min-width: 0;
+  /* 长文案换行而不是溢出：这里本来就允许占两行 */
+  line-height: 1.45;
+  white-space: normal;
+}
+
 /* 体检进度条 */
 .probe-progress {
   display: flex;

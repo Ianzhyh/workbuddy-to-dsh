@@ -29,6 +29,42 @@
       "$.bridge.upstream": {
         "type": "string"
       },
+      "$.bridge.auth": {
+        "type": "object"
+      },
+      "$.bridge.auth.source": {
+        "type": "string"
+      },
+      "$.bridge.auth.userId": {
+        "type": "string"
+      },
+      "$.bridge.auth.endpoint": {
+        "type": "string"
+      },
+      "$.bridge.auth.expiresAt": {
+        "type": "string"
+      },
+      "$.bridge.auth.expired": {
+        "type": "boolean"
+      },
+      "$.bridge.auth.changedAt": {
+        "type": "string"
+      },
+      "$.bridge.credentialSource": {
+        "type": "string"
+      },
+      "$.bridge.desktopUserId": {
+        "type": "string"
+      },
+      "$.bridge.build": {
+        "type": "string"
+      },
+      "$.bridge.expectedBuild": {
+        "type": "string"
+      },
+      "$.bridge.staleBuild": {
+        "type": "boolean"
+      },
       "$.bridge.authFile": {
         "type": "string"
       },
@@ -62,13 +98,13 @@
       "$.bridge.upstreamShape.sources": {
         "type": "object"
       },
-      "$.bridge.upstreamShape.sources./v2/enterprises/personal/models": {
-        "type": "number"
-      },
       "$.bridge.upstreamShape.sources./v3/config": {
         "type": "number"
       },
       "$.bridge.upstreamShape.sources./v3/config#modelPromotions": {
+        "type": "number"
+      },
+      "$.bridge.upstreamShape.sources./v2/enterprises/personal/models": {
         "type": "number"
       },
       "$.bridge.upstreamShape.model": {
@@ -92,6 +128,9 @@
       "$.bridge.upstreamShape.agentName": {
         "type": "string"
       },
+      "$.bridge.upstreamShape.whitelistSample": {
+        "type": "string"
+      },
       "$.bridge.upstreamShape.agents": {
         "type": "string"
       },
@@ -99,9 +138,6 @@
         "type": "string"
       },
       "$.bridge.upstreamShape.productFeatures": {
-        "type": "string"
-      },
-      "$.bridge.upstreamShape.whitelistSample": {
         "type": "string"
       },
       "$.bridge.upstreamShape.promotionFields": {
@@ -131,6 +167,39 @@
       "$.bridge.upstreamShape.promotionDetail[].models[]": {
         "type": "string"
       },
+      "$.bridge.upstreamShape.promotionDetail[].schedule": {
+        "type": "object"
+      },
+      "$.bridge.upstreamShape.promotionDetail[].schedule.daily": {
+        "type": "array"
+      },
+      "$.bridge.upstreamShape.promotionDetail[].schedule.daily[]": {
+        "type": "object"
+      },
+      "$.bridge.upstreamShape.promotionDetail[].schedule.daily[].end": {
+        "type": "string"
+      },
+      "$.bridge.upstreamShape.promotionDetail[].schedule.daily[].start": {
+        "type": "string"
+      },
+      "$.bridge.upstreamShape.promotionDetail[].schedule.timezone": {
+        "type": "string"
+      },
+      "$.bridge.upstreamShape.promotionDetail[].hover": {
+        "type": "object"
+      },
+      "$.bridge.upstreamShape.promotionDetail[].hover.action": {
+        "type": "object"
+      },
+      "$.bridge.upstreamShape.promotionDetail[].hover.action.labelZh": {
+        "type": "string"
+      },
+      "$.bridge.upstreamShape.promotionDetail[].hover.action.type": {
+        "type": "string"
+      },
+      "$.bridge.upstreamShape.promotionDetail[].hover.textZh": {
+        "type": "string"
+      },
       "$.bridge.upstreamShape.promotionDetail[].discount": {
         "type": "object",
         "optional": true
@@ -146,6 +215,24 @@
       "$.bridge.upstreamShape.promotionDetail[].discount.factor": {
         "type": "number",
         "optional": true
+      },
+      "$.bridge.upstreamShape.promotionDetail[].schedule.validFrom": {
+        "type": "string"
+      },
+      "$.bridge.upstreamShape.promotionDetail[].schedule.validUntil": {
+        "type": "string"
+      },
+      "$.bridge.upstreamShape.officialPickerCount": {
+        "type": "number"
+      },
+      "$.bridge.upstreamShape.officialPicker": {
+        "type": "array"
+      },
+      "$.bridge.upstreamShape.officialPicker[]": {
+        "type": "string"
+      },
+      "$.bridge.upstreamShape.productModelCount": {
+        "type": "number"
       },
       "$.bridge.upstreamShape.droppedNonChat": {
         "type": "array"
@@ -173,6 +260,12 @@
       },
       "$.console.version": {
         "type": "string"
+      },
+      "$.console.build": {
+        "type": "string"
+      },
+      "$.console.pid": {
+        "type": "number"
       },
       "$.console.node": {
         "type": "string"
@@ -283,6 +376,51 @@
       "$.quota.productCode": {
         "type": "string"
       },
+      "$.quota.account": {
+        "type": "string"
+      },
+      "$.quota.source": {
+        "type": "string"
+      },
+      "$.quota.history": {
+        "type": "array"
+      },
+      "$.quota.history[]": {
+        "type": "object"
+      },
+      "$.quota.history[].t": {
+        "type": "number"
+      },
+      "$.quota.history[].account": {
+        "type": "string"
+      },
+      "$.quota.history[].total": {
+        "type": "number"
+      },
+      "$.quota.history[].packages": {
+        "type": "array"
+      },
+      "$.quota.history[].packages[]": {
+        "type": "object"
+      },
+      "$.quota.history[].packages[].name": {
+        "type": "string"
+      },
+      "$.quota.history[].packages[].remain": {
+        "type": "number"
+      },
+      "$.quota.history[].packages[].size": {
+        "type": "number"
+      },
+      "$.quota.history[].packages[].monthly": {
+        "type": "boolean"
+      },
+      "$.quota.history[].packages[].expiresAt": {
+        "type": "string"
+      },
+      "$.quota.snapshotIntervalMs": {
+        "type": "number"
+      },
       "$.dsh": {
         "type": "object"
       },
@@ -301,6 +439,12 @@
       "$.dsh.routeSource": {
         "type": "string"
       },
+      "$.dsh.routeMode": {
+        "type": "string"
+      },
+      "$.dsh.nativeRoute": {
+        "type": "boolean"
+      },
       "$.dsh.hasBridgeKey": {
         "type": "boolean"
       },
@@ -317,6 +461,9 @@
         "type": "string"
       },
       "$.dsh.bundles[].installed": {
+        "type": "boolean"
+      },
+      "$.dsh.bundles[].optional": {
         "type": "boolean"
       },
       "$.dsh.registeredModels": {
@@ -351,8 +498,41 @@
       "$.models[].context_window": {
         "type": "number"
       },
+      "$.models[].context_window_max": {
+        "type": "number"
+      },
       "$.models[].max_output_tokens": {
         "type": "number"
+      },
+      "$.models[].context_length": {
+        "type": "number"
+      },
+      "$.models[].max_input_tokens": {
+        "type": "number"
+      },
+      "$.models[].max_tokens": {
+        "type": "number"
+      },
+      "$.models[].capabilities": {
+        "type": "object"
+      },
+      "$.models[].capabilities.vision": {
+        "type": "boolean"
+      },
+      "$.models[].capabilities.tools": {
+        "type": "boolean"
+      },
+      "$.models[].capabilities.reasoning": {
+        "type": "boolean"
+      },
+      "$.models[].architecture": {
+        "type": "object"
+      },
+      "$.models[].architecture.input_modalities": {
+        "type": "array"
+      },
+      "$.models[].architecture.input_modalities[]": {
+        "type": "string"
       },
       "$.models[].supports_images": {
         "type": "boolean",
@@ -369,9 +549,20 @@
       "$.models[].reasoning_efforts[]": {
         "type": "string"
       },
+      "$.models[].reasoning_efforts_source": {
+        "type": "string",
+        "optional": true
+      },
+      "$.models[].default_temperature": {
+        "type": "number",
+        "optional": true
+      },
       "$.models[].only_reasoning": {
         "type": "boolean",
         "optional": true
+      },
+      "$.models[].official": {
+        "type": "boolean"
       },
       "$.models[].vendor": {
         "type": "string"
@@ -391,17 +582,88 @@
         "type": "string",
         "optional": true
       },
+      "$.models[].context_window_default": {
+        "type": "number",
+        "optional": true
+      },
+      "$.models[].context_window_options": {
+        "type": "array",
+        "optional": true
+      },
+      "$.models[].context_window_options[]": {
+        "type": "number"
+      },
       "$.models[].credits": {
         "type": "number",
+        "optional": true
+      },
+      "$.models[].default_reasoning_effort": {
+        "type": "string",
         "optional": true
       },
       "$.models[].badge": {
         "type": "string",
         "optional": true
       },
+      "$.models[].promotion_text": {
+        "type": "string",
+        "optional": true
+      },
+      "$.models[].promotion_until": {
+        "type": "string",
+        "optional": true
+      },
       "$.models[].free": {
         "type": "boolean",
         "optional": true
+      },
+      "$.models[].promotion_active": {
+        "type": "boolean",
+        "optional": true
+      },
+      "$.models[].promotion_factor": {
+        "type": "number",
+        "optional": true
+      },
+      "$.models[].can_disable_thinking": {
+        "type": "boolean",
+        "optional": true
+      },
+      "$.modelsDefault": {
+        "type": "object"
+      },
+      "$.modelsDefault.ok": {
+        "type": "boolean"
+      },
+      "$.modelsDefault.mode": {
+        "type": "string"
+      },
+      "$.modelsDefault.ids": {
+        "type": "array"
+      },
+      "$.modelsDefault.ids[]": {
+        "type": "string"
+      },
+      "$.modelsDefault.source": {
+        "type": "string"
+      },
+      "$.modelsDefault.env": {
+        "type": "string"
+      },
+      "$.modelsDefault.saved": {
+        "type": "object"
+      },
+      "$.modelsDefault.saved.mode": {
+        "type": "string"
+      },
+      "$.modelsDefault.saved.ids": {
+        "type": "array"
+      },
+      "$.modelsDefault.saved.ids[]": {
+        "type": "string"
+      },
+      "$.modelsDefault.file": {
+        "type": "string"
       }
     },
     "/api/clients": {
@@ -731,19 +993,19 @@
       "$.clients[].changes[].to.models.glm-5.3-flash.limit.output": {
         "type": "number"
       },
-      "$.clients[].changes[].to.models.glm-5.3": {
+      "$.clients[].changes[].to.models.hy3-x": {
         "type": "object"
       },
-      "$.clients[].changes[].to.models.glm-5.3.name": {
+      "$.clients[].changes[].to.models.hy3-x.name": {
         "type": "string"
       },
-      "$.clients[].changes[].to.models.glm-5.3.limit": {
+      "$.clients[].changes[].to.models.hy3-x.limit": {
         "type": "object"
       },
-      "$.clients[].changes[].to.models.glm-5.3.limit.context": {
+      "$.clients[].changes[].to.models.hy3-x.limit.context": {
         "type": "number"
       },
-      "$.clients[].changes[].to.models.glm-5.3.limit.output": {
+      "$.clients[].changes[].to.models.hy3-x.limit.output": {
         "type": "number"
       },
       "$.token": {
@@ -790,6 +1052,26 @@
       },
       "$.backupDir": {
         "type": "string"
+      },
+      "$.clients[].changes[].to.models.glm-5.3": {
+        "type": "object",
+        "optional": true
+      },
+      "$.clients[].changes[].to.models.glm-5.3.name": {
+        "type": "string",
+        "optional": true
+      },
+      "$.clients[].changes[].to.models.glm-5.3.limit": {
+        "type": "object",
+        "optional": true
+      },
+      "$.clients[].changes[].to.models.glm-5.3.limit.context": {
+        "type": "number",
+        "optional": true
+      },
+      "$.clients[].changes[].to.models.glm-5.3.limit.output": {
+        "type": "number",
+        "optional": true
       },
       "$.clients[].changes[].to.models.deepseek-v4-pro": {
         "type": "object",
@@ -873,6 +1155,9 @@
       "$.bridge.body.pid": {
         "type": "number"
       },
+      "$.bridge.body.build": {
+        "type": "string"
+      },
       "$.bridge.body.startedAt": {
         "type": "string"
       },
@@ -881,6 +1166,9 @@
       },
       "$.bridge.body.auth": {
         "type": "object"
+      },
+      "$.bridge.body.auth.source": {
+        "type": "string"
       },
       "$.bridge.body.auth.userId": {
         "type": "string"
@@ -894,7 +1182,34 @@
       "$.bridge.body.auth.expired": {
         "type": "boolean"
       },
+      "$.bridge.body.auth.changedAt": {
+        "type": "string"
+      },
       "$.bridge.body.authFile": {
+        "type": "string"
+      },
+      "$.bridge.body.credential": {
+        "type": "object"
+      },
+      "$.bridge.body.credential.configured": {
+        "type": "string"
+      },
+      "$.bridge.body.credential.storeMode": {
+        "type": "string"
+      },
+      "$.bridge.body.credential.storeDir": {
+        "type": "string"
+      },
+      "$.bridge.body.credential.fallbackReason": {
+        "type": "string"
+      },
+      "$.bridge.body.credential.source": {
+        "type": "string"
+      },
+      "$.bridge.body.credential.pluginCount": {
+        "type": "number"
+      },
+      "$.bridge.body.credential.desktopUserId": {
         "type": "string"
       },
       "$.bridge.body.clientExe": {
@@ -905,6 +1220,27 @@
       },
       "$.bridge.body.models[]": {
         "type": "string"
+      },
+      "$.bridge.body.modelsDefault": {
+        "type": "object"
+      },
+      "$.bridge.body.modelsDefault.mode": {
+        "type": "string"
+      },
+      "$.bridge.body.modelsDefault.ids": {
+        "type": "array"
+      },
+      "$.bridge.body.modelsDefault.ids[]": {
+        "type": "string"
+      },
+      "$.bridge.body.modelsDefault.source": {
+        "type": "string"
+      },
+      "$.bridge.body.modelsDefault.total": {
+        "type": "number"
+      },
+      "$.bridge.body.modelsDefault.count": {
+        "type": "number"
       },
       "$.bridge.body.catalogSize": {
         "type": "number"
@@ -927,13 +1263,13 @@
       "$.bridge.body.upstreamShape.sources": {
         "type": "object"
       },
-      "$.bridge.body.upstreamShape.sources./v2/enterprises/personal/models": {
-        "type": "number"
-      },
       "$.bridge.body.upstreamShape.sources./v3/config": {
         "type": "number"
       },
       "$.bridge.body.upstreamShape.sources./v3/config#modelPromotions": {
+        "type": "number"
+      },
+      "$.bridge.body.upstreamShape.sources./v2/enterprises/personal/models": {
         "type": "number"
       },
       "$.bridge.body.upstreamShape.model": {
@@ -957,6 +1293,9 @@
       "$.bridge.body.upstreamShape.agentName": {
         "type": "string"
       },
+      "$.bridge.body.upstreamShape.whitelistSample": {
+        "type": "string"
+      },
       "$.bridge.body.upstreamShape.agents": {
         "type": "string"
       },
@@ -964,9 +1303,6 @@
         "type": "string"
       },
       "$.bridge.body.upstreamShape.productFeatures": {
-        "type": "string"
-      },
-      "$.bridge.body.upstreamShape.whitelistSample": {
         "type": "string"
       },
       "$.bridge.body.upstreamShape.promotionFields": {
@@ -996,6 +1332,39 @@
       "$.bridge.body.upstreamShape.promotionDetail[].models[]": {
         "type": "string"
       },
+      "$.bridge.body.upstreamShape.promotionDetail[].schedule": {
+        "type": "object"
+      },
+      "$.bridge.body.upstreamShape.promotionDetail[].schedule.daily": {
+        "type": "array"
+      },
+      "$.bridge.body.upstreamShape.promotionDetail[].schedule.daily[]": {
+        "type": "object"
+      },
+      "$.bridge.body.upstreamShape.promotionDetail[].schedule.daily[].end": {
+        "type": "string"
+      },
+      "$.bridge.body.upstreamShape.promotionDetail[].schedule.daily[].start": {
+        "type": "string"
+      },
+      "$.bridge.body.upstreamShape.promotionDetail[].schedule.timezone": {
+        "type": "string"
+      },
+      "$.bridge.body.upstreamShape.promotionDetail[].hover": {
+        "type": "object"
+      },
+      "$.bridge.body.upstreamShape.promotionDetail[].hover.action": {
+        "type": "object"
+      },
+      "$.bridge.body.upstreamShape.promotionDetail[].hover.action.labelZh": {
+        "type": "string"
+      },
+      "$.bridge.body.upstreamShape.promotionDetail[].hover.action.type": {
+        "type": "string"
+      },
+      "$.bridge.body.upstreamShape.promotionDetail[].hover.textZh": {
+        "type": "string"
+      },
       "$.bridge.body.upstreamShape.promotionDetail[].discount": {
         "type": "object",
         "optional": true
@@ -1011,6 +1380,24 @@
       "$.bridge.body.upstreamShape.promotionDetail[].discount.factor": {
         "type": "number",
         "optional": true
+      },
+      "$.bridge.body.upstreamShape.promotionDetail[].schedule.validFrom": {
+        "type": "string"
+      },
+      "$.bridge.body.upstreamShape.promotionDetail[].schedule.validUntil": {
+        "type": "string"
+      },
+      "$.bridge.body.upstreamShape.officialPickerCount": {
+        "type": "number"
+      },
+      "$.bridge.body.upstreamShape.officialPicker": {
+        "type": "array"
+      },
+      "$.bridge.body.upstreamShape.officialPicker[]": {
+        "type": "string"
+      },
+      "$.bridge.body.upstreamShape.productModelCount": {
+        "type": "number"
       },
       "$.bridge.body.upstreamShape.droppedNonChat": {
         "type": "array"
@@ -1189,8 +1576,38 @@
       "$.dsh.bundles[].installed": {
         "type": "boolean"
       },
+      "$.dsh.bundles[].optional": {
+        "type": "boolean"
+      },
       "$.dsh.bundlesOk": {
         "type": "boolean"
+      },
+      "$.dsh.manualRoute": {
+        "type": "boolean"
+      },
+      "$.dsh.nativeRoute": {
+        "type": "boolean"
+      },
+      "$.dsh.nativePlugin": {
+        "type": "object"
+      },
+      "$.dsh.nativePlugin.installed": {
+        "type": "boolean"
+      },
+      "$.dsh.nativePlugin.enabled": {
+        "type": "boolean"
+      },
+      "$.dsh.nativePlugin.disabledByPatch": {
+        "type": "boolean"
+      },
+      "$.dsh.nativePlugin.provider": {
+        "type": "string"
+      },
+      "$.dsh.nativePlugin.bundle": {
+        "type": "string"
+      },
+      "$.dsh.routeMode": {
+        "type": "string"
       },
       "$.dsh.routeLive": {
         "type": "boolean"
@@ -1244,6 +1661,60 @@
       "$.usage.total.failed": {
         "type": "number"
       },
+      "$.usage.total.searches": {
+        "type": "number"
+      },
+      "$.usage.total.searchFailed": {
+        "type": "number"
+      },
+      "$.usage.total.videos": {
+        "type": "number"
+      },
+      "$.usage.total.videoFailed": {
+        "type": "number"
+      },
+      "$.usage.total.images": {
+        "type": "number"
+      },
+      "$.usage.total.imageFailed": {
+        "type": "number"
+      },
+      "$.usage.total.failureKinds": {
+        "type": "object"
+      },
+      "$.usage.total.failureKinds.unknown": {
+        "type": "number"
+      },
+      "$.usage.total.failureKinds.auth": {
+        "type": "number"
+      },
+      "$.usage.total.failureKinds.stream": {
+        "type": "number"
+      },
+      "$.usage.total.videoCredit": {
+        "type": "number"
+      },
+      "$.usage.total.videoCreditKnown": {
+        "type": "number"
+      },
+      "$.usage.total.imageCredit": {
+        "type": "number"
+      },
+      "$.usage.total.imageCreditKnown": {
+        "type": "number"
+      },
+      "$.usage.total.cachedTokens": {
+        "type": "number"
+      },
+      "$.usage.total.cacheMissTokens": {
+        "type": "number"
+      },
+      "$.usage.total.cacheKnownCalls": {
+        "type": "number"
+      },
+      "$.usage.total.cacheHitRate": {
+        "type": "number"
+      },
       "$.usage.models": {
         "type": "array"
       },
@@ -1271,6 +1742,18 @@
       "$.usage.models[].creditCalls": {
         "type": "number"
       },
+      "$.usage.models[].cachedTokens": {
+        "type": "number"
+      },
+      "$.usage.models[].cacheMissTokens": {
+        "type": "number"
+      },
+      "$.usage.models[].failed": {
+        "type": "number"
+      },
+      "$.usage.models[].cacheHitRate": {
+        "type": "number"
+      },
       "$.usage.days": {
         "type": "array"
       },
@@ -1293,6 +1776,27 @@
         "type": "number"
       },
       "$.usage.days[].creditCalls": {
+        "type": "number"
+      },
+      "$.usage.days[].searches": {
+        "type": "number"
+      },
+      "$.usage.days[].searchFailed": {
+        "type": "number"
+      },
+      "$.usage.days[].videos": {
+        "type": "number"
+      },
+      "$.usage.days[].videoFailed": {
+        "type": "number"
+      },
+      "$.usage.days[].images": {
+        "type": "number"
+      },
+      "$.usage.days[].imageFailed": {
+        "type": "number"
+      },
+      "$.usage.days[].failed": {
         "type": "number"
       },
       "$.usage.days[].byModel": {
@@ -1319,6 +1823,18 @@
       "$.usage.days[].byModel[].creditCalls": {
         "type": "number"
       },
+      "$.usage.days[].byModel[].cachedTokens": {
+        "type": "number"
+      },
+      "$.usage.days[].byModel[].cacheMissTokens": {
+        "type": "number"
+      },
+      "$.usage.days[].cachedTokens": {
+        "type": "number"
+      },
+      "$.usage.days[].cacheMissTokens": {
+        "type": "number"
+      },
       "$.usage.failures": {
         "type": "array"
       },
@@ -1341,10 +1857,43 @@
         "type": "number"
       },
       "$.usage.failures[].code": {
-        "type": "mixed"
+        "type": "null"
       },
       "$.usage.failures[].error": {
         "type": "string"
+      },
+      "$.usage.failures[].kind": {
+        "type": "string"
+      },
+      "$.usage.failures[].failureKind": {
+        "type": "string"
+      },
+      "$.usage.failures[].retryable": {
+        "type": "boolean"
+      },
+      "$.usage.failureByModel": {
+        "type": "array"
+      },
+      "$.usage.failureByModel[]": {
+        "type": "object"
+      },
+      "$.usage.failureByModel[].model": {
+        "type": "string"
+      },
+      "$.usage.failureByModel[].failed": {
+        "type": "number"
+      },
+      "$.usage.failureByModel[].byKind": {
+        "type": "object"
+      },
+      "$.usage.failureByModel[].byKind.unknown": {
+        "type": "number"
+      },
+      "$.usage.failureByModel[].byKind.auth": {
+        "type": "number"
+      },
+      "$.usage.failureByModel[].byKind.stream": {
+        "type": "number"
       }
     },
     "/api/requests": {
@@ -1373,31 +1922,62 @@
         "type": "boolean"
       },
       "$.requests[].promptTokens": {
-        "type": "number"
+        "type": "number",
+        "optional": true
       },
       "$.requests[].completionTokens": {
-        "type": "number"
+        "type": "number",
+        "optional": true
+      },
+      "$.requests[].cachedTokens": {
+        "type": "number",
+        "optional": true
+      },
+      "$.requests[].cacheMissTokens": {
+        "type": "number",
+        "optional": true
       },
       "$.requests[].credit": {
-        "type": "number"
+        "type": "number",
+        "optional": true
       },
-      "$.active": {
-        "type": "array"
+      "$.requests[].overheadMs": {
+        "type": "number",
+        "optional": true
       },
-      "$.activeAlertMs": {
-        "type": "number"
+      "$.requests[].ttfbMs": {
+        "type": "number",
+        "optional": true
       },
       "$.requests[].status": {
         "type": "number",
         "optional": true
       },
       "$.requests[].code": {
-        "type": "mixed",
+        "type": "null",
         "optional": true
       },
       "$.requests[].error": {
         "type": "string",
         "optional": true
+      },
+      "$.requests[].failureKind": {
+        "type": "string",
+        "optional": true
+      },
+      "$.requests[].retryable": {
+        "type": "boolean",
+        "optional": true
+      },
+      "$.requests[].failureAction": {
+        "type": "string",
+        "optional": true
+      },
+      "$.active": {
+        "type": "array"
+      },
+      "$.activeAlertMs": {
+        "type": "number"
       },
       "$.active[]": {
         "type": "object",
@@ -1432,6 +2012,12 @@
         "type": "string"
       },
       "$.active": {
+        "type": "string"
+      },
+      "$.desktopAuth": {
+        "type": "string"
+      },
+      "$.desktopUid": {
         "type": "string"
       },
       "$.accounts": {
@@ -1486,6 +2072,21 @@
         "type": "number"
       },
       "$.keyError": {
+        "type": "null"
+      },
+      "$.pin": {
+        "type": "object"
+      },
+      "$.pin.followedDesktop": {
+        "type": "boolean"
+      },
+      "$.pin.reason": {
+        "type": "string"
+      },
+      "$.pin.restarted": {
+        "type": "boolean"
+      },
+      "$.pin.error": {
         "type": "null"
       }
     },

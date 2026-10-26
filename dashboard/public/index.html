@@ -1305,6 +1305,22 @@ const I18N_EN = {
   '仅可用': 'Available only',
   '仅不可用': 'Unavailable only',
   '按倍率排序': 'Sort by multiplier',
+  // 「桥默认返回几个模型」那一行（客户端的「获取模型列表」按钮用的是这个默认值）
+  '客户端一键拉取给': 'One-click model fetch returns ',
+  '桥默认返回哪些模型': 'Which models the bridge returns by default',
+  '精选（默认）': 'Curated (default)',
+  '表格里勾选的': 'The ones checked in the table',
+  '保存中…': 'Saving…',
+  '先在表格里勾选要暴露给客户端的模型，再保存（当前没有勾选）':
+    'Check the models to expose to clients in the table first, then save (nothing is checked now)',
+  '还没勾选任何模型：勾选后点「保存」才会生效':
+    'No models checked yet — check some, then press Save',
+  '已保存为这': 'Saved: these ',
+  '个勾选的模型': ' checked models',
+  '将保存为这': 'Will save these ',
+  '个勾选的模型（点「保存」才会生效）': ' checked models (takes effect after you press Save)',
+  '客户端的「获取模型列表」按钮不带参数，用的就是这个默认值':
+    'The client\'s "get model list" button sends no parameters — this is the default it gets',
   '全选': 'Select all',
   '加选免费': 'Add free models',
   '清空勾选': 'Clear selection',
@@ -2098,6 +2114,24 @@ const I18N_RULES_EN = [
   [/^已按可用性排序：(.+)（点表头继续切换）$/, 'Sorted by availability: $1 (click the header to cycle)'],
   [/^有 (\d+) 个已注册模型已不在上游目录中：([\s\S]*)$/, 'There are $1 registered models no longer in the upstream catalog: $2'],
   [/^目录已更新（(\d+) 个模型）$/, 'Catalog updated ($1 models)'],
+  // 「桥默认返回几个模型」那一行的动态文案
+  [/^已保存：客户端一键拉取会拿到 ([\d?]+) 个模型（已立刻生效，无需重启桥）$/,
+    'Saved: one-click model fetch now returns $1 models (takes effect immediately, no restart)'],
+  [/^当前一键拉取给 (\d+) 个$/, 'One-click fetch returns $1 models'],
+  [/^按勾选的 (\d+) 个$/, 'Using the $1 checked models'],
+  [/^还没勾选任何模型：勾选后点「保存」才会生效$/,
+    'No models checked yet — check some, then press Save'],
+  [/^已保存为这 (\d+) 个勾选的模型$/,
+    'Saved: these $1 checked models'],
+  [/^将保存为这 (\d+) 个勾选的模型（点「保存」才会生效）$/,
+    'Will save these $1 checked models (takes effect after you press Save)'],
+  [/^其中 (\d+) 个已不在当前目录，不会下发$/,
+    '$1 of them are no longer in the catalog and will not be returned'],
+  [/^目录共 (\d+) 个（\/v1\/models\?all=1 可拿全量）$/,
+    '$1 models in the catalog (use /v1/models?all=1 for all of them)'],
+  [/^值来自(.+)$/, 'value from: $1'],
+  [/^配置里的「(.+)」不被识别，已按默认处理$/,
+    'The configured value "$1" is not recognised; falling back to the default'],
   [/^刷新失败：上游未返回新目录；仍显示 (.+) 的缓存$/, 'Refresh failed: the upstream returned no new catalog; still showing the $1 cache'],
   [/^显示 (\d+) \/ 总 (\d+) 行$/, 'Showing $1 / $2 rows'],
   [/^显示 (\d+) \/ (\d+)$/, 'Showing $1 / $2'],
@@ -2950,6 +2984,13 @@ let lastModels = null;
 let lastModelsError = '';
 /** 最近一次「刷新目录」失败时桥带回的 staleMs（缓存有多旧）；成功时为 null。 */
 let lastModelsStaleMs = null;
+/**
+ * 「桥默认返回几个模型」的当前设置（`/api/models` 里的 `modelsDefault`）。
+ *
+ * 桥没起来 / 旧版桥没有这个字段时是 `null` —— 那一行据此隐藏，而不是显示一个
+ * 猜出来的默认值（用户会以为保存生效了）。
+ */
+let lastModelsDefault = null;
 /** 最近一次「最近请求」的明细，供前端筛选/统计复用。 */
 let lastRequests = [];
 /** 进行中的请求（桥 /v1/requests 的 active[]）——正在跑、还没落账。只显示，不干预。 */
@@ -5449,6 +5490,14 @@ function updateRegCount() {
   // 勾选变化会同时影响「体检范围」的数量文案与「取消勾选不可用的」的可见性
   updateProbeScopeUI();
   updateUncheckBadBtn();
+  /*
+   * 也影响「客户端一键拉取给」那一行：勾了模型就该跟着切到「表格里勾选的」。
+   *
+   * 放在 updateRegCount 里而不是每个 checkbox 的 handler 里：全选 / 加选免费 /
+   * 清空勾选 / 取消勾选不可用 这些批量路径都会经过这里，漏一处就会"勾了却不动"。
+   */
+  const sel = $('modelDefaultSel');
+  if (sel && typeof sel._syncIds === 'function') sel._syncIds();
 }
 
 /** 模型工具栏的提示（与顶部操作条的 setMsg 分开，别串到别的面板上去）。 */
@@ -5910,6 +5959,8 @@ async function loadModels(opts = {}) {
   const d = await api('/api/models' + (refresh ? '?refresh=1' : ''));
   // 刷新失败时桥会带回 staleMs：记下来，供「目录 HH:MM」与失败提示如实说明缓存有多旧
   lastModelsStaleMs = (d && d.staleMs !== undefined && d.staleMs !== null) ? Number(d.staleMs) : null;
+  // 桥没起来 / 旧版桥没有这个字段时留 null，「默认返回几个」那一行据此隐藏
+  if (d && d.modelsDefault && typeof d.modelsDefault === 'object') lastModelsDefault = d.modelsDefault;
   refreshModelStamp();
   if (!d || !Array.isArray(d.models)) {
     // 读不到目录时**不能**说成「桥未运行」——这是接口本身的问题，如实说清
@@ -6174,6 +6225,31 @@ function renderModelTable(models, registered) {
         '<button id="refreshCatalogBtn" title="立即强制重取上游模型目录">刷新目录</button>' +
         '<span class="msg" id="regMsg"></span>' +
       '</div>' +
+      /*
+       * 「桥默认返回哪些模型」。
+       *
+       * 为什么需要：客户端的「获取模型列表 / 一键同步」按钮打的是**不带参数**的
+       * `/v1/models`，而那里默认只回 3 个精选 —— 用户在 Cherry Studio 里点
+       * 「获取模型列表」只看到 3 个，会以为桥只有这么几个（2026-10-26 反馈）。
+       *
+       * 三档粒度，都写进桥的数据目录、**保存即生效**（不用重启桥）：
+       *   精选 / 全部 / 表格里勾选的那几个。
+       *
+       * 放在表格工具栏下方而不是表格里：它管的是「客户端能拉到哪些」，不是
+       * 「表格里显示哪些」，混排在筛选器中间会让人以为它影响当前这张表。
+       */
+      '<div class="regbar regbar-modeldefault" id="modelDefaultBar">' +
+        '<label class="check" title="客户端的「获取模型列表」按钮不带参数，用的就是这个默认值">' +
+          '客户端一键拉取给' +
+          '<select id="modelDefaultSel" aria-label="桥默认返回哪些模型">' +
+            '<option value="curated">精选（默认）</option>' +
+            '<option value="all">全部</option>' +
+            '<option value="ids">表格里勾选的</option>' +
+          '</select>' +
+        '</label>' +
+        '<button id="modelDefaultSave">保存</button>' +
+        '<span class="filterinfo" id="modelDefaultInfo"></span>' +
+      '</div>' +
       '<div class="tablewrap" id="modelTableWrap"><table id="modelTable"><thead><tr>' +
       '<th style="width:38px"></th><th>模型 id</th><th>显示名</th><th class="num">上下文</th><th class="num">最大输出</th><th class="num">倍率</th>'
       + '<th class="num" title="账本最近 N 天：扣分合计 ÷ token 合计 × 1000，只含成功且回报了扣分的调用">实测成本</th><th>dsh</th>' +
@@ -6239,6 +6315,7 @@ function renderModelTable(models, registered) {
     $('uncheckBadBtn').onclick = uncheckBadModels;
     $('exportModelsBtn').onclick = exportModelsCsv;
     $('refreshCatalogBtn').onclick = refreshCatalogNow;
+    wireModelDefault();
     $('modelFilter').oninput = applyModelFilter;
     $('modelKind').onchange = applyModelFilter;
     $('probeSortTh').onclick = sortModelsByProbe;
@@ -6253,6 +6330,160 @@ function renderModelTable(models, registered) {
 
     applyModelSearch();
   }
+}
+
+/**
+ * 「桥默认返回哪些模型」那一行：把当前值回填到下拉，并绑定保存。
+ *
+ * ## 它到底在管什么（别让人误会）
+ *
+ * 管的是**客户端**看到的清单，不是上面这张表：`GET /v1/models`（不带参数）是
+ * Cherry Studio / ChatBox 等客户端「获取模型列表」按钮打的那个地址，桥默认只回
+ * 3 个精选 —— 用户因此以为桥「只认三个模型」（2026-10-26 反馈）。
+ *
+ * 三档：精选 / 全部 / **表格里勾选的那几个**（顺序按勾选的先后，也就是客户端
+ * 列表里的显示顺序）。保存后**立即生效**（写桥的数据目录，不重启桥）；
+ * `/v1/models?all=1` 始终是全量，不受这里影响。
+ */
+function wireModelDefault() {
+  const bar = $('modelDefaultBar');
+  const sel = $('modelDefaultSel');
+  const btn = $('modelDefaultSave');
+  if (!bar || !sel || !btn) return;
+  // 桥没起来 / 旧版桥没有这个字段：整行隐藏，不显示一个猜出来的值
+  bar.hidden = !lastModelsDefault;
+  if (!lastModelsDefault) return;
+
+  const current = lastModelsDefault;
+  const toSelectValue = (d) => (d && d.mode === 'ids' ? 'ids' : (d && d.mode === 'all' ? 'all' : 'curated'));
+  sel.value = toSelectValue(current);
+  refreshModelDefaultInfo();
+
+  /*
+   * 勾选变化 → 下拉自动切到「表格里勾选的」。
+   *
+   * 为什么不是反过来（让用户先去下拉里选）：用户的真实动作顺序就是"先勾模型、
+   * 再决定给客户端看哪些"。勾了却什么都不变，看起来就像勾选没被接受
+   * （2026-10-26 的反馈正是这个）。这里只在**还没有 ids 设置**时自动切，
+   * 已经保存过 all / curated 的用户不会被一次勾选悄悄改掉意图。
+   */
+  sel.onchange = () => {
+    // 手动切走时不用自动再切回来：以用户这次的选择为准
+    sel.dataset.touched = '1';
+    refreshModelDefaultPendingHint();
+  };
+  syncModelDefaultSelection();
+  sel._syncIds = syncModelDefaultSelection;
+
+  const save = async () => {
+    const next = sel.value;
+    let payload;
+    if (next === 'ids') {
+      const ids = checkedModelIds();
+      if (!ids.length) {
+        // 勾选为空时不发请求：桥会 400，而用户看到的应该是一句能照着做的提示
+        setRegMsg('先在表格里勾选要暴露给客户端的模型，再保存（当前没有勾选）', 'err');
+        sel.value = toSelectValue(current);
+        return;
+      }
+      payload = { ids };
+    } else {
+      payload = { value: next };
+    }
+    btn.disabled = true;
+    btn.textContent = '保存中…';
+    const r = await api('/api/models/default', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    btn.disabled = false;
+    btn.textContent = '保存';
+    if (r && r.ok) {
+      lastModelsDefault = r;
+      refreshModelDefaultInfo();
+      setRegMsg('已保存：客户端一键拉取会拿到 ' + (r.count ?? '?') + ' 个模型（已立刻生效，无需重启桥）', 'good');
+      // 保存成功后清除「用户手动选过」的标记：之后的勾选变化可以继续自动跟随
+      delete sel.dataset.touched;
+      sel.value = toSelectValue(r);
+    } else {
+      setRegMsg('保存失败：' + ((r && r.error) || '未知错误'), 'err');
+      // 回滚下拉，别让界面停在一个没保存成功的值上
+      sel.value = toSelectValue(current);
+    }
+    refreshModelDefaultPendingHint();
+  };
+  btn.onclick = save;
+}
+
+/**
+ * 让下拉跟随勾选：没手动挑过时，勾了模型就切到「表格里勾选的」，全取消就回「精选」。
+ * 用户手动选过（`dataset.touched`）就不再自动改 —— 那是他自己的意图。
+ */
+function syncModelDefaultSelection() {
+  const sel = $('modelDefaultSel');
+  if (!sel || sel.dataset.touched === '1') return;
+  const n = checkedModelIds().length;
+  // 已保存成 ids 时保持 ids（不管当前勾了几个）；否则按"有没有勾"来切
+  const savedIds = lastModelsDefault && lastModelsDefault.mode === 'ids';
+  if (n > 0 || savedIds) sel.value = 'ids';
+  else if (sel.value === 'ids') sel.value = 'curated';
+  refreshModelDefaultPendingHint();
+}
+
+/** 「当前会给 N 个 / 目录共 M 个 / 值从哪来」——一句话说清，不留猜的空间。 */
+function refreshModelDefaultInfo() {
+  const info = $('modelDefaultInfo');
+  if (!info) return;
+  const d = lastModelsDefault;
+  if (!d) { info.textContent = ''; return; }
+  const from = { panel: '面板保存的', env: '环境变量', builtin: '默认' }[d.source] || '';
+  const count = typeof d.count === 'number' ? d.count : null;
+  const total = typeof d.total === 'number' ? d.total : null;
+  const parts = [];
+  if (d.mode === 'ids') {
+    parts.push('按勾选的 ' + ((d.ids && d.ids.length) || 0) + ' 个');
+    if (count !== null && d.ids && count < d.ids.length) {
+      parts.push('其中 ' + (d.ids.length - count) + ' 个已不在当前目录，不会下发');
+    }
+  } else if (count !== null) {
+    parts.push('当前一键拉取给 ' + count + ' 个');
+  }
+  if (total !== null && count !== null && count < total) parts.push('目录共 ' + total + ' 个（/v1/models?all=1 可拿全量）');
+  if (from) parts.push('值来自' + from);
+  if (d.invalid) parts.push('配置里的「' + d.invalid + '」不被识别，已按默认处理');
+  info.textContent = parts.join(' · ');
+  refreshModelDefaultPendingHint();
+}
+
+/**
+ * 下拉里选中「表格里勾选的」，但**还没保存**时给出即时提示。
+ *
+ * 为什么需要：勾选是表格上的动作，它对"客户端能看到什么"**没有影响** ——
+ * 只有点保存才生效。原先没有这条提示，用户勾完看到下拉还写着「精选」，
+ * 会以为"勾选没用 / 一保存就跳回精选"（2026-10-26 的真实反馈）。
+ * 现在下拉会跟着勾选自动切到「表格里勾选的」，并在这里说清"还没保存"。
+ */
+function refreshModelDefaultPendingHint() {
+  const sel = $('modelDefaultSel');
+  const info = $('modelDefaultInfo');
+  const btn = $('modelDefaultSave');
+  if (!sel || !info || !btn) return;
+  if (sel.value !== 'ids') return;
+  const n = checkedModelIds().length;
+  if (!n) {
+    info.textContent = '还没勾选任何模型：勾选后点「保存」才会生效';
+    btn.disabled = true;
+    return;
+  }
+  btn.disabled = false;
+  const saved = lastModelsDefault && lastModelsDefault.mode === 'ids'
+    ? (lastModelsDefault.ids || [])
+    : [];
+  const same = saved.length === n && saved.every((id) => checkedModelIds().includes(id));
+  info.textContent = same
+    ? '已保存为这 ' + n + ' 个勾选的模型'
+    : '将保存为这 ' + n + ' 个勾选的模型（点「保存」才会生效）';
 }
 
 /**

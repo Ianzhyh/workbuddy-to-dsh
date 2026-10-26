@@ -21,6 +21,21 @@
 
 ### Added
 
+- **默认视图可选规模 / 具体模型**（2026-10-26 反馈「为什么只出现三个」）：
+  客户端的「获取模型列表 / 一键同步」按钮打的是**不带参数**的 `GET /v1/models`，
+  原先那里固定只回 3 个精选，于是用户以为桥只认三个模型（完整目录在 `?all=1`）。
+  现在默认视图可控：
+  - 面板「可用模型」新增一行「客户端一键拉取给」，可选**精选 / 全部 / 表格里勾选的**；
+    勾选模型时下拉自动跟随并提示「点保存才生效」，保存后**立即生效**（无需重启桥）。
+  - 新增 `GET|POST /v1/models/default`（桥）与 `/api/models/default`（控制台）；
+    支持 `{ value: 'curated' | 'all' | N }`、`{ ids: [...] }`（点名具体模型）与
+    `{ value: null }`（清除偏好）。
+  - 新增 `WORKBUDDY_MODELS_DEFAULT`（`curated` / `all` / 正整数）作为部署级默认；
+    面板保存的值优先，请求级 `GET /v1/models?limit=N` 再覆盖两者。
+    校验规则同步进 `lib/config-schema.mjs`（正整数不算写错）。
+  - `ids` 与当前目录**求交集**：已下架的 id 不下发；顺序按用户提交顺序，
+    即客户端列表里的显示顺序。`/health.models` 与 `/v1/models` 走同一函数，
+    面板说的数量和客户端真拿到的一致。
 - **失败归因**：账本失败记录统一带 `failureKind` / `retryable` / `failureAction`
   （channel / account / auth / rate_limit / quota / tool_history / stream /
   upstream / request / unknown）；请求页显示归因标签，概览对账号/通道/额度类失败

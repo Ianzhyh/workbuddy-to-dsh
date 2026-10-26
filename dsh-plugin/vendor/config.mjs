@@ -484,6 +484,18 @@ export const config = {
      */
     activeAlertMs: numEnv('WORKBUDDY_ACTIVE_ALERT_MS', 300_000, { min: 1000 }),
     /**
+     * `GET /v1/models`（不带参数）给几个模型 —— 几乎所有客户端的「获取模型列表 /
+     * 一键同步」按钮打的都是这个地址。
+     *
+     * 默认 `curated`（3 个精选），与历史行为一致。想让客户端一键拉到全部就设
+     * `all`；想让默认视图大一点但不到全量，设正整数（如 `8`）。
+     * `/v1/models?limit=N` 是请求级覆盖，不用重启桥。
+     *
+     * 取值原样透传给桥，**不在这里做校验**：桥侧 parseModelsDefault() 是唯一
+     * 真源（控制台、插件拉起桥、独立启动桥三条路径都必须同一套判据）。
+     */
+    modelsDefault: env.WORKBUDDY_MODELS_DEFAULT || '',
+    /**
      * 出站客户端身份（UA / X-IDE-* / X-Product-Version 的取值）。
      *
      * 上游按这些指纹校验调用来源；官方客户端升级后旧指纹可能被拒（「上游
@@ -604,6 +616,9 @@ export function bridgeEnv(overrides = {}) {
     WORKBUDDY_RATE_LIMIT_MIN_INTERVAL_MS: String(config.bridge.rateLimitMinIntervalMs),
     WORKBUDDY_RATE_LIMIT_MODE: config.bridge.rateLimitMode,
     WORKBUDDY_ACTIVE_ALERT_MS: String(config.bridge.activeAlertMs),
+    // 空值不注入：让桥自己按「未配置」处理（等价于默认 curated），
+    // 避免 `.env` 里写了个空行就把桥侧判据喂成空串。
+    ...(config.bridge.modelsDefault ? { WORKBUDDY_MODELS_DEFAULT: config.bridge.modelsDefault } : {}),
     WORKBUDDY_CLIENT_KEYS: config.bridge.clientKeys,
     WORKBUDDY_AUTH_FILE: overrides.authFile || config.workbuddy.authFile,
     // 钉住某个账号快照时，再告诉桥"桌面端当前登录文件 + 钉住时的账号 uid"：

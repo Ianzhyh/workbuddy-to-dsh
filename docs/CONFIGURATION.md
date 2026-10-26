@@ -40,6 +40,7 @@ copy .env.example .env
 | `WORKBUDDY_CONVERSATION_ID_BODY` | `1` | 上游按 body 的 `conversation_id` 分前缀缓存槽。客户端没带时，桥用「首条 system + 首条 user + 模型」的指纹补稳定值；若上游把它当未知字段拒绝，会自动去掉并关闭本进程注入 |
 | `WORKBUDDY_SSE_NORMALIZE` | `1` | chat 流式帧归一：补齐缺失的 `choices[0].delta`、把逐字符 `reasoning_content` 聚合成一段、`[DONE]` 只发一次。`0` = 原始字节透传（用于 A/B 或客户端特殊兼容） |
 | `WORKBUDDY_SKIP_MODEL_PREFLIGHT` | 未设 | `1` = 跳过本地模型目录预校验，未知模型也转发给上游（目录漏列可用模型时用）。默认未知模型在本地回 **404**（OpenAI/Anthropic 客户端据此切模型） |
+| `WORKBUDDY_MODELS_DEFAULT` | `curated` | `GET /v1/models`（**不带参数**，即客户端「获取模型列表」按钮打的那个地址）默认返回哪些模型：`curated` = 3 个精选（原行为）、`all` = 全量目录、正整数 N = 精选在前补到 N 个。面板「可用模型 → 客户端一键拉取给」保存的值**优先于**本变量且立即生效；请求级 `?limit=N` 再覆盖两者。`?all=1` 始终全量，不受影响 |
 | `WORKBUDDY_SHAPE` | 未设 | `1` = 额外打印请求形状（角色计数、工具名、客户端头；仍不含对话内容），排查 11128 字段用 |
 | `WORKBUDDY_LOG` | `1` | `1` 时打印每次请求的模型、消息数、工具数（**不含对话内容**） |
 | `WORKBUDDY_SEARCH_BASE` | 按账号区域自动选择 | WorkBuddy 原生搜索网关（`/agenttool/v1/search`）。国际版默认 `https://www.workbuddy.ai`，国内版默认 `https://www.workbuddy.cn`；仅自建网关/A/B 时覆盖 |

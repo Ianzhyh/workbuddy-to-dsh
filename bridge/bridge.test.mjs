@@ -110,6 +110,11 @@ async function startBridge(env = {}, opts = {}) {
       WORKBUDDY_CREDENTIAL_DIR: join(dir, 'credentials'),
       WORKBUDDY_USAGE_FILE: join(dir, 'usage.jsonl'),
       WORKBUDDY_MEDIA_STORE_FILE: join(dir, 'media-tasks.json'),
+      // 面板保存的「默认视图规模」也必须隔离：它与 .state.json 不同，
+      // 之前漏了这一条 → 测试把 `value: "4"` 写进了用户真实的
+      // `~/.workbuddy-bridge/models-default.json`，跑完测试后真实桥就少列模型，
+      // 而测试自己是"通过"的（最坏的一类污染：改的是用户数据、症状隔一轮才现形）。
+      WORKBUDDY_MODELS_DEFAULT_FILE: join(dir, 'models-default.json'),
       WORKBUDDY_AUTO_CHECKIN: '0', // 别在测试里触发签到
       WORKBUDDY_LOG: '0',
       ...env,
@@ -603,6 +608,121 @@ test('目录补全：国际版漏列的模型必须带上**实测过的**视觉 
       !def.data.some((m) => m.id === 'deepseek-v4-pro'),
       '默认视图同样要过区域过滤：国际版不该出现 v4-pro',
     );
+  } finally { await bridge.stop(); upstream.close(); }
+});
+
+test('/v1/models：默认视图的规模可由面板保存（改完立即生效，不需要重启桥）', { timeout: 90_000 }, async () => {
+  /*
+   * 2026-10-26 反馈：「为什么只出现三个？」
+   *
+   * 客户端的「获取模型列表 / 一键同步」按钮打的是**不带参数**的 `/v1/models`，
+   * 而那里默认只回精选。这条用例钉四件事：
+   *   1. 默认仍是精选（老行为不变 —— 不能因为加开关就悄悄改默认）；
+   *   2. 面板保存 `all` → 同一个地址立刻回全量（**不重启桥**）；
+   *   3. 保存数字 N → 精选在前、补齐到 N；
+   *   4. `?limit=N` 是请求级覆盖，不需要保存任何东西。
+   */
+  const upstream = createServer((req, res) => {
+    const path = new URL(req.url, 'http://127.0.0.1').pathname;
+    if (path === '/v2/enterprises/personal/models') {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      return res.end(JSON.stringify({
+        code: 0,
+        data: {
+          models: [
+            { id: 'glm-5.3', name: 'GLM-5.3', maxInputTokens: 1000000, maxOutputTokens: 48000 },
+            { id: 'm-only-a', name: 'A', maxInputTokens: 1000, maxOutputTokens: 100 },
+            { id: 'm-only-b', name: 'B', maxInputTokens: 1000, maxOutputTokens: 100 },
+            { id: 'm-only-c', name: 'C', maxInputTokens: 1000, maxOutputTokens: 100 },
+            { id: 'm-only-d', name: 'D', maxInputTokens: 1000, maxOutputTokens: 100 },
+          ],
+        },
+      }));
+    }
+    if (path === '/v3/config') {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      return res.end(JSON.stringify({ code: 0, data: { models: [] } }));
+    }
+    res.writeHead(404, { 'content-type': 'application/json' });
+    res.end('{}');
+  });
+  await new Promise((r) => upstream.listen(0, '127.0.0.1', r));
+  const upstreamBase = `http://127.0.0.1:${upstream.address().port}`;
+
+  const bridge = await startBridge({ CODEBUDDY_ENDPOINT: upstreamBase }, { auth: READABLE_FAKE_AUTH });
+  const getModels = async (qs = '') => (await fetch(`${bridge.baseUrl}/v1/models${qs}`, { headers: auth })).json();
+  // 传对象 = 直接当请求体（`{ ids: [...] }`）；其余 = `{ value }`
+  const saveDefault = async (value) => {
+    const r = await fetch(`${bridge.baseUrl}/v1/models/default`, {
+      method: 'POST',
+      headers: { ...auth, 'content-type': 'application/json' },
+      body: JSON.stringify(value && typeof value === 'object' ? value : { value }),
+    });
+    return { status: r.status, body: await r.json() };
+  };
+  try {
+    // ① 默认不变：还是精选那几个
+    const before = await getModels();
+    assert.deepEqual(
+      before.data.map((m) => m.id).sort(),
+      ['deepseek-v4-pro', 'deepseek-v4.1-flash', 'glm-5.3'],
+      '不配置时默认视图必须仍是 3 个精选（这是既有行为，不能被开关改掉）',
+    );
+
+    // ② 保存 all → 立即全量
+    const allSaved = await saveDefault('all');
+    assert.equal(allSaved.status, 200, `保存 all 应当成功：${JSON.stringify(allSaved.body)}`);
+    assert.equal(allSaved.body.mode, 'all');
+    const afterAll = await getModels();
+    assert.ok(
+      afterAll.data.length > before.data.length,
+      `保存 all 后默认视图必须放大（之前 ${before.data.length} 个，现在 ${afterAll.data.length} 个）`,
+    );
+    assert.ok(
+      afterAll.data.some((m) => m.id === 'm-only-a'),
+      '保存 all 后，只在上游目录里的模型也必须出现在默认视图',
+    );
+
+    // ③ 保存数字 N → 精选在前，补齐到 N
+    const nSaved = await saveDefault(4);
+    assert.equal(nSaved.status, 200);
+    const afterN = await getModels();
+    assert.equal(afterN.data.length, 4, '保存 4 之后默认视图就给 4 个');
+    assert.equal(afterN.data[0].id, 'deepseek-v4.1-flash', '精选排在前面（顺序不能被打乱）');
+
+    // ④ ?limit=N 是请求级覆盖：不用保存、也不改已保存的值
+    const limited = await getModels('?limit=2');
+    assert.equal(limited.data.length, 2, '?limit=2 必须只回 2 个');
+    assert.equal((await getModels()).data.length, 4, '请求级 limit 不能污染已保存的默认值');
+
+    // ⑤ 清掉保存的偏好 → 回落到内建精选
+    const cleared = await saveDefault(null);
+    assert.equal(cleared.status, 200);
+    assert.equal(cleared.body.mode, 'curated', '清空后必须回落到 curated');
+    assert.equal((await getModels()).data.length, 3, '清空后默认视图回到 3 个精选');
+
+    // ⑥ 非法值明确拒绝，而不是静默回退
+    const bad = await saveDefault('十几个');
+    assert.equal(bad.status, 400, '不认识的取值必须 400（静默回退会让面板显示与实际不符）');
+
+    // ⑦ 「只给这几个」：按名字点名，顺序按提交顺序（也就是客户端列表的顺序）
+    const idsSaved = await saveDefault({ ids: ['m-only-c', 'glm-5.3'] });
+    assert.equal(idsSaved.status, 200, `保存 ids 应当成功：${JSON.stringify(idsSaved.body)}`);
+    const afterIds = await getModels();
+    assert.deepEqual(
+      afterIds.data.map((m) => m.id),
+      ['m-only-c', 'glm-5.3'],
+      'ids 模式必须**只**给点名的那几个，且保持提交顺序',
+    );
+
+    // ⑧ 点名清单与目录求交集：下架的模型不该继续冒充可用
+    await saveDefault({ ids: ['m-only-c', 'no-such-model'] });
+    const intersect = await getModels();
+    assert.deepEqual(intersect.data.map((m) => m.id), ['m-only-c'], '不在目录里的 id 不下发');
+
+    // ⑨ 空清单 / 全是非法 id → 400（否则会存出一份"什么都拉不到"的设置）
+    assert.equal((await saveDefault({ ids: [] })).status, 400, '空 ids 必须 400');
+    assert.equal((await saveDefault({ ids: ['模型-中文名'] })).status, 400, '非 ASCII 的 id 必须 400');
   } finally { await bridge.stop(); upstream.close(); }
 });
 
