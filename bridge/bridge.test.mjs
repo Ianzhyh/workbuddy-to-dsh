@@ -2764,7 +2764,10 @@ test('桥：自动生成令牌时必须把值打印到启动日志（否则用�
     const m = out.match(/WORKBUDDY_LOCAL_TOKEN=([A-Za-z0-9._-]{16,})/);
     assert.ok(m, `启动日志里必须给出自动生成的令牌（实际输出：\n${out}\n）`);
 
-    const ok = await fetch(`${bridge.baseUrl}/v1/models`, {
+    // 只验证令牌可用：`/` 是轻量身份端点，不抓目录、不打上游。
+    // 原先进程会顺带请求 `/v1/models`，CI 上目录抓取可能超过 5 秒，导致
+    // 这条**与目录无关**的用例被网络超时误伤。
+    const ok = await fetch(`${bridge.baseUrl}/`, {
       headers: { authorization: `Bearer ${m[1]}` },
       signal: AbortSignal.timeout(5000),
     });
