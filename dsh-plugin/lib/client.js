@@ -558,6 +558,15 @@ body.dark .wb-root,
       '启动控制台': 'Start console',
       '重新诊断': 'Re-diagnose',
       '复制诊断包': 'Copy diagnostic bundle',
+      '确定停止桥？正在进行的请求会被中断。': 'Stop the bridge? In-flight requests will be interrupted.',
+      '确定重启桥？正在进行的请求会被中断。': 'Restart the bridge? In-flight requests will be interrupted.',
+      '切换账号会重启桥，正在进行的请求会被中断。继续？':
+        'Switching accounts restarts the bridge and interrupts in-flight requests. Continue?',
+      '目录来源：': 'Catalog source: ',
+      '上游目录': 'upstream catalog',
+      '旧缓存': 'stale cache',
+      '活动数据来源': 'Promotion source',
+      '上游 modelPromotions': 'upstream modelPromotions',
       '再查一次': 'Check again',
       '查看失败': 'View failures',
       '去签到': 'Go to check-in',
@@ -3784,6 +3793,8 @@ body.dark .wb-root,
         }
       };
       const switchTo = async (name, { forceDesktop = false } = {}) => {
+        if (typeof window.confirm === 'function'
+          && !window.confirm(t('切换账号会重启桥，正在进行的请求会被中断。继续？'))) return;
         setWorking(name);
         setMessage('');
         const res = await postJson(CONSOLE_API + '/account/switch', { file: name });
@@ -5325,6 +5336,11 @@ body.dark .wb-root,
                 Array.isArray(m.efforts) ? m.efforts.join('|') : '', m.onlyReasoning ? 1 : 0,
                 resultOf(m.id) ? (resultOf(m.id).ok ? 'ok' : 'fail') : '', resultOf(m.id)?.ms ?? '', resultOf(m.id)?.error || ''])) }, '导出 CSV'))),
         !consoleReady ? h('p', { className: 'wb-note' }, '体检需要控制台在跑（结论只由它写，保证两边一致）。') : null,
+        h('p', { className: 'wb-note', style: { margin: '0 0 10px' } },
+          t('目录来源：'),
+          data?.staleMs ? t('旧缓存') : t('上游目录'),
+          data?.at ? ' · ' + fmtClock(data.at) : '',
+          data?.error ? ' · ' + String(data.error) : ''),
         // ── 模型显示偏好：勾选决定哪些模型出现在 dsh 的模型选择器里 ─────────
         h('div', { className: 'wb-actions split', style: { marginBottom: '10px' } },
           h('div', { className: 'wb-actions-group' },
@@ -5747,6 +5763,13 @@ body.dark .wb-root,
                             label: '促销',
                             value: m.badge + (m.promotionActive ? t('（进行中）') : t('（未生效）')),
                             hint: m.promotionText || undefined,
+                          })
+                          : null,
+                        m.badge
+                          ? h(DetailItem, {
+                            label: '活动数据来源',
+                            value: t('上游 modelPromotions'),
+                            hint: '浏览器登录时，桥会额外用桌面身份补抓促销规则；模型清单仍用插件身份。活动名白天也会显示，是否免费看「计费倍率」与进行中状态。',
                           })
                           : null,
                         m.promotionUntil
@@ -6973,6 +6996,12 @@ body.dark .wb-root,
       }, [chatModelValid]);
 
       const act = useCallback(async (action) => {
+        if ((action === 'stop' || action === 'restart') && typeof window.confirm === 'function') {
+          const question = action === 'stop'
+            ? t('确定停止桥？正在进行的请求会被中断。')
+            : t('确定重启桥？正在进行的请求会被中断。');
+          if (!window.confirm(question)) return;
+        }
         setBusy(true);
         setError('');
         try {
