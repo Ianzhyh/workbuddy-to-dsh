@@ -157,6 +157,11 @@ dsh plugin --profile desktop add github:Ianzhyh/workbuddy-to-dsh
 完整的路线（拷文件夹 / tarball / 发 npm）、验收清单、端口与目录说明、九条常见
 故障排查，见 **[docs/INSTALL.md](../docs/INSTALL.md)**；
 
+装不上、配置怎么填、客户端怎么接，优先到
+[Discussions · Q&A](https://github.com/Ianzhyh/workbuddy-to-dsh/discussions/new?category=q-a)
+提问（附脱敏诊断包）；确定是可复现的缺陷再开 issue。公开区都不要贴令牌、登录文件、
+账号 UID 或完整对话。
+
 ```sh
 npm run vendor             # 生成/更新插件自带的 vendor/（分发前必做）
 npm run vendor:check       # 校验 vendor/ 与仓库是否同步（CI / 发版前）

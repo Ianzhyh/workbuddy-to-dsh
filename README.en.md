@@ -194,6 +194,16 @@ Key knobs: `WORKBUDDY_PORT` / `WORKBUDDY_LOCAL_TOKEN` / `WORKBUDDY_ANTHROPIC_MOD
 - [Troubleshooting](docs/TROUBLESHOOTING.md) · [Security](docs/SECURITY.md)
 - [OpenAPI](docs/openapi.yaml) · [Changelog](CHANGELOG.md) · [Contributing](CONTRIBUTING.md)
 
+## Community & feedback
+
+- **Setup help / troubleshooting:** [Discussions · Q&A](https://github.com/Ianzhyh/workbuddy-to-dsh/discussions/new?category=q-a) — attach a redacted diagnostic bundle (`node tools\doctor.mjs --bundle`).
+- **Feature ideas:** [Discussions · Ideas](https://github.com/Ianzhyh/workbuddy-to-dsh/discussions/new?category=ideas)
+- **Setups / workflows:** [Discussions · Show and tell](https://github.com/Ianzhyh/workbuddy-to-dsh/discussions/new?category=show-and-tell)
+- **Maintainer announcements:** [Discussions · Announcements](https://github.com/Ianzhyh/workbuddy-to-dsh/discussions/categories/announcements)
+- **Confirmed bugs:** [open an issue](https://github.com/Ianzhyh/workbuddy-to-dsh/issues/new?template=bug.yml). Usage questions belong in Q&A.
+
+> Never post tokens, `Authorization` headers, login files, account UIDs, or full conversations in public discussions or issues. Security reports: see [`SECURITY.md`](.github/SECURITY.md).
+
 ## License
 
 MIT — see [LICENSE](LICENSE).

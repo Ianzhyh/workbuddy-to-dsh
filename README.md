@@ -718,6 +718,19 @@ docs/                      架构、配置、排错、安全、接入链路审�
 
 ---
 
+## 社区与反馈
+
+- **使用求助 / 报错提问**：[Discussions · Q&A](https://github.com/Ianzhyh/workbuddy-to-dsh/discussions/new?category=q-a)
+  —— 先搜一下已有讨论；提问时附上脱敏诊断包（`node tools\doctor.mjs --bundle`）。
+- **功能建议**：[Discussions · Ideas](https://github.com/Ianzhyh/workbuddy-to-dsh/discussions/new?category=ideas)
+- **接入案例 / 工作流分享**：[Discussions · Show and tell](https://github.com/Ianzhyh/workbuddy-to-dsh/discussions/new?category=show-and-tell)
+- **维护者公告**：[Discussions · Announcements](https://github.com/Ianzhyh/workbuddy-to-dsh/discussions/categories/announcements)
+- **确定是 bug**：[开 issue](https://github.com/Ianzhyh/workbuddy-to-dsh/issues/new?template=bug.yml)；产品使用问题请优先走上面的 Q&A，issue 区留给可复现的缺陷。
+
+> 不要在公开讨论或 issue 里贴令牌、`Authorization` 头、登录文件、账号 UID 或完整对话内容。安全问题请按 [`SECURITY.md`](.github/SECURITY.md) 私下报告。
+
+---
+
 ## 故障排查
 
 | 现象 | 常见原因 |

@@ -52,6 +52,9 @@
 - **安全与运维文档**：新增 `.github/SECURITY.md`、Bug/Feature issue 表单、PR 模板、
   [`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md) 与 [`docs/SUNSET.md`](docs/SUNSET.md)；
   明确平台/客户端分档、上游失效处置、数据位置与不支持范围。
+- **社区入口**：启用 GitHub Discussions（Q&A / Ideas / Show and tell / Announcements
+  / Polls），欢迎帖说明提问模板、脱敏诊断包与安全边界；issue 模板页把使用求助
+  引导到 Discussions，issue 区保留给可复现缺陷。
 - **配置取值校验与备份恢复**：诊断页新增「配置取值」——用与 `numEnv()` 相同的
   判据检查数值 / 枚举 / 开关项，格式错误（如端口 `879O`、搜索条数 `50`）会明确
   指出「值不会被采用、实际按什么运行」，不再静默回退。新增

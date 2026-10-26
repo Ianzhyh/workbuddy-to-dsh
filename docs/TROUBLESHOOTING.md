@@ -17,6 +17,10 @@ node tools\doctor.mjs --bundle > workbuddy-diagnostic.json
 vendor 指纹、诊断项与最近失败归因；**不含令牌、密钥、对话内容**。插件「诊断」
 页也有「复制诊断包」按钮。
 
+使用问题（装不上、配置怎么填、客户端怎么接）优先发
+[Discussions · Q&A](https://github.com/Ianzhyh/workbuddy-to-dsh/discussions/new?category=q-a)；
+确定是可复现的缺陷再开 issue。两边都不要贴令牌、登录文件、账号 UID 或完整对话。
+
 ---
 
 ## 运行期数据在哪（升级后数据丢了先看这里）
