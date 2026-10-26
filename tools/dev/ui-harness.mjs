@@ -268,7 +268,51 @@ export async function openPage(url, routes, { cdpPort = 9333, width = 1440, heig
     const { validateRoutes, loadShape } = await import('./api-shape.mjs');
     const shape = loadShape();
     if (shape) {
-      const problems = validateRoutes(routes, shape);
+      /*
+       * 先补**与用例无关的附加字段**，再做形状校验。
+       *
+       * 背景：`/api/models` 除了 `models` 还有 `modelsDefault`（面板「客户端一键
+       * 拉取给」那一行要用）。十来个用例都是自己写 `{ body: { models: CATALOG } }`
+       * —— 要求每个用例都记得带上这个跟它毫无关系的字段，只会变成长期负担：
+       * 下次接口再加一个诊断字段，又得全仓库改一遍。
+       *
+       * 所以这里统一补齐：**用例没写该字段**时填夹具默认值；写了的（包括显式
+       * 传 `false` 验「旧版桥没有这个字段」）一律尊重原值。补齐之后仍然要过
+       * 形状校验 —— 这不是"跳过检查"，只是替用例省掉无关的样板。
+       */
+      const filled = { ...routes };
+      const modelsRoute = filled['/api/models'];
+      if (modelsRoute && modelsRoute.body && typeof modelsRoute.body === 'object'
+        && modelsRoute.body.modelsDefault === undefined) {
+        const { baseRoutes } = await import('./fixtures.mjs');
+        const defaults = baseRoutes()['/api/models']?.body?.modelsDefault;
+        if (defaults) {
+          filled['/api/models'] = { ...modelsRoute, body: { ...modelsRoute.body, modelsDefault: defaults } };
+        }
+      }
+      /*
+       * 同上：`/api/usage` 的 `failureByModel` 是「按模型的失败统计」，与
+       * `models` 是**两张表**（失败不混进成功排行）。少数用例自己拼了 usage 对象，
+       * 这里补一个空数组 —— 空数组是真实语义（这批数据里没有失败），不掩盖问题。
+       */
+      const usageRoute = filled['/api/usage'];
+      if (usageRoute && usageRoute.body && typeof usageRoute.body === 'object'
+        && usageRoute.body.usage && typeof usageRoute.body.usage === 'object'
+        && usageRoute.body.usage.failureByModel === undefined) {
+        filled['/api/usage'] = {
+          ...usageRoute,
+          body: { ...usageRoute.body, usage: { ...usageRoute.body.usage, failureByModel: [] } },
+        };
+      }
+      const problems = validateRoutes(filled, shape);
+      /*
+       * 把补齐结果**同步回真正要打给页面的那份**。
+       *
+       * 只在 `filled` 上补是不够的：校验过了、页面拿到的仍是缺字段的原对象，
+       * 于是那一行在页面上不渲染，而**测试是绿的** —— 正是这套夹具要防的坑。
+       */
+      if (filled['/api/models'] !== routes['/api/models']) routes['/api/models'] = filled['/api/models'];
+      if (filled['/api/usage'] !== routes['/api/usage']) routes['/api/usage'] = filled['/api/usage'];
       if (problems.length) {
         const detail = problems.map((p) => {
           const lines = [`  ${p.route}`];

@@ -19,6 +19,18 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **UI 测试夹具跟上接口形状**：`tools/dev/fixtures.mjs` 补齐 `/api/overview`、
+  `/api/models`、`/api/diagnose`、`/api/usage`、`/api/accounts` 一直缺的字段
+  （`bridge.auth` / `build` / `staleBuild`、`dsh.routeMode` / `nativeRoute` /
+  `nativePlugin`、`quota.history`、`usage.failureByModel`、`accounts.pin` 等）。
+  这些缺失会让 `openPage` 的形状校验直接抛错，**整批 UI 用例根本跑不到断言**。
+  `ui-harness` 同时为 `/api/models` 与 `/api/usage` 补上与用例无关的附加字段，
+  免得每个用例都要记得带上它们。
+
+## [1.16.0] - 2026-10-26
+
 ### Added
 
 - **默认视图可选规模 / 具体模型**（2026-10-26 反馈「为什么只出现三个」）：

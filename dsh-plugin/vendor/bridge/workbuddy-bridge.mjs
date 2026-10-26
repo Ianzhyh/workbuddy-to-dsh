@@ -9720,12 +9720,25 @@ async function handleRequest(req, res) {
      */
     if (url.pathname === '/v1/models/default' && req.method === 'GET') {
       const current = effectiveModelsDefault();
+      /*
+       * 与 POST 回同一套字段（含 `count` / `total`）。
+       *
+       * 为什么 GET 也要算这两个数：面板刚打开时只调一次 GET 就要把
+       * 「当前一键拉取给 N 个 · 目录共 M 个」显示出来 —— 若 GET 不给，
+       * 页面得等一次目录加载才敢显示，而那时文案会先空一截。
+       * 用**缓存**里的目录算，不触发上游抓取（这条是高频探活路径）。
+       */
+      const catalog = catalogCache.models;
+      let region = '';
+      try { region = upstreamRegion(await resolveAuth()); } catch { region = ''; }
       return json(res, 200, {
         ok: true,
         ...current,
         env: process.env.WORKBUDDY_MODELS_DEFAULT || '',
         saved: readSavedModelsDefault(),
         file: modelsDefaultFile(),
+        total: catalog.length || fallbackCatalog(region).length,
+        count: defaultViewModels(catalog, region).length,
       });
     }
 

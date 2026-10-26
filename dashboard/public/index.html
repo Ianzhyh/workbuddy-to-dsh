@@ -1315,6 +1315,8 @@ const I18N_EN = {
     'Check the models to expose to clients in the table first, then save (nothing is checked now)',
   '还没勾选任何模型：勾选后点「保存」才会生效':
     'No models checked yet — check some, then press Save',
+  '桥未运行或版本过旧，暂时读不到这项设置':
+    'Bridge is not running or too old — this setting is unavailable',
   '已保存为这': 'Saved: these ',
   '个勾选的模型': ' checked models',
   '将保存为这': 'Will save these ',
@@ -6350,9 +6352,24 @@ function wireModelDefault() {
   const sel = $('modelDefaultSel');
   const btn = $('modelDefaultSave');
   if (!bar || !sel || !btn) return;
-  // 桥没起来 / 旧版桥没有这个字段：整行隐藏，不显示一个猜出来的值
-  bar.hidden = !lastModelsDefault;
-  if (!lastModelsDefault) return;
+  /*
+   * 桥没起来 / 旧版桥没有这个字段：禁用而不是**隐藏**。
+   *
+   * 为什么不用 `hidden`：这一行是异步（`/api/models` 返回后）才有内容的，
+   * 从隐藏变可见会让**下方整块内容下移 21px** —— 而 `test-dropdowns` 的判据是
+   * 「页面高度与触发器纵坐标连续 3 次一致」（约 750ms）就算稳定，正好卡在数据
+   * 回来之前，于是它按旧坐标点击，落在移动后的别处，报「这个下拉点不开」。
+   *
+   * 保持占位、只把控件置灰：既不会让布局跳变，也仍然如实告诉用户"现在改不了"。
+   */
+  const available = !!lastModelsDefault;
+  bar.dataset.disabled = available ? '' : '1';
+  sel.disabled = !available;
+  btn.disabled = !available;
+  if (!available) {
+    refreshModelDefaultInfo();
+    return;
+  }
 
   const current = lastModelsDefault;
   const toSelectValue = (d) => (d && d.mode === 'ids' ? 'ids' : (d && d.mode === 'all' ? 'all' : 'curated'));
@@ -6431,27 +6448,43 @@ function syncModelDefaultSelection() {
   refreshModelDefaultPendingHint();
 }
 
-/** 「当前会给 N 个 / 目录共 M 个 / 值从哪来」——一句话说清，不留猜的空间。 */
+/**
+ * 「当前会给 N 个 / 目录共 M 个 / 值从哪来」——一句话说清，不留猜的空间。
+ *
+ * **逐段翻译再拼接**：整串会被拼成「A · B · C」一条文本节点，而规则表是按
+ * 单段写的（`^当前一键拉取给 (\d+) 个$`）—— 直接把整串丢给 translateText
+ * 永远匹配不到，英文模式下这一行会原样保留中文。
+ * 逐段过 `t()` 之后，拼接分隔符（` · `）本身就是语言无关的。
+ */
 function refreshModelDefaultInfo() {
   const info = $('modelDefaultInfo');
   if (!info) return;
   const d = lastModelsDefault;
-  if (!d) { info.textContent = ''; return; }
-  const from = { panel: '面板保存的', env: '环境变量', builtin: '默认' }[d.source] || '';
+  if (!d) {
+    // 桥没起来 / 旧版桥没有这个字段：说清为什么置灰，而不是留一片空白
+    info.textContent = t('桥未运行或版本过旧，暂时读不到这项设置');
+    return;
+  }
+  const from = t({ panel: '面板保存的', env: '环境变量', builtin: '默认' }[d.source] || '');
   const count = typeof d.count === 'number' ? d.count : null;
   const total = typeof d.total === 'number' ? d.total : null;
   const parts = [];
   if (d.mode === 'ids') {
-    parts.push('按勾选的 ' + ((d.ids && d.ids.length) || 0) + ' 个');
+    parts.push(t('按勾选的 ' + ((d.ids && d.ids.length) || 0) + ' 个'));
     if (count !== null && d.ids && count < d.ids.length) {
-      parts.push('其中 ' + (d.ids.length - count) + ' 个已不在当前目录，不会下发');
+      parts.push(t('其中 ' + (d.ids.length - count) + ' 个已不在当前目录，不会下发'));
     }
   } else if (count !== null) {
-    parts.push('当前一键拉取给 ' + count + ' 个');
+    parts.push(t('当前一键拉取给 ' + count + ' 个'));
   }
-  if (total !== null && count !== null && count < total) parts.push('目录共 ' + total + ' 个（/v1/models?all=1 可拿全量）');
-  if (from) parts.push('值来自' + from);
-  if (d.invalid) parts.push('配置里的「' + d.invalid + '」不被识别，已按默认处理');
+  if (total !== null && count !== null && count < total) {
+    parts.push(t('目录共 ' + total + ' 个（/v1/models?all=1 可拿全量）'));
+  }
+  if (from) parts.push(t('值来自' + from));
+  if (d.invalid) parts.push(t('配置里的「' + d.invalid + '」不被识别，已按默认处理'));
+  // 已经逐段翻过：告诉 MutationObserver 别再对整串翻一次
+  // （整串匹配不到规则，翻了也是白翻，但会覆盖掉 __i18nSrc 的还原基准）
+  info.dataset.i18nSkip = '1';
   info.textContent = parts.join(' · ');
   refreshModelDefaultPendingHint();
 }

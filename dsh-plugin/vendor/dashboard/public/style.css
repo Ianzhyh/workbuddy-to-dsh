@@ -2247,7 +2247,6 @@ input[type="checkbox"]:active {
 }
 .regbar-modeldefault .check {
   flex: 0 0 auto;
-  white-space: nowrap;
 }
 .regbar-modeldefault select {
   flex: 0 0 auto;
@@ -2264,6 +2263,17 @@ input[type="checkbox"]:active {
   /* 长文案换行而不是溢出：这里本来就允许占两行 */
   line-height: 1.45;
   white-space: normal;
+}
+
+/*
+ * 读不到设置时（桥没起来 / 旧版桥）**置灰但保留占位**，不隐藏。
+ *
+ * 隐藏↔可见会让这一行的高度在数据回来时从 0 变成 33px，把下方内容整体推下去；
+ * 而 test-dropdowns 的「布局已稳定」判定正好卡在那一刻之前，于是它按旧坐标
+ * 点击、落到别处，报出一个假的「这个下拉点不开」。
+ */
+.regbar-modeldefault[data-disabled="1"] {
+  opacity: 0.6;
 }
 
 /* 体检进度条 */

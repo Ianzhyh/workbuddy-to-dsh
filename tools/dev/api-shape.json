@@ -664,6 +664,12 @@
       },
       "$.modelsDefault.file": {
         "type": "string"
+      },
+      "$.modelsDefault.total": {
+        "type": "number"
+      },
+      "$.modelsDefault.count": {
+        "type": "number"
       }
     },
     "/api/clients": {
@@ -993,19 +999,19 @@
       "$.clients[].changes[].to.models.glm-5.3-flash.limit.output": {
         "type": "number"
       },
-      "$.clients[].changes[].to.models.hy3-x": {
+      "$.clients[].changes[].to.models.glm-5.1": {
         "type": "object"
       },
-      "$.clients[].changes[].to.models.hy3-x.name": {
+      "$.clients[].changes[].to.models.glm-5.1.name": {
         "type": "string"
       },
-      "$.clients[].changes[].to.models.hy3-x.limit": {
+      "$.clients[].changes[].to.models.glm-5.1.limit": {
         "type": "object"
       },
-      "$.clients[].changes[].to.models.hy3-x.limit.context": {
+      "$.clients[].changes[].to.models.glm-5.1.limit.context": {
         "type": "number"
       },
-      "$.clients[].changes[].to.models.hy3-x.limit.output": {
+      "$.clients[].changes[].to.models.glm-5.1.limit.output": {
         "type": "number"
       },
       "$.token": {
@@ -1052,6 +1058,26 @@
       },
       "$.backupDir": {
         "type": "string"
+      },
+      "$.clients[].changes[].to.models.hy3-x": {
+        "type": "object",
+        "optional": true
+      },
+      "$.clients[].changes[].to.models.hy3-x.name": {
+        "type": "string",
+        "optional": true
+      },
+      "$.clients[].changes[].to.models.hy3-x.limit": {
+        "type": "object",
+        "optional": true
+      },
+      "$.clients[].changes[].to.models.hy3-x.limit.context": {
+        "type": "number",
+        "optional": true
+      },
+      "$.clients[].changes[].to.models.hy3-x.limit.output": {
+        "type": "number",
+        "optional": true
       },
       "$.clients[].changes[].to.models.glm-5.3": {
         "type": "object",

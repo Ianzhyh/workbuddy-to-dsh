@@ -45,7 +45,9 @@ export function bridgeFixture({ running = true } = {}) {
     return {
       running: false, ok: false, host: '127.0.0.1', port: 8790,
       endpoint: 'http://127.0.0.1:8790/v1', error: 'connect ECONNREFUSED 127.0.0.1:8790',
-      upstream: '', authFile: '', selectedAuthFile: '', pid: null, startedAt: null, uptimeMs: null,
+      upstream: '', auth: null, credentialSource: '', desktopUserId: '',
+      build: '', expectedBuild: '', staleBuild: false,
+      authFile: '', selectedAuthFile: '', pid: null, startedAt: null, uptimeMs: null,
       catalogSize: null, catalogAt: null, upstreamShape: null,
       autoCheckin: null, autoCheckinEnabled: false,
     };
@@ -54,6 +56,24 @@ export function bridgeFixture({ running = true } = {}) {
     running: true, ok: true, host: '127.0.0.1', port: 8790,
     endpoint: 'http://127.0.0.1:8790/v1', error: null,
     upstream: 'https://copilot.tencent.com',
+    /*
+     * 桥**实际生效**的账号。页面用 auth.source 显示「桌面端 / 插件」，
+     * 缺了它那一行会静默不渲染（形状校验会先一步拦下来）。
+     */
+    auth: {
+      source: 'desktop',
+      userId: '00000000-0000-0000-0000-000000000000',
+      endpoint: 'https://copilot.tencent.com',
+      expiresAt: new Date(NOW + 37 * 86400000).toISOString(),
+      expired: false,
+      changedAt: new Date(NOW - 3600000).toISOString(),
+    },
+    credentialSource: 'desktop',
+    desktopUserId: '',
+    // 构建指纹：`staleBuild` 是「升级后旧进程还在跑」的判据
+    build: '0123456789abcdef',
+    expectedBuild: '0123456789abcdef',
+    staleBuild: false,
     authFile: 'C:\\path\\to\\workbuddy-desktop.info',
     selectedAuthFile: 'C:\\path\\to\\workbuddy-desktop.info',
     pid: 18432, startedAt: new Date(NOW - 5400000).toISOString(), uptimeMs: 5400000,
@@ -98,7 +118,12 @@ export function credentialsFixture({ active = true } = {}) {
 
 /** 控制台自述（`/api/overview` 的 `console`）。 */
 export function consoleFixture() {
-  return { version: '1.0.0', node: 'v22.22.2' };
+  return {
+    version: '1.0.0',
+    build: '0123456789abcdef',
+    pid: 18432,
+    node: 'v22.22.2',
+  };
 }
 
 /**
@@ -112,6 +137,18 @@ export function quotaFixture({ total = 715 } = {}) {
   return {
     ok: true,
     total,
+    /*
+     * 余额属于哪个账号：换号后页面靠它判断"这份余额是不是旧账号的"。
+     * 缺了这两个字段，`/api/overview` 的 quota 块会被形状校验判缺键。
+     */
+    account: '330000000000',
+    source: 'desktop',
+    /*
+     * 账实核对：最近 30 天余额快照。空数组是真实形状（刚装上还没采够），
+     * 页面据此显示「—」而不是拿单点冒充变化。
+     */
+    history: [],
+    snapshotIntervalMs: 3600000,
     /*
      * **给 3 个包**：控制台积分卡只在「包数 > 2」时才拼「等 N 个套餐」，
      * 只给一个包这条分支永远不渲染 —— i18n 验收也就扫不到它。
@@ -136,10 +173,22 @@ export function dshFixture({ ready = true } = {}) {
   return ready ? {
     settingsExists: true, settingsHasRoute: true, patchHasRoute: true,
     routeLive: true, routeSource: 'settings.yaml', hasBridgeKey: true,
+    /*
+     * 路由形态：`native` = 插件在运行时注册（不需要 settings.yaml 也能生效），
+     * `manual` = 靠用户手写配置。面板据此决定提示哪种措辞，缺键会静默不渲染。
+     *
+     * ⚠️ `/api/overview` 的 `dsh` **没有** `manualRoute` / `nativePlugin`
+     * （那两个是 `/api/diagnose` 独有的）—— 这里是 overview 的形状，
+     * 多给会被形状校验判「多余键」。
+     */
+    routeMode: 'native',
+    nativeRoute: true,
     bundlesOk: true, bundles: ['a'], registeredModels: ['glm-5.3'],
   } : {
     settingsExists: false, settingsHasRoute: false, patchHasRoute: false,
     routeLive: false, routeSource: null, hasBridgeKey: false,
+    routeMode: 'manual',
+    nativeRoute: false,
     bundlesOk: false, bundles: [], registeredModels: [],
   };
 }
@@ -199,6 +248,12 @@ export function usageFixture({
           ] },
       ],
       failures,
+      /*
+       * 按模型的失败统计（与 `models` 的成功统计分开）：
+       * 失败数不混进模型的 calls / token 排行，否则「最耗额的模型」会被
+       * 一堆失败的调用顶到第一。默认空数组 = 这批数据里没有失败。
+       */
+      failureByModel: [],
     },
   };
 }
@@ -254,6 +309,18 @@ export function diagnoseFixture({ items = null } = {}) {
       settingsExists: true, settingsHasRoute: true, patchHasRoute: true,
       settingsText: '', settingsModels: ['glm-5.3'], patchModels: ['glm-5.3'],
       registeredModels: ['glm-5.3'], hasBridgeKey: true, refNames: ['WORKBUDDY_BRIDGE_KEY'],
+      /*
+       * 诊断页比概览多三项：`manualRoute` / `nativeRoute` / `nativePlugin`。
+       * 面板靠它们区分「插件运行时注册」与「用户手写配置」两种形态 ——
+       * 缺键会让整块静默不渲染，而这正是它存在的意义（告诉用户路由为什么没生效）。
+       */
+      manualRoute: false,
+      nativeRoute: true,
+      nativePlugin: {
+        installed: true, enabled: true, disabledByPatch: false,
+        provider: 'workbuddy', bundle: 'workbuddy-to-dsh',
+      },
+      routeMode: 'native',
       bundles: ['a'], bundlesOk: true, routeLive: true, routeSource: 'settings.yaml',
     },
   };
@@ -263,6 +330,14 @@ export function accountsFixture({ accounts = null } = {}) {
   return {
     dir: 'C:\\path\\to\\auth',
     active: 'C:\\path\\to\\auth\\workbuddy-desktop.info',
+    /*
+     * 桌面端**当前**登录文件与账号：账号页用它和"桥正在用哪个"对比，
+     * 两者不一致时提示「钉住的是快照、桌面端已换号」。
+     */
+    desktopAuth: 'C:\\path\\to\\auth\\workbuddy-desktop.info',
+    desktopUid: '00000000-0000-0000-0000-000000000000',
+    // 账号钉住状态（.state.json 的 authFile）；null = 没钉住，跟随桌面端
+    pin: null,
     accounts: accounts || [{
       name: 'workbuddy-desktop.info', path: 'C:\\path\\to\\auth\\workbuddy-desktop.info',
       active: true, usable: true, account: '330000000000', domain: 'copilot.tencent.com',
@@ -549,10 +624,36 @@ export function connectFixture({ clients = null } = {}) {
   };
 }
 
-export function baseRoutes({ catalog = CATALOG, usage, probeResults, ...rest } = {}) {
+export function baseRoutes({ catalog = CATALOG, usage, probeResults, modelsDefault = null, ...rest } = {}) {
   return {
     '/api/overview': { body: overviewFixture(rest) },
-    '/api/models': { body: { models: catalog } },
+    /*
+     * `modelsDefault` 也由用例决定：
+     *   - `null`（默认）= 有这份设置，但用内建精选；
+     *   - 传 `false`   = **旧版桥没有这个字段**（页面要把那一行整行隐藏）。
+     * 面板上「客户端一键拉取给」那一行的渲染分支，两个方向都要能测到。
+     *
+     * 字段要按真实响应的**全集**给：形状校验会逐个比对（缺一个就报）。
+     * `ids` / `saved` 在 curated 模式下是空值，但仍会出现 —— 桥侧是统一结构。
+     */
+    '/api/models': {
+      body: {
+        models: catalog,
+        ...(modelsDefault === false ? {} : {
+          modelsDefault: modelsDefault || {
+            ok: true,
+            mode: 'curated',
+            source: 'builtin',
+            env: '',
+            ids: [],
+            saved: null,
+            file: 'C:\\path\\to\\.workbuddy-bridge\\models-default.json',
+            count: 3,
+            total: catalog.length,
+          },
+        }),
+      },
+    },
     '/api/clients': { body: clientsFixture(rest) },
     '/api/connect': { body: connectFixture(rest) },
     '/api/diagnose': { body: diagnoseFixture(rest) },
