@@ -59,7 +59,7 @@ jobs:
         run: npm run panel:i18n
 
       - name: 面板渲染验收（真实浏览器）
-        run: npm run panel:render
+        run: npm run panel:shot
 
       # Windows 中文/空格路径是现场高频故障（安装路径、TEMP、账号目录）。
       # 让独立分发包演练在含中文与空格的 TEMP 下再跑一次。
