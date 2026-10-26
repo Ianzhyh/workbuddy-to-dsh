@@ -64,6 +64,37 @@ const stub = createServer((req, res) => {
           message: 'upstream image-generate failed: status=400 code=14407 msg=CONTENT_SAFETY',
         });
       }
+      if (prompt.includes('sync-fail')) {
+        return json(200, {
+          code: 0,
+          failed: false,
+          data: {
+            upstreamTaskId: 'wb-sync-img-fail',
+            mode: 'sync',
+            status: 'FAILED',
+            errorMessage: 'content safety',
+          },
+        });
+      }
+      if (prompt.includes('sync-ok')) {
+        // 不改余额：同步完成不一定当场扣分（也可能延迟出账），估算应保持 null。
+        return json(200, {
+          code: 0,
+          failed: false,
+          data: {
+            upstreamTaskId: 'wb-sync-img-ok',
+            model: 'hy-image',
+            provider: 'copilot-image',
+            mode: 'sync',
+            status: 'completed',
+            resultFiles: [{
+              signedUrl: 'https://cdn.example/sync.png',
+              mimeType: 'image/png',
+              fileKey: 'file/sync-image',
+            }],
+          },
+        });
+      }
       quotaRemain -= 1.5;
       return json(200, {
         code: 0,
@@ -146,6 +177,8 @@ const child = spawn(process.execPath, [BRIDGE], {
     WORKBUDDY_SKIP_MODEL_PREFLIGHT: '1',
     WORKBUDDY_AUTO_CHECKIN: '0',
     WORKBUDDY_LOG: '0',
+    // 小上限只用于验证 413 的形状；正常提交（含 prompt）远低于它。
+    WORKBUDDY_MAX_BODY_BYTES: '65536',
   },
   windowsHide: true,
 });
@@ -302,6 +335,63 @@ test('上游拒绝：200+failed(status=400) 映射成 400 IMAGE_UPSTREAM_REJECTE
   const body = await rejected.json();
   assert.equal(body.error.code, 'IMAGE_UPSTREAM_REJECTED');
   assert.match(body.error.message, /CONTENT_SAFETY/);
+});
+
+test('同步完成：HTTP 200 + sync=true，查询与 /content 都命中提交缓存', async () => {
+  const submit = await post('/v1/images', { prompt: 'sync-ok please' });
+  assert.equal(submit.status, 200, '同步完成已不是 202 Accepted');
+  const image = await submit.json();
+  assert.equal(image.id, 'wb-sync-img-ok');
+  assert.equal(image.status, 'completed');
+  assert.equal(image.sync, true);
+  assert.equal(image.output.url, 'https://cdn.example/sync.png');
+  assert.equal(image.result_files[0].fileKey, 'file/sync-image');
+
+  const queriesBefore = queryCalls.length;
+  const lookup = await get('/v1/images/wb-sync-img-ok');
+  assert.equal(lookup.status, 200);
+  const queried = await lookup.json();
+  assert.equal(queried.status, 'completed');
+  assert.equal(queried.sync, true);
+  assert.equal(queried.output.url, 'https://cdn.example/sync.png');
+  assert.equal(queryCalls.length, queriesBefore, '缓存命中不应再查询上游');
+
+  const content = await get('/v1/images/wb-sync-img-ok/content', { redirect: 'manual' });
+  assert.equal(content.status, 302);
+  assert.equal(content.headers.get('location'), 'https://cdn.example/sync.png');
+});
+
+test('同步失败：账本按失败记（IMAGE_GENERATION_FAILED），查询仍能拿到真实原因', async () => {
+  const usageBefore = await (await get('/v1/usage?days=1')).json();
+  const submit = await post('/v1/images', { prompt: 'sync-fail please' });
+  assert.equal(submit.status, 200);
+  const failed = await submit.json();
+  assert.equal(failed.status, 'failed');
+  assert.equal(failed.sync, true);
+  assert.equal(failed.error.message, 'content safety');
+
+  const lookup = await get('/v1/images/wb-sync-img-fail');
+  const queried = await lookup.json();
+  assert.equal(queried.status, 'failed');
+  assert.equal(queried.error.message, 'content safety');
+
+  const usageAfter = await (await get('/v1/usage?days=1')).json();
+  assert.equal(usageAfter.total.imageFailed, usageBefore.total.imageFailed + 1, '同步失败要计入失败');
+  assert.equal(usageAfter.total.images, usageBefore.total.images, '同步失败不能算成功提交');
+
+  const ledger = await (await get('/v1/requests?limit=100')).json();
+  assert.ok(ledger.requests.some((row) => row.kind === 'image'
+    && row.ok === false
+    && row.code === 'IMAGE_GENERATION_FAILED'
+    && /content safety/.test(row.error || '')), '账本要留下同步失败原因');
+});
+
+test('请求体超限：413 带 IMAGE_PAYLOAD_TOO_LARGE 与可执行建议', async () => {
+  const huge = await post('/v1/images', { prompt: 'x'.repeat(70000) });
+  assert.equal(huge.status, 413);
+  const body = await huge.json();
+  assert.equal(body.error.code, 'IMAGE_PAYLOAD_TOO_LARGE');
+  assert.match(body.error.message, /fileKey|https|WORKBUDDY_MAX_BODY_BYTES/);
 });
 
 test('账本：图片提交单独计数，不污染模型调用/tokens/积分', async () => {

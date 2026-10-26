@@ -204,6 +204,139 @@ test('查询：waitMs 内等到 completed，并回填提交元数据', async () 
   assert.equal(queries, 2);
 });
 
+test('同步完成：提交响应即终态，查询命中缓存、不再打上游', async () => {
+  let calls = 0;
+  const fetchImpl = async (url) => {
+    calls += 1;
+    if (String(url).endsWith('/v2/api-keys')) return tempKeyResponse('ck_t_sync_ok');
+    if (String(url).endsWith('/image/generate/submit')) {
+      return jsonResponse(200, {
+        code: 0,
+        failed: false,
+        data: {
+          upstreamTaskId: 'wb-sync-ok',
+          model: 'hy-image',
+          provider: 'copilot-image',
+          mode: 'sync',
+          status: 'completed',
+          resultFiles: [{ signedUrl: 'https://cdn.example/sync.png', fileKey: 'file/sync' }],
+        },
+      });
+    }
+    throw new Error(`unexpected ${url}`);
+  };
+
+  const submitted = await submitImage(AUTH, { prompt: 'x' }, { fetchImpl, baseUrl: BASE, now: () => 5000 });
+  assert.equal(submitted.status, 'completed');
+  assert.equal(submitted.sync, true);
+  assert.equal(submitted.output.url, 'https://cdn.example/sync.png');
+  assert.equal(calls, 2, '临时 key + 提交');
+
+  const queried = await queryImage(AUTH, 'wb-sync-ok', {
+    fetchImpl, baseUrl: BASE, waitMs: 60_000,
+  });
+  assert.equal(queried.status, 'completed');
+  assert.equal(queried.sync, true);
+  assert.equal(queried.created_at, 5);
+  assert.equal(queried.output.url, 'https://cdn.example/sync.png');
+  assert.equal(calls, 2, '缓存命中不应再查询上游');
+});
+
+test('同步失败：真实失败原因随提交返回；图生图不再回显未生效的 quality', async () => {
+  let calls = 0;
+  const fetchImpl = async (url) => {
+    calls += 1;
+    if (String(url).endsWith('/v2/api-keys')) return tempKeyResponse('ck_t_sync_fail');
+    if (String(url).endsWith('/image/edit/submit')) {
+      return jsonResponse(200, {
+        code: 0,
+        failed: false,
+        data: {
+          upstreamTaskId: 'wb-sync-fail',
+          mode: 'sync',
+          status: 'FAILED',
+          errorMessage: 'content safety',
+        },
+      });
+    }
+    throw new Error(`unexpected ${url}`);
+  };
+
+  const failed = await submitImage(AUTH, {
+    prompt: 'x', images: ['file/abc/ref.png'], quality: 'hd',
+  }, { fetchImpl, baseUrl: BASE });
+  assert.equal(failed.status, 'failed');
+  assert.equal(failed.upstream_status, 'FAILED');
+  assert.equal(failed.sync, true);
+  assert.equal(failed.error.message, 'content safety');
+  assert.equal(failed.quality, null, '图生图没有发送 quality，不能回显成已生效');
+
+  const queried = await queryImage(AUTH, 'wb-sync-fail', { fetchImpl, baseUrl: BASE });
+  assert.equal(queried.status, 'failed');
+  assert.equal(queried.error.message, 'content safety');
+  assert.equal(calls, 2, '同步失败的结果也来自提交缓存');
+});
+
+test('同步任务缓存丢失：查询伪失败被标记 sync_result_unavailable，并给出人话', async () => {
+  const fetchImpl = async (url) => {
+    if (String(url).endsWith('/v2/api-keys')) return tempKeyResponse('ck_t_sync_gone');
+    if (String(url).endsWith('/image/query-task')) {
+      return jsonResponse(200, {
+        code: 0,
+        failed: false,
+        data: {
+          'wb-sync-gone': {
+            status: 'failed',
+            errorMessage: 'INVALID_TASK_ID_FOR_SYNC_MODE: this task was completed synchronously',
+          },
+        },
+      });
+    }
+    throw new Error(`unexpected ${url}`);
+  };
+  const result = await queryImage(AUTH, 'wb-sync-gone', { fetchImpl, baseUrl: BASE });
+  assert.equal(result.status, 'failed');
+  assert.equal(result.sync_result_unavailable, true);
+  assert.match(result.error.message, /同步完成/);
+  assert.match(result.error.message, /重新生成/);
+});
+
+test('多图 inline 预算：按请求体上限提前 400，而不是读完几十 MB 再 413', async () => {
+  const twelveMb = Buffer.alloc(12 * 1024 * 1024);
+  await assert.rejects(
+    () => buildImageSubmitBody(
+      { prompt: 'x', images: [localPng, localPng] },
+      { readFile: async () => twelveMb, maxBodyBytes: 32 * 1024 * 1024 },
+    ),
+    (err) => {
+      assert.equal(err.code, 'IMAGE_INVALID_INPUT');
+      assert.match(err.message, /request body budget/);
+      assert.match(err.message, /fileKey/);
+      return true;
+    },
+  );
+
+  const twentyMb = Buffer.alloc(20 * 1024 * 1024);
+  const one = await buildImageSubmitBody(
+    { prompt: 'x', images: [localPng] },
+    { readFile: async () => twentyMb, maxBodyBytes: 32 * 1024 * 1024 },
+  );
+  assert.ok(one.body.images[0].base64.length > 0, '单张 20 MB 仍应放行');
+});
+
+test('临时 key 限流使用独立 code：任务尚未提交，可以直接稍后重试', async () => {
+  const limited = async () => jsonResponse(429, { msg: 'slow down' }, { 'retry-after': '3' });
+  await assert.rejects(
+    () => submitImage(AUTH, { prompt: 'x' }, { fetchImpl: limited, baseUrl: BASE }),
+    (err) => {
+      assert.equal(err.code, 'IMAGE_KEY_RATE_LIMITED');
+      assert.equal(err.status, 429);
+      assert.equal(err.retryAfter, 3);
+      return true;
+    },
+  );
+});
+
 test('查询：不存在返回 IMAGE_NOT_FOUND；失败任务保留 errorMessage', async () => {
   const fetchImpl = async (url) => {
     if (String(url).endsWith('/v2/api-keys')) return tempKeyResponse('ck_t_image_fail');

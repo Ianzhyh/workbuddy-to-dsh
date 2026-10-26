@@ -112,7 +112,11 @@ test('状态归一：pending/processing/completed/failed/cancelled', () => {
   assert.equal(normalizeVideoStatus('pending'), 'queued');
   assert.equal(normalizeVideoStatus('processing'), 'in_progress');
   assert.equal(normalizeVideoStatus('completed'), 'completed');
+  assert.equal(normalizeVideoStatus('success'), 'completed');
+  assert.equal(normalizeVideoStatus('done'), 'completed');
   assert.equal(normalizeVideoStatus('failed'), 'failed');
+  assert.equal(normalizeVideoStatus('timeout'), 'failed');
+  assert.equal(normalizeVideoStatus('expired'), 'failed');
   assert.equal(normalizeVideoStatus('cancelled'), 'cancelled');
   assert.equal(normalizeVideoStatus('something-new'), 'in_progress');
 });
@@ -338,12 +342,85 @@ test('提交：外层 502 包裹的业务 400 也要还原成 400', async () => 
   );
 });
 
+test('同步完成：视频也认 mode=sync，查询从缓存恢复', async () => {
+  let calls = 0;
+  const fetchImpl = async (url) => {
+    calls += 1;
+    if (String(url).endsWith('/v2/api-keys')) {
+      return jsonResponse(200, {
+        code: 0,
+        data: { key: 'ck_t_video_sync', expires_at: new Date(Date.now() + 900_000).toISOString() },
+      });
+    }
+    if (String(url).endsWith('/video/submit')) {
+      return jsonResponse(200, {
+        code: 0,
+        failed: false,
+        data: {
+          upstreamTaskId: 'wb-sync-video',
+          mode: 'sync',
+          status: 'completed',
+          resultFiles: [{ signedUrl: 'https://cdn.example/sync.mp4', fileKey: 'file/sync-video' }],
+        },
+      });
+    }
+    throw new Error(`unexpected ${url}`);
+  };
+
+  const submitted = await submitVideo(AUTH, { prompt: 'x' }, { fetchImpl, baseUrl: BASE });
+  assert.equal(submitted.status, 'completed');
+  assert.equal(submitted.sync, true);
+  assert.equal(submitted.output.url, 'https://cdn.example/sync.mp4');
+
+  const queried = await queryVideo(AUTH, 'wb-sync-video', { fetchImpl, baseUrl: BASE, waitMs: 60_000 });
+  assert.equal(queried.status, 'completed');
+  assert.equal(queried.output.url, 'https://cdn.example/sync.mp4');
+  assert.equal(calls, 2, '缓存命中不应再查询上游');
+});
+
+test('多帧 inline 预算：三张 10 MB 帧会超过 32 MB 请求体，提交前 400', async () => {
+  const tenMb = Buffer.alloc(10 * 1024 * 1024);
+  await assert.rejects(
+    () => buildVideoSubmitBody(
+      { prompt: 'x', references: [localPng, localPng, localPng] },
+      { readFile: async () => tenMb, maxBodyBytes: 32 * 1024 * 1024 },
+    ),
+    (err) => {
+      assert.equal(err.code, 'VIDEO_INVALID_INPUT');
+      assert.match(err.message, /request body budget/);
+      return true;
+    },
+  );
+});
+
+test('失败原因兼容对象形状：error.message 不会变成 [object Object]', async () => {
+  const fetchImpl = async (url) => {
+    if (String(url).endsWith('/v2/api-keys')) {
+      return jsonResponse(200, {
+        code: 0,
+        data: { key: 'ck_t_video_err_obj', expires_at: new Date(Date.now() + 900_000).toISOString() },
+      });
+    }
+    if (String(url).endsWith('/video/query-task')) {
+      return jsonResponse(200, {
+        code: 0,
+        failed: false,
+        data: { 'task-obj': { status: 'failed', error: { message: 'render exploded' } } },
+      });
+    }
+    throw new Error(`unexpected ${url}`);
+  };
+  const failed = await queryVideo(AUTH, 'task-obj', { fetchImpl, baseUrl: BASE });
+  assert.equal(failed.error.message, 'render exploded');
+});
+
 test('临时 key：429/403 不能被笼统报成登录失败', async () => {
   const rateLimited = async () => jsonResponse(429, { code: 15001, msg: 'too many keys' }, { 'retry-after': '9' });
   await assert.rejects(
     () => submitVideo(AUTH, { prompt: 'x' }, { fetchImpl: rateLimited, baseUrl: BASE }),
     (err) => {
-      assert.equal(err.code, 'VIDEO_RATE_LIMITED');
+      // 申请 key 被限流 ≠ 提交被限流：任务还没创建，可以直接稍后重试。
+      assert.equal(err.code, 'VIDEO_KEY_RATE_LIMITED');
       assert.equal(err.status, 429);
       assert.equal(err.retryAfter, 9);
       return true;
@@ -654,7 +731,10 @@ test('图片输入：公网域名不再被私有地址规则误杀，内网字�
 
   const rejected = [
     'https://localhost/a.png',
+    // 根点写法解析结果一样，不能绕过 localhost 判定。
+    'https://localhost./a.png',
     'https://127.0.0.1/a.png',
+    'https://127.0.0.1./a.png',
     'https://10.1.2.3/a.png',
     'https://192.168.1.1/a.png',
     'https://100.64.0.1/a.png',

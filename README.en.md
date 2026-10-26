@@ -152,8 +152,9 @@ instead of the DeepSeek wallet.
   and exposes `workbuddy_web_search` as a fallback that bypasses dsh search config.
 - **Video & image generation APIs** — text-to-video, first/last-frame and
   reference-image videos via `/v1/videos`, plus text-to-image and image editing via
-  `/v1/images` and `/v1/images/edits` (async `202` submit, `GET .../{id}` query with
-  optional `?wait=N`, `/content` redirect). The temporary key stays in memory; only a
+  `/v1/images` and `/v1/images/edits` (async `202` submit, or `200` + `sync: true`
+  when the upstream completes inline; `GET .../{id}` query with optional `?wait=N`,
+  `/content` redirect). The temporary key stays in memory; only a
   401 triggers one key refresh, and 429/5xx are never retried automatically to avoid
   double billing. dsh agents can call `workbuddy_generate_video`,
   `workbuddy_video_status`, `workbuddy_generate_image` and `workbuddy_image_status`

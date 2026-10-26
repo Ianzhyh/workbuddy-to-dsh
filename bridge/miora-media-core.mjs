@@ -99,9 +99,15 @@ export function normalizeMediaStatus(status) {
       return 'in_progress';
     case 'completed':
     case 'succeeded':
+    case 'success':
+    case 'done':
+    case 'finished':
       return 'completed';
     case 'failed':
     case 'error':
+    case 'timeout':
+    case 'timed_out':
+    case 'expired':
       return 'failed';
     case 'cancelled':
     case 'canceled':
@@ -127,8 +133,11 @@ export function collectOutputUrls(files) {
     if (typeof item === 'string') return item;
     if (!isObject(item)) return '';
     const nested = isObject(item.file) ? item.file : (isObject(item.result) ? item.result : null);
+    const nestedValue = nested
+      ? (nested.signedUrl || nested.signed_url || nested.url || nested.downloadUrl || nested.download_url)
+      : '';
     const value = item.signedUrl || item.signed_url || item.url || item.downloadUrl
-      || item.download_url || (nested ? (nested.signedUrl || nested.signed_url || nested.url) : '');
+      || item.download_url || nestedValue;
     return typeof value === 'string' ? value : '';
   };
   const urls = [];
@@ -137,6 +146,31 @@ export function collectOutputUrls(files) {
     if (/^https:\/\//i.test(url) && !urls.includes(url)) urls.push(url);
   }
   return urls;
+}
+
+/**
+ * 同步任务（`mode:"sync"`）的结果只在提交响应里；上游不保存可按 id 查询的任务。
+ * 它的查询接口会返回 `INVALID_TASK_ID_FOR_SYNC_MODE` —— 这是「查法不对」，
+ * 不是「生成失败」。工具层要据此给出完全不同的建议，不能劝用户重提。
+ */
+const SYNC_QUERY_MISS_RE = /INVALID_TASK_ID_FOR_SYNC_MODE/i;
+
+/** 失败原因可能是字符串、Error 形状或 `{message}`：统一取出可读文本。 */
+function errorMessageOf(value) {
+  if (typeof value === 'string') return value;
+  if (isObject(value)) {
+    const nested = value.message ?? value.msg ?? value.errorMessage ?? value.error;
+    if (typeof nested === 'string') return nested;
+  }
+  return '';
+}
+
+/** 上游字段偶尔在 `resultFiles` / `result_files` 之间摇摆；两边都认。 */
+function pickResultFiles(entry, data) {
+  for (const candidate of [entry?.resultFiles, entry?.result_files, data?.resultFiles, data?.result_files]) {
+    if (Array.isArray(candidate)) return candidate;
+  }
+  return [];
 }
 
 /**
@@ -151,14 +185,20 @@ export function collectOutputUrls(files) {
 export function normalizeMediaEntry({ id, data, entry, meta = null, object, defaultProvider }) {
   const rawStatus = String(entry?.status ?? data?.status ?? 'pending').trim();
   const status = normalizeMediaStatus(rawStatus);
-  const files = Array.isArray(entry?.resultFiles)
-    ? entry.resultFiles
-    : (Array.isArray(data?.resultFiles) ? data.resultFiles : []);
+  const files = pickResultFiles(entry, data);
   const urls = collectOutputUrls(files);
   const failed = status === 'failed' || status === 'cancelled';
   const rawMessage = failed
-    ? (entry?.errorMessage ?? entry?.error_message ?? entry?.error ?? entry?.failReason ?? data?.errorMessage)
+    ? errorMessageOf(
+      entry?.errorMessage
+      ?? entry?.error_message
+      ?? entry?.error
+      ?? entry?.failReason
+      ?? data?.errorMessage
+      ?? data?.error_message,
+    )
     : '';
+  const syncResultUnavailable = failed && SYNC_QUERY_MISS_RE.test(rawMessage);
   return {
     id: String(data?.upstreamTaskId || id || ''),
     object,
@@ -169,9 +209,16 @@ export function normalizeMediaEntry({ id, data, entry, meta = null, object, defa
     provider: data?.provider ?? meta?.provider ?? defaultProvider,
     result_files: files,
     output: urls.length ? { url: urls[0], urls } : null,
-    error: rawMessage
+    error: rawMessage && !syncResultUnavailable
       ? { message: String(rawMessage).replace(/\s+/g, ' ').trim().slice(0, 300) }
-      : null,
+      : (syncResultUnavailable
+        ? {
+          message: '该任务是同步完成的：上游只把结果放在提交响应里，不保存可按 id 查询的任务。'
+            + '桥的短期缓存已不包含它（过期或重启）。需要产物请查看提交时的响应，或重新生成（会再次计费）。',
+        }
+        : null),
+    // 给 API/工具一个明确的判别位：这不是普通的「生成失败」，不要建议按 id 重查。
+    ...(syncResultUnavailable ? { sync_result_unavailable: true } : {}),
   };
 }
 
@@ -282,7 +329,12 @@ function publicHttpsUrl(raw, field, invalidCode) {
   if (url.username || url.password) {
     throw new MioraMediaError(invalidCode, `${field} must not contain credentials.`, { status: 400 });
   }
-  const host = url.hostname.toLowerCase().replace(/^\[|\]$/g, '');
+  // 末尾的根点（`localhost.` / `foo.local.`）解析结果不变，必须一起归一，
+  // 否则 `https://localhost./` 能绕过 localhost 判定。
+  const host = url.hostname.toLowerCase().replace(/^\[|\]$/g, '').replace(/\.+$/, '');
+  if (!host) {
+    throw new MioraMediaError(invalidCode, `${field} has no usable host.`, { status: 400 });
+  }
   /*
    * 域名与 IP 字面量分开判：`fc2.com` 是公网域名，`fc00::1` 才是内网地址。
    * 早先两者共用一条前缀正则，结果公网域名被误杀（见 isPrivateIpv6 的注释）。
@@ -331,7 +383,43 @@ function parseDataUri(raw, field, { maxBytes, invalidCode }) {
   if (buffer.length > maxBytes) {
     throw new MioraMediaError(invalidCode, `${field} exceeds ${maxBytes}B (${buffer.length}B).`, { status: 400 });
   }
-  return { origin: 'dataUri', base64: payload, mimeType: mimeType || undefined };
+  return { origin: 'dataUri', base64: payload, mimeType: mimeType || undefined, sizeBytes: buffer.length };
+}
+
+/**
+ * 内联图片（本地路径 / data URI）在请求体里占多少空间。
+ *
+ * 单张上限（图片 20 MB / 视频帧 10 MB）只管一张，**多张参考图叠加**时仍可能
+ * 超出桥的请求体上限，最后只得到一句 413。这里按真实的 body 预算提前算出可用的
+ * 原始字节数（base64 膨胀 4/3，再留 256 KB 给 prompt/JSON 其它字段），提交前即可
+ * 给出「改用 fileKey/URL」这种可执行的 400，而不是等解析完几十 MB 才失败。
+ */
+export function inlineInputBudgetBytes(maxBodyBytes) {
+  const limit = Number(maxBodyBytes) > 0 ? Number(maxBodyBytes) : 32 * 1024 * 1024;
+  const reserve = 256 * 1024;
+  return Math.max(0, Math.floor((limit - reserve) * 3 / 4));
+}
+
+export function inlineInputBytes(resolvedList) {
+  return (Array.isArray(resolvedList) ? resolvedList : [])
+    .reduce((sum, item) => sum + (Number(item?.sizeBytes) || 0), 0);
+}
+
+/** 人类可读的 MB（只用于错误文案，保留一位小数）。 */
+function mb(bytes) {
+  return `${((Number(bytes) || 0) / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+export function assertInlineInputBudget(resolvedList, maxBodyBytes, { prefix = 'VIDEO', what = 'image' } = {}) {
+  const total = inlineInputBytes(resolvedList);
+  const budget = inlineInputBudgetBytes(maxBodyBytes);
+  if (total <= budget) return;
+  throw new MioraMediaError(
+    `${prefix}_INVALID_INPUT`,
+    `inline ${what} data is ${mb(total)} (base64), which exceeds the request body budget (${mb(budget)} of raw data). `
+      + 'Use a miora fileKey or public https URL instead of local paths/data URIs, or send fewer/smaller inputs.',
+    { status: 400 },
+  );
 }
 
 /**
@@ -350,9 +438,11 @@ export async function resolveImageInput(raw, options = {}) {
   if (!text) throw invalid(`${field} is empty.`);
   if (text.startsWith('data:')) return parseDataUri(text, field, { maxBytes, invalidCode });
   if (/^https?:\/\//i.test(text)) {
-    return { origin: 'url', url: publicHttpsUrl(text, field, invalidCode) };
+    return { origin: 'url', url: publicHttpsUrl(text, field, invalidCode), sizeBytes: 0 };
   }
-  if (FILE_KEY_RE.test(text)) return { origin: 'fileKey', fileKey: safeFileKey(text, field, invalidCode) };
+  if (FILE_KEY_RE.test(text)) {
+    return { origin: 'fileKey', fileKey: safeFileKey(text, field, invalidCode), sizeBytes: 0 };
+  }
   if (!isAbsolute(text)) {
     throw invalid(`${field} must be an absolute local path, miora fileKey, public https URL, or data URI.`);
   }
@@ -381,7 +471,12 @@ export async function resolveImageInput(raw, options = {}) {
   if (buffer.length === 0) throw invalid(`${field} is empty: ${text}`);
   // 读的过程中文件可能被换掉/变大：仍要按真实长度兜一次，不能只信 stat。
   if (buffer.length > maxBytes) throw invalid(`${field} exceeds ${maxBytes}B (${buffer.length}B): ${text}`);
-  return { origin: 'path', base64: buffer.toString('base64'), mimeType };
+  return {
+    origin: 'path',
+    base64: buffer.toString('base64'),
+    mimeType,
+    sizeBytes: buffer.length,
+  };
 }
 
 function unwrapEnvelope(body) {
@@ -541,7 +636,12 @@ async function requestClientTempKey(auth, options) {
     const message = shortMessage(body?.msg ?? body?.message)
       || `could not obtain a temporary Miora key (HTTP ${response.status}).`;
     if (response.status === 429) {
-      throw new MioraMediaError(`${prefix}_RATE_LIMITED`, message, {
+      /*
+       * 这是**申请临时 key** 被限流，提交请求还没发出去 —— 和提交接口的 429
+       * 是两回事：后者可能已经受理并计费，前者绝不会。用独立 code 让工具能说
+       * “可以直接稍后重试”，而不是劝用户去查一个不存在的任务。
+       */
+      throw new MioraMediaError(`${prefix}_KEY_RATE_LIMITED`, message, {
         status: 429,
         retryAfter: retryAfterSeconds(response.headers),
         upstreamCode: body?.code ?? null,
@@ -638,6 +738,8 @@ export function mediaClientOptions(options = {}) {
     baseUrl: options.baseUrl || DEFAULT_MIORA_BASE,
     timeoutMs: options.timeoutMs,
     readFile: options.readFile,
+    // 提交前预算用：桥的请求体上限（默认 32 MB）。纯客户端调用可以不传。
+    maxBodyBytes: options.maxBodyBytes,
     prefix: options.prefix || 'VIDEO',
   };
 }

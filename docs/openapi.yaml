@@ -77,6 +77,7 @@ components:
         别名：first_frame_path / firstFrame / input_reference → first_frame；
         last_frame_path / lastFrame → last_frame；reference_paths → references；
         seconds → duration；aspectRatio → aspect_ratio。同一字段给多次会 400。
+        内联（本地路径/data URI）多帧合计受桥请求体预算约束（默认 32 MB）。
       properties:
         mode: { type: string, enum: [text, frame, reference] }
         prompt:
@@ -114,7 +115,8 @@ components:
         `POST /v1/images/edits` 固定图生图（`mode=edit`）；body 里显式 `mode` 会覆盖路径默认值。
 
         **未知字段一律 400**。`images` 每项支持绝对本地路径、miora fileKey、
-        公网 https URL、base64 data URI，单张 ≤ 20 MB。
+        公网 https URL、base64 data URI，单张 ≤ 20 MB。内联（本地路径/data URI）
+        多张合计受桥请求体预算约束（默认 32 MB），超出会在提交前 400 并建议改用 fileKey/URL。
       properties:
         mode: { type: string, enum: [generate, edit] }
         prompt: { type: string, minLength: 1, maxLength: 8000 }
@@ -140,7 +142,13 @@ components:
         provider: { type: [string, 'null'] }
         mode: { type: [string, 'null'], enum: [generate, edit, null] }
         size: { type: [string, 'null'] }
-        quality: { type: [string, 'null'] }
+        quality: { type: [string, 'null'], description: 图生图不发送也不回显 }
+        sync:
+          type: boolean
+          description: true = 上游同步完成，结果只在提交响应里；查询命中桥的 6 小时提交缓存
+        sync_result_unavailable:
+          type: boolean
+          description: true = 查询一个同步任务但缓存已过期/重启丢失；这不是普通生成失败
         result_files:
           type: array
           description: 上游原始产物字段（通常含 signedUrl / mimeType / fileKey）
@@ -174,6 +182,12 @@ components:
         seconds: { type: [number, 'null'] }
         resolution: { type: [string, 'null'] }
         aspect_ratio: { type: [string, 'null'] }
+        sync:
+          type: boolean
+          description: true = 上游同步完成，结果只在提交响应里；查询命中桥的 6 小时提交缓存
+        sync_result_unavailable:
+          type: boolean
+          description: true = 查询一个同步任务但缓存已过期/重启丢失；这不是普通生成失败
         result_files:
           type: array
           description: 上游原始产物字段（通常含 signedUrl / mimeType / fileKey）
@@ -251,7 +265,9 @@ paths:
     post:
       summary: 提交 Miora 视频生成（文生视频 / 首尾帧 / 参考图）
       description: |
-        异步任务：成功返回 202，之后用 GET /v1/videos/{id} 查询。
+        通常为异步任务：返回 202，之后用 GET /v1/videos/{id} 查询。
+        上游偶尔会同步跑完（`sync: true`）：此时返回 200，status 已是终态，
+        产物/失败原因就在本次响应里，不要再按 id 查询。
         提交成功即按 WorkBuddy 账号积分计费；401 只会换临时 key 重试一次，
         429/5xx 不自动重试，避免重复计费。只接受本地管理令牌（local token）。详见 docs/VIDEO-GENERATION.md。
       requestBody:
@@ -260,15 +276,21 @@ paths:
           application/json:
             schema: { $ref: '#/components/schemas/VideoRequest' }
       responses:
-        '202':
-          description: 已提交
+        '200':
+          description: 上游同步完成（`sync: true`，status 为 completed/failed/cancelled）
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Video' }
-        '400': { description: 参数错误（含未知字段；不会提交上游） }
+        '202':
+          description: 已提交（异步）
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Video' }
+        '400': { description: 参数错误（含未知字段、inline 图片超预算；不会提交上游） }
         '401': { description: 登录态不可用，或临时 key 申请失败 }
         '403': { description: 只接受本地管理令牌；client key 返回 VIDEO_LOCAL_TOKEN_REQUIRED }
-        '429': { description: Miora 限流，带 Retry-After }
+        '413': { description: 请求体超限，code=VIDEO_PAYLOAD_TOO_LARGE }
+        '429': { description: 提交限流（VIDEO_RATE_LIMITED）或临时 key 限流（VIDEO_KEY_RATE_LIMITED），带 Retry-After }
         '502': { description: Miora 不可用 / 上游拒绝 }
   /v1/videos/{video_id}:
     get:
@@ -287,7 +309,10 @@ paths:
           schema: { type: integer, minimum: 0, maximum: 60, default: 0 }
       responses:
         '200':
-          description: 当前任务状态（pending 归一到 queued，processing 归一到 in_progress）
+          description: |
+            当前任务状态（pending 归一到 queued，processing 归一到 in_progress）。
+            若是同步完成的任务，响应来自桥的提交缓存；缓存丢失时返回
+            status=failed + sync_result_unavailable=true，而不是普通生成失败。
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Video' }
@@ -319,7 +344,9 @@ paths:
     post:
       summary: 提交 Miora 文生图任务
       description: |
-        异步任务：成功返回 202，之后用 GET /v1/images/{id} 查询。
+        通常为异步任务：返回 202，之后用 GET /v1/images/{id} 查询。
+        上游经常同步跑完（`sync: true`）：此时返回 200，status 已是终态，
+        产物/失败原因就在本次响应里；按 id 查询只会返回 INVALID_TASK_ID_FOR_SYNC_MODE。
         提交成功即按 WorkBuddy 账号积分计费；401 只换临时 key 重试一次，
         429/5xx 不自动重试。只接受本地管理令牌（local token）。
       requestBody:
@@ -328,15 +355,21 @@ paths:
           application/json:
             schema: { $ref: '#/components/schemas/ImageRequest' }
       responses:
-        '202':
-          description: 已提交
+        '200':
+          description: 上游同步完成（`sync: true`，status 为 completed/failed/cancelled）
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Image' }
-        '400': { description: 参数错误（含未知字段与带 images 的冲突；不会提交上游） }
+        '202':
+          description: 已提交（异步）
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Image' }
+        '400': { description: 参数错误（含未知字段、带 images 的冲突、inline 图片超预算；不会提交上游） }
         '401': { description: 登录态不可用，或临时 key 申请失败 }
         '403': { description: 只接受本地管理令牌；client key 返回 IMAGE_LOCAL_TOKEN_REQUIRED }
-        '429': { description: Miora 限流，带 Retry-After }
+        '413': { description: 请求体超限，code=IMAGE_PAYLOAD_TOO_LARGE }
+        '429': { description: 提交限流（IMAGE_RATE_LIMITED）或临时 key 限流（IMAGE_KEY_RATE_LIMITED），带 Retry-After }
         '502': { description: Miora 不可用 / 上游拒绝 }
   /v1/images/edits:
     post:
@@ -350,15 +383,21 @@ paths:
           application/json:
             schema: { $ref: '#/components/schemas/ImageRequest' }
       responses:
-        '202':
-          description: 已提交
+        '200':
+          description: 上游同步完成（`sync: true`）
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Image' }
-        '400': { description: 参数错误（缺 images / 未知字段等） }
+        '202':
+          description: 已提交（异步）
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Image' }
+        '400': { description: 参数错误（缺 images / 未知字段 / inline 图片超预算等） }
         '401': { description: 登录态不可用 }
         '403': { description: 仅 local token }
-        '429': { description: Miora 限流 }
+        '413': { description: 请求体超限，code=IMAGE_PAYLOAD_TOO_LARGE }
+        '429': { description: 提交限流或临时 key 限流，带 Retry-After }
         '502': { description: Miora 不可用 / 上游拒绝 }
   /v1/images/{image_id}:
     get:
@@ -375,7 +414,9 @@ paths:
           schema: { type: integer, minimum: 0, maximum: 60, default: 0 }
       responses:
         '200':
-          description: 当前任务状态
+          description: |
+            当前任务状态。同步完成的任务从桥的提交缓存返回；缓存丢失时返回
+            status=failed + sync_result_unavailable=true，而不是普通生成失败。
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Image' }

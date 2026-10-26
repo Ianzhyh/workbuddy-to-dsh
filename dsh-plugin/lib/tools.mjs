@@ -112,9 +112,23 @@ async function describeArtifacts({ urls, kind, id, saveTo, mimeType }) {
   const saved = [];
   const failed = [];
   // 最多存 4 个：一次生成返回几十个产物时不该把工具调用拖成批量下载。
+  // 整次落盘共享 120 秒预算：单文件也限 120 秒，4 个大视频不会把工具拖到
+  // 宿主超时被杀（那会让用户只看到“查询失败”，却不知道文件已经下了一半）。
+  const saveBudgetMs = 120_000;
+  const saveStartedAt = Date.now();
+  // 序号跟着**成功保存的个数**走：显式文件名下若第一个产物下载失败，
+  // 第二个仍用用户给的原名，而不是莫名变成 -2。
   for (const url of urls.slice(0, 4)) {
+    const remaining = saveBudgetMs - (Date.now() - saveStartedAt);
+    if (remaining <= 0) {
+      failed.push({ url, reason: '本次落盘的 120 秒预算已用完（产物较多/较大），可减少一次保存的产物再试' });
+      continue;
+    }
     try {
-      const result = await saveMediaFile({ url, saveTo, id, kind, mimeType });
+      const result = await saveMediaFile(
+        { url, saveTo, id, kind, mimeType, index: saved.length },
+        { timeoutMs: Math.min(120_000, remaining) },
+      );
       saved.push(result);
     } catch (error) {
       failed.push({ url, reason: error?.message || String(error) });
@@ -142,36 +156,137 @@ async function describeArtifacts({ urls, kind, id, saveTo, mimeType }) {
 function mediaFailureText(error, { action = 'submit', label = '视频' } = {}) {
   const status = Number(error?.status) || 0;
   const code = String(error?.payload?.error?.code || error?.code || '');
+  const upstreamCode = error?.payload?.error?.upstream_code;
   const message = String(error?.message || error || '').slice(0, 300);
   const noun = label;
+  const statusTool = noun === '图片' ? 'workbuddy_image_status' : 'workbuddy_video_status';
   const actionText = action === 'submit' ? '提交' : '查询';
   if (code.endsWith('_NO_OUTPUT')) {
-    return `任务已标记完成，但上游没有返回可下载的 https 产物。稍后再调用 ${noun === '图片' ? 'workbuddy_image_status' : 'workbuddy_video_status'} 查一次；`
+    return `任务已标记完成，但上游没有返回可下载的 https 产物。稍后再调用 ${statusTool} 查一次；`
       + '不要重新提交（会再扣一次积分）。';
+  }
+  if (code.endsWith('_KEY_RATE_LIMITED')) {
+    return `申请临时 key 被 Miora 限流（${message || 'HTTP 429'}），生成任务尚未提交、不会计费。`
+      + '稍后直接重试即可，不需要查任务。';
+  }
+  if (status === 413 || code.endsWith('_PAYLOAD_TOO_LARGE')) {
+    return `${noun}请求体太大（图片 base64 内联会膨胀 1/3）：${message || 'HTTP 413'}。`
+      + '改用 miora fileKey / 公网 https URL，或少带/压缩图片；不要原样重试。';
   }
   if (status === 409) {
     return '任务还没完成，所以没有可下载的产物。稍后再查一次；不要重新提交。';
   }
   if (status === 403) {
-    return `${noun}接口只接受本地管理令牌（client key 仅聊天）。检查插件是否用 WORKBUDDY_LOCAL_TOKEN 连桥，或重启桥。`;
+    if (code.endsWith('_LOCAL_TOKEN_REQUIRED') || /local token/i.test(message)) {
+      return `${noun}接口只接受本地管理令牌（client key 仅聊天）。检查插件是否用 WORKBUDDY_LOCAL_TOKEN 连桥，或重启桥。`;
+    }
+    if (code.endsWith('_SCOPE_DENIED') || /scope|permission|not authorized/i.test(message)) {
+      return `当前 WorkBuddy 账号没有${noun}生成权限（${message || '403'}）。换有权限的账号；不要重试。`;
+    }
+    return `${noun}请求被上游拒绝（${message || '403'}）。先确认账号权限与登录态，不要原样重试。`;
   }
   if (status === 401) {
+    if (code.endsWith('_NO_CREDENTIAL')) {
+      return `读不到 WorkBuddy 登录凭据：在 WorkBuddy 桌面端或插件里重新登录后重试。`;
+    }
     return `${noun}请求失败：本地桥令牌或 WorkBuddy 登录态不可用。先确认桥在运行且已登录，再重试。`;
   }
   if (status === 429) {
-    return `${noun}${actionText}被 Miora 限流：${message || 'HTTP 429'}。`
-      + `不要重复提交（任务可能已经创建）；稍后先调用 ${noun === '图片' ? 'workbuddy_image_status' : 'workbuddy_video_status'} 查已有任务。`;
+    if (action === 'status') {
+      return `${noun}查询被 Miora 限流：${message || 'HTTP 429'}。任务本身不受影响，稍后重试查询即可；不要重新提交。`;
+    }
+    return `${noun}提交被 Miora 限流：${message || 'HTTP 429'}。`
+      + `任务可能已经创建：稍后先调用 ${statusTool} 查已有任务，不要重复提交。`;
   }
   if (status === 400) {
-    return `${noun}请求被拒绝：${message || '参数不合法'}。按提示修改参数或内容，不要原样重试。`;
+    return `${noun}请求被拒绝${upstreamCode ? `（上游码 ${upstreamCode}）` : ''}：${message || '参数不合法'}。`
+      + '按提示修改参数或内容，不要原样重试。';
   }
   if (status === 404) {
-    return `没有找到这个${noun}任务：${message || 'unknown id'}。确认 id 来自提交工具的返回。`;
+    return `没有找到这个${noun}任务：${message || 'unknown id'}。确认 id 来自${noun}提交工具的返回；`
+      + `视频和图片的查询接口不互通（不要拿图片 id 查视频，反之亦然）。`;
   }
   if (/ECONNREFUSED|fetch failed|socket hang up/i.test(message)) {
     return `${noun}请求失败：本地桥未运行。先调用 workbuddy_bridge（action=start），再重试。`;
   }
-  return `${noun}${actionText}失败：${message || '未知错误'}`;
+  return `${noun}${actionText}失败：${message || '未知错误'}`
+    + (action === 'submit'
+      ? ' 如果这是超时/断线，任务可能已在上游创建：不要直接重提，先到 WorkBuddy 客户端确认本次任务。'
+      : '');
+}
+
+/**
+ * 状态查询的等待预算。
+ *
+ * 桥单次 `?wait` 上限 60 秒；视频实测 ~101 秒出片，一次 20 秒的查询通常不够。
+ * 工具层把用户给的预算按 60 秒一段拆开（段间状态仍是 pending 就继续），
+ * 默认 20 秒不变，最多 120 秒 —— 大多数视频能在一个工具调用里等到终态。
+ */
+const MAX_STATUS_WAIT_SECONDS = 120;
+const STATUS_WAIT_CHUNK_SECONDS = 60;
+
+function clampWaitSeconds(raw, fallback = 20) {
+  const value = Number(raw);
+  if (!Number.isFinite(value)) return fallback;
+  return Math.min(Math.max(Math.trunc(value), 0), MAX_STATUS_WAIT_SECONDS);
+}
+
+/**
+ * 按用户预算查询状态；桥每段最多代等 60 秒。
+ * 终态 / 预算用完就停止；每段使用固定的 chunk，不会无限追加。
+ */
+async function waitForMediaStatus(statusFn, id, waitSeconds, signal) {
+  let remaining = waitSeconds;
+  for (;;) {
+    const chunk = Math.min(remaining, STATUS_WAIT_CHUNK_SECONDS);
+    const media = await statusFn(id, { waitMs: chunk * 1000, signal });
+    if (!media || media.status === 'completed' || media.status === 'failed' || media.status === 'cancelled') {
+      return media;
+    }
+    if (remaining <= chunk) return media;
+    remaining -= chunk;
+  }
+}
+
+/**
+ * 上游产物里的 miora fileKey。拿到它可以**直接**作为下一次图生图/图生视频的输入，
+ * 不必再走 URL 下载 + base64 回传（更快，也不会被签名 URL 的时效卡住）。
+ */
+function mediaFileKeys(resultFiles) {
+  if (!Array.isArray(resultFiles)) return [];
+  const keys = [];
+  for (const item of resultFiles) {
+    const value = typeof item === 'string'
+      ? item
+      : (item?.fileKey || item?.file_key || item?.file?.fileKey || item?.file?.file_key);
+    if (typeof value === 'string') {
+      const key = value.trim();
+      if (/^(?:bga|file)\//.test(key) && !keys.includes(key)) keys.push(key);
+    }
+  }
+  return keys;
+}
+
+/**
+ * 只有**图片**产物的 fileKey 能直接回流到 images[] / first_frame[]；
+ * 视频产物的 fileKey 不是图片，别把它说成“可以当首帧”。
+ */
+function fileKeyLine(resultFiles, kind) {
+  if (kind !== 'image') return '';
+  const keys = mediaFileKeys(resultFiles);
+  return keys.length ? `可复用的 miora fileKey（下次改图/图生视频直接作为输入，不用重新上传）：\n${keys.map((key) => `- ${key}`).join('\n')}` : '';
+}
+
+/** 上游的 mime 可能在顶层或 `{file:{…}}` 里；取第一个可用的。 */
+function mediaMimeType(resultFiles) {
+  if (!Array.isArray(resultFiles)) return '';
+  for (const item of resultFiles) {
+    const value = typeof item === 'string'
+      ? ''
+      : (item?.mimeType || item?.mime_type || item?.file?.mimeType || item?.file?.mime_type);
+    if (typeof value === 'string' && value.trim()) return value.trim();
+  }
+  return '';
 }
 
 /**
@@ -466,6 +581,8 @@ export function createTools(deps) {
       + '不要因为等待时间长就重复提交（会重复扣费）。'
       + '图片输入（first_frame / last_frame / references[]）请**传字符串**：'
       + '本地绝对路径、公网 https URL、data URI 或 miora fileKey。'
+      + '如果上游返回了 fileKey，后续图生视频优先复用它（不必重新上传）。'
+      + '多张图以 base64 内联时合计受桥请求体限制（默认 32 MB）；超了会提示改用 fileKey/URL。'
       + '参数会严格校验：拼错的键（如 size / image）会直接返回 400，而不是被忽略后按文生视频计费。',
     parameters: {
       type: 'object',
@@ -485,6 +602,11 @@ export function createTools(deps) {
         duration: { type: 'integer', minimum: 1, description: '目标时长（正整数秒）。本次实测支持 4–15 秒，3 秒会被上游拒绝' },
         resolution: { type: 'string', description: '分辨率。本次实测支持 768P / 2K（大小写不敏感），720p 会被上游拒绝' },
         aspect_ratio: { type: 'string', description: '画幅，如 16:9 / 9:16 / 1:1' },
+        save_to: {
+          type: 'string',
+          description: '可选：绝对路径（目录或完整文件名）。上游同步完成时直接落盘并返回文件路径；'
+            + '异步任务仍用 workbuddy_video_status 的 save_to 下载',
+        },
       },
       additionalProperties: false,
     },
@@ -526,12 +648,55 @@ export function createTools(deps) {
       } catch (error) {
         return mediaFailureText(error, { action: 'submit', label: '视频' });
       }
+      const summary = `任务：${video.id}；状态：${video.status}（上游：${video.upstream_status || '-'}）；`
+        + `模式：${video.mode || '-'}`
+        + `${video.seconds ? `；时长：${video.seconds}s` : ''}`
+        + `${video.resolution ? `；分辨率：${video.resolution}` : ''}`
+        + `${video.aspect_ratio ? `；画幅：${video.aspect_ratio}` : ''}`
+        + `${video.model ? `；模型：${video.model}` : ''}`;
+      /*
+       * 上游可能同步完成（mode=sync）：结果/失败原因就在这次响应里，按 id 再查
+       * 只会得到 INVALID_TASK_ID_FOR_SYNC_MODE。这类终态必须在这里讲清楚，
+       * 不能再说“已提交，稍后查询”。
+       */
+      if (video.status === 'completed') {
+        const urls = Array.isArray(video.output?.urls) ? video.output.urls : [];
+        const lines = [
+          video.sync ? '视频已生成（上游同步返回完成）。' : '视频已生成（上游返回完成）。',
+          summary,
+          '本次提交按 WorkBuddy 账号积分计费（以余额为准）。',
+        ];
+        if (urls.length) {
+          lines.push(await describeArtifacts({
+            urls, kind: 'video', id: video.id, saveTo: args?.save_to, mimeType: mediaMimeType(video.result_files),
+          }));
+        } else if (video.sync) {
+          lines.push('上游同步标记完成，但没有返回可下载的 https 产物；这个任务按 id 查不到更多信息。'
+            + '不要再按 id 重查；需要产物请向用户确认后重新生成（会再次计费）。');
+        } else {
+          lines.push('上游标记完成，但这次响应没有可下载的 https 产物。稍后可用 workbuddy_video_status 再查一次（查询不计费）。');
+        }
+        lines.push('同一需求不要重复生成（会再次计费）。');
+        return lines.join('\n');
+      }
+      if (video.status === 'failed' || video.status === 'cancelled') {
+        const lines = [
+          video.status === 'cancelled' ? '视频任务已取消（上游同步返回）。' : '视频生成失败（上游同步返回失败）。',
+          summary,
+          `原因：${video.error?.message || '上游未给失败原因'}`,
+          '本次没有可交付产物。不要原样重提；先和用户确认是否调整参数/内容，再决定是否重新生成（会再次计费）。',
+        ];
+        return lines.join('\n');
+      }
       const lines = [
         `已提交视频任务：${video.id}`,
-        `状态：${video.status}；模式：${video.mode || '-'}${video.model ? `；模型：${video.model}` : ''}`,
+        summary,
         '提交成功即按 WorkBuddy 账号积分计费。同一需求不要再提交一次。',
-        `生成是异步的，稍后用 workbuddy_video_status 查询（id=${video.id}）；completed 后把返回的 URL 交给用户。`,
+        `生成是异步的，稍后用 workbuddy_video_status 查询（id=${video.id}，可一次代等最多 120 秒）；completed 后把返回的 URL 交给用户。`,
       ];
+      if (args?.save_to) {
+        lines.push('本次 save_to 只对“提交时已同步完成”的产物生效；异步任务完成后再查状态时请再传一次 save_to。');
+      }
       return lines.join('\n');
     },
   });
@@ -540,7 +705,7 @@ export function createTools(deps) {
     name: 'workbuddy_video_status',
     description:
       '查询 workbuddy_generate_video 提交的视频任务状态。'
-      + '默认会在本工具里等待最多 20 秒（桥代轮询），通常能直接拿到 completed；'
+      + '默认会在本工具里等待最多 20 秒、可用 wait_seconds 最高 120 秒（桥代轮询），通常能直接拿到 completed；'
       + 'queued/in_progress 时告诉用户还在生成，稍后再查，**不要重新提交**；'
       + 'completed 时返回有时效的下载 URL；failed/cancelled 时返回失败原因。'
       + '产物是**会过期**的签名 URL：要交付给用户时请传 save_to（绝对路径，目录或文件），'
@@ -552,8 +717,9 @@ export function createTools(deps) {
         wait_seconds: {
           type: 'integer',
           minimum: 0,
-          maximum: 45,
-          description: '在本工具内等待多少秒再返回（0 = 立即返回；默认 20，最大 45）',
+          maximum: 120,
+          description: '在本工具内等待多少秒再返回（0 = 立即返回；默认 20，最大 120；'
+            + '内部按桥的 60 秒一段轮询，视频通常一次就能等到终态）',
         },
         save_to: {
           type: 'string',
@@ -564,15 +730,20 @@ export function createTools(deps) {
       required: ['id'],
       additionalProperties: false,
     },
-    timeoutMs: 300_000,
+    // 查询最多等 180 秒（60+60 两段 + 查询余量），落盘再预留 120 秒。
+    timeoutMs: 330_000,
     async execute(args, exec) {
       const id = typeof args?.id === 'string' ? args.id.trim() : '';
       if (!id) throw new Error('id 不能为空：请传 workbuddy_generate_video 返回的任务 id');
-      const rawWait = Number(args?.wait_seconds);
-      const waitSeconds = Number.isFinite(rawWait) ? Math.min(Math.max(Math.trunc(rawWait), 0), 45) : 20;
+      const waitSeconds = clampWaitSeconds(args?.wait_seconds);
       let video;
       try {
-        video = await client.videoStatus(id, { waitMs: waitSeconds * 1000, signal: exec?.signal });
+        video = await waitForMediaStatus(
+          (taskId, options) => client.videoStatus(taskId, options),
+          id,
+          waitSeconds,
+          exec?.signal,
+        );
       } catch (error) {
         return mediaFailureText(error, { action: 'status', label: '视频' });
       }
@@ -589,17 +760,28 @@ export function createTools(deps) {
         const urls = Array.isArray(video.output?.urls) ? video.output.urls : [];
         if (urls.length) {
           lines.push(await describeArtifacts({
-            urls, kind: 'video', id, saveTo: args?.save_to, mimeType: 'video/mp4',
+            urls, kind: 'video', id, saveTo: args?.save_to, mimeType: mediaMimeType(video.result_files),
           }));
+        } else if (video.sync) {
+          lines.push('上游同步标记完成，但没有返回 https 产物。同步任务按 id 查不到更多信息；'
+            + '不要再重查，需要产物请向用户确认后重新生成（会再次计费）。');
         } else {
           lines.push('上游标记完成，但没有返回 https 产物 URL。稍后再查一次，或到 WorkBuddy 客户端查看该任务。');
         }
+      } else if (video.sync_result_unavailable
+        || /INVALID_TASK_ID_FOR_SYNC_MODE/i.test(video.error?.message || '')) {
+        lines.push('这次查询没有拿到结果：该任务在上游是**同步完成**的，结果只出现在提交响应里，'
+          + '桥的短期缓存已不包含它（过期或重启）。不要把它当成普通失败反复重提；'
+          + '需要产物时请向用户确认后重新生成（会再次计费）。');
       } else if (video.status === 'failed' || video.status === 'cancelled') {
-        lines.push(`任务未成功：${video.error?.message || '上游未给失败原因'}`);
-        lines.push('不要直接重复提交；先确认失败原因，必要时再生成。');
+        lines.push(video.status === 'cancelled'
+          ? '任务已取消（不是生成失败）：没有产物。'
+          : `任务未成功：${video.error?.message || '上游未给失败原因'}`);
+        if (video.sync) lines.push('（该任务是上游同步完成的，结果来自提交缓存。）');
+        lines.push('不要直接重复提交；先确认失败原因/用户意愿，必要时再生成。');
       } else {
         lines.push(waitSeconds > 0
-          ? `仍在生成（已等待约 ${waitSeconds} 秒）。稍后再调用本工具查询；不要重新提交，否则会重复计费。`
+          ? `仍在生成（本次最多等待约 ${waitSeconds} 秒）。稍后再调用本工具查询；不要重新提交，否则会重复计费。`
           : '仍在生成。稍后再调用本工具查询；不要重新提交，否则会重复计费。');
       }
       return lines.join('\n');
@@ -620,6 +802,8 @@ export function createTools(deps) {
       + '提交是异步的：本工具返回任务 id，之后用 workbuddy_image_status 查询；'
       + '不要因为等待时间长就重复提交（会重复扣费）。'
       + '图片输入请**传字符串**：本地绝对路径、公网 https URL、data URI 或 miora fileKey。'
+      + '如果上游返回了 fileKey，后续改图优先复用它（不必重新上传）。'
+      + '多张图以 base64 内联时合计受桥请求体限制（默认 32 MB）；超了会提示改用 fileKey/URL。'
       + '参数会严格校验：拼错的键（如 aspect_ratio / width）会直接返回 400，而不是被忽略。',
     parameters: {
       type: 'object',
@@ -632,6 +816,11 @@ export function createTools(deps) {
         },
         size: { type: 'string', description: '输出尺寸 WIDTHxHEIGHT，如 1024x1024；不传用模型默认' },
         quality: { type: 'string', description: '文生图的质量档（如 standard / hd），图生图忽略' },
+        save_to: {
+          type: 'string',
+          description: '可选：绝对路径（目录或完整文件名）。上游同步完成时直接落盘并返回文件路径；'
+            + '异步任务仍用 workbuddy_image_status 的 save_to 下载',
+        },
       },
       required: ['prompt'],
       additionalProperties: false,
@@ -664,13 +853,55 @@ export function createTools(deps) {
       } catch (error) {
         return mediaFailureText(error, { action: 'submit', label: '图片' });
       }
+      const summary = `任务：${image.id}；状态：${image.status}（上游：${image.upstream_status || '-'}）；`
+        + `模式：${image.mode || mode}`
+        + `${image.size ? `；尺寸：${image.size}` : ''}${image.model ? `；模型：${image.model}` : ''}`;
+      /*
+       * 图片实测经常走 `mode:"sync"`：结果（或失败原因）就在这次提交响应里，
+       * 按 id 再查只会得到 INVALID_TASK_ID_FOR_SYNC_MODE。终态必须当场讲清楚。
+       */
+      if (image.status === 'completed') {
+        const urls = Array.isArray(image.output?.urls) ? image.output.urls : [];
+        const lines = [
+          image.sync ? '图片已生成（上游同步返回完成）。' : '图片已生成（上游返回完成）。',
+          summary,
+          '本次提交按 WorkBuddy 账号积分计费（以余额为准）。',
+        ];
+        if (urls.length) {
+          lines.push(await describeArtifacts({
+            urls, kind: 'image', id: image.id, saveTo: args?.save_to, mimeType: mediaMimeType(image.result_files),
+          }));
+        } else if (image.sync) {
+          lines.push('上游同步标记完成，但没有返回可下载的 https 产物；这个任务按 id 查不到更多信息。'
+            + '不要再按 id 重查；需要产物请向用户确认后重新生成（会再次计费）。');
+        } else {
+          lines.push('上游标记完成，但这次响应没有可下载的 https 产物。稍后可用 workbuddy_image_status 再查一次（查询不计费）。');
+        }
+        const keys = fileKeyLine(image.result_files, 'image');
+        if (keys) lines.push(keys);
+        lines.push('同一需求不要重复生成（会再次计费）。');
+        return lines.join('\n');
+      }
+      if (image.status === 'failed' || image.status === 'cancelled') {
+        const lines = [
+          image.status === 'cancelled' ? '图片任务已取消（上游同步返回）。' : '图片生成失败（上游同步返回失败）。',
+          summary,
+          `原因：${image.error?.message || '上游未给失败原因'}`,
+          '本次没有可交付产物。不要原样重提；先和用户确认是否调整提示词/参考图，再决定是否重新生成（会再次计费）。',
+        ];
+        const keys = fileKeyLine(image.result_files, 'image');
+        if (keys) lines.push(keys);
+        return lines.join('\n');
+      }
       const lines = [
         `已提交图片任务：${image.id}`,
-        `状态：${image.status}；模式：${image.mode || mode}`
-          + `${image.size ? `；尺寸：${image.size}` : ''}${image.model ? `；模型：${image.model}` : ''}`,
+        summary,
         '提交成功即按 WorkBuddy 账号积分计费。同一需求不要再提交一次。',
-        `生成是异步的，稍后用 workbuddy_image_status 查询（id=${image.id}）；completed 后把返回的 URL 交给用户。`,
+        `生成是异步的，稍后用 workbuddy_image_status 查询（id=${image.id}，可一次代等最多 120 秒）；completed 后把返回的 URL 交给用户。`,
       ];
+      if (args?.save_to) {
+        lines.push('本次 save_to 只对“提交时已同步完成”的产物生效；异步任务完成后再查状态时请再传一次 save_to。');
+      }
       return lines.join('\n');
     },
   });
@@ -679,7 +910,7 @@ export function createTools(deps) {
     name: 'workbuddy_image_status',
     description:
       '查询 workbuddy_generate_image 提交的图片任务状态。'
-      + '默认会在本工具里等待最多 20 秒（桥代轮询），通常能直接拿到 completed；'
+      + '默认会在本工具里等待最多 20 秒、可用 wait_seconds 最高 120 秒（桥代轮询），通常能直接拿到 completed；'
       + 'queued/in_progress 时告诉用户还在生成，稍后再查，**不要重新提交**；'
       + 'completed 时返回有时效的下载 URL；failed/cancelled 时返回失败原因。'
       + '产物是**会过期**的签名 URL：要交付给用户时请传 save_to（绝对路径，目录或文件），'
@@ -691,8 +922,9 @@ export function createTools(deps) {
         wait_seconds: {
           type: 'integer',
           minimum: 0,
-          maximum: 45,
-          description: '在本工具内等待多少秒再返回（0 = 立即返回；默认 20，最大 45）',
+          maximum: 120,
+          description: '在本工具内等待多少秒再返回（0 = 立即返回；默认 20，最大 120；'
+            + '内部按桥的 60 秒一段轮询）',
         },
         save_to: {
           type: 'string',
@@ -703,15 +935,20 @@ export function createTools(deps) {
       required: ['id'],
       additionalProperties: false,
     },
-    timeoutMs: 300_000,
+    // 查询最多等 180 秒（60+60 两段 + 查询余量），落盘再预留 120 秒。
+    timeoutMs: 330_000,
     async execute(args, exec) {
       const id = typeof args?.id === 'string' ? args.id.trim() : '';
       if (!id) throw new Error('id 不能为空：请传 workbuddy_generate_image 返回的任务 id');
-      const rawWait = Number(args?.wait_seconds);
-      const waitSeconds = Number.isFinite(rawWait) ? Math.min(Math.max(Math.trunc(rawWait), 0), 45) : 20;
+      const waitSeconds = clampWaitSeconds(args?.wait_seconds);
       let image;
       try {
-        image = await client.imageStatus(id, { waitMs: waitSeconds * 1000, signal: exec?.signal });
+        image = await waitForMediaStatus(
+          (taskId, options) => client.imageStatus(taskId, options),
+          id,
+          waitSeconds,
+          exec?.signal,
+        );
       } catch (error) {
         return mediaFailureText(error, { action: 'status', label: '图片' });
       }
@@ -724,21 +961,31 @@ export function createTools(deps) {
       if (image.status === 'completed') {
         const urls = Array.isArray(image.output?.urls) ? image.output.urls : [];
         if (urls.length) {
-          const mimeType = Array.isArray(image.result_files)
-            ? image.result_files.map((f) => f?.mimeType).find((v) => typeof v === 'string')
-            : '';
           lines.push(await describeArtifacts({
-            urls, kind: 'image', id, saveTo: args?.save_to, mimeType,
+            urls, kind: 'image', id, saveTo: args?.save_to, mimeType: mediaMimeType(image.result_files),
           }));
+        } else if (image.sync) {
+          lines.push('上游同步标记完成，但没有返回 https 产物。同步任务按 id 查不到更多信息；'
+            + '不要再重查，需要产物请向用户确认后重新生成（会再次计费）。');
         } else {
           lines.push('上游标记完成，但没有返回 https 产物 URL。稍后再查一次，或到 WorkBuddy 客户端查看该任务。');
         }
+        const keys = fileKeyLine(image.result_files, 'image');
+        if (keys) lines.push(keys);
+      } else if (image.sync_result_unavailable
+        || /INVALID_TASK_ID_FOR_SYNC_MODE/i.test(image.error?.message || '')) {
+        lines.push('这次查询没有拿到结果：该任务在上游是**同步完成**的，结果只出现在提交响应里，'
+          + '桥的短期缓存已不包含它（过期或重启）。不要把它当成普通失败反复重提；'
+          + '需要产物时请向用户确认后重新生成（会再次计费）。');
       } else if (image.status === 'failed' || image.status === 'cancelled') {
-        lines.push(`任务未成功：${image.error?.message || '上游未给失败原因'}`);
-        lines.push('不要直接重复提交；先确认失败原因，必要时再生成。');
+        lines.push(image.status === 'cancelled'
+          ? '任务已取消（不是生成失败）：没有产物。'
+          : `任务未成功：${image.error?.message || '上游未给失败原因'}`);
+        if (image.sync) lines.push('（该任务是上游同步完成的，结果来自提交缓存。）');
+        lines.push('不要直接重复提交；先确认失败原因/用户意愿，必要时再生成。');
       } else {
         lines.push(waitSeconds > 0
-          ? `仍在生成（已等待约 ${waitSeconds} 秒）。稍后再调用本工具查询；不要重新提交，否则会重复计费。`
+          ? `仍在生成（本次最多等待约 ${waitSeconds} 秒）。稍后再调用本工具查询；不要重新提交，否则会重复计费。`
           : '仍在生成。稍后再调用本工具查询；不要重新提交，否则会重复计费。');
       }
       return lines.join('\n');

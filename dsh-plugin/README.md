@@ -411,10 +411,10 @@ dsh 的 `web-search-deepseek` 分节：`baseURL=http://127.0.0.1:8790/v1`、
 | `workbuddy_usage` | 最近 N 天调用次数、tokens、积分、失败数 |
 | `workbuddy_checkin` | 签到状态；`claim=true` 立即领取 |
 | `workbuddy_web_search` | 直接走桥的 WorkBuddy 原生搜索；dsh 内置搜索 401/未接入时的兜底 |
-| `workbuddy_generate_video` | 提交 Miora 视频任务（文生视频 / 首尾帧 / 参考图）。**高积分计费**，异步返回任务 id；同一需求不要重复提交 |
-| `workbuddy_video_status` | 查询视频任务；默认代等 20 秒（`wait_seconds`），completed 返回有时效的下载 URL，processing 时明确提示不要重提 |
-| `workbuddy_generate_image` | 提交 Miora 图片任务（只给 prompt = 文生图；给 images = 图生图）。**高积分计费**，异步返回任务 id；同一需求不要重复提交 |
-| `workbuddy_image_status` | 查询图片任务；默认代等 20 秒（`wait_seconds`），completed 返回有时效的下载 URL |
+| `workbuddy_generate_video` | 提交 Miora 视频任务（文生视频 / 首尾帧 / 参考图）。**高积分计费**；上游同步完成时直接返回产物/失败原因并可用 `save_to` 落盘，异步时返回任务 id；同一需求不要重复提交 |
+| `workbuddy_video_status` | 查询视频任务；默认代等 20 秒、`wait_seconds` 最高 120 秒（桥按 60 秒一段轮询），completed 返回有时效的下载 URL，processing 时明确提示不要重提 |
+| `workbuddy_generate_image` | 提交 Miora 图片任务（只给 prompt = 文生图；给 images = 图生图）。**高积分计费**；上游同步完成时直接返回产物/失败原因并可用 `save_to` 落盘，异步时返回任务 id；同一需求不要重复提交 |
+| `workbuddy_image_status` | 查询图片任务；默认代等 20 秒、`wait_seconds` 最高 120 秒，completed 返回有时效的下载 URL 与可复用 fileKey |
 | `workbuddy_bridge` | `status` / `start` / `stop` / `restart` 桥；`console` 确保控制台在跑并返回地址 |
 
 ```

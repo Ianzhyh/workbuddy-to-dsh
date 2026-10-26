@@ -74,6 +74,13 @@ test('save_to：目录 / 不存在的目录 / 完整文件路径三种语义', a
     const c = await resolveTargetPath({ saveTo: join(dir, 'custom.mp4'), fileName: 'x.mp4' });
     assert.equal(c.file, join(dir, 'custom.mp4'));
 
+    // 已存在的无扩展名文件：它是文件，不是目录（否则 mkdir 会失败）
+    const extensionless = join(dir, 'README');
+    writeFileSync(extensionless, 'keep');
+    const d = await resolveTargetPath({ saveTo: extensionless, fileName: 'x.mp4' });
+    assert.equal(d.file, extensionless);
+    assert.equal(d.isDir, false);
+
     // 相对路径直接拒绝（工具会拿到 dsh 进程的 cwd，猜目录没有意义）
     await assert.rejects(() => resolveTargetPath({ saveTo: 'out', fileName: 'x.mp4' }), /absolute/);
     await assert.rejects(() => resolveTargetPath({ saveTo: '   ', fileName: 'x.mp4' }), /empty/);
@@ -189,4 +196,102 @@ test('文件名里的分隔符不会让 join 产生越界路径', async () => {
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test('目录落盘：同一任务多个产物同一秒写入也不会互相覆盖', async () => {
+  const dir = tmp();
+  const at = new Date(2026, 9, 26, 9, 30, 15).getTime();
+  try {
+    const first = await saveMediaFile(
+      { url: 'https://cdn.example/a.mp4', saveTo: dir, id: 'task-multi', kind: 'video', index: 0 },
+      { fetchImpl: stubFetch(Buffer.from('FIRST')), now: () => at },
+    );
+    const second = await saveMediaFile(
+      { url: 'https://cdn.example/b.mp4', saveTo: dir, id: 'task-multi', kind: 'video', index: 1 },
+      { fetchImpl: stubFetch(Buffer.from('SECOND')), now: () => at },
+    );
+    assert.notEqual(first.path, second.path);
+    assert.equal(readFileSync(first.path).toString(), 'FIRST');
+    assert.equal(readFileSync(second.path).toString(), 'SECOND');
+    assert.equal(readdirSync(dir).length, 2);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('目录落盘：不与已存在的同名文件争夺，序号顺延', async () => {
+  const dir = tmp();
+  const at = new Date(2026, 9, 26, 9, 30, 15).getTime();
+  try {
+    const name = mediaFileName({ id: 'task-1', kind: 'video', now: at });
+    const existing = join(dir, name);
+    writeFileSync(existing, 'OLD');
+    const result = await saveMediaFile(
+      { url: 'https://cdn.example/v.mp4', saveTo: dir, id: 'task-1', kind: 'video' },
+      { fetchImpl: stubFetch(Buffer.from('NEW')), now: () => at },
+    );
+    assert.notEqual(result.path, existing);
+    assert.match(result.path, /-2\.mp4$/);
+    assert.equal(readFileSync(existing).toString(), 'OLD');
+    assert.equal(readFileSync(result.path).toString(), 'NEW');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('显式文件名 + 多产物：首个覆盖、后续加序号，不丢结果', async () => {
+  const dir = tmp();
+  try {
+    const target = join(dir, 'fixed.mp4');
+    writeFileSync(target, 'OLD');
+    const first = await saveMediaFile(
+      { url: 'https://cdn.example/a.mp4', saveTo: target, index: 0 },
+      { fetchImpl: stubFetch(Buffer.from('FIRST')) },
+    );
+    const second = await saveMediaFile(
+      { url: 'https://cdn.example/b.mp4', saveTo: target, index: 1 },
+      { fetchImpl: stubFetch(Buffer.from('SECOND')) },
+    );
+    assert.equal(first.path, target);
+    assert.equal(second.path, join(dir, 'fixed-2.mp4'));
+    assert.equal(readFileSync(target).toString(), 'FIRST');
+    assert.equal(readFileSync(second.path).toString(), 'SECOND');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('下载地址：本机/内网字面量在发请求前就被拒绝', async () => {
+  const dir = tmp();
+  let fetched = 0;
+  const neverFetch = async () => { fetched += 1; return new Response('x'); };
+  try {
+    for (const url of [
+      'https://localhost/a.mp4',
+      'https://localhost./a.mp4',
+      'https://127.0.0.1/a.mp4',
+      'https://127.0.0.1./a.mp4',
+      'https://192.168.1.10/a.mp4',
+      'https://10.0.0.2/a.mp4',
+      'https://[::1]/a.mp4',
+      'https://[::ffff:127.0.0.1]/a.mp4',
+    ]) {
+      await assert.rejects(
+        () => saveMediaFile({ url, saveTo: dir }, { fetchImpl: neverFetch }),
+        /private\/local host|non-https/,
+      );
+    }
+    assert.equal(fetched, 0, '拒绝发生在 fetch 之前');
+    assert.deepEqual(readdirSync(dir), []);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('mediaFileName：index 只影响显式文件名场景的序号', () => {
+  const at = new Date(2026, 9, 26, 9, 30, 15).getTime();
+  assert.equal(
+    mediaFileName({ id: 'task-1', kind: 'video', now: at, index: 2 }),
+    'video-20261026-093015-task-1-3.mp4',
+  );
 });

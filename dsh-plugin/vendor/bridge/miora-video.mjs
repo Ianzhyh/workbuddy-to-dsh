@@ -11,12 +11,14 @@ import {
   MioraMediaError,
   MAX_MEDIA_WAIT_MS,
   SUBMIT_TIMEOUT_MS,
+  assertInlineInputBudget,
   isObject,
   mediaClientOptions,
   mediaPayload,
   mioraRequest,
   normalizeMediaEntry,
   pollMediaTask,
+  recallSubmission,
   rememberSubmission,
   resolveImageInput,
 } from './miora-media-core.mjs';
@@ -223,10 +225,13 @@ export async function buildVideoSubmitBody(input, options = {}) {
   if (mode === 'frame') {
     const first = await resolveImageInput(firstRaw, { ...options, fieldName: 'first_frame' });
     const frame = { first_frame_image: mediaPayload(first) };
+    const resolved = [first];
     if (lastRaw) {
       const last = await resolveImageInput(lastRaw, { ...options, fieldName: 'last_frame' });
       frame.last_frame_image = mediaPayload(last);
+      resolved.push(last);
     }
+    assertInlineInputBudget(resolved, options.maxBodyBytes, { prefix: 'VIDEO', what: 'frame' });
     body.input = frame;
   } else if (mode === 'reference') {
     const resolved = [];
@@ -236,6 +241,7 @@ export async function buildVideoSubmitBody(input, options = {}) {
         fieldName: `references[${index}]`,
       }));
     }
+    assertInlineInputBudget(resolved, options.maxBodyBytes, { prefix: 'VIDEO', what: 'frame' });
     body.input = { reference_images: resolved.map(mediaPayload) };
   }
 
@@ -251,13 +257,20 @@ function normalizeResult({ id, data, entry, meta = null }) {
     seconds: meta?.duration ?? null,
     resolution: meta?.resolution ?? null,
     aspect_ratio: meta?.aspectRatio ?? null,
+    // 与图片一致：sync=true 表示结果已在提交响应里，不能按 id 再查。
+    sync: meta?.sync === true,
   };
 }
 
 export async function submitVideo(auth, input, options = {}) {
   const opts = mediaClientOptions(options);
-  const built = await buildVideoSubmitBody(input, { readFile: opts.readFile });
+  const built = await buildVideoSubmitBody(input, {
+    readFile: opts.readFile,
+    maxBodyBytes: opts.maxBodyBytes,
+  });
   const startedAt = opts.now();
+  // 只有**通过本地校验、真要发上游**时才读余额：拼错参数不该先等一次余额请求。
+  await options.onBeforeRequest?.();
   const data = await mioraRequest(auth, VIDEO_SUBMIT_PATH, built.body, {
     ...opts,
     timeoutMs: options.timeoutMs ?? SUBMIT_TIMEOUT_MS,
@@ -265,14 +278,16 @@ export async function submitVideo(auth, input, options = {}) {
   if (!isObject(data) || !data.upstreamTaskId) {
     throw new MioraMediaError('VIDEO_UPSTREAM', 'Miora video submit did not return an upstreamTaskId.', { status: 502 });
   }
-  const entry = data.mode === 'sync'
+  // 视频通常异步，但上游同样可能同步返回；处理方式与图片一致。
+  const syncEntry = data.mode === 'sync'
     ? {
       status: data.status ?? 'failed',
-      resultFiles: data.resultFiles,
-      errorMessage: data.errorMessage,
+      resultFiles: data.resultFiles ?? data.result_files,
+      errorMessage: data.errorMessage ?? data.error_message ?? data.error ?? data.failReason,
     }
     : null;
   const meta = {
+    kind: 'video',
     mode: built.mode,
     duration: built.duration,
     resolution: built.resolution,
@@ -281,9 +296,11 @@ export async function submitVideo(auth, input, options = {}) {
     provider: data.provider ?? null,
     createdAt: Math.floor(startedAt / 1000),
     savedAt: Date.now(),
+    sync: Boolean(syncEntry),
+    ...(syncEntry ? { syncEntry } : {}),
   };
   rememberSubmission(String(data.upstreamTaskId), meta);
-  return normalizeResult({ id: data.upstreamTaskId, data, entry, meta });
+  return normalizeResult({ id: data.upstreamTaskId, data, entry: syncEntry, meta });
 }
 
 /**
@@ -291,6 +308,16 @@ export async function submitVideo(auth, input, options = {}) {
  * 查询不计费，重复查询安全；超时返回最后一次状态，不是失败。
  */
 export async function queryVideo(auth, id, options = {}) {
+  const taskId = typeof id === 'string' ? id.trim() : '';
+  const remembered = taskId ? recallSubmission(taskId) : null;
+  if (remembered?.kind === 'video' && remembered.syncEntry) {
+    return normalizeResult({
+      id: taskId,
+      data: { upstreamTaskId: taskId },
+      entry: remembered.syncEntry,
+      meta: remembered,
+    });
+  }
   return pollMediaTask(auth, id, {
     ...options,
     queryPath: VIDEO_QUERY_PATH,

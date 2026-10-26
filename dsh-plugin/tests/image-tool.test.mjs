@@ -32,7 +32,8 @@ test('图片工具：注册生成与查询入口，参数严格', () => {
   assert.deepEqual(submit.parameters.required, ['prompt']);
   const status = tools.find((item) => item.name === 'workbuddy_image_status');
   assert.deepEqual(status.parameters.required, ['id']);
-  assert.equal(status.parameters.properties.wait_seconds.maximum, 45);
+  assert.equal(status.parameters.properties.wait_seconds.maximum, 120);
+  assert.equal(submit.parameters.properties.save_to.type, 'string', '同步完成时可直接落盘');
 });
 
 test('文生图：只传 prompt → mode=generate，返回任务 id 并禁止重提', async () => {
@@ -115,6 +116,45 @@ test('图生图：认不出的图片输入直接拒绝，不提交（否则会�
   assert.equal(submitted, false, '认不出图片输入时绝不能提交');
 });
 
+test('图片工具：上游同步完成时直接交付产物与 fileKey，不再让用户查任务', async () => {
+  const submit = tool('workbuddy_generate_image', {
+    imageSubmit: async () => ({
+      id: 'wb-sync-img',
+      status: 'completed',
+      upstream_status: 'completed',
+      mode: 'edit',
+      sync: true,
+      result_files: [{ signedUrl: 'https://cdn.example/i.png', fileKey: 'file/image-1' }],
+      output: { url: 'https://cdn.example/i.png', urls: ['https://cdn.example/i.png'] },
+    }),
+  });
+  const output = await submit.execute({ prompt: 'x', images: ['file/abc/ref.png'] });
+  assert.match(output, /图片已生成/);
+  assert.match(output, /https:\/\/cdn\.example\/i\.png/);
+  assert.match(output, /file\/image-1/);
+  assert.match(output, /不要重复生成/);
+  assert.doesNotMatch(output, /稍后用 workbuddy_image_status/);
+});
+
+test('图片工具：同步失败直接给失败原因，不说“已提交、稍后查询”', async () => {
+  const submit = tool('workbuddy_generate_image', {
+    imageSubmit: async () => ({
+      id: 'wb-sync-img-fail',
+      status: 'failed',
+      upstream_status: 'failed',
+      mode: 'edit',
+      sync: true,
+      error: { message: 'content safety' },
+    }),
+  });
+  const output = await submit.execute({ prompt: 'x', images: ['file/abc/ref.png'] });
+  assert.match(output, /图片生成失败/);
+  assert.match(output, /content safety/);
+  assert.match(output, /不要原样重提/);
+  assert.doesNotMatch(output, /已提交图片任务/);
+  assert.doesNotMatch(output, /稍后用 workbuddy_image_status/);
+});
+
 test('图片错误：400/403/429/NO_OUTPUT 都是「图片」口径且不暗示重提', async () => {
   const failed = (status, message = 'boom', payload) => tool('workbuddy_generate_image', {
     imageSubmit: async () => {
@@ -158,6 +198,7 @@ test('图片查询：completed 给 URL，processing 不催重提，failed 给原
         mode: 'generate',
         size: '1024x1024',
         created_at: 1761390000,
+        result_files: [{ signedUrl: 'https://cdn.example/i.png', fileKey: 'file/image-2' }],
         output: { url: 'https://cdn.example/i.png', urls: ['https://cdn.example/i.png'] },
       };
     },
@@ -168,6 +209,7 @@ test('图片查询：completed 给 URL，processing 不催重提，failed 给原
   assert.match(done, /提交时间/);
   assert.match(done, /https:\/\/cdn\.example\/i\.png/);
   assert.match(done, /有时效/);
+  assert.match(done, /file\/image-2/, 'fileKey 可直接复用于下一次改图');
 
   const processing = tool('workbuddy_image_status', {
     imageStatus: async () => ({ status: 'in_progress', upstream_status: 'processing' }),

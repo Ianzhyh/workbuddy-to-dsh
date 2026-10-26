@@ -41,9 +41,13 @@ WorkBuddy 客户端内置的 Miora MCP（`resources/plugins/workbuddy-builtin/mc
 - 临时 key 只驻桥内存，按账号 + token 指纹缓存；不落盘、不写日志、不回显。
 - 临时 key 失效（401）时只换 key 重试**一次**。提交成功后遇到 5xx/429 **不重试**，
   避免第二次计费；未完成任务请用查询接口恢复。
-- 视频提交是异步的：`POST /v1/videos` 返回 `202`，状态从 `queued` → `in_progress`
-  → `completed` / `failed` / `cancelled`。**客户端工具最多等待约 15 分钟**；
-  超时不等于失败，用查询接口恢复，避免重复提交再次计费。
+- 视频提交通常是异步的：`POST /v1/videos` 返回 `202`，状态从 `queued` → `in_progress`
+  → `completed` / `failed` / `cancelled`。上游也可能（少见）在 submit 里同步跑完：
+  此时桥返回 `200`、`sync: true`，结果只在提交响应里，按 id 查询会得到
+  `INVALID_TASK_ID_FOR_SYNC_MODE`。桥会把同步终态缓存 6 小时，期间查询/`/content` 仍可用。
+- 官方客户端工具最多等待约 15 分钟；dsh 工具默认代等 20 秒、可用 `wait_seconds`
+  最高 120 秒（内部按桥的 60 秒一段轮询）。超时不等于失败，用查询接口恢复，
+  避免重复提交再次计费。
 
 ## 2. 接口
 
@@ -121,6 +125,11 @@ Content-Type: application/json
 3. **公网 https URL**：拒绝 http、localhost、私有/保留地址、带账号密码的 URL；
 4. **base64 data URI**：必须 `;base64`，mime 必须是 `image/*`，解码后 ≤ 10 MB。
 
+**多张内联图片还要装得进桥的请求体**：base64 膨胀 4/3，默认 32 MB 的
+`WORKBUDDY_MAX_BODY_BYTES` 约容得下 23.8 MB 原始数据（例如 2 张 10 MB 帧可以，
+3 张就不行）。超出时桥在提交前返回 400 `VIDEO_INVALID_INPUT` 并建议改用 fileKey/URL；
+客户端硬塞到 413 时错误码是 `VIDEO_PAYLOAD_TOO_LARGE`。
+
 > 本地路径只对**本地管理令牌**开放（见第 5 节），因为它能读本机文件。
 
 **私有地址判定按 IP 字面量做，不按域名前缀**。早期版本用一条
@@ -136,7 +145,7 @@ Content-Type: application/json
 **本地文件先看大小再读内容**：超过上限时在读盘之前就返回 400，不会先把整个文件
 读进内存（再 base64 膨胀 1/3）才告诉用户「太大了」。
 
-成功返回 `202`：
+异步提交返回 `202`：
 
 ```json
 {
@@ -151,11 +160,17 @@ Content-Type: application/json
   "seconds": 5,
   "resolution": "768P",
   "aspect_ratio": "9:16",
+  "sync": false,
   "result_files": [],
   "output": null,
   "error": null
 }
 ```
+
+上游同步跑完时返回 `200`、`sync: true`，`status` 已是终态（`completed` / `failed` /
+`cancelled`），`output` / `error` / `result_files` 当场给全。这类任务不要再按 id 查询；
+桥缓存 6 小时，缓存失效后查询会返回 `status=failed` + `sync_result_unavailable=true`
+（说明是同步任务、结果只在提交响应里），**不是普通的生成失败**。
 
 ### 2.2 查询（可长轮询）
 
@@ -169,8 +184,11 @@ Authorization: Bearer <本地桥令牌>
   预算是**真实时间**：单次查询很慢也不会把 60 秒拖成几分钟。查询不计费，重复查询安全；
   超时返回最后一次状态（不是失败）。`wait=abc` 直接 400，不会静默当成 0。
 - 建议交互：提交后用 `wait=20` 查一次；仍是 `in_progress` 再隔一会儿查，别重提。
+  dsh 工具把等待预算拆成 60 秒一段，一次最多代等 120 秒（视频实测 ~101 秒出片）。
 - `status` 是归一化状态（`pending`→`queued`、`processing`→`in_progress`），
   `upstream_status` 保留上游原值。
+- 同步任务（`sync: true`）的查询优先命中提交缓存；`sync_result_unavailable: true`
+  表示缓存已失效，别把它当普通失败重试。
 
 **提交元数据是 best-effort 回填**：`mode` / `seconds` / `resolution` / `aspect_ratio` /
 `created_at` / `model` 只有提交时才知道，上游查询接口不返回。桥在内存里记 6 小时
@@ -181,6 +199,8 @@ Authorization: Bearer <本地桥令牌>
 
 `result_files` 保留上游原始字段（通常是 `signedUrl` / `mimeType` / `fileKey`）。
 `output.url` 是第一个 https 产物地址；签名 URL 有时效，拿到后请尽快下载。
+视频产物也可能带 `fileKey`，但它不是图片，**不能直接当首帧/参考图**；链式复用请使用
+图片工具返回的 fileKey（例如先出图、再拿它的 `resultFiles[].fileKey` 做图生视频）。
 
 ### 2.3 下载
 
@@ -205,7 +225,7 @@ GET /v1/videos/{upstreamTaskId}/content
 | 幂等 | **提交不是幂等的**：不要因为超时/断线自动重试，否则可能重复扣费 |
 | 提交超时 | 桥给提交预留 390 秒（异步接口正常几秒返回）；客户端超时先断开时任务可能已创建 —— 先查，不要重提 |
 | 查询超时 | 单次 30 秒；`wait=N` 的总预算最多 60 秒（按真实时间计，客户端把超时设得比它长） |
-| 请求体 | 沿用 `WORKBUDDY_MAX_BODY_BYTES`（默认 32 MB）；base64 图片会快速放大，注意 413 |
+| 请求体 | 沿用 `WORKBUDDY_MAX_BODY_BYTES`（默认 32 MB）；内联图片按 base64 膨胀 4/3 预留预算，超出在提交前 400；客户端硬塞到 413 时 code=`VIDEO_PAYLOAD_TOO_LARGE` |
 | 账本 | 视频提交按 `kind=video` 单独计数（控制台用量页显示「视频提交/视频失败」），不计入模型调用与 tokens；上游不回报视频积分，桥记录**提交前后账号余额差**为 `creditEstimate`（估算，并发生成/模型调用会混入），用量页单列「视频消耗积分」 |
 
 > 视频是高积分工具（客户端里单独审批，和图片分组），桥不会替你估算成本。
@@ -215,24 +235,29 @@ GET /v1/videos/{upstreamTaskId}/content
 
 | code | HTTP | 含义 | 客户端该怎么做 |
 |---|---|---|---|
-| `VIDEO_INVALID_INPUT` | 400 | 本地校验失败（模式冲突、未知字段、图片不可读、参数形状不对） | 按 message 改参数；**不要原样重试** |
+| `VIDEO_INVALID_INPUT` | 400 | 本地校验失败（模式冲突、未知字段、图片不可读、inline 超预算） | 按 message 改参数；**不要原样重试** |
 | `VIDEO_NO_CREDENTIAL` | 401 | 读不到 WorkBuddy 登录凭据 | 重新登录（桌面端或插件），再试 |
 | `VIDEO_AUTH` | 401 | 临时 key 申请失败 / 上游拒绝临时 key | 确认登录态有效；桥已换 key 重试过一次 |
-| `VIDEO_SCOPE_DENIED` | 403 | 当前凭据没有视频权限 | 换有权限的账号；不要重试 |
+| `VIDEO_SCOPE_DENIED` | 403 | 当前账号没有视频权限 | 换有权限的账号；不要重试 |
 | `VIDEO_LOCAL_TOKEN_REQUIRED` | 403 | 用了普通 client key 调视频接口 | 改用本地管理令牌（插件会自己带） |
-| `VIDEO_NOT_FOUND` | 404 | 上游没有这个任务 id | 确认 id 来自提交响应；不要自己拼 |
+| `VIDEO_NOT_FOUND` | 404 | 上游没有这个任务 id | 确认 id 来自提交响应；视频/图片 id 不互通 |
 | `VIDEO_NOT_READY` | 409 | 任务未完成 / 无产物可下载 | 稍后再查；不要重提 |
-| `VIDEO_RATE_LIMITED` | 429 | Miora 限流（带 `Retry-After`） | 等到 `Retry-After` 后再查；提交是否已受理以查询为准 |
-| `VIDEO_UPSTREAM_REJECTED` | 400 | 上游业务拒绝（时长/分辨率/内容安全等） | 按上游 message 改参数；**不要原样重试** |
+| `VIDEO_RATE_LIMITED` | 429 | **提交**被 Miora 限流（带 `Retry-After`） | 提交可能已受理：先查状态 |
+| `VIDEO_KEY_RATE_LIMITED` | 429 | **申请临时 key** 被限流 | 任务尚未提交、不会计费；稍后直接重试 |
+| `VIDEO_PAYLOAD_TOO_LARGE` | 413 | 请求体超限 | 改用 fileKey/URL，或调大 `WORKBUDDY_MAX_BODY_BYTES` |
+| `VIDEO_UPSTREAM_REJECTED` | 400 | 上游业务拒绝（时长/分辨率/内容安全等） | 按上游 message / `upstream_code` 改参数；**不要原样重试** |
 | `VIDEO_NO_OUTPUT` | 502 | 上游标记完成但没有 https 产物 | 稍后重查；不要重提 |
 | `VIDEO_UNAVAILABLE` | 502 | 连不上 WorkBuddy 网关 / Miora | 检查网络与桥状态；提交是否成功未知，先查询 |
 | `VIDEO_UPSTREAM` | 502 | 上游返回非 JSON、缺字段、其它 5xx | 稍后重试**查询**；不要重试提交 |
+| `VIDEO_GENERATION_FAILED` | — | **账本专用**：同步失败/取消 | 看 `error`；不要原样重提 |
 | `VIDEO_ERROR` | 5xx | 未分类错误 | 看桥日志 |
 
 自动重试边界（桥自己只做这些）：
 
 - **401 → 换临时 key 重试一次**（请求未被受理，不会重复计费）；
-- **429 / 5xx → 不自动重试**（提交可能已被受理，重试会重复计费）；
+- **提交 429 / 5xx → 不自动重试**（提交可能已被受理，重试会重复计费）；
+- **申请临时 key 的 429 → 也不自动重试**，但用独立 `*_KEY_RATE_LIMITED` 标出
+  「任务尚未提交、不会计费」，客户端可以直接稍后重试；
 - **查询**永远可以重复（只读、不计费）。
 
 上游拒绝的还原：Miora 代理有时用外层 2xx/5xx 包住业务错误，真正的状态只写在
@@ -303,3 +328,11 @@ curl -sS "http://127.0.0.1:8790/v1/videos/<id>?wait=30" -H "Authorization: Beare
 - `VIDEO_NO_OUTPUT`：`bridge-video.test.mjs` 的 `task-empty`（completed + 空产物）
   断言 `/content` 返回 502，而不是 409。
 - 打包完整性：`npm run check:pack` 递归校验根包入口的本地 import 都在 `files` 里。
+
+**2026-10-26 体验轮（图片真机同步失败驱动）**
+
+- 同步终态：`mode:"sync"` 返回 200 + `sync:true`；产物/错误当场返回，查询命中 6 小时缓存
+  （`miora-image.test.mjs`、`bridge-image.test.mjs`；视频共用同一实现并有单测）。
+- 状态工具：`wait_seconds` 最高 120 秒，内部 60 秒一段；`save_to` 多产物不再互相覆盖。
+- 预算与错误：inline 图片按请求体预算提前 400；临时 key 限流独立成 `*_KEY_RATE_LIMITED`；
+  413 带 `*_PAYLOAD_TOO_LARGE`；400 带 `upstream_code`。

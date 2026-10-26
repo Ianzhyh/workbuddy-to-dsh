@@ -85,8 +85,8 @@ dsh 的模型选择器里，日常需要的接入、管理、监控、运维能�
 | 对话测试 | 多轮流式对话，按轮次显示 token / 扣分 / 耗时，附桥日志 |
 | 每日签到 | 自动签到（不开控制台也会签）+ 手动领取 |
 | 同时服务其它客户端 | 桥讲 OpenAI / Anthropic / Responses 三套协议 —— Claude Code、Codex、opencode、Cherry Studio 等直接接入 |
-| 视频生成（本地 API） | 文生视频 / 首尾帧 / 参考图三种模式，异步提交 + 查询（可长轮询）+ 下载跳转；走 WorkBuddy 账号积分，详见 [`docs/VIDEO-GENERATION.md`](docs/VIDEO-GENERATION.md) |
-| 图片生成（本地 API） | 文生图 / 图生图两种模式，异步提交 + 查询（可长轮询）+ 下载跳转；与视频共用临时 key 与错误契约，详见 [`docs/IMAGE-GENERATION.md`](docs/IMAGE-GENERATION.md) |
+| 视频生成（本地 API） | 文生视频 / 首尾帧 / 参考图三种模式，异步提交 + 查询（可长轮询，上游同步完成时 200 直接返回）+ 下载跳转；走 WorkBuddy 账号积分，详见 [`docs/VIDEO-GENERATION.md`](docs/VIDEO-GENERATION.md) |
+| 图片生成（本地 API） | 文生图 / 图生图两种模式，异步提交 + 查询（可长轮询，上游同步完成时 200 直接返回产物/失败原因）+ 下载跳转；与视频共用临时 key 与错误契约，详见 [`docs/IMAGE-GENERATION.md`](docs/IMAGE-GENERATION.md) |
 | 中英双语 | 控制台与 dsh 设置页（9 个标签页）全部双语，右上角 `EN` / `中` 切换 |
 
 **在 dsh 里直接装**：设置 → 插件 → 添加插件，填
@@ -478,7 +478,7 @@ node tools\connect.mjs apply codex --model glm-5.3
 | 桥的启停 | 插件自动复用/拉起 | 控制台按钮，或 `启动.cmd` |
 | 数据界面 | **dsh 设置页（9 个标签页）** + 控制台网页，两边同步 | 只有控制台网页 |
 | 网页搜索 | **启动后自动接入（默认）**，概览顶部独立状态卡 + 一键接入/恢复；令牌写独立引用，不覆盖 DeepSeek key | 需手动改 dsh 的 `web-search-deepseek` 配置 |
-| agent 侧 | 8 个工具（含 `workbuddy_web_search` 原生搜索兜底、`workbuddy_generate_video` / `workbuddy_video_status` 视频生成与查询）+ `/workbuddy` 命令 | 无 |
+| agent 侧 | 10 个工具（含 `workbuddy_web_search` 原生搜索兜底、`workbuddy_generate_video` / `workbuddy_video_status` 视频生成与查询、`workbuddy_generate_image` / `workbuddy_image_status` 图片生成与查询）+ `/workbuddy` 命令 | 无 |
 
 概览**最上方**的「网页搜索」独立卡片会按「配置 + 桥存活 + 令牌匹配」显示是否真的
 可用（不再藏在「操作」里；旧宿主没上报状态时也会显示重启提示与手动入口）。插件启动、
@@ -596,8 +596,10 @@ Web search provider 把接口地址指到桥后，搜索走 WorkBuddy 账号、*
 `GET /v1/videos/{id}` 与 `GET /v1/videos/{id}/content`，支持**文生视频、首尾帧、
 参考图**三种模式。图片同源：`POST /v1/images`、`POST /v1/images/edits`、
 `GET /v1/images/{id}`、`GET /v1/images/{id}/content`，支持**文生图 / 图生图**。
-两类都是异步任务（`202` + 轮询查询，可加 `?wait=N` 让桥代等），提交成功即按账号积分
-计费；临时 key 只驻内存，401 才换 key 重试一次，429/5xx 不自动重提以免重复扣费。
+两类通常是异步任务（`202` + 轮询查询，可加 `?wait=N` 让桥代等）；上游有时同步跑完，
+此时返回 `200` + `sync: true`，产物/失败原因就在提交响应里（图片实测常见），不要再按
+id 查询。提交成功即按账号积分计费；临时 key 只驻内存，401 才换 key 重试一次，
+429/5xx 不自动重提以免重复扣费。
 媒体接口只接受本地管理令牌（普通 client key 仅聊天）；配置、参数、计费边界与实测
 结论见 [`docs/VIDEO-GENERATION.md`](docs/VIDEO-GENERATION.md) 与
 [`docs/IMAGE-GENERATION.md`](docs/IMAGE-GENERATION.md)。

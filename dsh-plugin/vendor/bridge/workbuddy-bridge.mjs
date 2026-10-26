@@ -3191,11 +3191,15 @@ const MEDIA_TASK_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/;
 const MEDIA_WAIT_MAX_S = MAX_VIDEO_WAIT_MS / 1000;
 
 /** 视频 / 图片共用的错误响应；type 按 code 前缀区分，失败日志统一走 media failed。 */
-function respondMediaError(res, err) {
+function respondMediaError(res, err, fallbackPrefix = 'VIDEO') {
   const status = err instanceof MioraVideoError ? err.status : (Number(err?.status) || 502);
   const headers = err?.retryAfter ? { 'Retry-After': String(err.retryAfter) } : {};
-  const code = err?.code || 'MEDIA_ERROR';
-  const kind = code.startsWith('IMAGE_') ? 'image' : 'video';
+  const code = err?.code || `${fallbackPrefix}_ERROR`;
+  // 未分类异常没有 IMAGE_/VIDEO_ 前缀时，按调用来源（提交/查询路径）归类，
+  // 不能把图片侧的 TypeError 一概记成 video。
+  const kind = code.startsWith('IMAGE_')
+    ? 'image'
+    : (code.startsWith('VIDEO_') ? 'video' : fallbackPrefix.toLowerCase());
   if (status >= 500) log('media failed', kind, status, code, shortError(err?.message || err, 200));
   const type = status === 429
     ? 'rate_limit_error'
@@ -3207,6 +3211,10 @@ function respondMediaError(res, err) {
       message: `workbuddy-bridge: ${shortError(err?.message || err, 300)}`,
       type,
       code,
+      // 上游自己的错误码（如 CONTENT_SAFETY / 14407）对排障很有用，别只留在日志里。
+      ...(err?.upstreamCode !== undefined && err?.upstreamCode !== null
+        ? { upstream_code: err.upstreamCode }
+        : {}),
     },
   }, headers);
 }
@@ -3238,7 +3246,8 @@ async function mediaAuth(prefix) {
  */
 async function quotaBalance(auth) {
   try {
-    const quota = await fetchQuota(auth);
+    // 估算不该给提交添两次最长 15 秒的等待：读不到余额就放弃，creditEstimate=null。
+    const quota = await fetchQuota(auth, { timeoutMs: 5000 });
     return typeof quota?.total === 'number' ? quota.total : null;
   } catch {
     return null;
@@ -3256,7 +3265,14 @@ async function handleMediaSubmit(req, res, { submit, kind, label, prefix, defaul
     raw = await readBody(req);
   } catch (e) {
     if (e.code === 'BODY_TOO_LARGE') {
-      return rejectTooLarge(req, res, 'openai', `${label} request body too large`);
+      return rejectTooLarge(
+        req,
+        res,
+        'openai',
+        `${label} request body too large (limit ${MAX_BODY_BYTES} bytes); `
+          + 'use miora fileKeys/https URLs for large images, or raise WORKBUDDY_MAX_BODY_BYTES',
+        `${prefix}_PAYLOAD_TOO_LARGE`,
+      );
     }
     throw e;
   }
@@ -3279,29 +3295,60 @@ async function handleMediaSubmit(req, res, { submit, kind, label, prefix, defaul
     if (defaultMode && body && typeof body === 'object' && !Array.isArray(body) && body.mode === undefined) {
       payload = { ...body, mode: defaultMode };
     }
-    const balanceBefore = await quotaBalance(resolved.auth);
-    const media = await submit(resolved.auth, payload, { baseUrl: VIDEO_BASE_OVERRIDE || undefined });
+    /*
+     * 余额要在**本地校验通过、即将发上游**时读：放在 submit 之前会让「未知字段/
+     * 图片路径写错」这类 400 也先等一次余额接口（最长 5 秒），纯属浪费。
+     */
+    let balanceBefore = null;
+    const media = await submit(resolved.auth, payload, {
+      baseUrl: VIDEO_BASE_OVERRIDE || undefined,
+      // 提交前预算：多张 inline 图片叠加不能先长到几十 MB 再被 413 顶回来。
+      maxBodyBytes: MAX_BODY_BYTES,
+      onBeforeRequest: async () => { balanceBefore = await quotaBalance(resolved.auth); },
+    });
     /*
      * 生成消耗只能估算：提交前后各读一次账号余额，差值写进账本（creditEstimate）。
      * 差值 ≤ 0 / 读不到 → 不记（界面显示「—」），绝不把“没测到”写成 0。
+     * 同步失败就不必再读一次（本来也不会记 creditEstimate）。
      */
-    const balanceAfter = await quotaBalance(resolved.auth);
+    const failedTask = media.status === 'failed' || media.status === 'cancelled';
+    const balanceAfter = failedTask ? null : await quotaBalance(resolved.auth);
     const creditEstimate = balanceBefore !== null && balanceAfter !== null && balanceBefore > balanceAfter
       ? Math.round((balanceBefore - balanceAfter) * 10000) / 10000
       : null;
+    /*
+     * 上游可能同步跑完（`media.sync === true`）：这时 202 是错的语义，
+     * 任务已经是终态，结果/错误就在这次响应里。HTTP 200 让调用方不必再查；
+     * 账本也按真实成败记（同步失败不能再算一次“成功提交”）。
+     */
+    const terminal = media.status === 'completed' || media.status === 'failed' || media.status === 'cancelled';
+    const syncTerminal = media.sync === true && terminal;
+    const generationFailed = media.status === 'failed' || media.status === 'cancelled';
+    const httpStatus = syncTerminal ? 200 : 202;
     recordRequest({
-      model: kind, kind, stream: false, ms: Date.now() - startedAt,
-      ok: true, status: 202, code: null,
-      ...(creditEstimate !== null ? { creditEstimate } : {}),
+      model: kind,
+      kind,
+      stream: false,
+      ms: Date.now() - startedAt,
+      ok: !generationFailed,
+      status: httpStatus,
+      code: generationFailed ? `${prefix}_GENERATION_FAILED` : null,
+      ...(generationFailed
+        ? { error: media.error?.message || `upstream ${kind} task ${media.status}` }
+        : {}),
+      ...(!generationFailed && creditEstimate !== null ? { creditEstimate } : {}),
     });
-    log(`${label} submit id=${media.id} mode=${media.mode} status=${media.status}`);
-    return json(res, 202, media, { 'Cache-Control': 'no-store' });
+    log(`${label} submit id=${media.id} mode=${media.mode} status=${media.status}`
+      + `${media.sync ? ' sync=true' : ''}`
+      + `${media.output?.urls?.length ? ` outputs=${media.output.urls.length}` : ''}`
+      + `${generationFailed ? ` error=${shortError(media.error?.message || media.status, 200)}` : ''}`);
+    return json(res, httpStatus, media, { 'Cache-Control': 'no-store' });
   } catch (e) {
     recordRequest({
       model: kind, kind, stream: false, ms: Date.now() - startedAt,
       ok: false, status: e?.status || 502, code: e?.code || null, error: e?.message || String(e),
     });
-    return respondMediaError(res, e);
+    return respondMediaError(res, e, prefix);
   }
 }
 
@@ -3387,7 +3434,7 @@ async function handleMediaLookup(req, res, pathname, url, { basePath, query, lab
     });
     return res.end();
   } catch (e) {
-    return respondMediaError(res, e);
+    return respondMediaError(res, e, prefix);
   }
 }
 
@@ -7884,7 +7931,7 @@ function startAutoCheckinTimer() {
  * 该端点不会消耗积分，可安全地按需调用。月度套餐（CapacityType=4）看
  * CycleCapacityRemain，一次性套餐看 CapacityRemain。
  */
-async function fetchQuota(auth) {
+async function fetchQuota(auth, { timeoutMs = 15000 } = {}) {
   const pad = (n) => String(n).padStart(2, '0');
   const fmt = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
     + ` ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
@@ -7907,7 +7954,7 @@ async function fetchQuota(auth) {
       PackageEndTimeRangeBegin: fmt(now),
       PackageEndTimeRangeEnd: fmt(new Date(now.getTime() + 3185136e6)),
     }),
-    signal: AbortSignal.timeout(15000),
+    signal: AbortSignal.timeout(timeoutMs),
   });
 
   const body = await res.json().catch(() => null);
@@ -8029,10 +8076,16 @@ const json = (res, status, obj, extraHeaders = {}) => {
  * 这个动作曾在两个端点漏掉（`/v1/responses`、`/v1/messages/count_tokens`），
  * 所以收敛成一个函数，避免再靠手写复制。
  */
-function rejectTooLarge(req, res, protocol, message = `request body too large (limit ${MAX_BODY_BYTES} bytes)`) {
+function rejectTooLarge(
+  req,
+  res,
+  protocol,
+  message = `request body too large (limit ${MAX_BODY_BYTES} bytes)`,
+  code = null,
+) {
   const body = protocol === 'anthropic'
-    ? { type: 'error', error: { type: 'request_too_large', message } }
-    : { error: { type: 'payload_too_large', message } };
+    ? { type: 'error', error: { type: 'request_too_large', message, ...(code ? { code } : {}) } }
+    : { error: { type: 'payload_too_large', message, ...(code ? { code } : {}) } };
   json(res, 413, body);
   req.resume();
 }

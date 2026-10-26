@@ -21,6 +21,31 @@
 
 ### Fixed
 
+- **上游同步完成（`mode:"sync"`）的图片/视频被当成异步任务**（真机复现）：
+  2026-10-26 两次图生图提交都在 submit 里同步返回 `failed`，桥却回 `202`、
+  工具照着模板说「已提交，稍后查询」，把真实失败原因丢掉；再去查只会得到
+  `INVALID_TASK_ID_FOR_SYNC_MODE` 的伪失败，看起来像任务坏了。现在：
+  - 同步终态返回 **HTTP 200 + `sync: true`**，`completed` 直接交付产物，
+    `failed` / `cancelled` 直接给真实原因，不再劝用户按 id 重查；
+  - 同步结果（含 `resultFiles` / `errorMessage`）进 6 小时提交缓存，
+    `GET /v1/{videos,images}/{id}` 与 `/content` 优先命中，桥重启/过期后才落到上游；
+  - 缓存失效时查询返回 `sync_result_unavailable: true` + 人话，明确「这不是普通生成失败」。
+- **本地参数错误也要先等一次余额请求**：`quotaBalance` 原先在 `submit()` 之前执行，
+  未知字段/坏路径这类纯本地 400 会先等最长 5 秒的余额接口。改为构建通过、
+  真要发上游时才读余额（`onBeforeRequest`），同步失败也不再读 after。
+- **多产物落盘互相覆盖**：同一任务同一秒的多个产物文件名完全相同，`rename` 会静默
+  覆盖前一个；显式 `save_to` 文件路径时两个产物更是直接写同一个文件。现在目录模式
+  按磁盘去重（`-2`/`-3`），显式文件名从第二个产物开始加序号，首个仍按用户意图覆盖。
+- **同步失败的账本记成成功**：`recordRequest` 固定 `ok:true/status:202`；现在同步
+  `failed`/`cancelled` 记 `ok:false`、`code=*_GENERATION_FAILED` 并带错误原因。
+- **图生图回显未生效的 `quality`**：上游 edit schema 不接收 quality，工具层也丢掉了它，
+  但查询响应还显示「质量：hd」。现在 edit 模式的 quality 为 `null`，不再假装生效。
+- **失败原因/产物字段的兼容面**：`error.message` 是对象时不再变成 `[object Object]`；
+  `result_files` 的 snake_case 变体也认；`success` / `done` / `timeout` / `expired`
+  等状态有明确归一。
+- **私有地址判定漏到下载器**：`save_to` 下载产物时只校验了 https，没挡住
+  `https://127.0.0.1/…`、`[::1]`、内网段等本机/私有**字面量**地址；现在在 fetch 之前拒绝。
+  输入 URL 也补上了末尾根点归一（`https://localhost./` 不再绕过 localhost 判定）。
 - **视频/图片输入的私有地址判定既误杀又漏判**（真机可复现）：
   - 旧规则用 `/^(?:fc|fd|fe8|fe9|fea|feb)/` 同时匹配域名与 IPv6 字面量，结果把
     `fc2.com`、`fcdn.cloudflare.net`、`fd.example.com`、`fe8.images.xyz` 这类**公网域名**
@@ -50,6 +75,18 @@
 
 ### Added
 
+- **同步完成的提交也能当场落盘**：`workbuddy_generate_video` / `workbuddy_generate_image`
+  新增 `save_to`（只对提交时已同步完成的产物生效；异步任务完成后再查状态时再传一次）。
+- **图片状态回执展示可复用 fileKey**：图片完成时把 `result_files[].fileKey` 一并列出，
+  后续改图/图生视频可以直接把它当输入，不必重新下载 + base64 上传。视频产物的
+  fileKey 不是图片，不宣称可当首帧复用。
+- **状态工具最长代等 120 秒**：视频实测 ~101 秒出片；工具把预算按桥的 60 秒一段拆开，
+  一次调用通常就能等到终态，减少反复“稍后再查”的回合。
+- **更可执行的错误**：新增 `*_KEY_RATE_LIMITED`（临时 key 限流，任务未提交、不会计费）、
+  `*_PAYLOAD_TOO_LARGE`（413 请求体超限），并在 400 响应里带 `upstream_code`；
+  403 区分「本地令牌用错」与「账号没有权限」。
+- **inline 图片预算**：本地路径/data URI 多张图在提交前按 `WORKBUDDY_MAX_BODY_BYTES`
+  折算（base64 膨胀 4/3），超预算直接 400 并建议改用 fileKey/URL，不再读完几十 MB 才 413。
 - **生成产物可落盘**：`workbuddy_video_status` / `workbuddy_image_status` 新增 `save_to`
   参数（绝对路径，目录或完整文件名）。给定时把签名 URL **流式下载**到本地并回传真实
   文件路径 —— 上游签名 URL 有时效（视频实测约 12 小时），过期后想再要只能重新提交

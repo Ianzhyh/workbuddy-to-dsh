@@ -5,8 +5,11 @@
 > Miora 网关，与视频共用临时 key / 轮询 / 错误映射。
 >
 > **验证状态**：请求路径、字段与限制来自客户端内置 `miora-mcp`（`dist/cli.cjs`）的
-> 实现，并用桩上游做了端到端合约测试；**本轮没有真机出图**（避免计费），
-> 上游实际出图效果与扣费时点未实测。
+> 实现，并用桩上游做了端到端合约测试。真机提交已发生过两次（2026-10-26，图生图），
+> 上游均**在提交响应里同步返回失败**，而旧实现把它当异步任务、丢掉了真实失败原因，
+> 随后按 id 查询只得到 `INVALID_TASK_ID_FOR_SYNC_MODE` —— 本轮已修复这条链路
+> （同步结果缓存、HTTP 200、工具直接交付/报错）。**尚未真机成功出图**；实际出图效果、
+> 尺寸/质量枚举与扣费时点仍未验证。
 
 ## 1. 上游链路
 
@@ -25,7 +28,10 @@
 
 - 临时 key 只驻桥内存，按账号 + token 指纹缓存；与视频共用一把（同一账号）。
 - 提交是计费动作：401 只换 key 重试一次；429/5xx **不自动重试**。
-- 图片任务同样是异步的（个别情况上游可能直接 `mode:"sync"` 返回结果）。
+- 图片任务可能是异步的，也可能**在提交接口里同步跑完**（实测图生图就走过
+  `mode:"sync"`）。同步结果只在 submit 响应里；上游不会为它保存可按 id 查询的任务，
+  查询会返回 `INVALID_TASK_ID_FOR_SYNC_MODE`。桥会把同步终态连同产物/失败原因缓存
+  6 小时，提交后的查询与 `/content` 优先命中缓存。
 
 ## 2. 接口
 
@@ -55,11 +61,26 @@ Content-Type: application/json
 
 `images[]` 每项支持：绝对本地路径、miora fileKey（`bga/…` / `file/…`）、公网 https URL、
 `data:image/...;base64,...`。**单张 ≤ 20 MB**（视频帧是 10 MB）。
+内联（本地路径 / data URI）多张合计还要装得进桥的请求体：base64 膨胀 4/3，默认
+32 MB 的 `WORKBUDDY_MAX_BODY_BYTES` 大约只容得下 23.8 MB 原始图片。超出时桥在**提交前**
+返回 400，并建议改用 fileKey/URL，而不是等请求体长到几十 MB 再给 413。
 
 > 路径语义是硬的：`/v1/images` 只做文生图（带 `images` 会 400，不会悄悄改成图生图）；
 > `/v1/images/edits` 只做图生图（缺 `images` 会 400）。body 里显式传 `mode` 会覆盖路径默认值。
+> `quality` 只对文生图有意义；图生图不发送、也不在查询响应里回显（避免看起来已生效）。
 
-### 2.3 查询与下载
+### 2.3 提交响应：异步 202 / 同步 200
+
+- **异步**（最常见）：`202`，`sync: false`，`status` 为 `queued` / `in_progress`，
+  之后用查询接口轮询。
+- **同步**：上游在 submit 里直接跑完，桥返回 **`200`**、`sync: true`，`status` 已是
+  `completed` / `failed` / `cancelled`，`output` / `error` / `result_files` 当场给全。
+  这类任务**不能再按 id 查询**；桥会在内存里缓存 6 小时，期间查询与 `/content` 仍可用。
+  缓存过期或桥重启后，查询返回 `status=failed` + `sync_result_unavailable=true`，
+  `error.message` 会说明「这是同步任务、结果只在提交响应里」——**不要把它当普通生成失败
+  反复重试**。
+
+### 2.4 查询与下载
 
 ```http
 GET /v1/images/{id}            # 可加 ?wait=0..60，让桥代轮询
@@ -73,6 +94,7 @@ GET /v1/images/{id}/content    # completed 且有产物 → 302 签名 URL
   "id": "img_xxx",
   "object": "image",
   "status": "completed",
+  "sync": false,
   "upstream_status": "completed",
   "created_at": 1761390000,
   "model": "…",
@@ -89,6 +111,9 @@ GET /v1/images/{id}/content    # completed 且有产物 → 302 签名 URL
 - `status`：`queued` → `in_progress` → `completed` / `failed` / `cancelled`。
 - `mode` / `size` / `quality` / `created_at` / `model` 是**提交元数据**，桥只在内存里
   回填 6 小时（不含 prompt、不落盘）；桥重启后为 `null`，不要当持久事实。
+- `sync: true` 表示这个结果来自提交时的同步响应（或它的 6 小时缓存）。
+- `sync_result_unavailable: true` 表示你查的是同步任务、但缓存已经没了；响应里的
+  `failed` 不是上游的生成结论，别照着它重试。
 - `/content`：未完成 → `409 IMAGE_NOT_READY`；已完成但上游没给 https 产物 →
   `502 IMAGE_NO_OUTPUT`（重查也许能拿到，**不要重提**）。
 
@@ -111,18 +136,22 @@ GET /v1/images/{id}/content    # completed 且有产物 → 302 签名 URL
 
 | code | HTTP | 含义 | 处理 |
 |---|---|---|---|
-| `IMAGE_INVALID_INPUT` | 400 | 本地校验失败（未知字段、模式冲突、坏 size、图片不可读） | 按 message 改参数，不要原样重试 |
+| `IMAGE_INVALID_INPUT` | 400 | 本地校验失败（未知字段、模式冲突、坏 size、图片不可读、inline 超预算） | 按 message 改参数，不要原样重试 |
 | `IMAGE_NO_CREDENTIAL` | 401 | 读不到 WorkBuddy 登录凭据 | 重新登录 |
 | `IMAGE_AUTH` | 401 | 临时 key 申请失败 / 被上游拒绝 | 确认登录态；桥已换 key 重试一次 |
-| `IMAGE_SCOPE_DENIED` | 403 | 当前凭据没有图片权限 | 换有权限的账号 |
+| `IMAGE_SCOPE_DENIED` | 403 | 当前账号没有图片权限 | 换有权限的账号；不要重试 |
 | `IMAGE_LOCAL_TOKEN_REQUIRED` | 403 | 用了普通 client key | 改用本地管理令牌 |
-| `IMAGE_NOT_FOUND` | 404 | 上游没有该任务 | 用提交返回的 id，不要自己拼 |
+| `IMAGE_NOT_FOUND` | 404 | 上游没有该任务 | 用提交返回的 id；视频/图片 id 不互通 |
 | `IMAGE_NOT_READY` | 409 | 任务未完成 / 无产物 | 稍后再查，不要重提 |
-| `IMAGE_RATE_LIMITED` | 429 | Miora 限流（带 `Retry-After`） | 等待后再查 |
-| `IMAGE_UPSTREAM_REJECTED` | 400 | 上游业务拒绝（内容安全、尺寸不支持等） | 按上游 message 改参数 |
+| `IMAGE_RATE_LIMITED` | 429 | **提交**被 Miora 限流（带 `Retry-After`） | 任务可能已创建：先查状态 |
+| `IMAGE_KEY_RATE_LIMITED` | 429 | **申请临时 key** 被限流 | 任务尚未提交、不会计费；稍后直接重试 |
+| `IMAGE_PAYLOAD_TOO_LARGE` | 413 | 请求体超限 | 改用 fileKey/URL，或调大 `WORKBUDDY_MAX_BODY_BYTES` |
+| `IMAGE_UPSTREAM_REJECTED` | 400 | 上游业务拒绝（内容安全、尺寸不支持等） | 按上游 message / `upstream_code` 改参数 |
 | `IMAGE_NO_OUTPUT` | 502 | 完成但没有 https 产物 | 稍后重查，不要重提 |
 | `IMAGE_UNAVAILABLE` | 502 | 连不上网关 / Miora | 检查网络与桥；先查任务再决定 |
 | `IMAGE_UPSTREAM` | 502 | 非 JSON / 缺字段 / 其它 5xx | 只重试查询，不重试提交 |
+| `IMAGE_ERROR` | 5xx | 未分类错误 | 看桥日志 |
+| `IMAGE_GENERATION_FAILED` | — | **账本专用**：同步失败/取消 | 看 `error`；不要原样重提 |
 
 ## 5. 认证、计费与积分
 
@@ -130,7 +159,9 @@ GET /v1/images/{id}/content    # completed 且有产物 → 302 签名 URL
   client key 只能聊天，调用图片会得到 `403 IMAGE_LOCAL_TOKEN_REQUIRED`。
 - **提交成功即按账号积分计费**；查询与下载不计费。图片不是幂等操作，不要因超时自动重提交。
 - 上游**不回报**单次图片的积分/token：本地账本只记「图片提交 / 失败」次数
-  （`kind=image`，不计入模型调用与 tokens）。用量页单列「图片消耗积分」，值是
+  （`kind=image`，不计入模型调用与 tokens）。同步失败/取消记 `imageFailed`，
+  `code=IMAGE_GENERATION_FAILED`，不会再算一次“成功提交”。
+  用量页单列「图片消耗积分」，值是
   **提交前后账号余额差**（`creditEstimate`，估算；并发生成或模型调用会混入）。
   读不到余额或差值 ≤ 0 时显示「—」，不会写成 0。
   需要精确值请自己用 `/v1/quota` 前后做差。
@@ -171,7 +202,10 @@ curl -sS "http://127.0.0.1:8790/v1/images/<id>?wait=30" -H "Authorization: Beare
 
 ## 8. 验证与后续
 
-- 合约测试：`bridge/miora-image.test.mjs`（请求体 / 校验 / 错误前缀 / 长轮询 / 元数据）、
-  `bridge/bridge-image.test.mjs`（真起桥 + 桩上游：两条路径、下载、闸门、账本）。
-- **未做**：真机出图、真实扣费时点、上游对 size/quality 的实际枚举范围。
-  需要时先跑一条最小尺寸、再对比余额。
+- 合约测试：`bridge/miora-image.test.mjs`（请求体 / 校验 / 错误前缀 / 长轮询 / 元数据 /
+  同步完成与同步失败 / inline 预算）、`bridge/bridge-image.test.mjs`（真起桥 + 桩上游：
+  两条路径、同步 200 与缓存、413、下载、闸门、账本）。
+- 真机：2026-10-26 两次图生图提交均走 `mode:"sync"` 且返回 `failed`；旧实现丢失了
+  失败原因，本轮补上了「同步终态当场返回 + 6 小时缓存 + 伪失败翻译」。
+- **未做**：真机成功出图、真实扣费时点、上游对 size/quality 的实际枚举范围。
+  需要时先跑一条最小尺寸、再对比余额；同步成功/失败的真实 `resultFiles` 形态也值得再验一次。
