@@ -716,6 +716,17 @@ test('/v1/models：每模型给出**实测过**的 reasoning_efforts 档位（�
       'claude-* 网关当前不接，实测表里是显式空数组',
     );
 
+    // ④b 客户端字段别名与能力：不同客户端读不同名字，值必须同源。
+    const glm = byId.get('glm-5.3');
+    assert.equal(glm.context_length, 1000000, 'context_length 必须与 context_window 同源');
+    assert.equal(glm.max_input_tokens, 1000000);
+    assert.equal(glm.max_tokens, 48000);
+    assert.deepEqual(glm.capabilities, { vision: true, tools: true, reasoning: true });
+    assert.deepEqual(glm.architecture, { input_modalities: ['text', 'image'] });
+    const plain = byId.get('plain-1');
+    assert.deepEqual(plain.capabilities, { vision: false, tools: true, reasoning: false });
+    assert.deepEqual(plain.architecture, { input_modalities: ['text'] });
+
     // ⑤ 补全进来的模型同样要有档位（FEATURED 的 deepseek-v4.1-flash 实测过）
     const flash = models.data.find((m) => m.id === 'deepseek-v4.1-flash');
     assert.ok(flash, '补全模型要在列表里');

@@ -527,7 +527,7 @@ paths:
           description: all=1 返回完整目录并刷新缓存
       responses:
         '200':
-          description: 目录
+          description: 目录。每个模型除 `context_window` / `max_output_tokens` / `supports_images` / `supports_reasoning` 外，还提供客户端别名 `context_length` / `max_input_tokens` / `max_tokens`、`capabilities{vision,tools,reasoning}` 与 `architecture.input_modalities`，值同源。
           content:
             application/json:
               schema:

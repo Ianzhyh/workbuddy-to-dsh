@@ -45,6 +45,10 @@
 - **插件操作安全与来源标注**：插件里的停桥/重启/切号都加二次确认（会中断在途
   请求）；模型页显示「目录来源：上游目录/旧缓存 + 更新时间」，模型详情显示促销
   数据来自 `modelPromotions`，并说明浏览器登录会用桌面身份补抓促销。
+- **协议兼容补强**：`/v1/models` 增加 `context_length` / `max_input_tokens` /
+  `max_tokens` / `capabilities` / `architecture.input_modalities` 别名；Responses
+  带 `previous_response_id` 时明确回 400 `previous_response_not_found`，不再静默
+  丢上下文。
 
 ## [1.15.0] - 2026-10-26
 

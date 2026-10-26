@@ -473,6 +473,13 @@ curl -H "Authorization: Bearer $WB_TOKEN" "http://127.0.0.1:8790/v1/models?all=1
 
 每个模型都带 `context_window` 与 `max_output_tokens`。
 
+### Codex / Responses 报 `previous_response_not_found`
+
+桥是**无状态**的，不实现 OpenAI Responses 的服务端 `store`。客户端如果带
+`previous_response_id`（或 `store: true` 后复用 id），桥会明确回 400
+`previous_response_not_found`，而不是静默当新会话处理、悄悄丢掉上一轮上下文。
+把完整 `input` 历史一起发即可；不要依赖 `previous_response_id`。
+
 ### 客户端里模型显示「上下文 0」
 
 **这不是桥的问题，也不是你填错了。**

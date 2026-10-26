@@ -477,6 +477,31 @@ Second paragraph instructions.`,
     '第二条请求应保留首段之后的 system instructions');
 });
 
+test('Anthropic 未知 thinking / anthropic-beta：忽略而不是 400', async () => {
+  await waitReady();
+  lastUpstreamBody = null;
+  const res = await fetch(`${BASE}/v1/messages`, {
+    method: 'POST',
+    headers: {
+      'x-api-key': TOKEN,
+      'content-type': 'application/json',
+      'anthropic-version': '2023-06-01',
+      'anthropic-beta': 'some-unknown-beta-2026',
+    },
+    body: JSON.stringify({
+      model: 'glm-5.3',
+      max_tokens: 64,
+      thinking: { type: 'enabled', budget_tokens: 1024 },
+      messages: [{ role: 'user', content: 'hi' }],
+    }),
+  });
+  assert.equal(res.status, 200);
+  await res.text();
+  assert.ok(lastUpstreamBody, '应当转发到上游');
+  assert.equal('thinking' in lastUpstreamBody, false,
+    '桥不支持的 thinking 字段不能原样塞给上游（上游会 400）');
+});
+
 test('上游 401：Anthropic 路径回 502 + authentication_error，并提示重登 WorkBuddy', async () => {
   await waitReady();
   scenario = { kind: 'error401' };

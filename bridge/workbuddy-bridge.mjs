@@ -9654,6 +9654,16 @@ async function handleRequest(req, res) {
             : {}),
           ...(m.context ? { context_window_max: m.context } : {}),
           ...(m.maxOutput ? { max_output_tokens: m.maxOutput } : {}),
+          // 兼容别名：不同客户端读不同的字段名（Claude Code 读 context_length /
+          // max_input_tokens，Roo 读 max_tokens）。值与上一行保持同源，不另算一套。
+          ...(contextWindow ? { context_length: contextWindow, max_input_tokens: contextWindow } : {}),
+          ...(m.maxOutput ? { max_tokens: m.maxOutput } : {}),
+          capabilities: {
+            vision: m.images === true,
+            tools: m.supportsToolCall !== false,
+            reasoning: m.supportsReasoning === true,
+          },
+          architecture: { input_modalities: m.images ? ['text', 'image'] : ['text'] },
           ...(typeof credits === 'number' ? { credits } : {}),
           ...(m.images ? { supports_images: true } : {}),
           ...(m.supportsReasoning ? { supports_reasoning: true } : {}),
@@ -10687,6 +10697,23 @@ async function handleRequest(req, res) {
       let body;
       try { body = JSON.parse(raw); }
       catch { return json(res, 400, { error: { type: 'invalid_request', message: 'invalid JSON body' } }); }
+
+      /*
+       * 桥是无状态的：没有实现 Responses 的服务端 store。客户端带
+       * `previous_response_id` 时，如果静默当新会话处理，会把上一轮上下文吞掉，
+       * 用户只会看到“模型失忆”。明确拒绝，让客户端改发完整 input 历史。
+       */
+      if (typeof body.previous_response_id === 'string' && body.previous_response_id.trim()) {
+        const message = 'workbuddy-bridge: previous_response_id is not supported '
+          + '(the bridge is stateless); send the full input history and omit store/previous_response_id';
+        recordRequest({
+          model: String(body.model || ''), stream: false, ms: 0, ok: false, status: 400,
+          code: 'previous_response_not_found', error: message,
+        });
+        return json(res, 400, {
+          error: { type: 'invalid_request_error', code: 'previous_response_not_found', message },
+        });
+      }
 
       const wantStream = body.stream === true;
       const model = resolveResponsesModel(body.model);

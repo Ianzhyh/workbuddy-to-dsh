@@ -930,6 +930,24 @@ test('上游非 2xx（流式）：改发 response.failed 事件，不能中途�
   assert.match(failed.data.response.error.message, /upstream says no/, '上游的错误原文应透出');
 });
 
+test('previous_response_id：桥无服务端状态，必须明确 400 且不打上游', async () => {
+  await waitReady();
+  scenario = { kind: 'text' };
+  lastUpstreamBody = null;
+  const { status, text } = await post({
+    model: 'gpt-5.1-codex',
+    stream: false,
+    store: true,
+    previous_response_id: 'resp_old',
+    input: [{ type: 'message', role: 'user', content: 'hello' }],
+  });
+  assert.equal(status, 400);
+  const j = JSON.parse(text);
+  assert.equal(j.error.code, 'previous_response_not_found');
+  assert.match(j.error.message, /stateless|full input history/i);
+  assert.equal(lastUpstreamBody, null, '明确拒绝后不能再打上游（否则会静默丢上下文）');
+});
+
 test('上游非 2xx（非流式）：按 Responses 的错误形状回 JSON', async () => {
   await waitReady();
   scenario = { kind: 'error' };
