@@ -557,6 +557,7 @@ body.dark .wb-root,
       '正在检测控制台…': 'Detecting console…',
       '启动控制台': 'Start console',
       '重新诊断': 'Re-diagnose',
+      '复制诊断包': 'Copy diagnostic bundle',
       '再查一次': 'Check again',
       '查看失败': 'View failures',
       '去签到': 'Go to check-in',
@@ -4661,7 +4662,40 @@ body.dark .wb-root,
           h('span', null, h('b', null, item.label))),
         h('span', { className: 'wb-value', style: { textAlign: 'left' } }, item.detail || '')))),
         h('div', { style: { marginTop: '8px' } }, adjusted.filter((i) => i.hint).map((i, k) => h('p', { key: k, className: 'wb-note' }, '建议（' + i.label + '）：' + i.hint))),
-        h('div', { className: 'wb-actions', style: { marginTop: '10px' } }, h(Btn, { onClick: reload }, '重新诊断')));
+        h('div', { className: 'wb-actions', style: { marginTop: '10px' } },
+          h(Btn, { onClick: reload }, '重新诊断'),
+          h(Btn, {
+            onClick: () => copyText(JSON.stringify({
+              schemaVersion: 1,
+              generatedAt: new Date().toISOString(),
+              plugin: pluginStatus?.runtime || null,
+              bridge: pluginStatus?.bridge ? {
+                state: pluginStatus.bridge.state,
+                ok: pluginStatus.bridge.ok,
+                error: pluginStatus.bridge.error || '',
+                pid: pluginStatus.bridge.health?.pid ?? null,
+                build: pluginStatus.bridge.health?.build || '',
+                uptimeMs: pluginStatus.bridge.health?.uptimeMs ?? null,
+                catalogSize: pluginStatus.bridge.health?.catalogSize ?? null,
+                auth: pluginStatus.bridge.health?.auth
+                  ? {
+                    source: pluginStatus.bridge.health.auth.source || '',
+                    region: pluginStatus.bridge.health.auth.region || '',
+                    expiresAt: pluginStatus.bridge.health.auth.expiresAt || '',
+                  }
+                  : null,
+              } : null,
+              console: pluginStatus?.console
+                ? { state: pluginStatus.console.state, build: pluginStatus.console.build || '', error: pluginStatus.console.error || '' }
+                : null,
+              route: pluginStatus?.route
+                ? { registered: pluginStatus.route.registered === true, provider: pluginStatus.route.provider || '', error: pluginStatus.route.error || '' }
+                : null,
+              diagnostics: adjusted.map((item) => ({
+                id: item.id, label: item.label, status: item.status, hint: item.hint || '',
+              })),
+            }, null, 2)),
+          }, '复制诊断包')));
     }
 
     // ─────────────────────────── 可用模型 / 体检 ───────────────────────────

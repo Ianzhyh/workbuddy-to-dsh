@@ -62,6 +62,13 @@ export const name = 'workbuddy';
 export const inject = ['llm'];
 
 const PLUGIN_DIR = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+const PLUGIN_VERSION = (() => {
+  try {
+    return JSON.parse(readFileSync(join(PLUGIN_DIR, 'package.json'), 'utf8')).version || '';
+  } catch {
+    return '';
+  }
+})();
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 /**
@@ -1560,7 +1567,7 @@ export function apply(ctx, rawConfig = {}) {
       recentFailed,
       dsh: { home: dshPaths.home, profileDir: dshPaths.profileDir, settingsPath: dshPaths.settingsPath, patchPath: dshPaths.patchPath },
       client: clientGraphSummary(ctx.get('clientModules')),
-      runtime: { node: process.version, pid: process.pid, pluginDir: PLUGIN_DIR },
+      runtime: { version: PLUGIN_VERSION, node: process.version, pid: process.pid, pluginDir: PLUGIN_DIR },
       sampleModel: pickDefaultModel(catalog),
     };
   }

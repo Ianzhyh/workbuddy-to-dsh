@@ -733,6 +733,7 @@ docs/                      架构、配置、排错、安全、接入链路审�
 
 ```cmd
 node tools\doctor.mjs
+node tools\doctor.mjs --bundle   :: 可分享的诊断包（版本/路径/PID/端口/vendor 指纹/最近失败，脱敏）
 ```
 
 完整排查表见 [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md)。
