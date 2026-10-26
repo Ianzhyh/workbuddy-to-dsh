@@ -179,6 +179,7 @@ const child = spawn(process.execPath, [BRIDGE], {
     WORKBUDDY_AUTH_FILE: authFile,
     WORKBUDDY_CREDENTIAL_DIR: join(dir, 'credentials'),
     WORKBUDDY_USAGE_FILE: join(dir, 'usage.jsonl'),
+    WORKBUDDY_MEDIA_STORE_FILE: join(dir, 'media-tasks.json'),
     CODEBUDDY_ENDPOINT: STUB,
     WORKBUDDY_MIORA_BASE: STUB,
     WORKBUDDY_BILLING_BASE: STUB,
@@ -456,6 +457,23 @@ test('OpenAI Images：等待超时回 202 + job id，不伪装成成功', async 
   assert.equal(body.id, 'img-processing');
   assert.equal(body.status, 'in_progress', '上游 processing 归一成 in_progress');
   assert.equal(body.data, undefined, '未完成时不能给 data');
+});
+
+test('OpenAI Images：同一个 Idempotency-Key 只提交一次，第二次标记 replay', async () => {
+  const before = submitCalls.length;
+  const send = () => fetch(base + '/v1/images/generations', {
+    method: 'POST',
+    headers: { ...headers, 'idempotency-key': 'idem-sync-1' },
+    body: JSON.stringify({ prompt: 'sync-ok', size: '512x512' }),
+    signal: AbortSignal.timeout(15_000),
+  });
+  const first = await send();
+  const second = await send();
+  assert.equal(first.status, 200);
+  assert.equal(second.status, 200);
+  assert.equal(second.headers.get('x-workbuddy-idempotent-replay'), '1',
+    '第二次命中幂等缓存时必须如实标记');
+  assert.equal(submitCalls.length, before + 1, '重复请求不能再次提交上游（会重复扣积分）');
 });
 
 test('OpenAI Images：n>1 / stream / 未知字段在本地 400，不提交上游', async () => {

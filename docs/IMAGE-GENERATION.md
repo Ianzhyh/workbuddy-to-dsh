@@ -214,6 +214,11 @@ Content-Type: application/json
   标准客户端可能不认 202，这是非标准降级；自定义 `/v1/images` 仍是完整的异步接口。
 - `stream=true` 不支持，返回 400（避免客户端误以为有 SSE）。
 - 只接受本地管理令牌；client key 仍只能聊天。
+- **幂等**：带 `Idempotency-Key` 时，同账号 + 同 key 在
+  `WORKBUDDY_MEDIA_IDEMPOTENCY_MS`（默认 10 分钟）内只提交一次；重复请求回同一
+  任务并带 `X-WorkBuddy-Idempotent-Replay: 1`。没有该头时不自动合并相同 prompt。
+- 提交元数据（含同步任务的产物/失败原因）落盘到运行期数据目录
+  `media-tasks.json`，桥重启后仍能查询；`WORKBUDDY_MEDIA_STORE=0` 可关闭。
 
 ## 7. 与视频的差异
 

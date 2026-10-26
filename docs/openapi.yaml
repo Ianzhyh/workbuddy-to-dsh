@@ -350,7 +350,14 @@ paths:
         最多等待 WORKBUDDY_IMAGE_SYNC_WAIT_S（默认 90 秒）；完成回 200 +
         {created,data:[{url|b64_json}]}，仍未完成回 202 + X-WorkBuddy-Job-Id
         （标准客户端可能不认 202）。n 只支持 1；stream=true 明确 400。
-        只接受本地管理令牌。
+        只接受本地管理令牌。带 `Idempotency-Key` 时，同账号 + 同 key 在
+        `WORKBUDDY_MEDIA_IDEMPOTENCY_MS` 窗口内只提交一次；重复请求带
+        `X-WorkBuddy-Idempotent-Replay: 1`。
+      parameters:
+        - in: header
+          name: Idempotency-Key
+          schema: { type: string }
+          description: 同一逻辑提交的幂等键（强烈建议客户端超时重试时携带）
       requestBody:
         required: true
         content:

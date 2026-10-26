@@ -109,6 +109,7 @@ async function startBridge(env = {}, opts = {}) {
       // 凭据库必须隔离：否则测试会读到本机真实的插件登录凭据（/health 不再是 503）。
       WORKBUDDY_CREDENTIAL_DIR: join(dir, 'credentials'),
       WORKBUDDY_USAGE_FILE: join(dir, 'usage.jsonl'),
+      WORKBUDDY_MEDIA_STORE_FILE: join(dir, 'media-tasks.json'),
       WORKBUDDY_AUTO_CHECKIN: '0', // 别在测试里触发签到
       WORKBUDDY_LOG: '0',
       ...env,

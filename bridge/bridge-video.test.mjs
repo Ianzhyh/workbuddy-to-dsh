@@ -166,6 +166,7 @@ const child = spawn(process.execPath, [BRIDGE], {
     WORKBUDDY_AUTH_FILE: authFile,
     WORKBUDDY_CREDENTIAL_DIR: join(dir, 'credentials'),
     WORKBUDDY_USAGE_FILE: join(dir, 'usage.jsonl'),
+    WORKBUDDY_MEDIA_STORE_FILE: join(dir, 'media-tasks.json'),
     CODEBUDDY_ENDPOINT: STUB,
     WORKBUDDY_MIORA_BASE: STUB,
     WORKBUDDY_BILLING_BASE: STUB,

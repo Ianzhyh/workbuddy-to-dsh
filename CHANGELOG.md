@@ -36,6 +36,11 @@
 - **OpenAI Images 兼容端点**：新增 `POST /v1/images/generations`（JSON），
   支持 `url` / `b64_json`、同步等待与 202 + job id 降级；`n` 只允许 1，
   `stream` 明确拒绝；复用现有图片提交/查询与本地令牌闸门。
+- **媒体幂等与任务持久化**：带 `Idempotency-Key` 的同账号重复提交在
+  `WORKBUDDY_MEDIA_IDEMPOTENCY_MS` 窗口内只提交一次（并发重复共享同一个
+  pending 提交，命中回 `X-WorkBuddy-Idempotent-Replay: 1`）；任务元数据/同步
+  结果落盘到 `media-tasks.json`，桥重启后仍能查询，`WORKBUDDY_MEDIA_STORE=0`
+  可关闭。自定义图片/视频与 OpenAI Images 端点共用。
 
 ## [1.15.0] - 2026-10-26
 

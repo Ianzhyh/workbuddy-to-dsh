@@ -60,6 +60,8 @@ copy .env.example .env
 | `WORKBUDDY_QUOTA_SNAPSHOT_MS` | `3600000` | 余额快照采集间隔（毫秒）。用量页「账实差额」用首尾快照对比本地账本；`0` = 每次读到余额都记一条（只建议测试用） |
 | `WORKBUDDY_IMAGE_SYNC_WAIT_S` | `90` | OpenAI Images 兼容端点提交后最多等待秒数；超时回 202 + job id |
 | `WORKBUDDY_IMAGE_B64_MAX_BYTES` | `20971520` | `response_format=b64_json` 时单张产物上限（字节），超过回 502 |
+| `WORKBUDDY_MEDIA_IDEMPOTENCY_MS` | `600000` | 媒体提交幂等窗口（毫秒）。带 `Idempotency-Key` 的重复请求只提交一次；`0` = 关闭 |
+| `WORKBUDDY_MEDIA_STORE` | `1` | `1` = 媒体任务元数据落盘到 `<WORKBUDDY_DATA_DIR>/media-tasks.json`（同步任务重启可查）；`0` = 纯内存 |
 
 ### WorkBuddy 客户端
 

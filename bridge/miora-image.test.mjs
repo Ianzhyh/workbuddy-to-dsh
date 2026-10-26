@@ -10,7 +10,12 @@ import {
   queryImage,
   submitImage,
 } from './miora-image.mjs';
-import { resetTempKeyCache } from './miora-media-core.mjs';
+import {
+  configureSubmissionStore, recallSubmission, rememberSubmission, resetTempKeyCache,
+} from './miora-media-core.mjs';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 const AUTH = {
   access: 'test-login-token',
@@ -31,6 +36,28 @@ const tempKeyResponse = (key = 'ck_t_image') => jsonResponse(200, {
 });
 
 beforeEach(() => resetTempKeyCache());
+
+test('提交元数据可落盘并在清空内存后重载（同步任务重启可查）', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'wb-media-store-'));
+  const file = join(dir, 'media-tasks.json');
+  try {
+    configureSubmissionStore({ file });
+    rememberSubmission('task-persist-1', {
+      account: 'scope-a',
+      savedAt: Date.now(),
+      sync: true,
+      syncEntry: { status: 'completed', resultFiles: [{ signedUrl: 'https://cdn.example/x.png' }] },
+    });
+    resetTempKeyCache(); // 模拟桥重启：内存清空，文件还在
+    configureSubmissionStore({ file });
+    const meta = recallSubmission('task-persist-1', 'scope-a');
+    assert.equal(meta?.syncEntry?.status, 'completed', '同步任务元数据必须从磁盘恢复');
+    assert.equal(recallSubmission('task-persist-1', 'scope-b'), null, '换账号不能读到别人的任务');
+  } finally {
+    configureSubmissionStore({ file: '' });
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 test('文生图：prompt/size/quality 原样进请求体，size 归一成小写', async () => {
   const built = await buildImageSubmitBody({

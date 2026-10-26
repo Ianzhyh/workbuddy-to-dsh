@@ -39,7 +39,7 @@ import { waitDrain } from './wait-drain.mjs';
 import { applyPromotion, groupPromotions } from './promotions.mjs';
 import { submitVideo, queryVideo, MioraVideoError, MAX_VIDEO_WAIT_MS } from './miora-video.mjs';
 import { submitImage, queryImage } from './miora-image.mjs';
-import { publicHttpsUrl } from './miora-media-core.mjs';
+import { configureSubmissionStore, publicHttpsUrl } from './miora-media-core.mjs';
 
 /**
  * 本桥源码的构建指纹。
@@ -902,6 +902,15 @@ const RUNTIME_DATA_DIR = (() => {
   if (raw) return isAbsolute(raw) ? raw : join(process.cwd(), raw);
   return join(HOME_FOR_AUTH || homedir(), '.workbuddy-bridge');
 })();
+/**
+ * 媒体任务元数据落盘：同步任务上游不保存，桥重启后必须靠本地缓存才能回答查询。
+ * 只存 id/元数据（不含 prompt）；`WORKBUDDY_MEDIA_STORE=0` 可关闭。
+ */
+const MEDIA_STORE_FILE = process.env.WORKBUDDY_MEDIA_STORE_FILE
+  || join(RUNTIME_DATA_DIR, 'media-tasks.json');
+if (process.env.WORKBUDDY_MEDIA_STORE !== '0') {
+  configureSubmissionStore({ file: MEDIA_STORE_FILE });
+}
 const WIN_LOCAL_APPDATA = process.env.LOCALAPPDATA
   || (process.platform === 'win32' ? join(HOME_FOR_AUTH, 'AppData', 'Local') : '');
 const AUTH_DIRS = [
@@ -3602,6 +3611,41 @@ async function quotaBalance(auth) {
   }
 }
 
+// ── 媒体提交幂等（防客户端超时重试造成重复扣费）──────────────────────────
+const MEDIA_IDEMPOTENCY_MS = numEnv('WORKBUDDY_MEDIA_IDEMPOTENCY_MS', 10 * 60 * 1000, { min: 0 });
+const mediaIdemCache = new Map();
+
+/**
+ * 同一个 `Idempotency-Key` + 账号 + 媒体类型在窗口内只提交一次。
+ * 并发重复请求共享同一个 pending Promise；命中时回 `X-WorkBuddy-Idempotent-Replay: 1`。
+ * 没有 header 时不启用（不擅自把两个相同的 prompt 合并，用户可能真的要画两张）。
+ */
+async function withMediaIdempotency(req, res, kind, auth, fn) {
+  const raw = String(req.headers['idempotency-key'] || '').trim().slice(0, 200);
+  if (!raw || MEDIA_IDEMPOTENCY_MS <= 0) return fn();
+  const account = auth?.userId || auth?.uid || '';
+  const key = createHash('sha256').update(`${kind}|${account}|${raw}`).digest('hex');
+  const now = Date.now();
+  for (const [cachedKey, cached] of mediaIdemCache) {
+    if (now - cached.at >= MEDIA_IDEMPOTENCY_MS) mediaIdemCache.delete(cachedKey);
+  }
+  const hit = mediaIdemCache.get(key);
+  if (hit) {
+    res.setHeader('X-WorkBuddy-Idempotent-Replay', '1');
+    return hit.pending ? hit.pending : hit.result;
+  }
+  const pending = Promise.resolve().then(fn);
+  mediaIdemCache.set(key, { at: now, pending });
+  try {
+    const result = await pending;
+    mediaIdemCache.set(key, { at: Date.now(), result });
+    return result;
+  } catch (e) {
+    mediaIdemCache.delete(key);
+    throw e;
+  }
+}
+
 /**
  * 提交（视频 / 图片共用）。`defaultMode` 让路径带上语义：
  * `/v1/images` = 文生图，`/v1/images/edits` = 图生图（body 显式 mode 优先）。
@@ -3659,12 +3703,12 @@ async function handleMediaSubmit(req, res, { submit, kind, label, prefix, defaul
      * 图片路径写错」这类 400 也先等一次余额接口（最长 5 秒），纯属浪费。
      */
     let balanceBefore = null;
-    const media = await submit(resolved.auth, payload, {
+    const media = await withMediaIdempotency(req, res, kind, resolved.auth, () => submit(resolved.auth, payload, {
       baseUrl: VIDEO_BASE_OVERRIDE || undefined,
       // 提交前预算：多张 inline 图片叠加不能先长到几十 MB 再被 413 顶回来。
       maxBodyBytes: MAX_BODY_BYTES,
       onBeforeRequest: async () => { balanceBefore = await quotaBalance(resolved.auth); },
-    });
+    }));
     /*
      * 生成消耗只能估算：提交前后各读一次账号余额，差值写进账本（creditEstimate）。
      * 差值 ≤ 0 / 读不到 → 不记（界面显示「—」），绝不把“没测到”写成 0。
@@ -3903,11 +3947,11 @@ async function handleOpenAIImagesGenerations(req, res) {
   if (resolved.error) return json(res, resolved.error.status, resolved.error.body);
   try {
     let balanceBefore = null;
-    const submitted = await submitImage(resolved.auth, input, {
+    const submitted = await withMediaIdempotency(req, res, 'image', resolved.auth, () => submitImage(resolved.auth, input, {
       baseUrl: VIDEO_BASE_OVERRIDE || undefined,
       maxBodyBytes: MAX_BODY_BYTES,
       onBeforeRequest: async () => { balanceBefore = await quotaBalance(resolved.auth); },
-    });
+    }));
     const failedAtSubmit = submitted.status === 'failed' || submitted.status === 'cancelled';
     const balanceAfter = failedAtSubmit ? null : await quotaBalance(resolved.auth);
     const creditEstimate = balanceBefore !== null && balanceAfter !== null && balanceBefore > balanceAfter

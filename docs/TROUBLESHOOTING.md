@@ -27,6 +27,7 @@ vendor 指纹、诊断项与最近失败归因；**不含令牌、密钥、对�
 |---|---|
 | `state.json` | 账号钉住、签到偏好、账号排序/隐藏 |
 | `usage.jsonl` | 本地用量账本（只含元数据） |
+| `media-tasks.json` | 媒体任务元数据（同步任务重启后仍可查；不含 prompt） |
 | `bridge-token` | 本地回环令牌（旧客户端配置里填的就是它） |
 | `credentials/` | 插件登录凭据（DPAPI + AES-GCM 信封） |
 

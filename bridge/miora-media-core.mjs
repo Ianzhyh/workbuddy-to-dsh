@@ -13,8 +13,11 @@
  * 能力区分；`prefix` 由各模块通过 options 传下来，默认 VIDEO。
  */
 import { createHash } from 'node:crypto';
+import {
+  existsSync, mkdirSync, readFileSync, renameSync, writeFileSync,
+} from 'node:fs';
 import { readFile, stat as statFile } from 'node:fs/promises';
-import { extname, isAbsolute } from 'node:path';
+import { dirname, extname, isAbsolute } from 'node:path';
 
 export const DEFAULT_MIORA_BASE = 'https://public.miora.qq.com';
 
@@ -572,6 +575,53 @@ function cacheKeyFor(auth) {
 }
 
 const submissionMeta = new Map();
+let submissionStoreFile = '';
+
+/**
+ * 让提交元数据跨桥重启保留（同步任务尤其重要：上游不保存 sync 任务，重启后
+ * 只能靠本地缓存回答查询）。只存 id 与元数据（含签名 URL/失败原因），不含 prompt；
+ * 调用方负责把文件放在运行期数据目录里。
+ *
+ * 不配置 file 时保持纯内存行为（单元测试默认走这条）。
+ */
+/**
+ * @param {{ file?: string }} [options]
+ */
+export function configureSubmissionStore({ file } = {}) {
+  submissionStoreFile = file ? String(file) : '';
+  if (!submissionStoreFile) return;
+  try {
+    if (!existsSync(submissionStoreFile)) return;
+    const parsed = JSON.parse(readFileSync(submissionStoreFile, 'utf8'));
+    const entries = Array.isArray(parsed?.entries) ? parsed.entries : [];
+    for (const entry of entries) {
+      if (!entry || typeof entry.id !== 'string' || !entry.meta) continue;
+      if (Date.now() - Number(entry.meta.savedAt || 0) > META_TTL_MS) continue;
+      submissionMeta.set(entry.id, entry.meta);
+    }
+    while (submissionMeta.size > META_MAX_ENTRIES) {
+      const oldest = submissionMeta.keys().next().value;
+      submissionMeta.delete(oldest);
+    }
+  } catch {
+    // 坏文件/权限问题按空缓存启动；查询会退回上游，不影响主链路。
+  }
+}
+
+function persistSubmissionStore() {
+  if (!submissionStoreFile) return;
+  try {
+    mkdirSync(dirname(submissionStoreFile), { recursive: true });
+    const entries = [...submissionMeta.entries()]
+      .filter(([, meta]) => Date.now() - Number(meta?.savedAt || 0) <= META_TTL_MS)
+      .map(([id, meta]) => ({ id, meta }));
+    const tmp = `${submissionStoreFile}.tmp`;
+    writeFileSync(tmp, `${JSON.stringify({ version: 1, entries })}\n`, 'utf8');
+    renameSync(tmp, submissionStoreFile);
+  } catch {
+    // 磁盘问题不能影响已经计费的提交/查询。
+  }
+}
 
 /** 记住一次提交的元数据（仅供同进程内的查询回填；不含 prompt）。 */
 export function rememberSubmission(id, meta) {
@@ -582,6 +632,7 @@ export function rememberSubmission(id, meta) {
     const oldest = submissionMeta.keys().next().value;
     submissionMeta.delete(oldest);
   }
+  persistSubmissionStore();
 }
 
 /**
@@ -607,6 +658,7 @@ export function recallSubmission(id, scope = null) {
   // TTL 用真实时钟：`now` 是可注入的（测试用来固定 created_at），不该影响缓存寿命。
   if (Date.now() - meta.savedAt > META_TTL_MS) {
     submissionMeta.delete(id);
+    persistSubmissionStore();
     return null;
   }
   return meta;
