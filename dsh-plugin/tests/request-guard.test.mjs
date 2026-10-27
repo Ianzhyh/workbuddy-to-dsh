@@ -51,9 +51,17 @@ test('请求超时：getJson 抛错、postJson 返回可读的失败响应', asy
   assert.match(res.data.error, /请求超时/);
 });
 
-test('轮询与登录 poll 都有在途去重 / 晚到响应守卫', () => {
+test('轮询在途排队、登录 poll 去重 / 晚到响应守卫', () => {
   assert.match(CLIENT, /const inFlight = useRef\(false\)/, 'useJson 缺少在途标记');
-  assert.match(CLIENT, /if \(inFlight\.current\) return;/, 'useJson 在途时没有跳过重复请求');
+  /*
+   * 旧语义是“在途时直接 return”，但切换统计范围这类**必须立刻生效**的调用会被丢掉：
+   * 选中态变了，数据要等下一次轮询才变。这里必须允许新请求排队，等旧请求结束后补发。
+   */
+  assert.match(CLIENT, /if \(inFlight\.current\) \{\s*pendingReload\.current = \(\) => reload\(overridePath\);\s*return;\s*\}/,
+    'useJson 在途时没有把新请求排队');
+  assert.match(CLIENT, /const next = pendingReload\.current;\s*pendingReload\.current = null;\s*if \(next && alive\.current\) next\(\);/,
+    'useJson 在途请求结束后没有补发排队请求');
+  assert.match(CLIENT, /pendingReload\.current = null;\s*stopTimer\(\)/, 'useJson 卸载时没有清空排队请求');
   assert.match(CLIENT, /const pollInFlight = useRef\(false\)/, '登录 poll 缺少在途标记');
   assert.match(CLIENT, /pendingRef\.current\?\.state !== state/, '登录 poll 没有丢弃晚到响应');
   assert.match(DASHBOARD, /const API_TIMEOUT_MS = 20000/, '控制台 api() 缺少超时');

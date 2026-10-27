@@ -191,7 +191,7 @@ try {
     账号: ['workbuddy-desktop.info', '330000000000', '使用中', '切换', 'CodeBuddyExtension'],
     用量: ['消耗积分', '积分花在哪些模型上', '搜索次数', '导出 CSV', 'deepseek-v4.1-flash'],
     请求: ['最近请求', '仅看失败', '导出当前筛选 CSV'],
-    签到: ['每日签到', '连续天数', '自动签到', '上次尝试'],
+    签到: ['每日签到', '连续签到', '自动签到', '上次尝试'],
     诊断: ['环境诊断', 'AtRest 密钥', '登录文件', 'profile bundles', '运行时注册，无需 settings.yaml'],
     模型: ['可用模型', '全部体检', '清除体检结论', '可用'],
     对话测试: ['对话测试', '清空对话', '会消耗你账号的额度'],
@@ -203,7 +203,9 @@ try {
     if (!tabList.includes(label)) { problems.push(`缺少标签页「${label}」`); continue; }
     await page.cdp.evaluate(`(() => { const b=[...document.querySelectorAll('.wb-tab')].find(x=>x.textContent===${JSON.stringify(label)}); if(b) b.click(); return !!b; })()`);
     await sleep(650);
-    const text = await page.cdp.evaluate("document.querySelector('.wb-root') ? document.querySelector('.wb-root').innerText : ''");
+    // textContent 而不是 innerText：低频工具/详情元数据已被刻意折叠，
+    // 但它们仍然必须在 DOM 里；存在性检查不能因为“默认收起”而漏掉。
+    const text = await page.cdp.evaluate("document.querySelector('.wb-root') ? document.querySelector('.wb-root').textContent : ''");
     for (const needle of EXPECT[label]) {
       if (!text.includes(needle)) problems.push(`「${label}」页缺少「${needle}」`);
     }
@@ -306,7 +308,7 @@ try {
   await sleep(500);
   const svgCount = await page.cdp.evaluate("document.querySelectorAll('.wb-root svg').length");
   if (!svgCount) problems.push('用量页没有渲染趋势图（内联 SVG）');
-  const usageText = await page.cdp.evaluate("document.querySelector('.wb-root') ? document.querySelector('.wb-root').innerText : ''");
+  const usageText = await page.cdp.evaluate("document.querySelector('.wb-root') ? document.querySelector('.wb-root').textContent : ''");
   if (!/搜索次数/.test(usageText)) problems.push('用量页没有单列搜索次数');
   if (!/视频提交/.test(usageText)) problems.push('用量页没有单列视频提交次数');
   if (!/图片提交/.test(usageText)) problems.push('用量页没有单列图片提交次数');
@@ -357,7 +359,7 @@ try {
       await new Promise((r) => setTimeout(r, 150));
       open('用量');
       await new Promise((r) => setTimeout(r, 700));
-      return { text: document.querySelector('#wb-panel-usage')?.innerText || '' };
+      return { text: document.querySelector('#wb-panel-usage')?.textContent || '' };
     } finally {
       window.__setRoute('/workbuddy/usage', orig);
     }
@@ -371,18 +373,29 @@ try {
   await page.cdp.evaluate(`(() => { const b=[...document.querySelectorAll('.wb-tab')].find(x=>x.textContent==='诊断'); b && b.click(); })()`);
   await sleep(500);
   // 回归：长路径不能把「登录文件」标签挤成竖排
+  // 诊断页已模块化：版本条、汇总条与逐项卡都必须在，且长路径不能把标题挤成竖排。
   const diagLayout = await page.cdp.evaluate(`(() => {
     const card = [...document.querySelectorAll('.wb-card')].find((c) => c.querySelector('h3')?.textContent === '环境诊断');
-    const row = card && card.querySelector('.wb-row');
-    const label = row && row.querySelector('.wb-label');
-    const value = row && row.querySelector('.wb-value');
-    if (!label || !value) return null;
-    return { lw: label.offsetWidth, lh: label.offsetHeight, vw: value.offsetWidth, align: getComputedStyle(value).textAlign };
+    if (!card) return null;
+    const version = card.querySelector('.wb-version-row');
+    const versionMain = card.querySelector('.wb-version-main');
+    const summary = card.querySelector('.wb-diag-stats');
+    const items = [...card.querySelectorAll('.wb-diag-item')];
+    const heads = items.map((item) => item.querySelector('.wb-diag-head')).filter(Boolean);
+    return {
+      version: Boolean(version && versionMain && (versionMain.querySelector('.wb-version-value') || {}).textContent),
+      summary: Boolean(summary),
+      itemCount: items.length,
+      headHeight: heads.length ? Math.max(...heads.map((head) => head.offsetHeight)) : 0,
+      detailCount: items.filter((item) => item.querySelector('.wb-diag-detail')).length,
+    };
   })()`);
-  if (!diagLayout) problems.push('诊断页找不到标签/值布局');
+  if (!diagLayout || !diagLayout.version) problems.push('诊断页缺少插件版本模块');
   else {
-    if (diagLayout.lw < 40 || diagLayout.lh > 28) problems.push(`诊断标签被挤成竖排（${diagLayout.lw}×${diagLayout.lh}）`);
-    if (diagLayout.align !== 'left') problems.push(`诊断值没有左对齐（${diagLayout.align}）`);
+    if (!diagLayout.summary) problems.push('诊断页缺少汇总结论模块');
+    if (diagLayout.itemCount < 5) problems.push(`诊断项没有渲染完整（实际 ${diagLayout.itemCount} 个）`);
+    if (diagLayout.headHeight > 28) problems.push(`诊断标题被挤成竖排（最高 ${diagLayout.headHeight}px）`);
+    if (diagLayout.detailCount < 5) problems.push('诊断详情行没有渲染完整');
   }
   shot = await page.cdp.send('Page.captureScreenshot', { format: 'png', captureBeyondViewport: true });
   writeFileSync(join(OUT_DIR, 'plugin-panel-diagnose.png'), Buffer.from(shot.result.data, 'base64'));
@@ -675,13 +688,12 @@ try {
   const overviewText = await page.cdp.evaluate("document.querySelector('.wb-root') ? document.querySelector('.wb-root').innerText : ''");
   if (!/今日还没签到/.test(overviewText)) problems.push('概览没有提示「今日还没签到」');
 
-  // 网页搜索：必须是概览最上面的独立一栏（issue #7 的入口不能埋在「操作」里）
-  if (!/网页搜索/.test(overviewText)) problems.push('概览没有「网页搜索」独立卡片');
+  // 余额是概览的首要读数；搜索卡排在它之后，但都必须保留独立卡片。
   {
     const searchIdx = overviewText.indexOf('网页搜索');
     const quotaIdx = overviewText.indexOf('积分余额');
-    if (!(searchIdx >= 0 && quotaIdx >= 0 && searchIdx < quotaIdx)) {
-      problems.push('「网页搜索」卡片必须排在积分卡上面（入口不能藏到下面）');
+    if (!(searchIdx >= 0 && quotaIdx >= 0 && quotaIdx < searchIdx)) {
+      problems.push('「积分余额」卡片必须排在「网页搜索」上面');
     }
   }
   // 已接入时必须在概览顶部显示状态卡；未接入时必须出现待办提醒 + 接入按钮
@@ -784,10 +796,6 @@ try {
   })()`);
   await sleep(500);
 
-  // Token 表单入口：上下文和输出在模型详情顶部一起调
-  const contextHint = await page.cdp.evaluate(`(() => document.body.innerText.includes('上下文和输出在模型详情顶部一起调'))()`);
-  if (!contextHint) problems.push('模型页没有提示“上下文和输出在模型详情顶部一起调”');
-
   // "太紧凑"的机器判据：模型表在标准宽度下**不该需要横向滚动**，
   // 操作列的按钮也不该竖着堆（那正是上一版被挤扁的样子）
   const modelFit = await page.cdp.evaluate(`(() => {
@@ -846,7 +854,7 @@ try {
         found: true,
         prevId: prev ? (prev.children[1].textContent || '').replace(' ★', '').trim() : null,
         isLast: idx === rows.length - 1,
-        text: box ? box.innerText : '',
+        text: box ? box.textContent : '',
         width: box ? Math.round(box.getBoundingClientRect().width) : 0,
         tokenInputs: tokenInputs.length,
         numberInputs: numberInputs.length,
@@ -860,7 +868,7 @@ try {
       if (inline.prevId !== detailTarget.id) {
         problems.push(`详情没有紧跟被点的模型行（点了 ${detailTarget.id}，详情却在 ${inline.prevId} 下面）`);
       }
-      for (const needle of ['模型 ID', '上下文窗口（Token）', '输入（上下文）', '输出（max_tokens）', '采样参数', '多模态', '计费倍率', '官方默认 temperature', '官方目录未列（实测补全）']) {
+      for (const needle of ['模型 ID', '上下文与输出', '输入（上下文）', '输出（max_tokens）', '采样参数', '多模态', '计费倍率', '官方默认 temperature', '官方目录未列（实测补全）']) {
         if (!inline.text.includes(needle)) problems.push(`模型详情缺少「${needle}」`);
       }
       if (inline.width < 200) problems.push(`模型详情宽度异常（${inline.width}px）`);
@@ -885,7 +893,11 @@ try {
       }
       const readText = () => page.cdp.evaluate(`(() => {
         const box = document.querySelector('.wb-detail');
-        return { text: box ? box.innerText : '', alert: [...document.querySelectorAll('.wb-alert')].map((el) => el.innerText).join('\\n') };
+        return {
+          text: box ? box.innerText : '',
+          alert: [...document.querySelectorAll('.wb-alert'), ...document.querySelectorAll('.wb-model-feedback')]
+            .map((el) => el.innerText).join('\\n'),
+        };
       })()`);
       const clickSave = () => page.cdp.evaluate(`(() => {
         const box = document.querySelector('.wb-detail');
@@ -1006,8 +1018,12 @@ try {
       }
       if (!/已保存/.test(textState.alert) || !/下一轮/.test(textState.alert)) problems.push('统一保存后没有“已保存 / 下一轮请求生效”反馈');
       if (!saveState || saveState.text !== '已保存' || saveState.disabled !== true) problems.push('保存后按钮没有变成禁用的「已保存」');
-      if (!/当前配置：/.test(textState.text)) problems.push('保存后没有显示当前配置值');
-      if (!/思考强度 Max/.test(textState.text)) problems.push('保存后当前思考强度没有保持 Max');
+      const effortAfterSave = await page.cdp.evaluate(`(() => {
+        const box = document.querySelector('.wb-detail');
+        const select = box ? [...box.querySelectorAll('select')].find((s) => [...s.options].some((o) => /跟随官方默认/.test(o.textContent))) : null;
+        return select ? select.value : null;
+      })()`);
+      if (effortAfterSave !== 'max') problems.push(`保存后思考强度没有保持 Max（实际 ${effortAfterSave || '空'}）`);
       if (/未保存的修改：/.test(textState.text)) problems.push('保存后仍显示“未保存的修改”');
 
       // 输入滑块：自动(300K) + 600K + 1M；与自动值重复的 300K 必须折叠。
@@ -1342,7 +1358,8 @@ try {
       const table = document.querySelector('.wb-table');
       const text = table ? table.innerText : '';
       const tags = [...(table ? table.querySelectorAll('.wb-badge') : [])].map((el) => el.textContent);
-      return { hasEmoji: /[\\u{1F300}-\\u{1FAFF}\\u{1F5BC}]/u.test(text), imageTags: tags.filter((t) => t === '图片').length, summary: /个支持图片输入/.test(document.body.innerText) };
+      const footer = (document.querySelector('.wb-model-footer') || {}).textContent || '';
+      return { hasEmoji: /[\\u{1F300}-\\u{1FAFF}\\u{1F5BC}]/u.test(text), imageTags: tags.filter((t) => t === '图片').length, summary: /[\\d,]+ 支持图片/.test(footer), footer };
     })()`);
     if (imageMark.hasEmoji) problems.push('模型列表里还有 emoji 字符（🖼 这类看不懂的标记应当换成文字）');
     if (!imageMark.summary) problems.push('模型页没有说明有多少模型支持图片');
@@ -1355,9 +1372,10 @@ try {
     const reasonMark = await page.cdp.evaluate(`(() => {
       const table = document.querySelector('.wb-table');
       const tags = [...(table ? table.querySelectorAll('.wb-badge') : [])].map((el) => el.textContent);
+      const footer = (document.querySelector('.wb-model-footer') || {}).textContent || '';
       return {
         reasonTags: tags.filter((t) => t === '推理').length,
-        summary: /个支持推理/.test(document.body.innerText),
+        summary: /[\\d,]+ 支持推理/.test(footer),
       };
     })()`);
     if (!reasonMark.reasonTags) problems.push('模型列表没有渲染「推理」徽章（支持推理的模型应当标出来）');
@@ -1380,7 +1398,7 @@ try {
     // 详情面板：推理能力一行必须给出档位（夹具里全档模型是 6 个档）
     const reasonDetail = await page.cdp.evaluate(`(() => {
       const open = document.querySelector('.wb-detail');
-      const text = open ? open.innerText : '';
+      const text = open ? open.textContent : '';
       return {
         hasLabel: text.includes('推理能力'),
         hasLevels: /个档位/.test(text),
@@ -2023,7 +2041,7 @@ async function verifyNarrow() {
         overflow: scroll ? Math.max(0, scroll.scrollWidth - scroll.clientWidth) : 0,
         cols,
         card: !!(table && table.classList.contains('wb-narrow')),
-        text: detail ? detail.innerText : '',
+        text: detail ? detail.textContent : '',
         probe: probeCell ? {
           text: probeCell.textContent.trim(),
           title: (probeCell.querySelector('.wb-pill') || {}).getAttribute ? probeCell.querySelector('.wb-pill').getAttribute('title') : '',
@@ -2037,7 +2055,7 @@ async function verifyNarrow() {
       if (detailFit.detailW > detailFit.scrollW + 2) problems.push(`窄列详情宽 ${detailFit.detailW}px 超出容器 ${detailFit.scrollW}px`);
       if (detailFit.overflow > 2) problems.push(`窄列模型表仍有横向滚动 ${detailFit.overflow}px`);
       if (detailFit.cols !== 1) problems.push(`窄列详情应单列（实际 ${detailFit.cols} 列）`);
-      if (!detailFit.text.includes('上下文窗口（Token）')) problems.push('窄列详情缺少「上下文窗口（Token）」');
+      if (!detailFit.text.includes('上下文与输出')) problems.push('窄列详情缺少「上下文与输出」模块');
       if (!detailFit.text.includes('推理能力')) problems.push('窄列详情缺少「推理能力」');
       if (!detailFit.text.includes('service info not found')) problems.push('体检失败详情没有带错误原因');
       if (!detailFit.probe || !/不可用/.test(detailFit.probe.text) || /ms/.test(detailFit.probe.text)) {
@@ -2080,7 +2098,7 @@ async function verifyNarrow() {
           scrollW: scroll ? scroll.clientWidth : 0,
           cols: grid ? getComputedStyle(grid).gridTemplateColumns.split(' ').filter(Boolean).length : 0,
           fields: detail ? detail.querySelectorAll('.wb-detail-item').length : 0,
-          text: detail ? detail.innerText : '',
+          text: detail ? detail.textContent : '',
           ctx: (() => {
             // Token 表单的输入滑块：窄到 400px 时也必须完整可见、整块不横向溢出
             const wrap = document.querySelector('.wb-token-control');

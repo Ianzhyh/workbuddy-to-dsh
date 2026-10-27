@@ -8897,6 +8897,15 @@ async function billingPost(auth, path, body = {}) {
   return typeof envelope.data === 'object' && envelope.data !== null ? envelope.data : {};
 }
 
+/**
+ * 「这个账号没有签到活动」的判据（上游常见文案：签到活动未开启或已过期）。
+ *
+ * 抽成一份常量：单账号领取、多账号领取、以及 `/v1/checkin` 的 POST 分支都要用它。
+ * 各写一遍迟早分叉 —— 一处把令牌过期误判成「没活动」，另一处又把「没活动」报成失败。
+ * 匹配必须卡在「签到活动」这个词上：只写 `已过期` 会把真故障也吞掉。
+ */
+const NO_CHECKIN_ACTIVITY_RE = /签到活动[^。；;]{0,12}(未开启|未开放|已过期|已结束|不存在)|no.?activity|not.?support/i;
+
 /** 今日签到状态（只读，不改状态）。 */
 async function fetchCheckinStatus(auth) {
   const d = await billingPost(auth, '/v2/billing/meter/checkin-activity-status');
@@ -8938,6 +8947,166 @@ async function claimDailyCheckin(auth) {
     }
     throw e;
   }
+}
+
+// ── 多账号签到：本机已登录的每个账号各自领自己那一份 ────────────────────
+/**
+ * 枚举本机桌面端**所有**登录态。
+ *
+ * 边界（重要，不要把它扩成「账号池」）：
+ *   - **只读**：绝不写回 `.info`；解出来的令牌只活在本次调用的内存里，不外发、不落盘；
+ *   - **只服务签到**：不参与模型请求路由，chat 永远只用当前账号（红线：单账号供给）；
+ *   - 返回给控制台的只有 uid / 昵称 / 区域 / 过期时间 / 状态。
+ *
+ * 同一账号会留下多个快照（客户端换号时带时间戳的旧文件），按 `mtime` 取最新一份；
+ * 解不开的（另一个 build 的信封）直接跳过，不影响其它账号。
+ */
+async function readLocalAccounts() {
+  const byUid = new Map();
+  /*
+   * 显式 `WORKBUDDY_AUTH_DIR` 是**覆盖**而不是追加（与 `WORKBUDDY_AUTH_FILE`
+   * 语义一致）：用户/测试指了目录，就只读那一个，不去碰同机其它位置的登录态。
+   * 未指定时才按 AUTH_DIRS 的平台兜底链逐个扫。
+   */
+  const explicit = String(process.env.WORKBUDDY_AUTH_DIR || '').trim();
+  const scanDirs = explicit && isAbsolute(explicit) ? [explicit] : AUTH_DIRS;
+  for (const dir of scanDirs) {
+    let names = [];
+    try {
+      names = readdirSync(dir).filter((name) => name.endsWith('.info'));
+    } catch { continue; }
+    for (const name of names) {
+      const path = join(dir, name);
+      let stat;
+      let raw;
+      try {
+        stat = statSync(path);
+        raw = JSON.parse(readFileSync(path, 'utf8'));
+      } catch { continue; }
+      const field = raw?.auth?.accessToken;
+      if (!field) continue;
+      let access = '';
+      // 另一个 build 写的信封解不开：跳过这一个账号，绝不让它毒死整批
+      try { access = await openAuthField(field, 'accessToken'); } catch { continue; }
+      const claims = decodeJwt(access);
+      const userId = String(claims.sub || '');
+      if (!userId) continue;
+      const previous = byUid.get(userId);
+      if (previous && previous.mtimeMs >= stat.mtimeMs) continue;
+      const domain = String(raw?.auth?.domain || claims.iss || '');
+      let nickname = '';
+      try {
+        const value = raw?.account?.nickname;
+        if (typeof value === 'string') nickname = value;
+        else if (value) nickname = await openAuthField(value, 'nickname');
+      } catch { /* 昵称只用于展示，解不开就不显示 */ }
+      byUid.set(userId, {
+        source: 'desktop',
+        access,
+        userId,
+        enterpriseId: String(claims.enterprise_id || ''),
+        tenantId: String(claims.tenant_id || claims.tenant || ''),
+        expiresAt: Number(raw?.auth?.expiresAt || claims.exp * 1000 || 0),
+        domain,
+        endpoint: pickUpstream(domain),
+        nickname,
+        uin: String(raw?.account?.uin || ''),
+        authFile: name,
+        mtimeMs: stat.mtimeMs,
+      });
+    }
+  }
+  return [...byUid.values()].sort((a, b) => b.mtimeMs - a.mtimeMs);
+}
+
+/** 国际版 / 国内版：判定只看**登录域名**（与 pickUpstream 同一套规则）。 */
+function regionOfDomain(domain) {
+  const d = String(domain || '');
+  return d.includes('workbuddy.ai') || d.includes('workbuddy.cc') || d.includes('codebuddy.ai')
+    ? 'intl'
+    : 'cn';
+}
+
+/** 一行账号签到状态：**不含任何令牌**。 */
+function accountCheckinRow(account, currentUserId) {
+  const expiresAt = Number(account.expiresAt || 0);
+  return {
+    userId: account.userId,
+    nickname: account.nickname || '',
+    uin: account.uin || '',
+    region: regionOfDomain(account.domain),
+    domain: account.domain,
+    authFile: account.authFile,
+    current: String(currentUserId || '') === String(account.userId || ''),
+    expired: expiresAt > 0 ? expiresAt <= Date.now() : false,
+    expiresAt,
+  };
+}
+
+/**
+ * `GET /v1/checkin/accounts`（只读）与 `POST /v1/checkin/all`（领取）。
+ *
+ * 逐个串行：这些请求打向**不同网关**，并发没有收益，反而更容易触发上游限流。
+ * 单个账号失败只落进它自己那一行 —— 一个账号令牌过期，不能让其它账号也领不到。
+ */
+async function handleCheckinAccounts(req, res, claim) {
+  let current = null;
+  try { current = await resolveAuth(); } catch { /* 当前账号不可用不影响其它账号 */ }
+  let accounts;
+  try {
+    accounts = await readLocalAccounts();
+  } catch (e) {
+    return json(res, 502, { ok: false, error: shortError(e.message || String(e)) });
+  }
+  const rows = [];
+  const totals = { accounts: accounts.length, claimed: 0, already: 0, failed: 0, skipped: 0, credit: 0 };
+  for (const account of accounts) {
+    const row = accountCheckinRow(account, current?.userId);
+    if (row.expired) {
+      row.error = '登录已过期，请在客户端重新登录';
+      totals.failed += 1;
+      rows.push(row);
+      continue;
+    }
+    if (claim) {
+      try {
+        const result = await claimDailyCheckin(account);
+        row.claim = result;
+        if (result.already) totals.already += 1;
+        else { totals.claimed += 1; totals.credit += Number(result.credit) || 0; }
+      } catch (e) {
+        const msg = String(e.message || e);
+        /*
+         * 「这个账号没有签到活动」不是失败 —— 国际版网关就没有积分活动。
+         * 匹配要卡在「签到活动」这个词上：只写 `已过期` 会把令牌过期之类的
+         * 真故障也误判成"没活动"，那是最容易把问题藏起来的一类写法。
+         */
+        if (NO_CHECKIN_ACTIVITY_RE.test(msg)) {
+          row.noActivity = true;
+          totals.skipped += 1;
+        } else {
+          row.error = shortError(msg);
+          totals.failed += 1;
+        }
+      }
+    }
+    try {
+      row.status = await fetchCheckinStatus(account);
+      /*
+       * 只读接口也要标出「这个账号没有签到活动」。
+       *
+       * 只靠 `claim` 时的报错来判定的话，GET 拿到的行只有 `active:false`，
+       * 面板只能显示「未签」—— 用户会以为国际版账号漏签了，实际那个网关
+       * 根本没有积分活动。状态里已经有 `active`，就别再让调用方自己猜。
+       */
+      if (row.status && row.status.active === false) {
+        row.noActivity = true;
+        if (!claim) totals.skipped += 1;
+      }
+    } catch { /* 状态是附加信息，取不到就留空，不影响领取结论 */ }
+    rows.push(row);
+  }
+  return json(res, 200, { ok: true, claim, totals, accounts: rows });
 }
 
 // ── 每日自动签到（R11.2）────────────────────────────────────────────────
@@ -9525,6 +9694,13 @@ async function handleRequest(req, res) {
      */
     const managementRequest = url.pathname.startsWith('/v1/auth/')
       || (url.pathname === '/v1/usage' && req.method === 'DELETE')
+      /*
+       * 多账号签到同样是管理面：`/accounts` 会列出本机**所有**已登录账号的
+       * 昵称与 uid，`/all` 会对每个账号各发一次领取请求。client key 是
+       * 聊天用的，不能被它拿来枚举账号或批量操作别人的钱包。
+       */
+      || url.pathname === '/v1/checkin/accounts'
+      || url.pathname === '/v1/checkin/all'
       || (url.pathname === '/v1/checkin' && req.method === 'POST');
     if (managementRequest && requestScope.getStore()?.client !== 'local') {
       return json(res, 403, {
@@ -10089,11 +10265,41 @@ async function handleRequest(req, res) {
       return json(res, 200, { ok: true, requests: recentRequests(limit), active, activeAlertMs: ACTIVE_ALERT_MS });
     }
 
+    /*
+     * 多账号签到：本机每个已登录账号各领各的。
+     * 只读登录文件、只做签到 —— **不参与模型请求路由**（红线：单账号供给）。
+     */
+    if (url.pathname === '/v1/checkin/accounts') {
+      return handleCheckinAccounts(req, res, false);
+    }
+    if (url.pathname === '/v1/checkin/all') {
+      if (req.method !== 'POST') return json(res, 405, { ok: false, error: 'method not allowed' });
+      return handleCheckinAccounts(req, res, true);
+    }
+
     if (url.pathname === '/v1/checkin') {
       try {
         const auth = await resolveAuth();
         if (req.method === 'POST') {
-          const claim = await claimDailyCheckin(auth);
+          let claim;
+          try {
+            claim = await claimDailyCheckin(auth);
+          } catch (e) {
+            const msg = String(e.message || e);
+            /*
+             * 「这个账号没有签到活动」不是失败：国际版网关根本没有积分活动。
+             *
+             * 以前这里直接落进外层 catch 变成 502 `ok:false`，面板只能显示
+             * 「领取失败：签到活动未开启或已过期」—— 用户会以为账号坏了/漏签了，
+             * 实际是这个网关不提供这事。现在如实回 200 + `noActivity`，让界面
+             * 说「没有签到活动」，而不是报错。
+             */
+            if (NO_CHECKIN_ACTIVITY_RE.test(msg)) {
+              const status = await fetchCheckinStatus(auth).catch(() => null);
+              return json(res, 200, { ok: true, noActivity: true, status, message: msg });
+            }
+            throw e;
+          }
           const status = await fetchCheckinStatus(auth).catch(() => null);
           return json(res, 200, { ...claim, status });
         }
@@ -10485,6 +10691,21 @@ async function handleRequest(req, res) {
            * 语义，拆行会把一个事件拆散。没有 data 的注释块原样透传。
            */
           const normalizeSse = process.env.WORKBUDDY_SSE_NORMALIZE !== '0';
+          /*
+           * reasoning 分片阈值（字符）。
+           *
+           * 聚合**不能无限期**：旧实现把整段思考扣在 `reasoningBuf` 里，直到正文/
+           * 工具/终止帧才 flush —— 对 Cherry Studio（issue #9）没问题，但它让
+           * **首 token 到达时间 = 整个思考时长**。任何按「首 token 到达」测量
+           * TTFT/TPS 的客户端（dsh 的 sessionStats）都会被算坏：
+           * 实测一轮思考 15.8s 才出正文时，dsh 记 TTFT=15755ms、解码段只剩 1701ms，
+           * 于是 2045 个输出 token 被算成 1202 tok/s（真实端到端约 130）。
+           *
+           * 攒到 64 字符就先发一帧：Cherry 拿到的是「较大块」而不是「每字符一块」
+           * （原问题仍被修复），而首帧最多晚 64 个字符的生成时间（约 0.4s），
+           * TTFT 回到真实量级。正文/工具/终止帧前依旧强制 flush，短思考不受影响。
+           */
+          const REASONING_FLUSH_CHARS = 64;
           let sseBuf = '';
           let reasoningBuf = '';
           let chunkMeta = null;
@@ -10580,6 +10801,9 @@ async function handleRequest(req, res) {
               return;
             }
             const next = normalizeBlock(block);
+            // 纯 reasoning 帧（next === null）被扣住：攒够阈值就先发一帧，
+            // 不能等正文 —— 否则首 token 时间等于整段思考时长。
+            if (reasoningBuf.length >= REASONING_FLUSH_CHARS) await flushReasoning();
             if (next === null) return;
             if (reasoningBuf) await flushReasoning();
             await writeOut(`${next}\n\n`);

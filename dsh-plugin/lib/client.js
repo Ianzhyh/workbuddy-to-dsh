@@ -175,15 +175,65 @@ body.dark .wb-root,
 @keyframes wb-panel-slide-right{from{opacity:0.35;transform:translate3d(10px,0,0)}to{opacity:1;transform:none}}
 @keyframes wb-panel-slide-left{from{opacity:0.35;transform:translate3d(-10px,0,0)}to{opacity:1;transform:none}}
 @media (prefers-reduced-motion: reduce){.wb-tab-indicator{transition:none}.wb-tab-panel{animation:none}}
-.wb-card{background:var(--dsw-alias-bg-module-platform,light-dark(#ffffff,#202226));border-radius:14px;box-shadow:inset 0 0 0 .5px var(--dsw-alias-border-l2,light-dark(#0000001a,#ffffff1f)),0 1px 3px light-dark(rgba(0,0,0,0.03),rgba(0,0,0,0.2));padding:14px 16px;min-width:0;position:relative;transition:border-color var(--wb-anim-normal),box-shadow var(--wb-anim-normal)}
+.wb-card{background:var(--dsw-alias-bg-module-platform,light-dark(#ffffff,#202226));border-radius:16px;box-shadow:inset 0 0 0 .5px var(--dsw-alias-border-l2,light-dark(#0000001a,#ffffff1f)),0 1px 2px light-dark(rgba(16,24,20,.035),rgba(0,0,0,.25)),0 2px 8px light-dark(rgba(16,24,20,.03),rgba(0,0,0,.18));padding:18px 20px;min-width:0;position:relative;transition:border-color var(--wb-anim-normal),box-shadow var(--wb-anim-normal)}
 .wb-welcome-steps{display:flex;flex-wrap:wrap;gap:4px 14px;margin-top:8px;font-size:12px;line-height:20px;color:var(--dsw-alias-label-secondary,light-dark(#61666b,#cfd3d6))}
-.wb-card h3{margin:0 0 10px;font-size:14px;font-weight:600;letter-spacing:-0.01em}
-.wb-row{display:flex;align-items:center;justify-content:space-between;gap:12px;min-height:30px;min-width:0}
+/* 标题：13.5px / 650 / 收紧字距 —— 比原来 14/600 更"立"，中英混排也不散 */
+.wb-card h3{margin:0 0 14px;font-size:13.5px;font-weight:650;letter-spacing:-.01em}
+.wb-row{display:flex;align-items:center;justify-content:space-between;gap:12px;min-height:38px;padding:5px 0;min-width:0}
 .wb-row+.wb-row{border-top:.5px solid var(--dsw-alias-border-l1,light-dark(#0000000a,#ffffff0f))}
+/*
+ * 签到/账号区的读数层次：大号数字 + 进度条 + 账号卡块。
+ *
+ * 原来所有东西都是「label …… value」的 Row：几十行长得一模一样，
+ * 眼睛没法判断哪几个是重点。这里把「汇总读数」和「逐项明细」分开：
+ * 上面三四个大数字回答"整体怎么样"，下面每行一个卡片块回答"每个账号怎么样"。
+ */
+.wb-stats{display:flex;flex-wrap:wrap;gap:24px;margin:14px 0 18px}
+.wb-stat{display:flex;flex-direction:column;gap:1px;min-width:84px}
+.wb-stat b{font-size:21px;font-weight:650;line-height:1.15;font-variant-numeric:tabular-nums;letter-spacing:-.01em}
+.wb-stat span{font-size:12px;line-height:16px;color:var(--dsw-alias-label-secondary,light-dark(#61666b,#cfd3d6))}
+.wb-meter{height:4px;border-radius:999px;margin:0;overflow:hidden;background:var(--dsw-alias-interactive-bg-hover,light-dark(#2631480f,#ffffff14))}
+.wb-meter>i{display:block;height:100%;border-radius:999px;background:var(--dsw-alias-label-primary,light-dark(#1f2328,#e8eaed));transition:width var(--wb-anim-normal)}
+.wb-acct{display:flex;align-items:center;gap:10px;padding:10px 12px;border-radius:10px;background:var(--dsw-alias-interactive-bg-hover,light-dark(#2631480f,#ffffff14));box-shadow:inset 0 0 0 .5px var(--dsw-alias-border-l1,light-dark(#0000000a,#ffffff0f))}
+.wb-acct+.wb-acct{margin-top:8px}
+.wb-acct-main{flex:1 1 auto;min-width:0}
+.wb-acct-name{display:flex;align-items:center;gap:6px;min-width:0;font-size:12.5px;font-weight:650;letter-spacing:-.01em}
+.wb-acct-name>span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.wb-acct-sub{margin-top:2px;font-size:12px;line-height:16px;font-variant-numeric:tabular-nums;color:var(--dsw-alias-label-secondary,light-dark(#61666b,#cfd3d6))}
+.wb-acct-side{display:flex;align-items:center;gap:6px;flex:none}
+.wb-acct-wrap{margin-top:16px}
+.wb-acct-region{flex:none;font-size:11px;font-weight:500;color:var(--dsw-alias-label-tertiary,#adb2b8)}
+/*
+ * 卡内分组：标题 + 一条分隔线。
+ * 用途是把「一片同构 Row」切成几段（桥 / 账号 / 能力），
+ * 否则十几个字段连排，找一个值只能逐行扫。
+ */
+.wb-section-title{margin:18px 0 2px;padding-top:13px;border-top:.5px solid var(--dsw-alias-border-l2,light-dark(#0000001a,#ffffff1f));font-size:11px;font-weight:600;letter-spacing:.04em;color:var(--dsw-alias-label-tertiary,#adb2b8)}
+.wb-section-title:first-child{margin-top:0;padding-top:0;border-top:none}
+/* 诊断项：标题一行 + 详情一行（长文件名/路径右对齐会折成一团乱麻） */
+.wb-version-row{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin:0 0 14px;padding:10px 12px;border:.5px solid var(--dsw-alias-border-l2,light-dark(#0000001a,#ffffff1f));border-radius:10px;background:var(--dsw-alias-interactive-bg-hover,light-dark(#26314808,#ffffff0a))}
+.wb-version-main{display:flex;align-items:baseline;gap:8px;min-width:0}
+.wb-version-label{color:var(--dsw-alias-label-secondary,light-dark(#61666b,#cfd3d6));font-size:11.5px}
+.wb-version-value{font-size:12.5px;font-variant-numeric:tabular-nums}
+.wb-version-link{display:inline-flex;align-items:center;gap:4px;flex:none;padding:4px 9px;border-radius:7px;background:var(--dsw-alias-bg-module-platform,light-dark(#ffffff,#202226));border:.5px solid var(--dsw-alias-border-l2,light-dark(#0000001f,#ffffff2e));color:var(--dsw-alias-label-primary,light-dark(#0f1115,#f9fafb));font-size:11px;line-height:16px;font-weight:600;text-decoration:none;transition:background-color var(--wb-anim-fast),border-color var(--wb-anim-fast)}
+.wb-version-link:hover{background:var(--dsw-alias-interactive-bg-active,light-dark(#2631481a,#ffffff24));border-color:var(--dsw-alias-border-l3,light-dark(#00000033,#ffffff42))}
+.wb-version-link:focus-visible{outline:2px solid var(--dsw-alias-brand-primary,#6366f1);outline-offset:1px}
+.wb-version-inline{display:inline-flex;align-items:center;gap:8px;min-width:0}
+.wb-version-link.is-inline{padding:2px 7px;font-size:10.5px;line-height:15px;border-radius:6px;background:var(--dsw-alias-interactive-bg-hover,light-dark(#2631480f,#ffffff14));border-color:transparent}
+.wb-diag-stats{padding:10px 14px;border:.5px solid var(--dsw-alias-border-l2,light-dark(#0000001a,#ffffff1f));border-radius:12px;background:var(--dsw-alias-interactive-bg-hover,light-dark(#26314808,#ffffff0a))}
+.wb-diag-note{width:100%;margin:6px 0 0!important;font-size:11px;line-height:16px}
+.wb-diag-hints{margin-top:12px;padding:10px 12px;border:.5px solid var(--dsw-alias-border-l2,light-dark(#0000001a,#ffffff1f));border-radius:10px;background:var(--dsw-alias-interactive-bg-hover,light-dark(#26314808,#ffffff0a))}
+.wb-diag-hints-head{margin:0 0 4px;color:var(--dsw-alias-label-primary,light-dark(#0f1115,#f9fafb));font-size:12px;font-weight:650}
+.wb-diag-hints-body .wb-note{margin:5px 0 0;font-size:11.5px;line-height:17px}
+.wb-diag-item{padding:10px 12px;border:.5px solid var(--dsw-alias-border-l2,light-dark(#0000001a,#ffffff1f));border-radius:10px;background:var(--dsw-alias-interactive-bg-hover,light-dark(#26314808,#ffffff0a));margin-bottom:8px}
+.wb-diag-item:first-child{padding-top:10px}
+.wb-diag-item:last-child{margin-bottom:0}
+.wb-diag-head{display:flex;align-items:center;gap:8px;font-size:12.5px;line-height:18px;min-width:0}
+.wb-diag-detail{margin-top:3px;padding-left:15px;font-size:11.5px;line-height:17px;color:var(--dsw-alias-label-secondary,light-dark(#61666b,#cfd3d6));overflow-wrap:anywhere}
 .wb-label{color:var(--dsw-alias-label-secondary,light-dark(#61666b,#cfd3d6));flex:0 0 auto;white-space:nowrap}
 .wb-value{flex:1 1 auto;min-width:0;font-variant-numeric:tabular-nums;text-align:right;overflow-wrap:anywhere;word-break:break-word}
 /* 胶囊：**不换行**。table-layout:auto 下列宽不会小于 nowrap 内容的宽度 */
-.wb-pill{display:inline-flex;align-items:center;gap:6px;padding:2px 10px;border-radius:999px;font-size:12px;background:var(--dsw-alias-interactive-bg-hover,light-dark(#2631480f,#ffffff14));box-shadow:inset 0 0 0 .5px var(--dsw-alias-border-l1,light-dark(#0000000a,#ffffff0f));max-width:100%;white-space:nowrap;transition:background-color var(--wb-anim-fast)}
+.wb-pill{display:inline-flex;align-items:center;gap:6px;padding:2px 9px;border-radius:999px;font-size:11.5px;background:var(--dsw-alias-interactive-bg-hover,light-dark(#2631480f,#ffffff14));box-shadow:inset 0 0 0 .5px var(--dsw-alias-border-l1,light-dark(#0000000a,#ffffff0f));max-width:100%;white-space:nowrap;transition:background-color var(--wb-anim-fast)}
 /* 对话页组件不在 .wb-root 里：动画变量必须自己声明，否则 transition 引用未定义变量会整条失效 */
 .wb-chat-quota,.wb-chat-login-inline,.wb-turn-cost{--wb-ease:cubic-bezier(0.16,1,0.3,1);--wb-anim-fast:.16s var(--wb-ease);--wb-anim-normal:.24s var(--wb-ease)}
 .wb-chat-quota{appearance:none;display:inline-flex;align-items:center;gap:6px;border:.5px solid var(--dsw-alias-border-l2,light-dark(#0000001f,#ffffff2e));border-radius:999px;background:transparent;color:var(--dsw-alias-label-secondary,light-dark(#61666b,#cfd3d6));font:inherit;font-size:12px;line-height:20px;padding:1px 9px;cursor:pointer;white-space:nowrap;transition:background-color var(--wb-anim-fast),color var(--wb-anim-fast),border-color var(--wb-anim-fast)}
@@ -213,7 +263,7 @@ body.dark .wb-root,
 .wb-actions{display:flex;flex-wrap:wrap;gap:8px;align-items:center;min-width:0}
 .wb-actions.split{justify-content:space-between}
 .wb-actions-group{display:flex;align-items:center;flex-wrap:wrap;gap:8px}
-.wb-btn{appearance:none;border:.5px solid var(--dsw-alias-border-l1,light-dark(#00000014,#ffffff1a));border-radius:9px;padding:6px 12px;font:inherit;font-size:12.5px;cursor:pointer;background:var(--dsw-alias-interactive-bg-hover,light-dark(#2631480f,#ffffff14));color:inherit;text-decoration:none;display:inline-block;flex:none;transition:all var(--wb-anim-fast)}
+.wb-btn{appearance:none;border:.5px solid var(--dsw-alias-border-l1,light-dark(#00000014,#ffffff1a));border-radius:9px;padding:6px 12px;font:inherit;font-size:12.5px;font-weight:600;cursor:pointer;background:var(--dsw-alias-interactive-bg-hover,light-dark(#2631480f,#ffffff14));color:inherit;text-decoration:none;display:inline-block;flex:none;transition:all var(--wb-anim-fast)}
 .wb-btn:hover{background:var(--dsw-alias-interactive-bg-active,light-dark(#2631481a,#ffffff24));border-color:var(--dsw-alias-border-l2,light-dark(#00000028,#ffffff33))}
 .wb-btn:active:not(:disabled){transform:scale(0.97)}
 .wb-btn:focus-visible{outline:2px solid var(--dsw-alias-brand-primary,#6366f1);outline-offset:1px}
@@ -239,62 +289,146 @@ body.dark .wb-root,
 .wb-scroll{overflow:auto;max-height:420px;min-width:0;position:relative}
 /* 状态列里"胶囊 + 切换按钮"并排 */
 .wb-status-cell{display:inline-flex;align-items:center;gap:8px;flex-wrap:wrap;justify-content:flex-end}
-/* 模型详情 */
+/* 模型页：主任务（选择 + 保存）在首屏，低频维护动作收进折叠区。 */
+.wb-models-card{padding:20px}
+.wb-model-hero{display:flex;align-items:center;justify-content:space-between;gap:18px;flex-wrap:wrap;padding-bottom:16px;margin-bottom:14px;border-bottom:.5px solid var(--dsw-alias-border-l2,light-dark(#0000001a,#ffffff1f))}
+.wb-model-hero-copy{flex:1 1 240px;min-width:0}
+.wb-model-title-row{display:flex;align-items:center;gap:8px}
+.wb-model-title-row h3{margin:0;font-size:16px}
+.wb-model-count{display:inline-flex;align-items:center;justify-content:center;min-width:24px;height:20px;padding:0 7px;border-radius:999px;background:var(--dsw-alias-interactive-bg-hover,light-dark(#2631480f,#ffffff14));color:var(--dsw-alias-label-secondary,light-dark(#61666b,#cfd3d6));font-size:11px;font-variant-numeric:tabular-nums}
+.wb-model-hero-copy>.wb-note{margin:4px 0 0}
+.wb-model-hero-side{display:flex;align-items:center;justify-content:flex-end;gap:18px;flex:1 1 auto;flex-wrap:wrap}
+.wb-model-stats{display:flex;align-items:center;gap:18px}
+.wb-model-stats>span{display:flex;flex-direction:column;align-items:flex-start;min-width:42px}
+.wb-model-stats b{font-size:18px;line-height:22px;font-weight:650;font-variant-numeric:tabular-nums}
+.wb-model-stats small{font-size:11px;line-height:16px;color:var(--dsw-alias-label-secondary,light-dark(#61666b,#cfd3d6));white-space:nowrap}
+.wb-model-toolbar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:0 0 12px}
+.wb-model-search{display:flex;align-items:center;flex:1 1 180px;min-width:0;max-width:none;min-height:34px;background:var(--dsw-alias-bg-module-platform,light-dark(#ffffff,#202226));border:.5px solid var(--dsw-alias-border-l2,light-dark(#0000001f,#ffffff2e));border-radius:10px;box-shadow:0 1px 2px light-dark(rgba(16,24,20,.04),rgba(0,0,0,.2));transition:border-color var(--wb-anim-fast),box-shadow var(--wb-anim-fast)}
+.wb-model-search:hover{border-color:var(--dsw-alias-border-l3,light-dark(#00000033,#ffffff42))}
+.wb-model-search:focus-within{border-color:var(--dsw-alias-brand-primary,light-dark(#0f1115,#f9fafb));box-shadow:0 0 0 3px light-dark(rgba(15,17,21,.07),rgba(255,255,255,.09))}
+.wb-model-search-icon{display:inline-flex;align-items:center;flex:none;margin-left:10px;color:var(--dsw-alias-label-tertiary,light-dark(#81858c,#adb2b8))}
+.wb-model-search-input{flex:1 1 auto;width:auto!important;min-width:0;max-width:none;min-height:32px;padding:5px 6px 5px 7px;border:0!important;border-radius:0;background:transparent!important;box-shadow:none!important;outline:none!important}
+.wb-model-search-clear{appearance:none;display:inline-flex;align-items:center;justify-content:center;flex:none;width:25px;height:25px;margin-right:4px;border:0;border-radius:7px;background:transparent;color:var(--dsw-alias-label-tertiary,light-dark(#81858c,#adb2b8));font:inherit;font-size:17px;line-height:1;cursor:pointer;transition:background-color var(--wb-anim-fast),color var(--wb-anim-fast)}
+.wb-model-search-clear:hover{background:var(--dsw-alias-interactive-bg-hover,light-dark(#2631480f,#ffffff14));color:var(--dsw-alias-label-primary,light-dark(#0f1115,#f9fafb))}
+.wb-model-search-clear:focus-visible{outline:2px solid var(--dsw-alias-brand-primary,#6366f1);outline-offset:1px}
+.wb-model-sort{flex:0 0 118px;width:118px;min-height:34px}
+.wb-model-sort .wb-dropdown-trigger{width:100%;min-width:0;max-width:none;min-height:34px;background:var(--dsw-alias-bg-module-platform,light-dark(#ffffff,#202226));border-radius:10px}
+.wb-model-sort .wb-dropdown-menu{min-width:130px;width:max-content;max-width:220px}
+.wb-model-filter{flex:1 1 100%;min-width:0}
+.wb-model-filter .wb-segmented-wrap{max-width:100%}
+.wb-model-summary{display:flex;flex-wrap:wrap;gap:8px 12px;align-items:center;justify-content:space-between;margin:0 0 10px;font-size:12px;line-height:18px;color:var(--dsw-alias-label-secondary,light-dark(#61666b,#cfd3d6))}
+.wb-model-display-options{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;margin:0 0 12px;padding:7px 10px;border-radius:9px;background:var(--dsw-alias-interactive-bg-hover,light-dark(#26314808,#ffffff0a))}
+.wb-model-inline-note{margin:0 0 8px}
+.wb-model-tools{margin:0 0 12px;border:.5px solid var(--dsw-alias-border-l2,light-dark(#0000001a,#ffffff1f));border-radius:10px;background:var(--dsw-alias-interactive-bg-hover,light-dark(#26314808,#ffffff0a))}
+.wb-model-tools>summary,.wb-detail-meta>summary{padding:8px 11px;cursor:pointer;user-select:none;color:var(--dsw-alias-label-secondary,light-dark(#61666b,#cfd3d6));font-size:12px;font-weight:600;outline-offset:-2px}
+.wb-model-tools>summary:hover,.wb-detail-meta>summary:hover{color:var(--dsw-alias-label-primary,light-dark(#0f1115,#f9fafb))}
+.wb-model-tools-body{padding:2px 11px 10px}
+.wb-model-tools-body .wb-note{margin:8px 0 0}
+.wb-model-scroll{max-height:min(70vh,640px);border-radius:12px}
 .wb-table tr.open td{background:var(--dsw-alias-interactive-bg-hover,light-dark(#2631480f,#ffffff14))}
 .wb-detail-row td{background:var(--dsw-alias-interactive-bg-hover,light-dark(#2631480f,#ffffff14));padding:0 8px 12px}
-.wb-detail{background:var(--dsw-alias-bg-module-platform,light-dark(#ffffff,#2a2c30));border-radius:10px;padding:10px 12px;box-shadow:inset 0 0 0 .5px var(--dsw-alias-border-l2,light-dark(#0000001a,#ffffff1f)),0 1px 3px light-dark(rgba(0,0,0,0.03),rgba(0,0,0,0.15));min-width:0}
-.wb-detail-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:4px 20px}
-.wb-detail-item{display:flex;align-items:baseline;justify-content:space-between;gap:10px;min-width:0;font-size:12px}
-.wb-detail-item span:first-child{color:var(--dsw-alias-label-secondary,light-dark(#61666b,#cfd3d6));flex:0 0 auto}
-.wb-detail-item span:last-child{min-width:0;text-align:right;overflow-wrap:anywhere;font-variant-numeric:tabular-nums}
+.wb-detail{background:var(--dsw-alias-bg-module-platform,light-dark(#ffffff,#2a2c30));border-radius:12px;padding:14px;box-shadow:inset 0 0 0 .5px var(--dsw-alias-border-l2,light-dark(#0000001a,#ffffff1f)),0 1px 3px light-dark(rgba(0,0,0,0.03),rgba(0,0,0,0.15));min-width:0}
+.wb-detail-section-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:12px;padding-bottom:10px;border-bottom:.5px solid var(--dsw-alias-border-l1,light-dark(#0000000a,#ffffff0f))}
+.wb-detail-section-head strong{font-size:13px}
+.wb-detail-section-head .wb-note{margin:2px 0 0}
+.wb-model-detail-id{margin-left:0;max-width:55%;overflow:hidden;text-overflow:ellipsis;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+/* 详情按用途拆成独立模块：参数区有边界、有标题、有保存方式，不再是一屏连续文本。 */
+.wb-detail-modules{display:flex;flex-direction:column;gap:12px}
+.wb-detail-module{border:.5px solid var(--dsw-alias-border-l2,light-dark(#0000001a,#ffffff1f));border-radius:12px;background:var(--dsw-alias-bg-module-platform,light-dark(#ffffff,#202226));overflow:hidden}
+.wb-detail-module-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;padding:10px 12px;border-bottom:.5px solid var(--dsw-alias-border-l1,light-dark(#0000000a,#ffffff0f));background:var(--dsw-alias-interactive-bg-hover,light-dark(#26314808,#ffffff0a))}
+.wb-detail-module-head strong{display:block;font-size:12.5px;line-height:18px}
+.wb-detail-module-head p{margin:2px 0 0;color:var(--dsw-alias-label-secondary,light-dark(#61666b,#cfd3d6));font-size:11.5px;line-height:17px}
+.wb-detail-module-tag{flex:none;padding:1px 8px;border-radius:999px;background:var(--dsw-alias-bg-module-platform,light-dark(#ffffff,#202226));border:.5px solid var(--dsw-alias-border-l2,light-dark(#0000001a,#ffffff1f));color:var(--dsw-alias-label-secondary,light-dark(#61666b,#cfd3d6));font-size:10.5px;line-height:17px;white-space:nowrap}
+.wb-detail-module-body{padding:12px}
+.wb-token-field{min-width:0}
+.wb-token-field+.wb-token-field{margin-top:12px;padding-top:12px;border-top:.5px solid var(--dsw-alias-border-l1,light-dark(#0000000a,#ffffff0f))}
+.wb-token-field .wb-token-row{display:grid;grid-template-columns:auto minmax(160px,1fr) auto;align-items:center;column-gap:12px;row-gap:4px}
+.wb-token-field .wb-token-control{width:100%;max-width:none;min-width:0}
+.wb-token-field .wb-token-value{display:flex;align-items:center;justify-content:flex-end;gap:6px;min-width:0}
+.wb-token-field .wb-token-input{width:112px;flex:none}
+.wb-token-hint{margin:5px 0 0;font-size:11.5px}
+.wb-detail-module-note{margin:10px 0 0;padding-top:9px;border-top:.5px solid var(--dsw-alias-border-l1,light-dark(#0000000a,#ffffff0f));color:var(--dsw-alias-label-tertiary,light-dark(#81858c,#adb2b8));font-size:11.5px;line-height:17px}
+.wb-detail-meta{margin-top:12px;border:.5px solid var(--dsw-alias-border-l2,light-dark(#0000001a,#ffffff1f));border-radius:12px;background:var(--dsw-alias-interactive-bg-hover,light-dark(#26314808,#ffffff0a));overflow:hidden}
+.wb-detail-meta>summary{padding:10px 12px}
+.wb-detail-meta[open]>summary{border-bottom:.5px solid var(--dsw-alias-border-l1,light-dark(#0000000a,#ffffff0f))}
+.wb-detail-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:0 18px;padding:8px 12px 12px}
+.wb-detail-group-title{grid-column:1/-1;margin-top:4px;padding:8px 0 5px;border-bottom:.5px solid var(--dsw-alias-border-l2,light-dark(#0000001a,#ffffff1f));color:var(--dsw-alias-label-primary,light-dark(#0f1115,#f9fafb));font-size:11px;font-weight:650;line-height:16px;letter-spacing:.04em}
+.wb-detail-group-title:first-child{margin-top:0;padding-top:2px}
+.wb-detail-group-title+.wb-detail-item{border-top:0}
+.wb-detail-meta>.wb-note,.wb-detail-meta>div>.wb-note{margin:8px 12px !important}
+.wb-detail-meta>.wb-note:last-child,.wb-detail-meta>div:last-child{margin-bottom:12px}
+.wb-token-savebar.wb-detail-savebar{margin-top:0;padding:10px 12px;border:.5px solid var(--dsw-alias-border-l2,light-dark(#0000001a,#ffffff1f));border-radius:12px;background:var(--dsw-alias-interactive-bg-hover,light-dark(#26314808,#ffffff0a))}
+.wb-detail-savebar .wb-actions{margin-top:4px!important}
+.wb-detail-item{display:grid;grid-template-columns:minmax(84px,.9fr) minmax(0,1.1fr);align-items:start;gap:8px;min-width:0;font-size:12px;padding:7px 0;border-top:.5px solid var(--dsw-alias-border-l1,light-dark(#0000000a,#ffffff0f))}
+.wb-detail-item span:last-child{text-align:right;min-width:0;overflow-wrap:anywhere;font-variant-numeric:tabular-nums;line-height:16px}
+.wb-detail-item span:first-child{color:var(--dsw-alias-label-secondary,light-dark(#61666b,#cfd3d6));min-width:0;font-size:11.5px;line-height:16px;overflow-wrap:anywhere}
+.wb-detail-actions{margin-top:12px;padding-top:10px;border-top:.5px solid var(--dsw-alias-border-l1,light-dark(#0000000a,#ffffff0f))}
+.wb-model-feedback{margin:0 0 6px;color:light-dark(#18794e,#7ee2b8)}
+.wb-model-feedback.bad{color:light-dark(#a40e26,#ffb3ad)}
 .wb-model-table th:nth-child(6),.wb-model-table td:nth-child(6){width:80px;min-width:80px;white-space:nowrap}
 .wb-model-table th:nth-child(7),.wb-model-table td:nth-child(7){width:96px;min-width:96px;white-space:nowrap}
-/* 模型表：dsh 设置弹窗内容区很窄（约 400px），7 列在窄容器里改成卡片 */
-.wb-model-scroll{max-height:min(70vh,640px)}
+.wb-model-table tbody td:nth-child(2){font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11.5px}
+.wb-model-table tbody tr.bad td{color:inherit}
+.wb-model-table tbody tr.bad td:first-child{box-shadow:inset 2px 0 0 light-dark(#d1242f,#f85149)}
+.wb-model-table tbody tr.off td:nth-child(2),.wb-model-table tbody tr.off td:nth-child(4),.wb-model-table tbody tr.off td:nth-child(5){color:var(--dsw-alias-label-tertiary,light-dark(#81858c,#adb2b8))}
+.wb-model-meta-label{margin-right:6px;font-size:11px;color:var(--dsw-alias-label-tertiary,#adb2b8)}
+.wb-model-empty{text-align:center;padding:30px 16px;color:var(--dsw-alias-label-secondary,light-dark(#61666b,#cfd3d6))}
+.wb-model-empty strong{display:block;color:var(--dsw-alias-label-primary,light-dark(#0f1115,#f9fafb));font-size:13px}
+.wb-model-empty p{margin:4px 0 12px;font-size:12px}
 .wb-model-table.wb-narrow{display:block;width:100%}
 .wb-model-table.wb-narrow thead{display:none}
 .wb-model-table.wb-narrow tbody{display:block;width:100%}
-.wb-model-table.wb-narrow tr:not(.wb-detail-row){
+.wb-model-table.wb-narrow tr:not(.wb-detail-row):not(.wb-model-empty-row){
   display:grid;
   grid-template-columns:26px minmax(0,1fr) auto auto;
-  grid-template-areas:"check model actions actions" "check name actions actions" "check meta probe rate";
-  column-gap:8px;row-gap:2px;
-  padding:10px 6px;
-  border-bottom:.5px solid var(--dsw-alias-border-l1,light-dark(#0000000a,#ffffff0f));
-  border-radius:8px;
+  grid-template-areas:"check name actions actions" "check model actions actions" "check meta probe rate";
+  column-gap:10px;row-gap:4px;
+  padding:12px;
+  margin-bottom:8px;
+  border:.5px solid transparent;
+  border-radius:12px;
+  background:var(--dsw-alias-interactive-bg-hover,light-dark(#2631480f,#ffffff14));
   align-items:start;
-  transition:background-color var(--wb-anim-fast);
+  transition:box-shadow var(--wb-anim-fast),border-color var(--wb-anim-fast);
 }
-.wb-model-table.wb-narrow tr:not(.wb-detail-row):hover,
-.wb-model-table.wb-narrow tr:not(.wb-detail-row).open{background:var(--dsw-alias-interactive-bg-hover,light-dark(#2631480f,#ffffff14))}
-.wb-model-table.wb-narrow tr:not(.wb-detail-row)>td{
-  display:block;width:auto;min-width:0;padding:0;border:0;
-  /* 表格行/单元格的底色在卡片布局里会变成一块块灰砖：整行只保留一个背景 */
-  background:transparent!important;
-}
+.wb-model-table.wb-narrow tr:not(.wb-detail-row):not(.wb-model-empty-row):hover{box-shadow:inset 0 0 0 1px var(--dsw-alias-border-l2,light-dark(#0000001a,#ffffff1f))}
+.wb-model-table.wb-narrow tr:not(.wb-detail-row):not(.wb-model-empty-row).open{border-color:var(--dsw-alias-label-tertiary,#adb2b8)}
+.wb-model-table.wb-narrow tr.off{background:transparent;border-style:dashed;border-color:var(--dsw-alias-border-l2,light-dark(#00000028,#ffffff33))}
+.wb-model-table.wb-narrow tr.bad td:first-child{box-shadow:none}
+.wb-model-table.wb-narrow tr:not(.wb-detail-row):not(.wb-model-empty-row)>td{display:block;width:auto;min-width:0;padding:0;border:0;background:transparent!important}
 .wb-model-table.wb-narrow td:nth-child(1){grid-area:check;padding-top:3px!important}
-.wb-model-table.wb-narrow td:nth-child(2){grid-area:model;font-weight:600;overflow-wrap:anywhere;padding-right:2px!important}
-.wb-model-table.wb-narrow td:nth-child(3){grid-area:name;min-width:0}
-.wb-model-table.wb-narrow td:nth-child(4){grid-area:meta;color:var(--dsw-alias-label-secondary,light-dark(#61666b,#cfd3d6));font-variant-numeric:tabular-nums;white-space:nowrap}
-.wb-model-table.wb-narrow td:nth-child(5){grid-area:rate;text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums}
+.wb-model-table.wb-narrow td:nth-child(2){grid-area:model;font-weight:400;overflow-wrap:anywhere;padding-right:2px!important;color:var(--dsw-alias-label-tertiary,#adb2b8);font-size:11px}
+.wb-model-table.wb-narrow td:nth-child(3){grid-area:name;min-width:0;font-size:13px;font-weight:650;letter-spacing:-.01em;line-height:19px}
+.wb-model-table.wb-narrow td:nth-child(4){grid-area:meta;color:var(--dsw-alias-label-secondary,light-dark(#61666b,#cfd3d6));font-variant-numeric:tabular-nums;font-size:12px}
+.wb-model-table.wb-narrow td:nth-child(5){grid-area:rate;text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums;font-size:12px}
 .wb-model-table.wb-narrow td:nth-child(6){grid-area:probe;min-width:80px;text-align:right;white-space:nowrap}
 .wb-model-table.wb-narrow td:nth-child(7){grid-area:actions;display:flex;justify-content:flex-end;align-items:flex-start;gap:4px;white-space:nowrap}
 .wb-model-table.wb-narrow td:nth-child(7) .wb-btn{padding:3px 9px;min-height:26px;font-size:12px}
 .wb-model-table.wb-narrow tr.wb-detail-row{display:block;width:100%}
-.wb-model-table.wb-narrow tr.wb-detail-row>td{display:block;width:100%;padding:0 6px 10px;background:transparent!important}
-.wb-model-table.wb-narrow .wb-detail-grid{grid-template-columns:minmax(0,1fr);gap:3px}
+.wb-model-table.wb-narrow tr.wb-detail-row>td{display:block;width:100%;padding:0 4px 16px;background:transparent!important}
+.wb-model-table.wb-narrow tr.wb-model-empty-row{display:block;width:100%}
+.wb-model-table.wb-narrow tr.wb-model-empty-row>td{display:block;width:100%;padding:0;background:transparent!important}
+.wb-model-table.wb-narrow .wb-detail-grid{grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:4px 20px}
 .wb-model-table.wb-narrow .wb-detail-item{gap:8px}
-.wb-model-table.wb-narrow .wb-detail-item span:last-child{text-align:left}
+.wb-model-footer{display:flex;align-items:center;justify-content:space-between;gap:6px 16px;flex-wrap:wrap;margin-top:10px;color:var(--dsw-alias-label-tertiary,light-dark(#81858c,#adb2b8));font-size:11px;line-height:16px}
+.wb-model-probe-updated{margin:4px 0 0;font-size:11px}
+@media (max-width:560px){.wb-models-card{padding:14px}.wb-model-hero-side{justify-content:space-between;gap:12px}.wb-model-stats{gap:14px}.wb-model-search{flex:1 1 150px}.wb-model-sort{flex:0 0 104px;width:104px}.wb-model-filter .wb-segmented-wrap{max-width:100%;overflow-x:auto}.wb-detail-section-head{flex-direction:column}.wb-model-detail-id{max-width:100%}.wb-token-field .wb-token-row{grid-template-columns:minmax(0,1fr) auto}.wb-token-field .wb-token-label{grid-column:1;grid-row:1}.wb-token-field .wb-token-control{grid-column:1/-1;grid-row:2}.wb-token-field .wb-token-value{grid-column:2;grid-row:1}.wb-token-field .wb-token-input{width:104px}}
 /* 促销徽章 */
-.wb-badge{display:inline-block;margin-left:6px;padding:0 6px;border-radius:6px;font-size:11px;line-height:16px;background:light-dark(#00000010,#ffffff1f);border:.5px solid transparent;white-space:nowrap;vertical-align:middle;transition:all var(--wb-anim-fast)}
+.wb-badge{display:inline-block;margin-left:6px;padding:0 6px;border-radius:6px;font-size:10.5px;line-height:16px;background:light-dark(#00000010,#ffffff1f);border:.5px solid transparent;white-space:nowrap;vertical-align:middle;transition:all var(--wb-anim-fast)}
 /* 账号：每账号一行 */
-.wb-account{padding:9px 2px;border-bottom:.5px solid var(--dsw-alias-border-l1,light-dark(#0000000a,#ffffff0f));transition:background-color var(--wb-anim-fast)}
+/* 账号：每账号一个卡片块（原来是「下划线分隔的行」，和模型卡不统一，也读不出边界） */
+.wb-account{padding:12px;margin-bottom:8px;border-radius:10px;background:var(--dsw-alias-interactive-bg-hover,light-dark(#2631480f,#ffffff14));border-bottom:0;transition:background-color var(--wb-anim-fast),box-shadow var(--wb-anim-fast)}
+.wb-account:last-child{margin-bottom:0}
+.wb-account:hover{box-shadow:inset 0 0 0 1px var(--dsw-alias-border-l2,light-dark(#0000001a,#ffffff1f))}
 .wb-account:last-child{border-bottom:0}
 .wb-account.bad b{color:light-dark(#a40e26,#ffb3ad)}
 .wb-account-head{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;min-width:0}
 .wb-account-head b{min-width:0;overflow-wrap:anywhere}
-.wb-input,.wb-select{background:transparent;border:0;border-bottom:.5px solid var(--dsw-alias-border-l2,light-dark(#0000001a,#ffffff1f));color:inherit;font:inherit;font-size:12.5px;padding:4px 4px;min-width:0;max-width:100%;transition:border-color var(--wb-anim-fast)}
-.wb-input:focus{outline:none;border-bottom-color:var(--dsw-alias-brand-primary,light-dark(#0f1115,#f9fafb))}
+/* 输入框不再只靠一条下划线：描边 + 浅底 + 圆角，暗色主题同样有明确边界。 */
+.wb-input,.wb-select{background:var(--dsw-alias-interactive-bg-hover,light-dark(#2631480f,#ffffff14));border:.5px solid var(--dsw-alias-border-l2,light-dark(#0000001f,#ffffff2e));border-radius:9px;color:inherit;font:inherit;font-size:12.5px;padding:6px 10px;min-width:0;min-height:32px;max-width:100%;transition:background-color var(--wb-anim-fast),border-color var(--wb-anim-fast),box-shadow var(--wb-anim-fast)}
+.wb-input::placeholder{color:var(--dsw-alias-label-tertiary,light-dark(#81858c,#adb2b8))}
+.wb-input:hover,.wb-select:hover{border-color:var(--dsw-alias-border-l3,light-dark(#00000033,#ffffff42))}
+.wb-input:focus,.wb-select:focus{outline:none;border-color:var(--dsw-alias-brand-primary,light-dark(#0f1115,#f9fafb));box-shadow:0 0 0 3px light-dark(rgba(15,17,21,.07),rgba(255,255,255,.09))}
 .wb-input:focus-visible,.wb-select:focus-visible,.wb-textarea:focus-visible{outline:2px solid var(--dsw-alias-brand-primary,#6366f1);outline-offset:1px}
 .wb-input{width:200px}
 /* 拖拽手柄（账号排序）：握这里才拖动，避开行内按钮与文本选择 */
@@ -344,9 +478,11 @@ body.dark .wb-root,
 .wb-login-pending a{word-break:break-all;color:var(--dsw-alias-brand-primary,light-dark(#0f1115,#f9fafb))}
 .wb-login-actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}
 .wb-login-warning{margin-top:10px}
-.wb-select{background:var(--dsw-alias-bg-module-platform,light-dark(#ffffff,#202226));color:var(--dsw-alias-label-primary,light-dark(#0f1115,#f9fafb));border:.5px solid var(--dsw-alias-border-l2,light-dark(#0000001f,#ffffff2e));border-radius:8px;padding:4px 8px;cursor:pointer;transition:all var(--wb-anim-fast)}
-.wb-select:hover{background:var(--dsw-alias-interactive-bg-hover,light-dark(#2631480f,#ffffff14))}
-.wb-select:focus{outline:none;border-color:var(--dsw-alias-brand-primary,light-dark(#0f1115,#f9fafb))}
+/* 原生箭头在 Windows/暗色下粗细和位置不一致，统一关掉后自己画一个小箭头。 */
+.wb-select{appearance:none;-webkit-appearance:none;background-color:var(--dsw-alias-bg-module-platform,light-dark(#ffffff,#202226));background-image:linear-gradient(45deg,transparent 50%,var(--dsw-alias-label-tertiary,light-dark(#81858c,#adb2b8)) 50%),linear-gradient(135deg,var(--dsw-alias-label-tertiary,light-dark(#81858c,#adb2b8)) 50%,transparent 50%);background-position:calc(100% - 14px) calc(50% + 1px),calc(100% - 9px) calc(50% + 1px);background-size:5px 5px;background-repeat:no-repeat;color:var(--dsw-alias-label-primary,light-dark(#0f1115,#f9fafb));border:.5px solid var(--dsw-alias-border-l2,light-dark(#0000001f,#ffffff2e));border-radius:9px;padding:6px 30px 6px 10px;cursor:pointer;transition:all var(--wb-anim-fast)}
+.wb-select:hover{background-color:var(--dsw-alias-interactive-bg-hover,light-dark(#2631480f,#ffffff14));border-color:var(--dsw-alias-border-l3,light-dark(#00000033,#ffffff42))}
+.wb-select:focus{outline:none;border-color:var(--dsw-alias-brand-primary,light-dark(#0f1115,#f9fafb));box-shadow:0 0 0 3px light-dark(rgba(15,17,21,.07),rgba(255,255,255,.09))}
+.wb-select:disabled{opacity:.55;cursor:not-allowed}
 .wb-select option{background:light-dark(#ffffff,#202226);color:light-dark(#0f1115,#f9fafb)}
 .wb-hidden-select{position:absolute!important;width:1px!important;height:1px!important;padding:0!important;margin:-1px!important;overflow:hidden!important;clip:rect(0,0,0,0)!important;white-space:nowrap!important;border:0!important;opacity:0!important;pointer-events:none!important}
 /* 分段胶囊选择器 (全圆角 9999px，带平移动画) */
@@ -362,6 +498,18 @@ body.dark .wb-root,
 @media (prefers-reduced-motion: reduce){.wb-segmented-indicator{transition:none}}
 /* 多模型对比条与图例 */
 .wb-prop-bar{display:flex;width:100%;height:10px;border-radius:5px;overflow:hidden;background:var(--dsw-alias-interactive-bg-active,light-dark(#2631481a,#ffffff24));margin:8px 0;box-shadow:inset 0 1px 2px light-dark(rgba(0,0,0,0.06),rgba(0,0,0,0.2))}
+.wb-prop-bar.is-compact{height:6px;border-radius:999px;margin:7px 0 12px}
+.wb-usage-model-donut-wrap{display:flex;align-items:center;gap:16px;flex-wrap:wrap;padding:8px 0 12px;border-bottom:.5px solid var(--dsw-alias-border-l1,light-dark(#0000000a,#ffffff0f))}
+.wb-usage-model-donut{position:relative;width:136px;height:136px;flex:none}
+.wb-usage-model-donut svg{display:block;width:100%;height:100%}
+.wb-usage-model-donut-center{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;pointer-events:none}
+.wb-usage-model-donut-center span{font-size:10px;color:var(--dsw-alias-label-tertiary,light-dark(#81858c,#adb2b8))}
+.wb-usage-model-donut-center strong{max-width:92px;font-size:18px;line-height:22px;font-variant-numeric:tabular-nums;overflow-wrap:anywhere;text-align:center}
+.wb-usage-model-donut-legend{flex:1 1 190px;min-width:0;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:5px 12px}
+.wb-usage-model-donut-legend>div{display:flex;align-items:center;gap:6px;min-width:0;font-size:11px;line-height:17px}
+.wb-usage-model-donut-legend i{width:7px;height:7px;border-radius:50%;flex:none}
+.wb-usage-model-donut-legend span{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--dsw-alias-label-secondary,light-dark(#61666b,#cfd3d6))}
+.wb-usage-model-donut-legend b{flex:none;font-variant-numeric:tabular-nums;font-size:10.5px}
 .wb-prop-seg{height:100%;transition:width .45s cubic-bezier(0.16,1,0.3,1),opacity .2s ease,transform .2s ease;cursor:pointer;will-change:width}
 .wb-prop-seg:hover{filter:brightness(1.15)}
 .wb-prop-legend{display:flex;flex-wrap:wrap;gap:8px 12px;margin-bottom:10px;font-size:11.5px;color:var(--dsw-alias-label-secondary,light-dark(#61666b,#cfd3d6))}
@@ -373,16 +521,29 @@ body.dark .wb-root,
 .wb-prop-legend-val{color:var(--dsw-alias-label-primary,light-dark(#0f1115,#f9fafb));font-weight:600;margin-left:2px}
 /* 用量面板工具栏与图表容器进场动画与长度过渡 */
 .wb-usage-toolbar{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-bottom:14px;padding-bottom:12px;border-bottom:.5px solid var(--dsw-alias-border-l1,light-dark(#0000000f,#ffffff14))}
+.wb-usage-range-wrap{display:flex;align-items:center;gap:10px 12px;flex-wrap:wrap;min-width:0}
+.wb-usage-range-label{font-size:10.5px;line-height:16px;color:var(--dsw-alias-label-tertiary,light-dark(#81858c,#adb2b8));font-variant-numeric:tabular-nums;white-space:nowrap}
+.wb-usage-range-label.is-loading{color:var(--dsw-alias-brand-primary,light-dark(#0f1115,#f9fafb))}
 .wb-chart-wrap{min-width:0;position:relative}
+.wb-chart-tooltip{position:absolute;top:2px;transform:translateX(-50%);z-index:3;min-width:150px;max-width:250px;padding:8px 10px;border-radius:10px;background:var(--dsw-alias-bg-module-platform,light-dark(#ffffff,#202226));border:.5px solid var(--dsw-alias-border-l2,light-dark(#0000001f,#ffffff2e));box-shadow:0 8px 22px light-dark(rgba(16,24,40,.14),rgba(0,0,0,.42));pointer-events:none;font-size:10.5px;line-height:16px}
+.wb-chart-tooltip>strong{display:block;margin-bottom:4px;font-size:11px}
+.wb-chart-tooltip>div{display:flex;align-items:center;justify-content:space-between;gap:14px;padding:1px 0;color:var(--dsw-alias-label-secondary,light-dark(#61666b,#cfd3d6))}
+.wb-chart-tooltip>div>span{flex:1;min-width:0;color:var(--dsw-alias-label-secondary,light-dark(#61666b,#cfd3d6))}
+.wb-chart-tooltip>div>b{font-variant-numeric:tabular-nums;color:var(--dsw-alias-label-primary,light-dark(#0f1115,#f9fafb));font-weight:650;white-space:nowrap}
+.wb-chart-tooltip>div>i{display:inline-block;width:6px;height:6px;border-radius:50%;flex:none}
+.wb-chart-tooltip>small{display:block;margin-top:3px;color:var(--dsw-alias-label-tertiary,light-dark(#81858c,#adb2b8));font-size:10px;font-variant-numeric:tabular-nums}
+.wb-chart-legend{display:flex;align-items:center;gap:6px 14px;flex-wrap:wrap;margin-top:6px;font-size:10.5px;color:var(--dsw-alias-label-secondary,light-dark(#61666b,#cfd3d6))}
+.wb-chart-legend span{display:inline-flex;align-items:center;gap:5px}
+.wb-chart-legend i{display:inline-block;width:12px;height:3px;border-radius:999px;flex:none}
 .wb-curve-enter{animation:wb-curve-fade-in .32s cubic-bezier(0.16,1,0.3,1) both;transform-origin:bottom center}
 .wb-bar-rect{transition:width .45s cubic-bezier(0.16,1,0.3,1),fill .2s ease,opacity .2s ease;will-change:width}
 @keyframes wb-curve-fade-in{0%{opacity:0.12;transform:scaleY(0.93)}100%{opacity:1;transform:scaleY(1)}}
 @media (prefers-reduced-motion: reduce){.wb-curve-enter{animation:none}.wb-prop-seg,.wb-bar-rect{transition:none}}
 /* 自定义圆角悬浮下拉菜单 (10px) */
 .wb-dropdown{position:relative;display:inline-block;min-width:0}
-.wb-dropdown-trigger{display:inline-flex;align-items:center;justify-content:space-between;gap:6px;background:var(--dsw-alias-bg-module-platform,light-dark(#ffffff,#202226));color:var(--dsw-alias-label-primary,light-dark(#0f1115,#f9fafb));border:.5px solid var(--dsw-alias-border-l2,light-dark(#0000001f,#ffffff2e));border-radius:8px;padding:4px 8px;font:inherit;font-size:12px;cursor:pointer;transition:all var(--wb-anim-fast);min-width:110px;max-width:280px;text-align:left}
-.wb-dropdown-trigger:hover{background:var(--dsw-alias-interactive-bg-hover,light-dark(#2631480f,#ffffff14))}
-.wb-dropdown-trigger:disabled{opacity:.55;cursor:not-allowed;background:transparent}
+.wb-dropdown-trigger{display:inline-flex;align-items:center;justify-content:space-between;gap:6px;background:var(--dsw-alias-bg-module-platform,light-dark(#ffffff,#202226));color:var(--dsw-alias-label-primary,light-dark(#0f1115,#f9fafb));border:.5px solid var(--dsw-alias-border-l2,light-dark(#0000001f,#ffffff2e));border-radius:9px;padding:6px 10px;font:inherit;font-size:12px;line-height:18px;min-height:32px;cursor:pointer;box-shadow:0 1px 2px light-dark(rgba(16,24,20,.035),rgba(0,0,0,.2));transition:all var(--wb-anim-fast);min-width:110px;max-width:280px;text-align:left}
+.wb-dropdown-trigger:hover{background:var(--dsw-alias-interactive-bg-hover,light-dark(#2631480f,#ffffff14));border-color:var(--dsw-alias-border-l3,light-dark(#00000033,#ffffff42))}
+.wb-dropdown-trigger:disabled{opacity:.55;cursor:not-allowed;background:transparent;box-shadow:none}
 .wb-dropdown-trigger:focus-visible{outline:2px solid var(--dsw-alias-brand-primary,#6366f1);outline-offset:1px}
 .wb-dropdown-arrow{font-size:9px;color:var(--dsw-alias-label-tertiary,#adb2b8);margin-left:auto;transition:transform var(--wb-anim-fast);flex:none}
 .wb-dropdown.open .wb-dropdown-arrow{transform:rotate(180deg)}
@@ -468,6 +629,95 @@ body.dark .wb-root,
 .wb-quota-pkg-name{font-size:12px;min-width:0;overflow-wrap:anywhere}
 .wb-quota-pkg-num{font-size:12px;font-variant-numeric:tabular-nums;color:var(--dsw-alias-label-secondary,light-dark(#61666b,#cfd3d6));white-space:nowrap}
 .wb-chart{width:100%;max-width:100%;height:auto;display:block}
+/* 用量页：范围控制 → 六项指标 → 趋势 → 模型 → 明细，和 Qoder 面板同一信息节奏。 */
+.wb-usage-page{display:flex;flex-direction:column;gap:16px;min-width:0;container-type:inline-size}
+/* 面板宽度不等于窗口宽度：固定三列，避免六列在设置弹窗里把数值和标签挤成竖排。 */
+.wb-usage-kpis{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+.wb-usage-kpi{padding:12px 13px;min-height:88px}
+.wb-usage-kpi b{margin-top:4px;font-size:20px;line-height:24px;white-space:nowrap;overflow-wrap:normal}
+.wb-usage-kpi-hint{display:block;margin-top:5px;color:var(--dsw-alias-label-tertiary,light-dark(#81858c,#adb2b8));font-size:10.5px;line-height:15px;overflow-wrap:anywhere}
+.wb-usage-kpi.warn{background:var(--dsw-alias-interactive-bg-hover,light-dark(#2631480c,#ffffff10));border-color:light-dark(#fca5a5,#7f1d1d)}
+.wb-usage-kpi.warn b{color:light-dark(#a40e26,#ffb3ad)}
+.wb-usage-kpi.bad{background:var(--dsw-alias-interactive-bg-hover,light-dark(#2631480c,#ffffff10));border-color:light-dark(#fca5a5,#7f1d1d)}
+.wb-usage-kpi.bad b{color:light-dark(#a40e26,#ffb3ad)}
+.wb-usage-kpi.attention{background:var(--dsw-alias-interactive-bg-hover,light-dark(#2631480c,#ffffff10));border-color:light-dark(#eac77a,#6b5420)}
+.wb-usage-kpi.attention b{color:light-dark(#8a5a00,#f0c36d)}
+.wb-usage-kpi.brand b{color:light-dark(#3f5cc4,#8fb0ff)}
+.wb-usage-kpi.has-extra{position:relative;padding-right:60px}
+.wb-usage-kpi-ring{position:absolute;right:11px;top:50%;width:44px;height:44px;transform:translateY(-50%)}
+.wb-usage-kpi-ring>svg{display:block;width:100%;height:100%}
+.wb-usage-kpi-ring-center{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;pointer-events:none}
+.wb-usage-kpi-ring-center strong{font-size:11px;line-height:13px;font-weight:650;font-variant-numeric:tabular-nums}
+.wb-usage-kpi-ring-center span{font-size:8px;line-height:10px;color:var(--dsw-alias-label-tertiary,light-dark(#81858c,#adb2b8))}
+.wb-usage-card-note{margin:-6px 0 12px}
+.wb-chart-wrap+.wb-usage-card-note{margin-top:12px}
+.wb-usage-section-bar{display:flex;align-items:center;justify-content:space-between;gap:8px 12px;flex-wrap:wrap;margin-bottom:12px}
+.wb-usage-section-left{display:flex;align-items:center;gap:8px 10px;flex-wrap:wrap;min-width:0}
+.wb-usage-details{margin-top:14px;border:.5px solid var(--dsw-alias-border-l2,light-dark(#0000001f,#ffffff2e));border-radius:10px;background:var(--dsw-alias-interactive-bg-hover,light-dark(#26314808,#ffffff0a));overflow:hidden}
+.wb-usage-details>summary{padding:8px 11px;cursor:pointer;user-select:none;color:var(--dsw-alias-label-secondary,light-dark(#61666b,#cfd3d6));font-size:11.5px;font-weight:600}
+.wb-usage-details>summary:hover{color:var(--dsw-alias-label-primary,light-dark(#0f1115,#f9fafb))}
+.wb-usage-details[open]>summary{border-bottom:.5px solid var(--dsw-alias-border-l1,light-dark(#0000000a,#ffffff0f))}
+.wb-usage-details-body{padding:9px 11px}
+.wb-usage-details-body .wb-note{margin:0 0 5px;font-size:11.5px;line-height:17px}
+.wb-usage-details-body .wb-note:last-child{margin-bottom:0}
+.wb-usage-model-list{margin-top:4px;border-top:.5px solid var(--dsw-alias-border-l1,light-dark(#0000000a,#ffffff0f));max-height:520px;overflow:auto;overscroll-behavior:contain}
+.wb-usage-model-more{display:flex;align-items:center;justify-content:center;padding:10px 0 2px}
+.wb-usage-model-more-count{margin-left:5px;padding:0 6px;border-radius:999px;background:var(--dsw-alias-interactive-bg-active,light-dark(#2631481a,#ffffff24));font-size:10px;line-height:16px;color:var(--dsw-alias-label-secondary,light-dark(#61666b,#cfd3d6))}
+.wb-usage-model-row{padding:11px 2px;border-bottom:.5px solid var(--dsw-alias-border-l1,light-dark(#0000000a,#ffffff0f))}
+.wb-usage-model-head{display:flex;align-items:baseline;justify-content:space-between;gap:10px;min-width:0}
+.wb-usage-model-name{display:flex;align-items:center;gap:7px;min-width:0}
+.wb-usage-model-name strong{min-width:0;overflow-wrap:anywhere;font-size:12.5px;line-height:18px}
+.wb-usage-model-dot{width:7px;height:7px;border-radius:50%;flex:none}
+.wb-usage-model-nums{display:flex;align-items:baseline;gap:8px;flex:none;font-variant-numeric:tabular-nums}
+.wb-usage-model-nums b{font-size:12.5px}
+.wb-usage-model-nums span{font-size:11px;color:var(--dsw-alias-label-secondary,light-dark(#61666b,#cfd3d6))}
+.wb-usage-model-track{height:5px;margin-top:8px;border-radius:999px;overflow:hidden;background:var(--dsw-alias-interactive-bg-active,light-dark(#2631481a,#ffffff24))}
+.wb-usage-model-track i{display:block;height:100%;min-width:0;border-radius:999px;transition:width .45s var(--wb-ease)}
+.wb-usage-model-meta{display:flex;align-items:center;gap:4px 12px;flex-wrap:wrap;margin-top:6px;color:var(--dsw-alias-label-tertiary,light-dark(#81858c,#adb2b8));font-size:11px;line-height:16px;font-variant-numeric:tabular-nums}
+.wb-usage-trend-facts{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin:0 0 12px;padding:9px 10px;border-radius:10px;background:var(--dsw-alias-interactive-bg-hover,light-dark(#26314808,#ffffff0a))}
+.wb-usage-trend-facts>div{min-width:0;padding:0 4px}
+.wb-usage-trend-facts>div+div{border-left:.5px solid var(--dsw-alias-border-l1,light-dark(#0000000a,#ffffff0f))}
+.wb-usage-trend-facts span{display:block;color:var(--dsw-alias-label-tertiary,light-dark(#81858c,#adb2b8));font-size:10.5px;line-height:15px}
+.wb-usage-trend-facts strong{display:block;margin-top:2px;font-size:13px;line-height:18px;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
+.wb-usage-structure{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:14px;align-items:stretch}
+.wb-usage-structure-panel{min-width:0;padding:14px;border:.5px solid var(--dsw-alias-border-l2,light-dark(#0000001a,#ffffff1f));border-radius:12px;background:var(--dsw-alias-interactive-bg-hover,light-dark(#26314808,#ffffff0a));box-shadow:0 1px 2px light-dark(rgba(16,24,20,.03),rgba(0,0,0,.16))}
+.wb-usage-panel-title{margin:0 0 2px;font-size:12px;font-weight:650}
+.wb-usage-panel-sub{margin:0 0 10px;color:var(--dsw-alias-label-tertiary,light-dark(#81858c,#adb2b8));font-size:10.5px;line-height:15px}
+.wb-usage-donut-wrap{display:flex;align-items:center;gap:16px;flex-wrap:wrap}
+.wb-usage-donut{position:relative;width:124px;height:124px;flex:none}
+.wb-usage-donut svg{display:block;width:100%;height:100%}
+.wb-usage-donut-center{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;pointer-events:none}
+.wb-usage-donut-center span{font-size:10px;color:var(--dsw-alias-label-tertiary,light-dark(#81858c,#adb2b8))}
+.wb-usage-donut-center strong{font-size:18px;line-height:22px;font-variant-numeric:tabular-nums}
+.wb-usage-donut-legend{flex:1 1 120px;min-width:110px;display:flex;flex-direction:column;gap:8px}
+.wb-usage-donut-legend>div{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:0 10px;align-items:baseline}
+.wb-usage-donut-name{display:flex;align-items:center;gap:5px;color:var(--dsw-alias-label-secondary,light-dark(#61666b,#cfd3d6));font-size:11px}
+.wb-usage-donut-name i{width:7px;height:7px;border-radius:50%;flex:none}
+.wb-usage-donut-legend strong{font-size:12px;font-variant-numeric:tabular-nums}
+.wb-usage-donut-legend small{grid-column:2;text-align:right;color:var(--dsw-alias-label-tertiary,light-dark(#81858c,#adb2b8));font-size:10px}
+.wb-usage-donut-legend .wb-note{margin:2px 0 0;font-size:10.5px;line-height:16px}
+.wb-usage-bars{min-width:0}
+.wb-usage-bar-tooltip{top:8px}
+.wb-usage-bars-legend{display:flex;align-items:center;gap:14px;margin-top:5px;font-size:10.5px;color:var(--dsw-alias-label-secondary,light-dark(#61666b,#cfd3d6))}
+.wb-usage-bars-legend span{display:inline-flex;align-items:center;gap:5px}
+.wb-usage-bars-legend i{width:8px;height:8px;border-radius:2px;display:inline-block}
+.wb-usage-extra-groups{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:12px}
+.wb-usage-extra-group{min-width:0;padding:12px;border:.5px solid var(--dsw-alias-border-l2,light-dark(#0000001a,#ffffff1f));border-radius:12px;background:var(--dsw-alias-interactive-bg-hover,light-dark(#26314808,#ffffff0a))}
+.wb-usage-extra-head{display:flex;align-items:baseline;justify-content:space-between;gap:10px;margin-bottom:9px}
+.wb-usage-extra-head strong{font-size:12px;line-height:18px}
+.wb-usage-extra-head span{font-size:10.5px;color:var(--dsw-alias-label-tertiary,light-dark(#81858c,#adb2b8));font-variant-numeric:tabular-nums;white-space:nowrap}
+.wb-usage-extra-stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(84px,1fr));gap:8px}
+.wb-usage-extra-stats>div{min-width:0;padding:7px 8px;border-radius:8px;background:var(--dsw-alias-bg-module-platform,light-dark(#ffffff,#202226));border:.5px solid var(--dsw-alias-border-l1,light-dark(#0000000a,#ffffff0f))}
+.wb-usage-extra-stats span{display:block;color:var(--dsw-alias-label-tertiary,light-dark(#81858c,#adb2b8));font-size:10px;line-height:15px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.wb-usage-extra-stats b{display:block;margin-top:2px;font-size:15px;line-height:20px;font-variant-numeric:tabular-nums;white-space:nowrap}
+.wb-usage-share-bar{display:flex;width:100%;height:6px;margin-top:10px;border-radius:999px;overflow:hidden;background:var(--dsw-alias-interactive-bg-active,light-dark(#2631481a,#ffffff24))}
+.wb-usage-share-bar i{display:block;height:100%}
+.wb-usage-extra-group .wb-note{margin:8px 0 0;font-size:10.5px;line-height:16px}
+.wb-usage-footnote{margin:0;font-size:11px}
+@media (max-width:920px){.wb-usage-kpis{grid-template-columns:repeat(3,minmax(0,1fr))}}
+@media (max-width:760px){.wb-usage-structure{grid-template-columns:minmax(0,1fr)}.wb-usage-trend-facts{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:560px){.wb-usage-kpis{grid-template-columns:repeat(2,minmax(0,1fr))}.wb-usage-kpi b{font-size:18px}.wb-usage-model-head{align-items:flex-start}.wb-usage-model-nums{flex-direction:column;align-items:flex-end;gap:0}}
+@container (max-width:560px){.wb-usage-kpis{grid-template-columns:repeat(2,minmax(0,1fr))}.wb-usage-trend-facts{grid-template-columns:repeat(2,minmax(0,1fr))}.wb-usage-structure{grid-template-columns:minmax(0,1fr)}}
 /* 统一的"正在加载"占位 */
 .wb-loading{display:flex;align-items:center;gap:8px;color:var(--dsw-alias-label-secondary,light-dark(#61666b,#cfd3d6));font-size:12.5px;padding:14px 2px}
 .wb-spinner{width:13px;height:13px;border-radius:50%;border:2px solid var(--dsw-alias-border-l2,light-dark(#0000001f,#ffffff2e));border-top-color:var(--dsw-alias-label-secondary,light-dark(#61666b,#cfd3d6));animation:wb-spin .7s linear infinite;flex:none}
@@ -1010,6 +1260,7 @@ body.dark .wb-root,
       '上游回报口径，不等于账单': 'Reported by upstream; not a bill',
       '账实差额': 'Ledger vs balance',
       '账实核对：余额变化 ': 'Ledger vs balance: balance change ',
+      '，差额 ': ', difference ',
       '，本地账本 ': ', local ledger ',
       '；差额可能是客户端内使用/其他工具/估算，不是账单。':
         '; the difference may come from in-client use, other tools, or estimates — not a bill.',
@@ -1031,6 +1282,49 @@ body.dark .wb-root,
       '消耗积分': 'Credit spent',
       '当前时间段内暂无模型调用数据': 'No model calls in this period',
       '各模型用量分布对比柱状图': 'Model usage comparison bar chart',
+      '各模型用量占比环图': 'Model usage share donut',
+      '成功率': 'Success rate',
+      '24 小时': '24 hours',
+      '7 天': '7 days',
+      '30 天': '30 days',
+      '建议': 'Suggestions',
+      '窗口内': 'In range',
+      '次': 'calls',
+      '次失败': 'failed',
+      '上游已回报扣分': 'Upstream reported credit',
+      '上游未回报扣分': 'Upstream did not report credit',
+      '按已回报请求统计': 'Across requests with reported cache data',
+      '等待上游回报': 'Waiting for upstream data',
+      '完整响应': 'Full response',
+      '统计口径与账实核对': 'Accounting scope and reconciliation',
+      '用量趋势': 'Usage trend',
+      '按小时统计本机账本；切换范围可看更长周期。': 'Hourly local ledger; switch the range for a longer period.',
+      '按天统计本机账本；切换范围可看更长周期。': 'Daily local ledger; switch the range for a longer period.',
+      '按当前指标查看模型占比，用于判断额度花在哪里。': 'Model share for the selected metric; use it to see where quota goes.',
+      '缓存命中': 'cache hit',
+      '合计': 'Total',
+      '峰值': 'Peak',
+      '日均': 'Daily average',
+      '活跃': 'Active',
+      '用量结构': 'Usage composition',
+      'Token 构成': 'Token composition',
+      '输入与输出的占比；缓存命中单独统计。': 'Input vs output share; cache hits are counted separately.',
+      '每小时调用': 'Hourly calls',
+      '每日调用': 'Daily calls',
+      '蓝色为成功，红色为失败；悬停查看单点数据。': 'Blue is success, red is failure; hover a bar for details.',
+      '当前范围还没有调用记录。': 'No calls in this range yet.',
+      '每日调用与失败柱状图': 'Daily calls and failures bar chart',
+      '输入与输出 Token 构成环图': 'Input and output token composition donut',
+      '搜索与生成': 'Search and generation',
+      '搜索用量': 'Search usage',
+      '搜索': 'Search',
+      '搜索成功率': 'Search success rate',
+      '搜索成功与失败占比': 'Search success and failure share',
+      '视频与图片': 'Video and image',
+      '显示全部': 'Show all',
+      '其他': 'Other',
+      '最近失败': 'Recent failures',
+      '只展示失败请求，不记录对话内容；点错误可复制。': 'Failures only, with no conversation content; click an error to copy it.',
 
       // ── 请求 ──
       '最近请求': 'Recent requests',
@@ -1053,6 +1347,9 @@ body.dark .wb-root,
 
       // ── 签到 ──
       '每日签到': 'Daily check-in',
+      '账号签到状态': 'Account check-in status',
+      '本机每个已登录账号单独领取；不影响官方客户端登录态，也不改变当前模型使用的账号。':
+        'Each signed-in account is claimed separately; this does not affect the official client session or the account used by model calls.',
       '正在读取签到状态…': 'Reading check-in status…',
       '领取失败：': 'Claim failed: ',
       '已尝试领取今日签到。': 'Attempted to claim today\'s check-in.',
@@ -1075,6 +1372,35 @@ body.dark .wb-root,
         'Auto check-in was saved, but the bridge is still using the old value; restart the bridge to apply.',
       '领取中…': 'Claiming…',
       '立即领取': 'Claim now',
+      // 多账号签到（本机每个已登录账号各领各的；不参与模型请求路由）
+      '本机账号': 'Accounts on this machine',
+      '正在读取本机账号…': 'Reading accounts on this machine…',
+      '没有找到本机已登录的账号。': 'No signed-in accounts found on this machine.',
+      // 读数层次（大号数字 + 说明）
+      '无活动': 'No activity',
+      '该账号没有签到活动': 'This account has no check-in activity',
+      '今日状态': 'Today',
+      '连续签到': 'Day streak',
+      '今日已领 Credits': 'Credits claimed today',
+      '个账号今日已签': 'accounts checked in today',
+      '个无签到活动': 'accounts without check-in',
+      '个需处理': 'accounts need attention',
+      '今日共领 Credits': 'Credits claimed today',
+      // 卡内分组标题 + 诊断读数
+      '桥': 'Bridge',
+      '能力': 'Capabilities',
+      '项通过': 'passed',
+      '项警告': 'warnings',
+      '项失败': 'failed',
+      '红色项不解决，模型就不会出现。': 'Any red item blocks the model from appearing.',
+      '全部领取': 'Claim all',
+      '刷新账号': 'Refresh accounts',
+      '无签到活动': 'No activity',
+      '未签': 'Not checked in',
+      '当前': 'Current',
+      '个': 'accounts',
+      '今日已签': 'checked in today',
+      '共': 'total',
 
       // ── 诊断 ──
       /*
@@ -1394,6 +1720,42 @@ body.dark .wb-root,
       '复制 ID': 'Copy ID',
       '体检结论更新于': 'Probe results updated',
       '模型体检：': 'Model probe: ',
+      '勾选要出现在 dsh 选择器里的模型，保存后立即生效。': 'Choose the models to show in the dsh picker; save to apply immediately.',
+      '模型状态摘要': 'Model status summary',
+      '已启用': 'Enabled',
+      '体检可用': 'Available',
+      '目录总数': 'In catalog',
+      '搜索模型': 'Search models',
+      '个模型匹配': 'models matched',
+      '搜索模型 id / 名称 / 标签': 'Search model id / name / tag',
+      '清除搜索': 'Clear search',
+      '模型排序': 'Sort models',
+      '默认排序': 'Default order',
+      '按名称': 'By name',
+      '按上下文': 'By context',
+      '按倍率': 'By rate',
+      '按体检状态': 'By probe status',
+      '选择当前结果': 'Select current results',
+      '只保留当前筛选结果；其他模型将隐藏': 'Keep only the current filtered results; all other models will be hidden',
+      '在当前筛选结果中，隐藏体检不可用的模型': 'Within the current filtered results, hide models that failed probing',
+      '先开启「显示官方目录外的模型」': 'Enable Show models outside the official catalog first',
+      '目录与体检工具': 'Catalog and probe tools',
+      '没有匹配的模型': 'No matching models',
+      '模型目录为空': 'The model catalog is empty',
+      '换个关键词，或清除筛选后再看。': 'Try another keyword or clear the filters.',
+      '桥尚未返回模型，请稍后刷新目录。': 'The bridge has not returned any models; refresh the catalog shortly.',
+      '清除筛选': 'Clear filters',
+      '常用参数': 'Common parameters',
+      '修改只作用于本插件发出的请求，不改 WorkBuddy 客户端。': 'Changes affect only requests from this plugin; the WorkBuddy client is unchanged.',
+      '上下文与输出': 'Context and output',
+      'dsh 上下文预算与上游 max_tokens；留空 = 自动': 'dsh context budget and upstream max_tokens; blank = auto',
+      '自动保存': 'Auto-save',
+      'temperature 与思考强度；留空跟随模型默认': 'temperature and reasoning effort; blank follows the model default',
+      '手动保存': 'Manual save',
+      '能力与来源': 'Capabilities and source',
+      '来源与计费': 'Source and billing',
+      '能力与运行': 'Capabilities and runtime',
+      '已保存，将在下一轮请求生效。': 'Saved; applies to the next request.',
 
       // ── 对话 ──
       '对话测试': 'Chat test',
@@ -1538,6 +1900,9 @@ body.dark .wb-root,
       [/^进行中（(\d+)）$/, 'In progress ($1)'],
       [/^体检中 (\d+)\/(\d+)$/, 'Probing $1/$2'],
       [/^已勾选 (\d+) \/ (\d+)$/, '$1 / $2 selected'],
+      [/^(\d+)\/(\d+) 个模型匹配 ·$/, '$1 / $2 models matched ·'],
+      [/^(\d+)时 – (\d+)时$/, '$1:00 – $2:00'],
+      [/^(\d+) 支持图片 · (\d+) 支持推理 · (\d+) 免费$/, '$1 with images · $2 with reasoning · $3 free'],
       [/^共 (\d+) 个可选$/, '$1 available'],
       [/^建议（(\d+)）$/, 'Suggestions ($1)'],
       /*
@@ -1999,6 +2364,12 @@ body.dark .wb-root,
        */
       const inFlight = useRef(false);
       /**
+       * 在途期间又有新请求（典型：用户快速切换统计范围）：不能直接丢掉，
+       * 否则页面只改了选中态、数据要等下一次轮询才更新。存下最新一次重载，
+       * 等当前请求结束后立刻补发。
+       */
+      const pendingReload = useRef(null);
+      /**
        * 失败后的自动重试次数（上限 3，指数退避 4s→8s→16s）。
        *
        * 旧实现失败即排一次 4 秒重试、没有上限：桥没起 / 宿主旧构建 / 控制台停掉时，
@@ -2014,7 +2385,10 @@ body.dark .wb-root,
         retryTimer.current = setTimeout(() => { retryTimer.current = null; reload(); }, delay);
       };
       const reload = useCallback(async (overridePath) => {
-        if (inFlight.current) return;
+        if (inFlight.current) {
+          pendingReload.current = () => reload(overridePath);
+          return;
+        }
         inFlight.current = true;
         try {
           const { status, data } = await getJson(overridePath || path);
@@ -2031,6 +2405,9 @@ body.dark .wb-root,
           scheduleRetry();
         } finally {
           inFlight.current = false;
+          const next = pendingReload.current;
+          pendingReload.current = null;
+          if (next && alive.current) next();
         }
       }, [path]);
       useEffect(() => {
@@ -2075,6 +2452,7 @@ body.dark .wb-root,
         const unwatch = watchPageVisibility(onVisibilityChange);
         return () => {
           alive.current = false;
+          pendingReload.current = null;
           stopTimer();
           if (unwatch) unwatch();
           if (watchIdentity) identityListeners.delete(onIdentityChanged);
@@ -2185,6 +2563,10 @@ body.dark .wb-root,
     const MODEL_COLORS = [
       '#4f6bd8', '#2ea043', '#d29922', '#db61a2', '#8957e5', '#388bfd', '#f0883e', '#09b4a1',
     ];
+    // 图表颜色不能用品牌色：暗色主题下 brand-primary 是白色，折线/环图会变成白线白环。
+    const CHART_ACCENT = '#4f6bd8';
+    const CHART_OK = '#2ea043';
+    const CHART_BAD = '#e5534b';
     function fmtDuration(ms) {
       const minutes = Math.floor((Number(ms) || 0) / 60000);
       if (minutes < 60) return minutes + ' 分';
@@ -2352,10 +2734,14 @@ body.dark .wb-root,
       return h('button', {
         // 聊天页的 hero/header 可能被宿主包在 form 里：没有 type 的按钮默认 submit。
         type: 'button',
-        className: 'wb-btn' + (props.primary ? ' primary' : '') + (props.sm ? ' is-sm' : ''),
+        className: 'wb-btn' + (props.primary ? ' primary' : '') + (props.sm ? ' is-sm' : '') + (props.className ? ' ' + props.className : ''),
         disabled: props.disabled,
         onClick: props.onClick,
         title: props.title,
+        'aria-label': props['aria-label'],
+        'aria-expanded': props['aria-expanded'],
+        'aria-controls': props['aria-controls'],
+        'aria-pressed': props['aria-pressed'],
       }, props.children);
     }
     function Alert(props) {
@@ -2445,7 +2831,7 @@ body.dark .wb-root,
      * 内部同步渲染 <select className="wb-select wb-hidden-select"> 保证自动化测试 100% 兼容。
      */
     function DropdownSelect(props) {
-      const { value, onChange, options, placeholder, style, className, disabled } = props;
+      const { value, onChange, options, placeholder, style, className, disabled, ariaLabel } = props;
       const [open, setOpen] = useState(false);
       const [dropUp, setDropUp] = useState(false);
       const wrapRef = useRef(null);
@@ -2490,6 +2876,7 @@ body.dark .wb-root,
           className: 'wb-select wb-hidden-select',
           value: String(value),
           disabled: disabled === true,
+          'aria-label': ariaLabel,
           onChange: (e) => {
             if (onChange) onChange(e);
           },
@@ -2506,6 +2893,9 @@ body.dark .wb-root,
           onClick: toggle,
           title: currentLabel,
           disabled: disabled === true,
+          'aria-label': ariaLabel,
+          'aria-haspopup': 'listbox',
+          'aria-expanded': open,
           ...(currentRaw ? { 'data-wb-raw': '' } : {}),
         },
           h('span', { style: { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } },
@@ -2560,9 +2950,145 @@ body.dark .wb-root,
       return d;
     }
 
+    /** 每日调用 / 失败堆叠柱：补足折线图看不出的“失败占比”与单日波动。 */
+    function UsageBars(props) {
+      const [hoverIdx, setHoverIdx] = useState(null);
+      const rows = (props.series || []).map((row) => ({
+        label: props.hours ? String(row.key).slice(-2) + '时' : String(row.day || row.key).slice(5),
+        calls: Number(row.calls) || 0,
+        failed: Number(row.failed) || 0,
+      }));
+      if (!rows.length) return h('p', { className: 'wb-note' }, '当前范围还没有调用记录。');
+      const width = 720;
+      const height = 158;
+      const pad = { l: 34, r: 12, t: 12, b: 24 };
+      const plotW = width - pad.l - pad.r;
+      const plotH = height - pad.t - pad.b;
+      const max = Math.max(1, ...rows.map((row) => row.calls + row.failed));
+      const step = plotW / Math.max(rows.length, 1);
+      const barW = Math.max(2, Math.min(20, step * 0.58));
+      const labelEvery = Math.ceil(rows.length / 6);
+      const hovered = hoverIdx !== null ? rows[hoverIdx] : null;
+      return h('div', { className: 'wb-usage-bars', style: { position: 'relative' }, onMouseLeave: () => setHoverIdx(null) },
+        h('svg', {
+          viewBox: `0 0 ${width} ${height}`,
+          role: 'img',
+          'aria-label': '每日调用与失败柱状图',
+          style: { width: '100%', height: 'auto', display: 'block' },
+        },
+          [0, 0.5, 1].map((ratio) => {
+            const gy = pad.t + plotH * (1 - ratio);
+            return h('g', { key: 'g' + ratio },
+              h('line', {
+                x1: pad.l, x2: width - pad.r, y1: gy, y2: gy,
+                stroke: 'var(--dsw-alias-border-l1, rgba(120,140,180,.12))',
+                strokeDasharray: ratio === 0 ? undefined : '4 4',
+              }),
+              h('text', {
+                x: pad.l - 6, y: gy + 3, textAnchor: 'end', fontSize: 9.5,
+                fill: 'var(--dsw-alias-label-tertiary, #888)',
+              }, fmtInt(Math.round(max * ratio))));
+          }),
+          rows.map((row, i) => {
+            const x = pad.l + step * i + (step - barW) / 2;
+            const okH = (row.calls / max) * plotH;
+            const failH = (row.failed / max) * plotH;
+            const baseY = pad.t + plotH;
+            return h('g', { key: i },
+              row.calls ? h('rect', {
+                x, y: baseY - okH, width: barW, height: okH, rx: Math.min(3, barW / 2),
+                fill: CHART_ACCENT, opacity: 0.9,
+              }) : null,
+              row.failed ? h('rect', {
+                x, y: baseY - okH - failH, width: barW, height: failH, rx: Math.min(3, barW / 2),
+                fill: CHART_BAD, opacity: 0.92,
+              }) : null);
+          }),
+          rows.map((row, i) => ((i % labelEvery === 0 || i === rows.length - 1)
+            ? h('text', {
+              key: 'l' + i, x: pad.l + step * i + step / 2, y: height - 6,
+              textAnchor: 'middle', fontSize: 9.5, fill: 'var(--dsw-alias-label-tertiary, #888)',
+            }, row.label)
+            : null)),
+          rows.map((row, i) => h('rect', {
+            key: 'hit-' + i,
+            x: pad.l + step * i,
+            y: pad.t,
+            width: step,
+            height: plotH,
+            fill: 'transparent',
+            style: { cursor: 'crosshair' },
+            onMouseEnter: () => setHoverIdx(i),
+            onMouseLeave: () => setHoverIdx(null),
+          }))),
+        hovered ? h('div', {
+          className: 'wb-chart-tooltip wb-usage-bar-tooltip',
+          style: { left: `${Math.min(84, Math.max(16, ((pad.l + step * hoverIdx + step / 2) / width) * 100))}%` },
+        },
+          h('strong', null, hovered.label),
+          h('div', null,
+            h('i', { style: { background: CHART_ACCENT } }),
+            h('span', null, t('成功')),
+            h('b', null, fmtInt(hovered.calls) + ' ' + t('次'))),
+          hovered.failed ? h('div', null,
+            h('i', { style: { background: CHART_BAD } }),
+            h('span', null, t('失败')),
+            h('b', null, fmtInt(hovered.failed) + ' ' + t('次'))) : null) : null,
+        h('div', { className: 'wb-usage-bars-legend' },
+          h('span', null, h('i', { style: { background: CHART_ACCENT } }), t('成功')),
+          h('span', null, h('i', { style: { background: CHART_BAD } }), t('失败'))));
+    }
+
+    /** Token 构成环图：输入 / 输出占比 + 缓存命中信息，让总量之外还能看到结构。 */
+    function TokenDonut(props) {
+      const prompt = Number(props.prompt) || 0;
+      const completion = Number(props.completion) || 0;
+      const total = prompt + completion;
+      const radius = 48;
+      const circumference = 2 * Math.PI * radius;
+      const promptRatio = total > 0 ? prompt / total : 0;
+      const completionRatio = total > 0 ? completion / total : 0;
+      const cacheKnown = Number(props.cacheKnown) > 0;
+      return h('div', { className: 'wb-usage-donut-wrap' },
+        h('div', { className: 'wb-usage-donut' },
+          h('svg', { viewBox: '0 0 120 120', role: 'img', 'aria-label': '输入与输出 Token 构成环图' },
+            h('circle', { cx: 60, cy: 60, r: radius, fill: 'none', stroke: 'var(--dsw-alias-interactive-bg-active, rgba(120,140,180,.18))', strokeWidth: 14 }),
+            h('circle', {
+              cx: 60, cy: 60, r: radius, fill: 'none', stroke: CHART_ACCENT, strokeWidth: 14,
+              strokeDasharray: `${circumference * promptRatio} ${circumference}`,
+              strokeLinecap: 'round', transform: 'rotate(-90 60 60)',
+            }),
+            completion > 0 ? h('circle', {
+              cx: 60, cy: 60, r: radius, fill: 'none', stroke: CHART_OK, strokeWidth: 14,
+              strokeDasharray: `${circumference * completionRatio} ${circumference}`,
+              strokeDashoffset: -circumference * promptRatio,
+              strokeLinecap: 'round', transform: 'rotate(-90 60 60)',
+            }) : null),
+          h('div', { className: 'wb-usage-donut-center' },
+            h('span', null, 'tokens'),
+            h('strong', null, fmtTokens(total)))),
+        h('div', { className: 'wb-usage-donut-legend' },
+          h('div', null,
+            h('span', { className: 'wb-usage-donut-name' },
+              h('i', { style: { background: CHART_ACCENT } }), t('输入')),
+            h('strong', null, fmtTokens(prompt)),
+            h('small', null, (promptRatio * 100).toFixed(1) + '%')),
+          h('div', null,
+            h('span', { className: 'wb-usage-donut-name' },
+              h('i', { style: { background: CHART_OK } }), t('输出')),
+            h('strong', null, fmtTokens(completion)),
+            h('small', null, (completionRatio * 100).toFixed(1) + '%')),
+          cacheKnown
+            ? h('p', { className: 'wb-note' },
+              t('缓存命中率'), ' ', typeof props.cacheHitRate === 'number' ? (props.cacheHitRate * 100).toFixed(1) + '%' : '—',
+              props.cachedTokens ? ` · ${fmtTokens(props.cachedTokens)} ${t('缓存命中')}` : '')
+            : null));
+    }
+
     function LineChart(props) {
       const points = props.points || [];
       const metric = props.metric || 'calls';
+      const secondary = props.secondary || null;
       const [hoverIdx, setHoverIdx] = useState(null);
       if (points.length < 2) return h('p', { className: 'wb-note' }, '数据点不足，画不出趋势。');
       const width = 720;
@@ -2570,7 +3096,8 @@ body.dark .wb-root,
       const pad = { l: 40, r: 16, t: 16, b: 24 };
 
       // 顶部预留 18% 呼吸空间，杜绝大幅度切换时顶峰碰撞突兀
-      const rawMax = Math.max(...points.map((p) => p.value), 1);
+      const secondaryValues = secondary ? secondary.values.map((v) => Number(v) || 0) : [];
+      const rawMax = Math.max(...points.map((p) => p.value), ...secondaryValues, 1);
       const max = Math.ceil(rawMax * 1.18);
 
       const stepX = (width - pad.l - pad.r) / (points.length - 1);
@@ -2582,15 +3109,33 @@ body.dark .wb-root,
         label: p.label,
         value: p.value,
       }));
+      const secondaryPts = secondary ? secondaryValues.map((value, i) => ({
+        x: pad.l + i * stepX,
+        y: y(value),
+        value,
+      })) : [];
 
       const curve = getCurvedPath(pts);
+      const secondaryCurve = secondary ? getCurvedPath(secondaryPts) : '';
       const area = pts.length > 1
         ? `${curve} L ${(pts[pts.length - 1].x).toFixed(1)},${height - pad.b} L ${(pts[0].x).toFixed(1)},${height - pad.b} Z`
         : '';
       const every = Math.ceil(points.length / 8);
       const activePoint = hoverIdx !== null && points[hoverIdx] ? points[hoverIdx] : null;
+      const activeHoverX = hoverIdx !== null ? pts[hoverIdx]?.x : null;
+      const axisValue = (value) => (metric === 'tokens'
+        ? fmtTokens(value)
+        : metric === 'calls' ? fmtInt(value) : Number(value).toFixed(2));
+      const moveHover = (event) => {
+        try {
+          const rect = event.currentTarget.getBoundingClientRect();
+          if (!rect.width) return;
+          const ratio = Math.min(1, Math.max(0, (event.clientX - rect.left) / rect.width));
+          setHoverIdx(Math.round(ratio * (points.length - 1)));
+        } catch (e) { /* 忽略指针环境差异 */ }
+      };
 
-      const gridLevels = [0.25, 0.5, 0.75, 1];
+      const gridLevels = [0, 0.25, 0.5, 0.75, 1];
 
       // 生成随筛选（指标、天数跨度）变化而更新的 key，触发柔和的自底向上浮现生长动画
       const chartKey = `${metric}-${points.length}-${points[0]?.label || ''}-${points[points.length - 1]?.label || ''}`;
@@ -2604,8 +3149,8 @@ body.dark .wb-root,
         },
           h('defs', null,
             h('linearGradient', { id: 'wb-area-grad', x1: '0', y1: '0', x2: '0', y2: '1' },
-              h('stop', { offset: '0%', stopColor: 'var(--dsw-alias-brand-primary, #4f6bd8)', stopOpacity: '0.28' }),
-              h('stop', { offset: '100%', stopColor: 'var(--dsw-alias-brand-primary, #4f6bd8)', stopOpacity: '0.01' }))),
+              h('stop', { offset: '0%', stopColor: CHART_ACCENT, stopOpacity: '0.28' }),
+              h('stop', { offset: '100%', stopColor: CHART_ACCENT, stopOpacity: '0.01' }))),
           gridLevels.map((lvl) => {
             const gy = y(max * lvl);
             return h('g', { key: 'grid-' + lvl },
@@ -2624,7 +3169,7 @@ body.dark .wb-root,
                 fontSize: 9.5,
                 textAnchor: 'end',
                 fill: 'var(--dsw-alias-label-tertiary, #888)',
-              }, fmtTokens(Math.round(max * lvl))));
+              }, axisValue(Math.round(max * lvl))));
           }),
           // 曲线与面积专属呼吸浮现组：消除圆点横向乱飞与路径撕裂，大幅度切换时如晨曦海浪般从底部柔和升起
           h('g', { key: chartKey, className: 'wb-curve-enter' },
@@ -2635,17 +3180,27 @@ body.dark .wb-root,
             h('path', {
               d: curve,
               fill: 'none',
-              stroke: 'var(--dsw-alias-brand-primary, #4f6bd8)',
+              stroke: CHART_ACCENT,
               strokeWidth: 2.2,
               strokeLinecap: 'round',
               strokeLinejoin: 'round',
             }),
+            secondary ? h('path', {
+              d: secondaryCurve,
+              fill: 'none',
+              stroke: secondary.color,
+              strokeWidth: 1.8,
+              strokeDasharray: '5 4',
+              strokeLinecap: 'round',
+              strokeLinejoin: 'round',
+              opacity: 0.95,
+            }) : null,
             hoverIdx !== null ? h('line', {
               x1: pad.l + hoverIdx * stepX,
               y1: pad.t,
               x2: pad.l + hoverIdx * stepX,
               y2: height - pad.b,
-              stroke: 'var(--dsw-alias-brand-primary, #4f6bd8)',
+              stroke: CHART_ACCENT,
               strokeWidth: 1.2,
               strokeDasharray: '3 3',
               opacity: 0.6,
@@ -2657,7 +3212,7 @@ body.dark .wb-root,
                   cx: pt.x,
                   cy: pt.y,
                   r: 8,
-                  fill: 'var(--dsw-alias-brand-primary, #4f6bd8)',
+                  fill: CHART_ACCENT,
                   opacity: 0.22,
                   style: { pointerEvents: 'none' },
                 }) : null,
@@ -2665,12 +3220,21 @@ body.dark .wb-root,
                   cx: pt.x,
                   cy: pt.y,
                   r: isHover ? 4.5 : 2.5,
-                  fill: 'var(--dsw-alias-brand-primary, #4f6bd8)',
+                  fill: CHART_ACCENT,
                   stroke: 'var(--dsw-alias-bg-module-platform, #fff)',
                   strokeWidth: isHover ? 2 : 1,
                   style: { cursor: 'pointer', transition: 'r .15s ease' },
                   onMouseEnter: () => setHoverIdx(i),
-                }, h('title', null, `${pt.label}：${fmtMetricValue(metric, pt.value)}`)));
+                }),
+                secondary && isHover ? h('circle', {
+                  cx: secondaryPts[i]?.x,
+                  cy: secondaryPts[i]?.y,
+                  r: 3.6,
+                  fill: secondary.color,
+                  stroke: 'var(--dsw-alias-bg-module-platform, #fff)',
+                  strokeWidth: 1.5,
+                  style: { pointerEvents: 'none' },
+                }) : null);
             })),
           ...points.map((p, i) => (i % every === 0 || i === points.length - 1)
             ? h('text', {
@@ -2681,25 +3245,102 @@ body.dark .wb-root,
               textAnchor: 'middle',
               fill: 'var(--dsw-alias-label-tertiary, #888)',
             }, p.label)
-            : null)),
+            : null),
+          h('rect', {
+            x: pad.l,
+            y: pad.t,
+            width: width - pad.l - pad.r,
+            height: height - pad.t - pad.b,
+            fill: 'transparent',
+            style: { cursor: 'crosshair' },
+            onMouseMove: moveHover,
+            onMouseLeave: () => setHoverIdx(null),
+          })),
         activePoint ? h('div', {
-          className: 'wb-pill',
-          style: {
-            position: 'absolute',
-            top: '6px',
-            right: '12px',
-            fontSize: '11.5px',
-            pointerEvents: 'none',
-            background: 'var(--dsw-alias-bg-module-platform, light-dark(#ffffff,#202226))',
-            boxShadow: '0 2px 8px light-dark(rgba(0,0,0,0.1),rgba(0,0,0,0.35))',
-            border: '.5px solid var(--dsw-alias-border-l2, rgba(120,140,180,0.25))',
-          },
-        }, `${activePoint.label} · ${fmtMetricValue(metric, activePoint.value)}`) : null);
+          className: 'wb-chart-tooltip',
+          style: { left: `${Math.min(82, Math.max(18, ((activeHoverX || 0) / width) * 100))}%` },
+        },
+          h('strong', null, activePoint.label),
+          h('div', null,
+            h('i', { style: { background: CHART_ACCENT } }),
+            h('span', null, props.primaryLabel || ''),
+            h('b', null, fmtMetricValue(metric, activePoint.value))),
+          secondary ? h('div', null,
+            h('i', { style: { background: secondary.color } }),
+            h('span', null, secondary.label),
+            h('b', null, fmtMetricValue(metric, secondaryValues[hoverIdx] || 0))) : null,
+          activePoint.tokens !== undefined ? h('small', null,
+            fmtTokens(activePoint.tokens), ' tokens · ',
+            t('积分'), ' ', Number(activePoint.credit || 0).toFixed(2),
+            activePoint.failed ? ` · ${activePoint.failed} ${t('次失败')}` : '') : null) : null,
+        secondary ? h('div', { className: 'wb-chart-legend' },
+          h('span', null, h('i', { style: { background: CHART_ACCENT } }), props.primaryLabel || ''),
+          h('span', null, h('i', { style: { background: secondary.color } }), secondary.label)) : null);
     }
     /**
      * 多模型占比彩色比例条 + 图例：直观呈现各模型用量贡献
      * 保持模型序列的稳定排序，使各模型分段在筛选指标时呈现丝滑的长度伸展与收缩
      */
+    /** 模型占比环图：把“积分花在哪些模型上”从文字表格提升为可直接看出的结构图。 */
+    function ModelShareDonut(props) {
+      const { models = [], metric = 'calls' } = props;
+      const list = models.map((m) => {
+        const value = metric === 'calls'
+          ? (Number(m.calls) || 0)
+          : metric === 'tokens'
+            ? (Number(m.promptTokens) || 0) + (Number(m.completionTokens) || 0)
+            : (Number(m.credit) || 0);
+        return { model: m.model || 'unknown', value };
+      }).filter((item) => item.value > 0).sort((a, b) => b.value - a.value);
+      const total = list.reduce((sum, item) => sum + item.value, 0);
+      if (!list.length || total <= 0) return null;
+      const top = list.slice(0, 6);
+      const rest = list.slice(6);
+      const displayList = rest.length
+        ? [...top, {
+          model: t('其他') + ' ' + rest.length,
+          value: rest.reduce((sum, item) => sum + item.value, 0),
+          other: true,
+          title: rest.map((item) => item.model).join('、'),
+        }]
+        : top;
+      const radius = 46;
+      const circumference = 2 * Math.PI * radius;
+      let cumulative = 0;
+      const centerValue = metric === 'calls'
+        ? fmtInt(total)
+        : metric === 'tokens' ? fmtTokens(total) : total.toFixed(2);
+      return h('div', { className: 'wb-usage-model-donut-wrap' },
+        h('div', { className: 'wb-usage-model-donut' },
+          h('svg', { viewBox: '0 0 120 120', role: 'img', 'aria-label': '各模型用量占比环图' },
+            h('circle', {
+              cx: 60, cy: 60, r: radius, fill: 'none', strokeWidth: 15,
+              stroke: 'var(--dsw-alias-interactive-bg-active, rgba(120,140,180,.18))',
+            }),
+            displayList.map((item, index) => {
+              const length = (item.value / total) * circumference;
+              const dashOffset = -cumulative;
+              cumulative += length;
+              return h('circle', {
+                key: item.model + index,
+                cx: 60, cy: 60, r: radius, fill: 'none', strokeWidth: 15,
+                stroke: item.other ? '#8b949e' : MODEL_COLORS[index % MODEL_COLORS.length],
+                strokeDasharray: `${length} ${circumference}`,
+                strokeDashoffset: dashOffset,
+                transform: 'rotate(-90 60 60)',
+                strokeLinecap: 'butt',
+              });
+            })),
+          h('div', { className: 'wb-usage-model-donut-center' },
+            h('span', null, t('合计')),
+            h('strong', null, centerValue))),
+        h('div', { className: 'wb-usage-model-donut-legend' },
+          displayList.map((item, index) => h('div', { key: item.model + index, title: item.title || item.model },
+            h('i', { style: { background: item.other ? '#8b949e' : MODEL_COLORS[index % MODEL_COLORS.length] } }),
+            h('span', null, item.model),
+            h('b', null, ((item.value / total) * 100).toFixed(1) + '%')))));
+    }
+
     function ModelProportionBar(props) {
       const { models = [], metric = 'calls' } = props;
       const [hoveredModel, setHoveredModel] = useState(null);
@@ -2716,14 +3357,15 @@ body.dark .wb-root,
       if (!list.length || total <= 0) return null;
 
       const metricLabel = metric === 'calls' ? '模型调用' : metric === 'tokens' ? 'tokens' : '消耗积分';
+      const compact = props.compact === true;
 
-      return h('div', { style: { marginTop: '14px', marginBottom: '8px' } },
-        h('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontSize: '12px', marginBottom: '6px' } },
+      return h('div', { style: { marginTop: compact ? '8px' : '14px', marginBottom: '8px' } },
+        compact ? null : h('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontSize: '12px', marginBottom: '6px' } },
           h('span', { style: { fontWeight: 500, color: 'var(--dsw-alias-label-secondary, light-dark(#61666b,#cfd3d6))' } },
             `各模型占比 (${metricLabel})`),
           h('span', { style: { fontSize: '11px', color: 'var(--dsw-alias-label-tertiary, #81858c)' } },
             `共 ${list.length} 个活跃模型 · 合计 ${fmtMetricValue(metric, total)}`)),
-        h('div', { className: 'wb-prop-bar', onMouseLeave: () => setHoveredModel(null) },
+        h('div', { className: 'wb-prop-bar' + (compact ? ' is-compact' : ''), onMouseLeave: () => setHoveredModel(null) },
           list.map((item, i) => {
             const pct = (item.val / total) * 100;
             const color = MODEL_COLORS[i % MODEL_COLORS.length];
@@ -2742,7 +3384,7 @@ body.dark .wb-root,
               title: `${item.model}：${fmtMetricValue(metric, item.val)} (${pct.toFixed(1)}%)`,
             });
           })),
-        h('div', { className: 'wb-prop-legend', onMouseLeave: () => setHoveredModel(null) },
+        compact ? null : h('div', { className: 'wb-prop-legend', onMouseLeave: () => setHoveredModel(null) },
           list.map((item, i) => {
             const pct = (item.val / total) * 100;
             const color = MODEL_COLORS[i % MODEL_COLORS.length];
@@ -2865,8 +3507,7 @@ body.dark .wb-root,
                 fontSize: 11.5,
                 fontWeight: isHover ? 600 : 400,
                 fill: isHover ? 'var(--dsw-alias-label-primary, light-dark(#0f1115,#f9fafb))' : 'var(--dsw-alias-label-secondary, light-dark(#61666b,#cfd3d6))',
-              }, `${fmtMetricValue(metric, m.val)} (${pct.toFixed(1)}%)`),
-              h('title', null, `${m.model}\n调用: ${fmtInt(m.calls)} 次\ntokens: ${fmtTokens(m.tokens)}\n积分: ${m.credit.toFixed(2)}`));
+              }, `${fmtMetricValue(metric, m.val)} (${pct.toFixed(1)}%)`));
           })));
     }
 
@@ -3252,8 +3893,8 @@ body.dark .wb-root,
 
       /*
        * 网页搜索是插件最容易被忽略、也最容易“装了却还在走 DeepSeek”的功能
-       * （issue #7）。它必须在概览**最上面**有独立一栏，而不是藏在「操作」
-       * 按钮堆里；旧宿主没上报 webSearch 状态时也要显示，并说明重启后生效。
+       * （issue #7）。它在余额之后保留独立一栏，而不是藏在「操作」按钮堆里；
+       * 旧宿主没上报 webSearch 状态时也要显示，并说明重启后生效。
        */
       const searchCard = unauthenticated ? null : h(Card, { title: '网页搜索' },
         ...(searchKnown ? [
@@ -3315,12 +3956,11 @@ body.dark .wb-root,
             : null,
         ]));
 
-      return h('div', { style: { display: 'flex', flexDirection: 'column', gap: '12px' } },
+      return h('div', { style: { display: 'flex', flexDirection: 'column', gap: '16px' } },
         welcome,
-        // 网页搜索独立一栏、放在最上面：自动接入 / 手动接入都必须一眼可见。
-        searchCard,
-        // 积分卡紧随其后：这是大家真正在意的东西，值得单独一张卡 + 大号数字
+        // 余额是概览的首要读数；搜索接入排在它之后，仍保持独立一栏。
         unauthenticated ? null : h(QuotaCard, { status, reload, busy, onOpenTab }),
+        searchCard,
 
         alerts.length
           ? h('div', { className: 'wb-card' },
@@ -3337,20 +3977,29 @@ body.dark .wb-root,
             : h(Card, { title: '需要你动手' }, h('p', { className: 'wb-note', style: { margin: 0 } }, '没有待办事项。'))),
 
         unauthenticated ? null : h(Card, { title: '状态' },
+          /*
+           * 分三组：桥（进程活着吗）/ 账号（用的是谁、还剩多久）/ 能力（能做什么）。
+           * 原来十行连排，找「令牌剩余」要逐行扫；分组后每组 3–4 行，扫一眼就到。
+           */
+          h('div', { className: 'wb-section-title' }, '桥'),
           h(Row, { label: '本地桥' }, h(Pill, { tone, text })),
           health ? h(Row, { label: '进程 / 地址' },
             (health.pid ? 'pid ' + health.pid + ' · ' : '') + (status?.config?.bridgeUrl || '') + '/v1') : null,
           health?.uptimeMs ? h(Row, { label: '已运行' }, fmtDuration(health.uptimeMs)) : null,
+          h(Row, { label: '数据控制台' }, h(Pill, { tone: con.state === 'running' ? 'ok' : 'bad', text: con.state === 'running' ? '运行中' : (con.state || '未运行') })),
+
+          h('div', { className: 'wb-section-title' }, '账号'),
           health?.auth ? h(Row, { label: '凭据来源' }, credentialSourceLabel(health.auth.source || 'desktop')) : null,
           health?.auth ? h(Row, { label: '登录账号' }, health.auth.userId || '(未识别)') : null,
           health?.auth ? h(Row, { label: '令牌剩余' }, fmtRemaining(health.auth.expiresAt)) : null,
           h(Row, { label: '上游端点' }, health?.auth?.endpoint || '—'),
+
+          h('div', { className: 'wb-section-title' }, '能力'),
           h(Row, { label: '可用模型' }, state === 'unauthenticated'
             ? '登录后可用'
             : fmtInt((status?.directory || []).length) + ' 个' + (status?.sampleModel ? '，推荐 ' + status.sampleModel : '')),
           h(Row, { label: 'dsh 原生路由' }, status?.route?.registered ? '已注册 provider=' + status.route.provider + (status.route.fallback ? '（兜底）' : '') : '未注册'),
           h(PluginVersionRow, { status }),
-          h(Row, { label: '数据控制台' }, h(Pill, { tone: con.state === 'running' ? 'ok' : 'bad', text: con.state === 'running' ? '运行中' : (con.state || '未运行') })),
           status?.config?.projectRoot ? h(Row, { label: '检出目录' }, status.config.projectRoot) : null),
 
         unauthenticated ? null : h(Card, { title: '操作' },
@@ -4152,6 +4801,7 @@ body.dark .wb-root,
       const [days, setDays] = useState(7);
       const [metric, setMetric] = useState('calls');
       const [chartView, setChartView] = useState('time');
+      const [showAllModels, setShowAllModels] = useState(false);
       const hours = days <= 1;
       const path = `/workbuddy/usage?days=${days}${hours ? '&hours=1' : ''}`;
       const { data, error, reload, loading } = useJson(path, { interval: 60000 });
@@ -4222,11 +4872,58 @@ body.dark .wb-root,
       const hasAnyData = totalCalls > 0 || Number(total.failed) > 0
         || (hasSearchMetric && (searches > 0 || searchFailed > 0))
         || generationTotal > 0 || videoFailed > 0 || imageFailed > 0;
-      const series = hours ? (usage?.hours || []) : (usage?.days || []);
+      const localDayKey = (date) => {
+        const pad = (n) => String(n).padStart(2, '0');
+        return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+      };
+      // 桥只返回有请求的日期；补齐空日期后，7/30 天切换才能从时间轴上明确看出来。
+      const series = (() => {
+        if (hours) return usage?.hours || [];
+        const source = usage?.days || [];
+        const byKey = new Map(source.map((row) => [String(row.day || row.key), row]));
+        const out = [];
+        const anchor = new Date();
+        anchor.setHours(12, 0, 0, 0);
+        for (let offset = days - 1; offset >= 0; offset -= 1) {
+          const date = new Date(anchor);
+          date.setDate(anchor.getDate() - offset);
+          const key = localDayKey(date);
+          out.push(byKey.get(key) || {
+            day: key, calls: 0, failed: 0, promptTokens: 0, completionTokens: 0,
+            cachedTokens: 0, cacheMissTokens: 0, credit: 0, creditCalls: 0,
+            searches: 0, searchFailed: 0, videos: 0, videoFailed: 0,
+            images: 0, imageFailed: 0, byModel: [],
+          });
+        }
+        return out;
+      })();
       const points = series.map((d) => ({
         label: hours ? String(d.key).slice(-2) + '时' : String(d.day || d.key).slice(5),
         value: metric === 'calls' ? d.calls : metric === 'tokens' ? (d.promptTokens || 0) + (d.completionTokens || 0) : d.credit || 0,
+        calls: Number(d.calls) || 0,
+        tokens: (Number(d.promptTokens) || 0) + (Number(d.completionTokens) || 0),
+        credit: Number(d.credit) || 0,
+        failed: Number(d.failed) || 0,
       }));
+      const seriesRangeText = points.length
+        ? `${points[0].label} – ${points[points.length - 1].label}`
+        : '';
+      const secondaryRaw = metric === 'tokens'
+        ? series.map((d) => Number(d.completionTokens) || 0)
+        : metric === 'calls'
+          ? series.map((d) => Number(d.failed) || 0)
+          : [];
+      const secondary = secondaryRaw.some((value) => value > 0)
+        ? {
+          values: secondaryRaw,
+          label: metric === 'tokens' ? t('输出') : t('失败'),
+          color: metric === 'tokens' ? CHART_OK : CHART_BAD,
+        }
+        : null;
+      const trendTotal = points.reduce((sum, point) => sum + point.value, 0);
+      const trendPeak = points.length ? Math.max(...points.map((point) => point.value)) : 0;
+      const trendAvg = points.length ? trendTotal / points.length : 0;
+      const trendActive = points.filter((point) => point.value > 0).length;
       const [clearing, setClearing] = useState(false);
       const [message, setMessage] = useState('');
       if (isInitialLoading(loading, data, error)) return h(Card, { title: '用量统计' }, h(Loading, { text: '正在读取用量账本…' }));
@@ -4250,42 +4947,122 @@ body.dark .wb-root,
         setMessage(res.data?.ok || res.data?.cleared ? '账本已清空。' : `清空失败：${res.data?.error || 'HTTP ' + res.status}`);
         reload();
       };
-      return h('div', { style: { display: 'flex', flexDirection: 'column', gap: '12px' } },
-        showGenerationCard
-          ? h(Card, { title: '生成消耗' },
-            h('div', { className: 'wb-usage-grid' },
-              hasVideoData
-                ? h('div', { className: 'wb-metric' }, h('span', null, '视频提交'), h('b', null, fmtInt(videos)))
-                : null,
-              hasVideoData
-                ? h('div', { className: 'wb-metric brand' }, h('span', null, '视频消耗积分'), h('b', null, videoCreditKnown ? videoCredit.toFixed(2) : '—'))
-                : null,
-              hasVideoData && videoFailed > 0
-                ? h('div', { className: 'wb-metric warn' }, h('span', null, '视频失败'), h('b', null, fmtInt(videoFailed)))
-                : null,
-              hasImageData
-                ? h('div', { className: 'wb-metric' }, h('span', null, '图片提交'), h('b', null, fmtInt(images)))
-                : null,
-              hasImageData
-                ? h('div', { className: 'wb-metric brand' }, h('span', null, '图片消耗积分'), h('b', null, imageCreditKnown ? imageCredit.toFixed(2) : '—'))
-                : null,
-              hasImageData && imageFailed > 0
-                ? h('div', { className: 'wb-metric warn' }, h('span', null, '图片失败'), h('b', null, fmtInt(imageFailed)))
-                : null),
-            h('p', { className: 'wb-note' }, generationNote))
-          : null,
-        h(Card, { title: '用量统计' },
+      const failedCalls = Number(total.failed) || 0;
+      const totalTokens = (Number(total.promptTokens) || 0) + (Number(total.completionTokens) || 0);
+      const successRate = totalCalls + failedCalls > 0
+        ? (totalCalls / (totalCalls + failedCalls)) * 100
+        : null;
+      const cacheRate = total.cacheKnownCalls > 0 && typeof total.cacheHitRate === 'number'
+        ? total.cacheHitRate * 100
+        : null;
+      const avgLatency = totalCalls ? Math.round((Number(total.ms) || 0) / totalCalls) : null;
+      const metricValueOf = (m) => (metric === 'calls'
+        ? Number(m.calls) || 0
+        : metric === 'tokens'
+          ? (Number(m.promptTokens) || 0) + (Number(m.completionTokens) || 0)
+          : Number(m.credit) || 0);
+      const sortedModels = [...models].sort((a, b) => metricValueOf(b) - metricValueOf(a));
+      const modelRows = showAllModels ? sortedModels : sortedModels.slice(0, 8);
+      const metricSum = sortedModels.reduce((sum, m) => sum + metricValueOf(m), 0);
+      const showSearchData = hasSearchMetric && (searches > 0 || searchFailed > 0);
+      const searchAttempts = searches + searchFailed;
+      const searchSuccessRate = searchAttempts > 0 ? (searches / searchAttempts) * 100 : null;
+      const showAuxCard = showSearchData || showGenerationCard;
+      const kpi = (label, value, hint, tone, extra) => h('div', {
+        className: 'wb-metric wb-usage-kpi' + (tone ? ' ' + tone : '') + (extra ? ' has-extra' : ''),
+      },
+        h('span', null, label),
+        h('b', null, value),
+        hint ? h('small', { className: 'wb-usage-kpi-hint' }, hint) : null,
+        extra || null);
+      const successTone = successRate === null ? '' : (successRate < 75 ? 'bad' : (successRate < 90 ? 'attention' : ''));
+      const successColor = successTone === 'bad' ? CHART_BAD : (successTone === 'attention' ? '#d29922' : CHART_OK);
+      const successRing = successRate === null ? null : (() => {
+        const radius = 17;
+        const circumference = 2 * Math.PI * radius;
+        return h('div', {
+          className: 'wb-usage-kpi-ring',
+          'aria-hidden': 'true',
+        },
+          h('svg', { viewBox: '0 0 44 44' },
+            h('circle', {
+              cx: 22, cy: 22, r: radius, fill: 'none', strokeWidth: 4,
+              stroke: 'var(--dsw-alias-interactive-bg-active, rgba(120,140,180,.18))',
+            }),
+            h('circle', {
+              cx: 22, cy: 22, r: radius, fill: 'none', strokeWidth: 4,
+              stroke: successColor,
+              strokeDasharray: `${circumference * (successRate / 100)} ${circumference}`,
+              strokeLinecap: 'round',
+              transform: 'rotate(-90 22 22)',
+            })),
+          h('div', { className: 'wb-usage-kpi-ring-center' },
+            h('strong', null, fmtInt(totalCalls)),
+            h('span', null, t('成功'))));
+      })();
+      const chartMetricValue = (value) => (metric === 'calls'
+        ? fmtInt(Math.round(value))
+        : metric === 'tokens' ? fmtTokens(value) : Number(value || 0).toFixed(2));
+      return h('div', { className: 'wb-usage-page' },
+        h(Card, { title: '用量统计', className: 'wb-usage-overview' },
           h('div', { className: 'wb-usage-toolbar' },
+            h(Segmented, {
+              value: String(days),
+              onChange: (e) => setDays(Number(e.target.value)),
+              options: [
+                { value: '1', label: '24 小时' },
+                { value: '7', label: '7 天' },
+                { value: '30', label: '30 天' },
+              ],
+            }),
             h('div', { className: 'wb-actions-group' },
-              h(Segmented, {
-                value: String(days),
-                onChange: (e) => setDays(Number(e.target.value)),
-                options: [
-                  { value: '1', label: '最近 24 小时' },
-                  { value: '7', label: '最近 7 天' },
-                  { value: '30', label: '最近 30 天' },
-                ],
-              }),
+              h(Btn, { sm: true, onClick: reload }, '刷新'),
+              h(Btn, { sm: true, onClick: () => downloadCsv('workbuddy-usage.csv',
+                ['day', 'calls', 'failed', 'searches', 'searchFailed', 'promptTokens', 'completionTokens',
+                  'cachedTokens', 'cacheMissTokens', 'credit',
+                  'videos', 'videoFailed', 'images', 'imageFailed'],
+                series.map((d) => [d.day || d.key, d.calls, d.failed || 0, d.searches || 0, d.searchFailed || 0,
+                  d.promptTokens, d.completionTokens, d.cachedTokens || 0, d.cacheMissTokens || 0, d.credit,
+                  d.videos || 0, d.videoFailed || 0, d.images || 0, d.imageFailed || 0])) }, '导出 CSV'),
+              h(Btn, { sm: true, disabled: clearing, onClick: clearLedger }, clearing ? '清空中…' : '清空账本'))),
+          error ? h(Alert, { bad: true }, error) : null,
+          message ? h(Alert, null, message) : null,
+          h('div', { className: 'wb-usage-kpis' },
+            kpi('模型调用', fmtInt(totalCalls), failedCalls ? `${failedCalls} ${t('次失败')}` : t('窗口内')),
+            kpi('Tokens', fmtTokens(totalTokens),
+              `${t('输入')} ${fmtTokens(total.promptTokens)} · ${t('输出')} ${fmtTokens(total.completionTokens)}`),
+            kpi('消耗积分', typeof total.credit === 'number' ? total.credit.toFixed(2) : '0',
+              creditCalls ? t('上游已回报扣分') : t('上游未回报扣分'), 'brand'),
+            kpi('成功率', successRate === null ? '—' : successRate.toFixed(1) + '%',
+              failedCalls ? `${failedCalls} ${t('次失败')} · ${totalCalls + failedCalls} ${t('次')}` : t('窗口内'),
+              successTone, successRing),
+            kpi('缓存命中率', cacheRate === null ? '—' : cacheRate.toFixed(1) + '%',
+              Number(total.cacheKnownCalls) > 0 ? t('按已回报请求统计') : t('等待上游回报')),
+            kpi('平均耗时', avgLatency === null ? '—' : avgLatency + ' ms', t('完整响应'))),
+          h('details', { className: 'wb-usage-details' },
+            h('summary', null, '统计口径与账实核对'),
+            h('div', { className: 'wb-usage-details-body' },
+              noteLine1 ? h('p', { className: 'wb-note' }, noteLine1) : null,
+              noteLine2 ? h('p', { className: 'wb-note' }, noteLine2) : null,
+              h('p', { className: 'wb-note' },
+                '账实核对：余额变化 ',
+                balanceDelta === null ? '—' : (balanceDelta >= 0 ? '+' : '') + balanceDelta.toFixed(2),
+                '，本地账本 ',
+                ledgerCredit.toFixed(2),
+                '，差额 ',
+                reconcileDiff === null ? '—' : (reconcileDiff >= 0 ? '+' : '') + reconcileDiff.toFixed(2),
+                '；差额可能是客户端内使用/其他工具/估算，不是账单。'),
+              quotaSnapshots.length < 2
+                ? h('p', { className: 'wb-note' }, '余额快照不足两条，账实差额暂时显示 —（桥运行后按小时采集）。')
+                : null,
+              failureKindEntries.length
+                ? h('p', { className: 'wb-note' }, '失败归因：',
+                  failureKindEntries.map(([kind, count]) => h('span', { key: kind, style: { marginRight: '10px' } },
+                    failureKindLabel(kind), ' ', String(count))))
+                : null))),
+        h(Card, { title: '用量趋势', className: 'wb-usage-trend' },
+          h('div', { className: 'wb-usage-section-bar' },
+            h('div', { className: 'wb-usage-section-left' },
               h(Segmented, {
                 value: metric,
                 onChange: (e) => setMetric(e.target.value),
@@ -4295,119 +5072,152 @@ body.dark .wb-root,
                   { value: 'credit', label: '消耗积分' },
                 ],
               }),
-              h(Segmented, {
-                value: chartView,
-                onChange: (e) => setChartView(e.target.value),
-                options: [
-                  { value: 'time', label: '时间趋势' },
-                  { value: 'models', label: '各模型对比' },
-                ],
-              })),
-            h('div', { className: 'wb-actions-group' },
-              h(Btn, { onClick: reload }, '刷新'),
-              h(Btn, { onClick: () => downloadCsv('workbuddy-usage.csv',
-                ['day', 'calls', 'failed', 'searches', 'searchFailed', 'promptTokens', 'completionTokens',
-                  'cachedTokens', 'cacheMissTokens', 'credit',
-                  'videos', 'videoFailed', 'images', 'imageFailed'],
-                series.map((d) => [d.day || d.key, d.calls, d.failed || 0, d.searches || 0, d.searchFailed || 0,
-                  d.promptTokens, d.completionTokens, d.cachedTokens || 0, d.cacheMissTokens || 0, d.credit,
-                  d.videos || 0, d.videoFailed || 0, d.images || 0, d.imageFailed || 0])) }, '导出 CSV'),
-              h(Btn, { disabled: clearing, onClick: clearLedger }, clearing ? '清空中…' : '清空账本'))),
-          error ? h(Alert, { bad: true }, error) : null,
-          message ? h(Alert, null, message) : null,
-          h('div', { className: 'wb-usage-grid' },
-            h('div', { className: 'wb-metric' }, h('span', null, '模型调用'), h('b', null, fmtInt(totalCalls))),
-            h('div', { className: 'wb-metric' + ((total.failed || 0) > 0 ? ' warn' : '') }, h('span', null, '失败'), h('b', null, fmtInt(total.failed))),
-            hasSearchMetric
-              ? h('div', { className: 'wb-metric' }, h('span', null, '搜索次数'), h('b', null, fmtInt(searches)))
-              : null,
-            searchFailed > 0
-              ? h('div', { className: 'wb-metric warn' }, h('span', null, '搜索失败'), h('b', null, fmtInt(searchFailed)))
-              : null,
-            h('div', { className: 'wb-metric' }, h('span', null, '输入 tokens'), h('b', null, fmtTokens(total.promptTokens))),
-            h('div', { className: 'wb-metric' }, h('span', null, '输出 tokens'), h('b', null, fmtTokens(total.completionTokens))),
-            h('div', {
-              className: 'wb-metric',
-              title: '上游回报口径，不等于账单',
-            }, h('span', null, '缓存命中率'), h('b', null,
-              Number(total.cacheKnownCalls) > 0 && typeof total.cacheHitRate === 'number'
-                ? (total.cacheHitRate * 100).toFixed(1) + '%'
-                : '—')),
-            h('div', { className: 'wb-metric brand' }, h('span', null, '消耗积分'), h('b', null, typeof total.credit === 'number' ? total.credit.toFixed(2) : '0')),
-            h('div', {
-              className: 'wb-metric' + (reconcileDiff !== null && Math.abs(reconcileDiff) > 0.5 ? ' warn' : ''),
-            }, h('span', null, '账实差额'), h('b', null,
-              reconcileDiff === null ? '—' : (reconcileDiff >= 0 ? '+' : '') + reconcileDiff.toFixed(2))),
-            h('div', { className: 'wb-metric' }, h('span', null, '平均耗时'), h('b', null, totalCalls ? Math.round((total.ms || 0) / totalCalls) + ' ms' : '—'))),
-          noteLine1 ? h('p', { className: 'wb-note' }, noteLine1) : null,
-          noteLine2 ? h('p', { className: 'wb-note' }, noteLine2) : null,
-          h('p', { className: 'wb-note' },
-            '账实核对：余额变化 ',
-            balanceDelta === null ? '—' : (balanceDelta >= 0 ? '+' : '') + balanceDelta.toFixed(2),
-            '，本地账本 ',
-            ledgerCredit.toFixed(2),
-            '；差额可能是客户端内使用/其他工具/估算，不是账单。'),
-          quotaSnapshots.length < 2
-            ? h('p', { className: 'wb-note' }, '余额快照不足两条，账实差额暂时显示 —（桥运行后按小时采集）。')
-            : null,
-          failureKindEntries.length
-            ? h('p', { className: 'wb-note' }, '失败归因：',
-              failureKindEntries.map(([kind, count]) => h('span', { key: kind, style: { marginRight: '10px' } },
-                failureKindLabel(kind), ' ', String(count))))
-            : null,
-          h(ModelProportionBar, { models: usage?.models || [], metric }),
-          h('div', {
-            key: chartView,
-            className: 'wb-chart-wrap',
-            style: { marginTop: '12px' },
-          },
+              h('span', {
+                className: 'wb-usage-range-label' + (loading ? ' is-loading' : ''),
+                'aria-live': 'polite',
+              }, loading ? t('刷新中…') : seriesRangeText)),
+            h(Segmented, {
+              value: chartView,
+              onChange: (e) => setChartView(e.target.value),
+              options: [
+                { value: 'time', label: '时间趋势' },
+                { value: 'models', label: '各模型对比' },
+              ],
+            })),
+          h('div', { className: 'wb-usage-trend-facts' },
+            h('div', null, h('span', null, '合计'), h('strong', null, chartMetricValue(trendTotal))),
+            h('div', null, h('span', null, '峰值'), h('strong', null, chartMetricValue(trendPeak))),
+            h('div', null, h('span', null, '日均'), h('strong', null, chartMetricValue(trendAvg))),
+            h('div', null, h('span', null, '活跃'), h('strong', null, `${trendActive}/${points.length}`))),
+          h('div', { key: chartView, className: 'wb-chart-wrap' },
             chartView === 'time'
-              ? h(LineChart, { points, metric })
+              ? h(LineChart, {
+                points,
+                metric,
+                secondary,
+                primaryLabel: metric === 'calls' ? t('模型调用') : metric === 'tokens' ? 'tokens' : t('消耗积分'),
+              })
               : h(ModelBarChart, { models: usage?.models || [], metric })),
-          h('p', { className: 'wb-note' }, '只记元数据（时间 / 模型 / 耗时 / token / 积分），不含任何对话内容。')),
-        h(Card, { title: '积分花在哪些模型上' },
-          h('div', { className: 'wb-scroll' },
-            h('table', { className: 'wb-table' },
-              h('thead', null, h('tr', null,
-                h('th', null, '模型'),
-                h('th', { className: 'num' }, '次数'),
-                h('th', { className: 'num' }, 'tokens'),
-                h('th', { className: 'num' }, '积分'),
-                h('th', { style: { width: '100px', textAlign: 'right' } }, '占比'))),
-              h('tbody', null, models.map((m, idx) => {
-                const modelTotalCalls = total.calls || 1;
-                const pct = Math.round(((m.calls || 0) / modelTotalCalls) * 100);
-                const color = MODEL_COLORS[idx % MODEL_COLORS.length];
-                const creditReported = (Number(m.creditCalls) || 0) > 0;
-                return h('tr', { key: m.model },
-                  h('td', null,
-                    h('span', { style: { display: 'inline-block', width: '7px', height: '7px', borderRadius: '50%', background: color, marginRight: '8px', verticalAlign: 'middle' } }),
-                    m.model),
-                  h('td', { className: 'num' }, fmtInt(m.calls)),
-                  h('td', { className: 'num' }, fmtTokens((m.promptTokens || 0) + (m.completionTokens || 0))),
-                  h('td', { className: 'num' }, creditReported
-                    ? (typeof m.credit === 'number' ? m.credit.toFixed(2) : '0')
+          h('p', { className: 'wb-note wb-usage-card-note' },
+            hours ? '按小时统计本机账本；切换范围可看更长周期。' : '按天统计本机账本；切换范围可看更长周期。')),
+        h(Card, { title: '用量结构', className: 'wb-usage-structure-card' },
+          h('div', { className: 'wb-usage-structure' },
+            h('div', { className: 'wb-usage-structure-panel' },
+              h('p', { className: 'wb-usage-panel-title' }, 'Token 构成'),
+              h('p', { className: 'wb-usage-panel-sub' }, '输入与输出的占比；缓存命中单独统计。'),
+              h(TokenDonut, {
+                prompt: total.promptTokens,
+                completion: total.completionTokens,
+                cacheKnown: total.cacheKnownCalls,
+                cacheHitRate: total.cacheHitRate,
+                cachedTokens: total.cachedTokens,
+              })),
+            h('div', { className: 'wb-usage-structure-panel' },
+              h('p', { className: 'wb-usage-panel-title' }, hours ? '每小时调用' : '每日调用'),
+              h('p', { className: 'wb-usage-panel-sub' }, '蓝色为成功，红色为失败；悬停查看单点数据。'),
+              h(UsageBars, { series, hours })))),
+        h(Card, { title: '积分花在哪些模型上', className: 'wb-usage-models' },
+          h('div', { className: 'wb-usage-section-bar' },
+            h('p', { className: 'wb-note wb-usage-card-note' }, '按当前指标查看模型占比，用于判断额度花在哪里。'),
+            h(Segmented, {
+              value: metric,
+              onChange: (e) => setMetric(e.target.value),
+              options: [
+                { value: 'calls', label: '模型调用' },
+                { value: 'tokens', label: 'tokens' },
+                { value: 'credit', label: '消耗积分' },
+              ],
+            })),
+          h(ModelShareDonut, { models: usage?.models || [], metric }),
+          h(ModelProportionBar, { models: usage?.models || [], metric, compact: true }),
+          sortedModels.length
+            ? h('div', { className: 'wb-usage-model-list' }, modelRows.map((m, idx) => {
+              const share = metricSum > 0 ? (metricValueOf(m) / metricSum) * 100 : 0;
+              const color = MODEL_COLORS[idx % MODEL_COLORS.length];
+              const modelTokens = (Number(m.promptTokens) || 0) + (Number(m.completionTokens) || 0);
+              const modelCacheRate = typeof m.cacheHitRate === 'number' ? m.cacheHitRate * 100 : null;
+              const attempts = (Number(m.calls) || 0) + (Number(m.failed) || 0);
+              return h('div', { className: 'wb-usage-model-row', key: m.model },
+                h('div', { className: 'wb-usage-model-head' },
+                  h('div', { className: 'wb-usage-model-name' },
+                    h('span', { className: 'wb-usage-model-dot', style: { background: color } }),
+                    h('strong', null, m.model)),
+                  h('div', { className: 'wb-usage-model-nums' },
+                    h('b', null, share.toFixed(1) + '%'),
+                    h('span', null, fmtInt(m.calls) + ' ' + t('次')))),
+                h('div', { className: 'wb-usage-model-track' },
+                  h('i', { style: { width: Math.max(share, share > 0 ? 1 : 0) + '%', background: color } })),
+                h('div', { className: 'wb-usage-model-meta' },
+                  h('span', null, fmtTokens(modelTokens) + ' tokens'),
+                  h('span', null, (Number(m.creditCalls) || 0) > 0
+                    ? (Number(m.credit) || 0).toFixed(2) + ' ' + t('积分')
                     : t('未回报')),
-                  h('td', { className: 'num', style: { color: 'var(--dsw-alias-label-secondary)' } },
-                    h('div', { style: { display: 'inline-flex', alignItems: 'center', gap: '6px', justifyContent: 'flex-end', width: '100%' } },
-                      h('div', { style: { width: '42px', height: '5px', borderRadius: '3px', background: 'var(--dsw-alias-interactive-bg-active, rgba(120,140,180,0.18))', overflow: 'hidden', flex: 'none' } },
-                        h('div', { style: { width: pct + '%', height: '100%', background: color, borderRadius: '3px', transition: 'width .45s cubic-bezier(0.16, 1, 0.3, 1)' } })),
-                      h('span', { style: { minWidth: '28px', textAlign: 'right' } }, pct + '%'))));
-              })))),
+                  h('span', null, Math.round((Number(m.ms) || 0) / Math.max(Number(m.calls) || 0, 1)) + ' ms'),
+                  modelCacheRate === null ? null : h('span', null, modelCacheRate.toFixed(1) + '% ' + t('缓存命中')),
+                  attempts > Number(m.calls) ? h('span', null, t('成功率') + ' ' + ((Number(m.calls) || 0) / attempts * 100).toFixed(1) + '%') : null));
+            }))
+            : h('p', { className: 'wb-note' }, '窗口内还没有请求。'),
+          sortedModels.length > 8
+            ? h('div', { className: 'wb-usage-model-more' },
+              h(Btn, {
+                sm: true,
+                onClick: () => setShowAllModels((value) => !value),
+              }, showAllModels ? '收起' : '显示全部', h('span', { className: 'wb-usage-model-more-count' }, sortedModels.length)))
+            : null,
           noCreditModels.length
             ? h('p', { className: 'wb-note' },
               t('未回报扣分的模型：') + noCreditModels.map((m) => m.model).join('、'))
-            : null,
-          (usage?.failures || []).length
-            ? h('div', null, h('p', { className: 'wb-note' }, '最近的失败：'),
-              h('div', { className: 'wb-scroll', style: { maxHeight: '200px' } },
-                h('table', { className: 'wb-table' },
-                  h('thead', null, h('tr', null, h('th', null, '时间'), h('th', null, '模型'), h('th', null, '错误'))),
-                  h('tbody', null, usage.failures.map((f, i) => h('tr', { key: i, className: 'bad' },
-                    h('td', null, fmtClock(f.t)),
-                    h('td', null, f.model + (f.kind === 'search' ? t('（搜索）') : '')),
-                    h('td', { title: '点击复制', className: 'click wrap', onClick: () => copyText(String(f.error || '')) }, String(f.error || '').slice(0, 160))))))))
-            : null));
+            : null),
+        showAuxCard
+          ? h(Card, {
+            title: showSearchData && showGenerationCard ? '搜索与生成' : (showSearchData ? '搜索用量' : '生成消耗'),
+            className: 'wb-usage-extra',
+          },
+            h('div', { className: 'wb-usage-extra-groups' },
+              showSearchData
+                ? h('section', { className: 'wb-usage-extra-group' },
+                  h('div', { className: 'wb-usage-extra-head' },
+                    h('strong', null, '搜索'),
+                    h('span', null, `${searches + searchFailed} ${t('次')}`)),
+                  h('div', { className: 'wb-usage-extra-stats' },
+                    h('div', null, h('span', null, '搜索次数'), h('b', null, fmtInt(searches))),
+                    h('div', null, h('span', null, '搜索失败'), h('b', null, fmtInt(searchFailed))),
+                    h('div', null, h('span', null, '搜索成功率'), h('b', null,
+                      searchSuccessRate === null ? '—' : searchSuccessRate.toFixed(1) + '%'))),
+                  searchAttempts > 0
+                    ? h('div', { className: 'wb-usage-share-bar', role: 'img', 'aria-label': '搜索成功与失败占比' },
+                      searches > 0 ? h('i', { style: { width: (searches / searchAttempts * 100) + '%', background: CHART_ACCENT } }) : null,
+                      searchFailed > 0 ? h('i', { style: { width: (searchFailed / searchAttempts * 100) + '%', background: CHART_BAD } }) : null)
+                    : null,
+                  searchNote ? h('p', { className: 'wb-note' }, searchNote) : null)
+                : null,
+              showGenerationCard
+                ? h('section', { className: 'wb-usage-extra-group' },
+                  h('div', { className: 'wb-usage-extra-head' },
+                    h('strong', null, '视频与图片'),
+                    h('span', null, `${videos + images} ${t('次')}`)),
+                  h('div', { className: 'wb-usage-extra-stats' },
+                    hasVideoData ? h('div', null, h('span', null, '视频提交'), h('b', null, fmtInt(videos))) : null,
+                    hasVideoData ? h('div', null, h('span', null, '视频消耗积分'), h('b', null, videoCreditKnown ? videoCredit.toFixed(2) : '—')) : null,
+                    hasVideoData ? h('div', null, h('span', null, '视频失败'), h('b', null, fmtInt(videoFailed))) : null,
+                    hasImageData ? h('div', null, h('span', null, '图片提交'), h('b', null, fmtInt(images))) : null,
+                    hasImageData ? h('div', null, h('span', null, '图片消耗积分'), h('b', null, imageCreditKnown ? imageCredit.toFixed(2) : '—')) : null,
+                    hasImageData ? h('div', null, h('span', null, '图片失败'), h('b', null, fmtInt(imageFailed))) : null),
+                  h('p', { className: 'wb-note' }, generationNote))
+                : null))
+          : null,
+        (usage?.failures || []).length
+          ? h(Card, { title: '最近失败', className: 'wb-usage-failures' },
+            h('p', { className: 'wb-note wb-usage-card-note' }, '只展示失败请求，不记录对话内容；点错误可复制。'),
+            h('div', { className: 'wb-scroll', style: { maxHeight: '240px' } },
+              h('table', { className: 'wb-table' },
+                h('thead', null, h('tr', null, h('th', null, '时间'), h('th', null, '模型'), h('th', null, '错误'))),
+                h('tbody', null, usage.failures.map((f, i) => h('tr', { key: i, className: 'bad' },
+                  h('td', null, fmtClock(f.t)),
+                  h('td', null, f.model + (f.kind === 'search' ? t('（搜索）') : '')),
+                  h('td', { title: '点击复制', className: 'click wrap', onClick: () => copyText(String(f.error || '')) }, String(f.error || '').slice(0, 160))))))))
+          : null,
+        h('p', { className: 'wb-note wb-usage-footnote' }, '只记元数据（时间 / 模型 / 耗时 / token / 积分），不含任何对话内容。'));
     }
 
     // ─────────────────────────── 最近请求 ───────────────────────────
@@ -4554,6 +5364,37 @@ body.dark .wb-root,
       const { data: cstate, status: cstatus, reload: reloadState } = cstateApi;
       const [working, setWorking] = useState(false);
       const [message, setMessage] = useState('');
+      /*
+       * 多账号签到（本机每个已登录账号各自领自己那一份）。
+       *
+       * 数据与动作都走**插件自己的路由**（/workbuddy/checkin/accounts·all），
+       * 不走控制台：多账号不需要写 .state.json 里的单账号自动签到记录，
+       * 也就不必为它增加一条控制台依赖。
+       */
+      const [acctData, setAcctData] = useState(null);
+      const [acctBusy, setAcctBusy] = useState(false);
+      const [acctMsg, setAcctMsg] = useState('');
+      const loadAccounts = useCallback(async () => {
+        const res = await getJson('/workbuddy/checkin/accounts');
+        setAcctData(res.data && res.data.ok === false ? { ok: false, error: res.data.error } : res.data);
+      }, []);
+      useEffect(() => { loadAccounts(); }, [loadAccounts]);
+      const claimAll = async () => {
+        setAcctBusy(true);
+        setAcctMsg('');
+        const res = await postJson('/workbuddy/checkin/all', {});
+        setAcctBusy(false);
+        const totals = (res.data && res.data.totals) || null;
+        setAcctMsg(res.data && res.data.ok === false
+          ? '批量领取失败：' + (res.data.error || res.status)
+          : '已处理 ' + (totals ? totals.accounts : 0) + ' 个账号：新领 ' + (totals ? totals.claimed : 0)
+            + ' · 今天已签 ' + (totals ? totals.already : 0)
+            + ' · 无活动 ' + (totals ? totals.skipped : 0)
+            + ' · 失败 ' + (totals ? totals.failed : 0));
+        loadAccounts();
+        reload();
+        reloadState();
+      };
       // 同样兼容两种形状：{ok, status:{…}} 与早期的 {ok, todayCheckedIn…}
       if (isInitialLoading(loading, data, error)) return h(Card, { title: '每日签到' }, h(Loading, { text: '正在读取签到状态…' }));
       const status = data && data.status ? data.status : (data || {});
@@ -4572,7 +5413,14 @@ body.dark .wb-root,
         let res = await postJson(CONSOLE_API + '/checkin', {});
         if (res.status === 503 || res.status === 404) res = await postJson('/workbuddy/checkin?claim=1', {});
         setWorking(false);
-        setMessage(res.data?.ok === false ? '领取失败：' + (res.data?.error || res.status) : '已尝试领取今日签到。');
+        // 「没有签到活动」不是领取失败：桥已经把它和真错误分开（noActivity），
+        // 界面不能还按失败说 —— 国际版网关本来就不提供积分活动。
+        const claimed = res.data || {};
+        setMessage(claimed.ok === false
+          ? '领取失败：' + (claimed.error || res.status)
+          : claimed.noActivity
+            ? '当前账号没有签到活动，无需领取。'
+            : '已尝试领取今日签到。');
         reload(); reloadState();
       };
       const toggleAuto = async (next) => {
@@ -4586,12 +5434,23 @@ body.dark .wb-root,
             : '设置失败：' + (res.data?.error || res.status)));
         reloadState();
       };
-      return h(Card, { title: '每日签到' },
+      return h(Fragment, null, h(Card, { title: '每日签到' },
         error ? h(Alert, { bad: true }, error) : null,
         message ? h(Alert, null, message) : null,
-        h(Row, { label: '今日' }, status.todayCheckedIn ? h(Pill, { tone: 'ok', text: '已签到' + (typeof status.todayCredit === 'number' ? '（+' + status.todayCredit + '）' : '') }) : h(Pill, { tone: 'warn', text: '未签到' })),
-        typeof status.streakDays === 'number' ? h(Row, { label: '连续天数' }, status.streakDays + ' 天') : null,
-        status.active === false ? h(Row, { label: '活动' }, '账号当前无签到活动') : null,
+        h('div', { className: 'wb-stats' },
+          h('div', { className: 'wb-stat' },
+            h('b', null, status.active === false ? '无活动' : (status.todayCheckedIn ? '已签到' : '未签到')),
+            h('span', null, status.active === false ? '该账号没有签到活动' : '今日状态')),
+          status.active !== false && typeof status.streakDays === 'number'
+            ? h('div', { className: 'wb-stat' },
+              h('b', null, status.streakDays + ' 天'),
+              h('span', null, '连续签到'))
+            : null,
+          status.active !== false && typeof status.todayCredit === 'number' && status.todayCredit > 0
+            ? h('div', { className: 'wb-stat' },
+              h('b', null, '+' + status.todayCredit),
+              h('span', null, '今日已领 Credits'))
+            : null),
         runtime ? h(Row, { label: '上次尝试' }, (runtime.lastAt ? fmtTime(runtime.lastAt) + '（' + (runtime.lastSource || '?') + '）' : '—') + (runtime.lastError ? ' · ' + runtime.lastError : '')) : null,
         runtime ? h(Row, { label: '自动签到' }, h('label', { className: 'wb-check' },
           h('input', { type: 'checkbox', checked: runtime.auto !== false, disabled: working || !consoleReady, onChange: (e) => toggleAuto(e.target.checked) }),
@@ -4605,9 +5464,83 @@ body.dark .wb-root,
         !consoleReady ? h('p', { className: 'wb-note' }, '自动签到开关存在 .state.json，由控制台负责读写；控制台没跑时这项不可改（可先启动控制台）。签到本身由**桥**执行 —— 只要桥在跑，不开控制台也会自动签。') : null,
         !consoleReady && cstatus === 404 ? h(Alert, { bad: true }, '宿主端还是旧构建（重启一次 dsh 后，自动签到开关与「上次尝试」才会出现）。') : null,
         h('div', { className: 'wb-actions', style: { marginTop: '10px' } },
-          h(Btn, { primary: true, disabled: working || status.todayCheckedIn === true, onClick: claim }, working ? '领取中…' : '立即领取'),
+          h(Btn, { primary: true, disabled: working || status.todayCheckedIn === true || status.active === false, onClick: claim }, working ? '领取中…' : '立即领取'),
           h(Btn, { disabled: working, onClick: () => { reload(); reloadState(); } }, '刷新'),
-          !consoleReady ? h(Btn, { disabled: busy, onClick: onStartConsole }, '启动控制台') : null));
+          !consoleReady ? h(Btn, { disabled: busy, onClick: onStartConsole }, '启动控制台') : null)),
+      /*
+       * 账号列表单独成卡：它回答的是「本机这几个账号各签了没」，
+       * 与上面「当前账号今天签没签」是两个问题。挤在一张卡里，
+       * 下面几行看起来就像当前账号的明细（实际是另外几个账号）。
+       *
+       * 只读登录文件、只做签到，不改变当前模型使用的账号。
+       */
+      h(Card, { title: '账号签到状态' },
+        h('p', { className: 'wb-note' }, '本机每个已登录账号单独领取；不影响官方客户端登录态，也不改变当前模型使用的账号。'),
+        (() => {
+          // 首次加载必须有动画：空着一片会让人以为接口没响应
+          if (!acctData) return h(Loading, { text: '正在读取本机账号…' });
+          if (acctData.ok === false) {
+            return h(Alert, { bad: true }, '账号列表读取失败：' + (acctData.error || '未知'));
+          }
+          const rows = acctData.accounts || [];
+          if (!rows.length) return h('p', { className: 'wb-note' }, '没有找到本机已登录的账号。');
+          const total = rows.length;
+          const signed = rows.filter((a) => a.status && a.status.todayCheckedIn).length;
+          const credited = rows.reduce((sum, a) => sum + (a.status && typeof a.status.todayCredit === 'number' ? a.status.todayCredit : 0), 0);
+          const notOpen = rows.filter((a) => a.noActivity).length;
+          const failed = rows.filter((a) => a.error).length;
+          const pct = total ? Math.round((signed / total) * 100) : 0;
+          return h(Fragment, null,
+            /* 先给结论（几个数字），再给明细（每账号一块）—— 一片同构的 Row 看不出重点 */
+            h('div', { className: 'wb-stats' },
+              h('div', { className: 'wb-stat' },
+                h('b', null, signed + '/' + total),
+                h('span', null, '个账号今日已签')),
+              credited
+                ? h('div', { className: 'wb-stat' }, h('b', null, '+' + credited), h('span', null, '今日共领 Credits'))
+                : null,
+              notOpen
+                ? h('div', { className: 'wb-stat' }, h('b', null, String(notOpen)), h('span', null, '个无签到活动'))
+                : null,
+              failed
+                ? h('div', { className: 'wb-stat' }, h('b', null, String(failed)), h('span', null, '个需处理'))
+                : null),
+            h('div', {
+              className: 'wb-meter',
+              role: 'progressbar',
+              'aria-valuenow': pct,
+              'aria-valuemin': 0,
+              'aria-valuemax': 100,
+              'aria-label': '今日签到完成度',
+            }, h('i', { style: { width: pct + '%' } })),
+            h('div', { className: 'wb-acct-wrap' },
+              ...rows.map((a) => {
+                const name = a.nickname || String(a.userId || '').slice(0, 8) || '（未知账号）';
+                const tone = a.error ? 'bad' : a.noActivity ? 'warn' : (a.status && a.status.todayCheckedIn) ? 'ok' : 'warn';
+                const text = a.error ? '失败'
+                  : a.noActivity ? '无签到活动'
+                    : (a.status && a.status.todayCheckedIn)
+                      ? '已签' + (a.status.todayCredit ? ' +' + a.status.todayCredit : '')
+                      : '未签';
+                const since = a.expired
+                  ? '登录已过期'
+                  : (a.expiresAt ? '有效至 ' + new Date(a.expiresAt).toLocaleDateString('zh-CN') : '');
+                return h('div', { className: 'wb-acct', key: a.userId },
+                  h('div', { className: 'wb-acct-main' },
+                    h('div', { className: 'wb-acct-name' },
+                      h('span', null, name),
+                      h('span', { className: 'wb-acct-region' }, a.region === 'intl' ? '国际版' : '国内版'),
+                      a.current ? h(Pill, { tone: 'ok', text: '当前' }) : null),
+                    h('div', { className: 'wb-acct-sub' },
+                      [String(a.userId || '').slice(0, 8), since].filter(Boolean).join(' · '))),
+                  h('div', { className: 'wb-acct-side' },
+                    h(Pill, { tone, text, title: a.error || undefined })));
+              })),
+            h('div', { className: 'wb-actions', style: { marginTop: '14px' } },
+              h(Btn, { primary: true, disabled: acctBusy, onClick: claimAll }, acctBusy ? '领取中…' : '全部领取'),
+              h(Btn, { disabled: acctBusy, onClick: loadAccounts }, '刷新账号')));
+        })(),
+        acctMsg ? h(Alert, null, acctMsg) : null));
     }
 
     /*
@@ -4616,12 +5549,24 @@ body.dark .wb-root,
      * 把「当前是哪一代」摆出来，至少能排除「装了新版但宿主还在跑旧代码」。
      */
     const RELEASES_URL = 'https://github.com/Ianzhyh/workbuddy-to-dsh/releases/latest';
-    function PluginVersionRow({ status: pluginStatus }) {
+    function PluginVersionRow({ status: pluginStatus, boxed }) {
       const version = pluginStatus?.runtime?.version;
       if (!version) return null;
-      return h(Row, { label: '插件版本', align: 'left' },
-        h('span', null, 'v' + version + ' · ',
-          h('a', { href: RELEASES_URL, target: '_blank', rel: 'noreferrer' }, '检查更新')));
+      const updateLink = h('a', {
+        className: 'wb-version-link' + (boxed ? '' : ' is-inline'),
+        href: RELEASES_URL,
+        target: '_blank',
+        rel: 'noreferrer noopener',
+      }, '检查更新', h('span', { 'aria-hidden': 'true' }, '↗'));
+      if (!boxed) {
+        return h(Row, { label: '插件版本', align: 'left' },
+          h('span', { className: 'wb-version-inline' }, 'v' + version, updateLink));
+      }
+      return h('div', { className: 'wb-version-row' },
+        h('div', { className: 'wb-version-main' },
+          h('span', { className: 'wb-version-label' }, '插件版本'),
+          h('strong', { className: 'wb-version-value' }, 'v' + version)),
+        updateLink);
     }
 
     // ─────────────────────────── 环境诊断 ───────────────────────────
@@ -4679,22 +5624,44 @@ body.dark .wb-root,
 
       const tone = (s) => (s === 'ok' ? 'ok' : s === 'warn' ? 'warn' : 'bad');
       return h(Card, { title: '环境诊断' },
-        h(PluginVersionRow, { status: pluginStatus }),
+        h(PluginVersionRow, { status: pluginStatus, boxed: true }),
         error ? h(Alert, { bad: true }, error) : null,
+        /*
+         * 结论先行：三个数字回答「这套环境能不能用」，下面才是逐项明细。
+         * 原来这句话是小字，得读完才知道有几项红的。
+         */
         Object.keys(adjSummary).length
-          ? h('p', { className: 'wb-note', style: { marginTop: 0 } }, `${adjSummary.ok || 0} 项通过 / ${adjSummary.warn || 0} 项警告 / ${adjSummary.fail || 0} 项失败 —— 红色项不解决，模型就不会出现。`)
+          ? h('div', { className: 'wb-stats wb-diag-stats' },
+            h('div', { className: 'wb-stat' },
+              h('b', null, String(adjSummary.ok || 0)),
+              h('span', null, '项通过')),
+            h('div', { className: 'wb-stat' },
+              h('b', null, String(adjSummary.warn || 0)),
+              h('span', null, '项警告')),
+            h('div', { className: 'wb-stat' },
+              h('b', null, String(adjSummary.fail || 0)),
+              h('span', null, '项失败')),
+            h('p', { className: 'wb-note wb-diag-note' }, '红色项不解决，模型就不会出现。'))
           : null,
-        h('div', { style: { marginTop: '8px' } }, adjusted.map((item, i) => h('div', {
+        h('div', { style: { marginTop: '10px' } }, adjusted.map((item, i) => h('div', {
           key: i,
-          className: 'wb-row',
-          style: { alignItems: 'flex-start' },
+          className: 'wb-diag-item',
         },
-        // 标签不能被长路径挤成竖排：固定宽度 + 不换行，值另起一行自然折行
-        h('span', { className: 'wb-label', style: { display: 'flex', alignItems: 'center', gap: '8px', flex: '0 0 auto' } },
+        /*
+         * 两段式：状态点 + 标题一行，详情另起一行左对齐。
+         *
+         * 原来是 label 左、value 右的 flex —— 像「登录文件」这种值是一长串文件名，
+         * 右对齐后每行只剩十几个字，折成六七行还首尾不齐，整块看着像一团乱麻。
+         */
+        h('div', { className: 'wb-diag-head' },
           h('span', { className: 'wb-dot ' + tone(item.status) }),
-          h('span', null, h('b', null, item.label))),
-        h('span', { className: 'wb-value', style: { textAlign: 'left' } }, item.detail || '')))),
-        h('div', { style: { marginTop: '8px' } }, adjusted.filter((i) => i.hint).map((i, k) => h('p', { key: k, className: 'wb-note' }, '建议（' + i.label + '）：' + i.hint))),
+          h('b', null, item.label)),
+        item.detail ? h('div', { className: 'wb-diag-detail' }, item.detail) : null))),
+        adjusted.some((i) => i.hint)
+          ? h('div', { className: 'wb-diag-hints' },
+            h('div', { className: 'wb-diag-hints-head' }, '建议'),
+            h('div', { className: 'wb-diag-hints-body' }, adjusted.filter((i) => i.hint).map((i, k) => h('p', { key: k, className: 'wb-note' }, '建议（' + i.label + '）：' + i.hint))))
+          : null,
         h('div', { className: 'wb-actions', style: { marginTop: '10px' } },
           h(Btn, { onClick: reload }, '重新诊断'),
           h(Btn, {
@@ -4734,7 +5701,7 @@ body.dark .wb-root,
     // ─────────────────────────── 可用模型 / 体检 ───────────────────────────
     function ModelsPanel({ onStartConsole, busy, sampleModel, onUseModel }) {
       const { data, error, reload, loading } = useJson('/workbuddy/models', { interval: 120000 });
-      // dsh 设置弹窗的有效宽度很小：观察本面板容器，窄的时候把 7 列表格改成卡片。
+      // 宽容器用紧凑表格，窄容器用卡片；阈值看面板实际宽度，不看窗口宽度。
       const layoutRef = useRef(null);
       const narrow = useNarrowContainer(layoutRef, 760, Boolean(data));
       const [refreshing, setRefreshing] = useState(false);
@@ -4744,6 +5711,8 @@ body.dark .wb-root,
       const [working, setWorking] = useState('');
       const [progress, setProgress] = useState(null);
       const [message, setMessage] = useState('');
+      // 每模型保存结果放在对应详情里，避免用户在页面底部操作却要看顶部 Alert。
+      const [modelFeedback, setModelFeedback] = useState({ id: '', text: '', bad: false });
       const models = data?.models || [];
       const unofficialCount = models.filter((m) => m.official === false).length;
       const results = probes?.results || {};
@@ -4809,9 +5778,12 @@ body.dark .wb-root,
           const model = models.find((m) => m.id === id);
           return model?.official !== false || includeUnofficial;
         }
-        return visibility.includes(id);
+        const model = models.find((m) => m.id === id);
+        return visibility.includes(id) && (model?.official !== false || includeUnofficial);
       };
       const toggleVisible = (id) => {
+        const model = models.find((m) => m.id === id);
+        if (model?.official === false && !includeUnofficial) return;
         setVisibility((prev) => {
           const base = Array.isArray(prev)
             ? prev
@@ -4825,9 +5797,14 @@ body.dark .wb-root,
         setPrefsSaving(true);
         // null + 非 hideAll = "恢复全部"：请求服务端删除偏好，回到配置的 allow/deny
         const unset = visibility === null && !hideAll;
+        // “显示官方目录外”是总开关：关闭时不能把旧偏好里的扩展模型继续显式放行。
+        const selected = (Array.isArray(visibility) ? visibility : []).filter((id) => {
+          const model = models.find((m) => m.id === id);
+          return !denied.includes(id) && (model?.official !== false || includeUnofficial);
+        });
         const res = await postJson('/workbuddy/model-visibility', unset
           ? { unset: true, includeUnofficial }
-          : { visible: Array.isArray(visibility) ? visibility : [], hideAll, includeUnofficial });
+          : { visible: selected, hideAll, includeUnofficial });
         setPrefsSaving(false);
         if (res.data?.ok) {
           setVisibility(res.data.unset ? null : (Array.isArray(res.data.visible) ? res.data.visible : []));
@@ -4888,14 +5865,23 @@ body.dark .wb-root,
       /** 官方输出上限（也是未覆盖时的默认 max_tokens）。 */
       const outputCapOf = (m) => (Number(m?.maxTokens) > 0 ? Number(m.maxTokens) : 0);
       const tokenDraftFor = (id) => tokenDrafts[id] || {};
-      const setTokenField = (id, key, value) => setTokenDrafts((prev) => ({
-        ...prev,
-        [id]: { ...(prev[id] || {}), [key]: value },
-      }));
-      const editParam = (id, key, value) => setParamDrafts((prev) => ({
-        ...prev,
-        [id]: { ...(prev[id] || {}), [key]: value },
-      }));
+      const clearModelFeedback = (id) => setModelFeedback((prev) => (
+        prev.id === id ? { id: '', text: '', bad: false } : prev
+      ));
+      const setTokenField = (id, key, value) => {
+        clearModelFeedback(id);
+        setTokenDrafts((prev) => ({
+          ...prev,
+          [id]: { ...(prev[id] || {}), [key]: value },
+        }));
+      };
+      const editParam = (id, key, value) => {
+        clearModelFeedback(id);
+        setParamDrafts((prev) => ({
+          ...prev,
+          [id]: { ...(prev[id] || {}), [key]: value },
+        }));
+      };
       const savedTemperatureOf = (id) => {
         const value = savedParamsFor(id)?.temperature;
         return value === undefined || value === null ? '' : String(value);
@@ -5067,16 +6053,18 @@ body.dark .wb-root,
         return entries.sort((a, b) => (a.sort - b.sort) || (a.value - b.value));
       };
       const resetModelDrafts = (id) => {
+        clearModelFeedback(id);
         setTokenDrafts((prev) => ({ ...prev, [id]: { context: '', output: '' } }));
         setParamDrafts((prev) => ({ ...prev, [id]: { temperature: '', reasoningEffort: '' } }));
       };
       const discardModelDrafts = (id) => {
+        clearModelFeedback(id);
         setTokenDrafts((prev) => { const next = { ...prev }; delete next[id]; return next; });
         setParamDrafts((prev) => { const next = { ...prev }; delete next[id]; return next; });
       };
       const finishSave = (m, res, clearSampling) => {
         if (!res.data?.ok) {
-          setMessage('保存失败：' + (res.data?.error || res.status));
+          setModelFeedback({ id: m.id, text: '保存失败：' + (res.data?.error || res.status), bad: true });
           return false;
         }
         if (res.data.contextWindowByModel && res.data.paramsByModel) {
@@ -5090,9 +6078,13 @@ body.dark .wb-root,
         if (clearSampling) {
           setParamDrafts((prev) => { const next = { ...prev }; delete next[m.id]; return next; });
         }
-        setMessage(res.data.applied === false
-          ? '已保存。此 dsh 版本不支持即时刷新 —— 重启一次 dsh 后生效。'
-          : '已保存。下一轮请求按新配置解析；用量分母可能仍显示上一轮快照，发一条消息即可刷新。');
+        setModelFeedback({
+          id: m.id,
+          bad: false,
+          text: res.data.applied === false
+            ? '已保存。此 dsh 版本不支持即时刷新 —— 重启一次 dsh 后生效。'
+            : '已保存，将在下一轮请求生效。',
+        });
         reload();
         prefsApi.reload();
         return true;
@@ -5102,7 +6094,7 @@ body.dark .wb-root,
         const state = buildModelDraftState(m);
         if (!state.dirty) return;
         if (state.problems.length) {
-          setMessage('未保存：' + state.problems.join('；'));
+          setModelFeedback({ id: m.id, text: '未保存：' + state.problems.join('；'), bad: true });
           return;
         }
         const params = {};
@@ -5138,7 +6130,7 @@ body.dark .wb-root,
         if (state.tempDirty || state.effortDirty) return;
         const tokenProblems = state.problems.filter((p) => p.startsWith('输入') || p.startsWith('输出'));
         if (tokenProblems.length) {
-          setMessage('未保存：' + tokenProblems.join('；'));
+          setModelFeedback({ id: m.id, text: '未保存：' + tokenProblems.join('；'), bad: true });
           return;
         }
         const saved = savedParamsFor(m.id);
@@ -5162,9 +6154,19 @@ body.dark .wb-root,
           setSavingParams('');
         }
       };
-      const selectAllVisible = () => { setVisibility(models.map((m) => m.id)); setHideAll(false); setPrefsDirty(true); };      const selectNoneVisible = () => { setVisibility([]); setHideAll(true); setPrefsDirty(true); };
+      // 批量选择只作用于当前筛选结果，不再把搜索框之外的模型静默选进来。
+      const selectableVisible = () => visible.filter((m) => !denied.includes(m.id) && (m.official !== false || includeUnofficial));
+      const selectAllVisible = () => {
+        setVisibility(selectableVisible().map((m) => m.id));
+        setHideAll(false);
+        setPrefsDirty(true);
+      };
+      const selectNoneVisible = () => { setVisibility([]); setHideAll(true); setPrefsDirty(true); };
       const onlyAvailableVisible = () => {
-        setVisibility(models.filter((m) => { const r = resultOf(m.id); return !r || r.ok !== false; }).map((m) => m.id));
+        setVisibility(selectableVisible().filter((m) => {
+          const r = resultOf(m.id);
+          return !r || r.ok !== false;
+        }).map((m) => m.id));
         setHideAll(false);
         setPrefsDirty(true);
       };
@@ -5175,7 +6177,7 @@ body.dark .wb-root,
 
       // 体检与结论保存只依赖控制台：不可用时给出可行动的卡，而不是对 404 空转
       if ((pstatus === 503 || pstatus === 404) && models.length === 0) {
-        return h('div', { style: { display: 'flex', flexDirection: 'column', gap: '12px' } },
+        return h('div', { style: { display: 'flex', flexDirection: 'column', gap: '16px' } },
           h(Card, { title: '可用模型' }, error ? h(Alert, { bad: true }, error) : h('p', { className: 'wb-note', style: { margin: 0 } }, '正在读取模型目录…')),
           h(ConsoleGate, { availability: probesApi.availability, onStartConsole, onProbe: probesApi.probeConsole, busy, feature: '模型体检' }));
       }
@@ -5276,9 +6278,10 @@ body.dark .wb-root,
       const customTokenCount = models.filter(isTokenCustom).length;
       const [probeFilter, setProbeFilter] = useState('all');
       const [search, setSearch] = useState('');
+      const [sortBy, setSortBy] = useState('default');
       const [copiedId, setCopiedId] = useState('');
       if (isInitialLoading(loading, data, error)) return h(Card, { title: '可用模型' }, h(Loading, { text: '正在读取桥的模型目录…' }));
-      const visible = (probeFilter === 'fail'
+      const filtered = (probeFilter === 'fail'
         ? models.filter((m) => resultOf(m.id)?.ok === false)
         : probeFilter === 'untested'
           ? models.filter((m) => !resultOf(m.id))
@@ -5289,24 +6292,74 @@ body.dark .wb-root,
             const q = search.trim().toLowerCase();
             return (m.id || '').toLowerCase().includes(q)
               || (m.name || '').toLowerCase().includes(q)
-              || tagsOf(m).some((t) => t.toLowerCase().includes(q));
+              || tagsOf(m).some((tag) => tag.toLowerCase().includes(q));
           });
-      return h(Card, { title: '可用模型（' + models.length + '）' },
+      const visible = [...filtered].sort((a, b) => {
+        if (sortBy === 'name') return String(a.name || a.id).localeCompare(String(b.name || b.id));
+        if (sortBy === 'context') return effectiveContextForTable(b) - effectiveContextForTable(a);
+        if (sortBy === 'credits') return Number(a.free ? 0 : a.credits ?? Infinity) - Number(b.free ? 0 : b.credits ?? Infinity);
+        if (sortBy === 'probe') {
+          const rank = (m) => { const r = resultOf(m.id); return r ? (r.ok ? 0 : 2) : 1; };
+          return rank(a) - rank(b) || String(a.id).localeCompare(String(b.id));
+        }
+        return 0;
+      });
+      const enabledCount = models.filter((m) => isVisible(m.id)).length;
+      const availableCount = models.filter((m) => resultOf(m.id)?.ok === true).length;
+      return h(Card, { className: 'wb-models-card' },
         error ? h(Alert, { bad: true }, error) : null,
         data && data.ok === false ? h(Alert, { bad: true }, data.error) : null,
         message ? h(Alert, null, message) : null,
-        h('p', { className: 'wb-note', style: { marginTop: 0 } },
-          '模型列表来自桥的动态目录，不需要勾选或保存：选模型时 provider 选 “WorkBuddy” 就能看到全部。体检结论存在 .state.json 的 probe 字段，与控制器共用一份。'),
-        models.length
-          ? h('p', { className: 'wb-note' },
-            // 三段**分开传**：它们各自在词条表里有条目，先拼成一串就查不到词条了
-            `共 ${models.length} 个模型，其中 ${models.filter((m) => m.images).length} 个支持图片输入（名称旁标「图片」），`,
-            `${models.filter((m) => m.reasoning).length} 个支持推理（名称旁标「推理」），`,
-            `${models.filter((m) => m.free).length} 个免费；体检过的 ${models.filter((m) => resultOf(m.id)).length} 个。`)
-          : null,
-        h('div', { className: 'wb-actions split', style: { margin: '12px 0' } },
-          h('div', { className: 'wb-actions-group' },
-            h('input', { className: 'wb-input', placeholder: '搜索模型 / 名称…', value: search, onChange: (e) => setSearch(e.target.value), style: { width: '150px' } }),
+        h('div', { className: 'wb-model-hero' },
+          h('div', { className: 'wb-model-hero-copy' },
+            h('div', { className: 'wb-model-title-row' },
+              h('h3', null, '可用模型'),
+              h('span', { className: 'wb-model-count' }, models.length)),
+            h('p', { className: 'wb-note' }, '勾选要出现在 dsh 选择器里的模型，保存后立即生效。')),
+          h('div', { className: 'wb-model-hero-side' },
+            h('div', { className: 'wb-model-stats', 'aria-label': '模型状态摘要' },
+              h('span', null, h('b', null, enabledCount), h('small', null, '已启用')),
+              h('span', null, h('b', null, availableCount), h('small', null, '体检可用')),
+              h('span', null, h('b', null, models.length), h('small', null, '目录总数'))),
+            h(Btn, {
+              primary: true,
+              disabled: prefsSaving || !prefsDirty,
+              onClick: () => savePrefs(),
+            }, prefsSaving ? '保存中…' : prefsDirty ? '保存显示设置' : '已保存'))),
+        h('div', { className: 'wb-model-toolbar' },
+          h('div', { className: 'wb-model-search' },
+            h('span', { className: 'wb-model-search-icon', 'aria-hidden': 'true' },
+              h('svg', { viewBox: '0 0 16 16', width: 14, height: 14, fill: 'none', 'aria-hidden': 'true' },
+                h('circle', { cx: 7, cy: 7, r: 4.5, stroke: 'currentColor', strokeWidth: 1.5 }),
+                h('path', { d: 'M10.5 10.5 14 14', stroke: 'currentColor', strokeWidth: 1.5, strokeLinecap: 'round' }))),
+            h('input', {
+              className: 'wb-input wb-model-search-input',
+              placeholder: '搜索模型 id / 名称 / 标签',
+              'aria-label': '搜索模型',
+              value: search,
+              onChange: (e) => setSearch(e.target.value),
+            }),
+            search ? h('button', {
+              type: 'button',
+              className: 'wb-model-search-clear',
+              'aria-label': '清除搜索',
+              title: '清除搜索',
+              onClick: () => setSearch(''),
+            }, '×') : null),
+          h(DropdownSelect, {
+            className: 'wb-model-sort',
+            value: sortBy,
+            ariaLabel: '模型排序',
+            onChange: (e) => setSortBy(e.target.value),
+            options: [
+              { value: 'default', label: '默认排序' },
+              { value: 'name', label: '按名称' },
+              { value: 'context', label: '按上下文' },
+              { value: 'credits', label: '按倍率' },
+              { value: 'probe', label: '按体检状态' },
+            ],
+          }),
+          h('div', { className: 'wb-model-filter' },
             h(Segmented, {
               value: probeFilter,
               onChange: (e) => setProbeFilter(e.target.value),
@@ -5316,85 +6369,84 @@ body.dark .wb-root,
                 { value: 'untested', label: `只看未测（${models.filter((m) => !resultOf(m.id)).length}）` },
                 { value: 'custom', label: `已自定义（${customTokenCount}）` },
               ],
-            })),
-          h('div', { className: 'wb-actions-group' },
-            h(Btn, { primary: true, disabled: working === 'probe' || !consoleReady, onClick: () => runProbe('all') }, progress ? `体检中 ${progress.done}/${progress.total}` : '全部体检'),
-            h(Btn, { disabled: working === 'probe' || !consoleReady || !unavailable.length, onClick: () => runProbe('checked') }, `重测不可用的（${unavailable.length}）`),
-            h(Btn, {
-              disabled: !!working || refreshing,
-              onClick: async () => {
-                /*
-                 * 刷新是**一次性的**：旧实现把 `?refresh=1` 拼进轮询用的 path，
-                 * 点一次之后每 120 秒的轮询都绕过 TTL 真打上游；而且点击时
-                 * `setRefreshTick` + `reload()` 会同时发出两个请求（旧缓存可能
-                 * 盖掉新目录）。这里直接用 overridePath 打一次，轮询 path 不变。
-                 */
-                setRefreshing(true);
-                try {
-                  const res = await getJson('/workbuddy/models?refresh=1');
-                  if (res.status === 200 && res.data?.ok !== false) {
-                    // 文案保持**静态**（数量在表头已有）：动态拼接的中文会漏翻
-                    setMessage(Number(res.data?.staleMs) > 0
-                      ? '上游目录刷新失败：正在显示旧缓存，模型列表可能不是最新。'
-                      : '目录已刷新。');
-                  } else {
-                    setMessage('目录刷新失败，请稍后重试。');
-                  }
-                  reload();
-                } catch (e) {
-                  // getJson 在断网时仍会 reject；按钮必须复位并给出可读结论。
-                  setMessage('目录刷新失败，请稍后重试。');
-                } finally { setRefreshing(false); }
-              },
-            }, refreshing ? '刷新中…' : '刷新目录'),
-            h(Btn, { disabled: !!working || !consoleReady, onClick: clearProbes }, '清除体检结论'),
-            h(Btn, { onClick: () => downloadCsv('workbuddy-models.csv',
-              // reasoning / effortCount / efforts 三列：推理能力与实测档位是这块的
-              // 关键信息，导出后应能直接核对（原表只有 images/free，看不出能不能推理）。
-              // efforts 用 `|` 分隔（档位名里没有竖线，CSV 转义不会歧义）。
-              ['id', 'name', 'contextWindow', 'maxTokens', 'credits', 'free', 'images', 'reasoning', 'effortCount', 'efforts', 'onlyReasoning', 'probe', 'probeMs', 'probeError'],
-              models.map((m) => [m.id, m.name, effectiveContextForTable(m) || '', effectiveOutputForTable(m) || '', m.credits ?? '', m.free ? 1 : 0, m.images ? 1 : 0,
-                m.reasoning ? 1 : 0, Array.isArray(m.efforts) ? m.efforts.length : '',
-                Array.isArray(m.efforts) ? m.efforts.join('|') : '', m.onlyReasoning ? 1 : 0,
-                resultOf(m.id) ? (resultOf(m.id).ok ? 'ok' : 'fail') : '', resultOf(m.id)?.ms ?? '', resultOf(m.id)?.error || ''])) }, '导出 CSV'))),
-        !consoleReady ? h('p', { className: 'wb-note' }, '体检需要控制台在跑（结论只由它写，保证两边一致）。') : null,
-        h('p', { className: 'wb-note', style: { margin: '0 0 10px' } },
-          t('目录来源：'),
-          data?.staleMs ? t('旧缓存') : t('上游目录'),
-          data?.at ? ' · ' + fmtClock(data.at) : '',
-          data?.error ? ' · ' + String(data.error) : ''),
-        // ── 模型显示偏好：勾选决定哪些模型出现在 dsh 的模型选择器里 ─────────
-        h('div', { className: 'wb-actions split', style: { marginBottom: '10px' } },
-          h('div', { className: 'wb-actions-group' },
-            h('span', { className: 'wb-label' }, 'dsh 选择器显示'),
-            h(Btn, { disabled: prefsSaving, onClick: selectAllVisible }, '全选'),
-            h(Btn, { disabled: prefsSaving, onClick: selectNoneVisible }, '全不选'),
-            h(Btn, { disabled: prefsSaving || !consoleReady, onClick: onlyAvailableVisible, title: '按体检结论隐藏"不可用"的模型' }, '只留可用的'),
+            }))),
+        h('div', { className: 'wb-model-summary' },
+          h('span', null,
+            `${visible.length}/${models.length}`,
+            ' ',
+            t('个模型匹配'),
+            ' · ',
             visibility === null && !hideAll
-              ? h('span', { className: 'wb-note', style: { margin: 0 } },
-                includeUnofficial ? t('当前：全部显示（含官方目录外）') : t('当前：官方模型全部显示（扩展模型隐藏）'))
+              ? (includeUnofficial ? t('当前：全部显示（含官方目录外）') : t('当前：官方模型全部显示（扩展模型隐藏）'))
               : hideAll
-                ? h('span', { className: 'wb-note', style: { margin: 0 } }, '当前：全部隐藏')
-                : h('span', { className: 'wb-note', style: { margin: 0 } }, `已勾选 ${visibility.length} / ${models.length}`)),
+                ? '当前：全部隐藏'
+                : `已勾选 ${enabledCount} / ${models.length}`),
           h('div', { className: 'wb-actions-group' },
-            h(Btn, { primary: prefsDirty, disabled: prefsSaving || !prefsDirty, onClick: () => savePrefs() }, prefsSaving ? '保存中…' : prefsDirty ? '保存显示设置' : '已保存'),
-            h(Btn, { disabled: prefsSaving, onClick: () => { setVisibility(null); setHideAll(false); setPrefsDirty(true); }, title: '恢复为全部显示（删除偏好，跟随配置的 allow/deny）' }, '恢复全部'),
-            h('label', { className: 'wb-note', style: { display: 'flex', alignItems: 'center', gap: '6px', margin: 0 } },
-              h('input', {
-                type: 'checkbox',
-                checked: includeUnofficial,
-                disabled: prefsSaving,
-                onChange: (e) => { setIncludeUnofficial(e.target.checked); setPrefsDirty(true); },
-              }),
-              t('显示官方目录外的模型'), `（${unofficialCount}）`))),
-        // 上下文和输出在模型详情顶部一起调；这里只提示入口。
-        h('p', { className: 'wb-note', style: { margin: '0 0 10px' } },
-          '上下文和输出在模型详情顶部一起调（留空 = 自动，走官方默认）；表里的「上下文 / 输出」显示实际生效值。'),
+            h(Btn, {
+              disabled: prefsSaving || !visible.length,
+              onClick: selectAllVisible,
+              title: '只保留当前筛选结果；其他模型将隐藏',
+            }, '选择当前结果'),
+            h(Btn, { disabled: prefsSaving, onClick: selectNoneVisible }, '全不选'),
+            h(Btn, {
+              disabled: prefsSaving || !consoleReady || !visible.length,
+              onClick: onlyAvailableVisible,
+              title: '在当前筛选结果中，隐藏体检不可用的模型',
+            }, '只留可用的'))),
+        h('div', { className: 'wb-model-display-options' },
+          h('label', { className: 'wb-check' },
+            h('input', {
+              type: 'checkbox',
+              checked: includeUnofficial,
+              disabled: prefsSaving,
+              onChange: (e) => { setIncludeUnofficial(e.target.checked); setPrefsDirty(true); },
+            }),
+            t('显示官方目录外的模型'), `（${unofficialCount}）`),
+          h(Btn, {
+            sm: true,
+            disabled: prefsSaving,
+            onClick: () => { setVisibility(null); setHideAll(false); setPrefsDirty(true); },
+            title: '恢复为全部显示（删除偏好，跟随配置的 allow/deny）',
+          }, '恢复全部')),
         denied.length
-          ? h('p', { className: 'wb-note', style: { margin: '0 0 8px' } },
+          ? h('p', { className: 'wb-note wb-model-inline-note' },
             '配置里有模型被 modelDeny 排除，它们不会出现在 dsh 选择器里（面板里勾选也不生效）。')
           : null,
-        prefsDirty ? h('p', { className: 'wb-note', style: { margin: '0 0 8px' } }, '有未保存的勾选改动 —— 点「保存显示设置」后才会应用到 dsh 的模型选择器。') : null,
+        prefsDirty ? h('p', { className: 'wb-note wb-model-inline-note' }, '有未保存的勾选改动 —— 点「保存显示设置」后才会应用到 dsh 的模型选择器。') : null,
+        h('details', { className: 'wb-model-tools' },
+          h('summary', null, '目录与体检工具'),
+          h('div', { className: 'wb-model-tools-body' },
+            h('div', { className: 'wb-actions' },
+              h(Btn, { disabled: working === 'probe' || !consoleReady, onClick: () => runProbe('all') }, progress ? `体检中 ${progress.done}/${progress.total}` : '全部体检'),
+              h(Btn, { disabled: working === 'probe' || !consoleReady || !unavailable.length, onClick: () => runProbe('checked') }, `重测不可用的（${unavailable.length}）`),
+              h(Btn, {
+                disabled: !!working || refreshing,
+                onClick: async () => {
+                  // 强制刷新只打一次；120 秒轮询仍走原路径和缓存策略。
+                  setRefreshing(true);
+                  try {
+                    const res = await getJson('/workbuddy/models?refresh=1');
+                    if (res.status === 200 && res.data?.ok !== false) {
+                      setMessage(Number(res.data?.staleMs) > 0
+                        ? '上游目录刷新失败：正在显示旧缓存，模型列表可能不是最新。'
+                        : '目录已刷新。');
+                    } else {
+                      setMessage('目录刷新失败，请稍后重试。');
+                    }
+                    reload();
+                  } catch (e) {
+                    setMessage('目录刷新失败，请稍后重试。');
+                  } finally { setRefreshing(false); }
+                },
+              }, refreshing ? '刷新中…' : '刷新目录'),
+              h(Btn, { disabled: !!working || !consoleReady, onClick: clearProbes }, '清除体检结论'),
+              h(Btn, { onClick: () => downloadCsv('workbuddy-models.csv',
+                ['id', 'name', 'contextWindow', 'maxTokens', 'credits', 'free', 'images', 'reasoning', 'effortCount', 'efforts', 'onlyReasoning', 'probe', 'probeMs', 'probeError'],
+                models.map((m) => [m.id, m.name, effectiveContextForTable(m) || '', effectiveOutputForTable(m) || '', m.credits ?? '', m.free ? 1 : 0, m.images ? 1 : 0,
+                  m.reasoning ? 1 : 0, Array.isArray(m.efforts) ? m.efforts.length : '',
+                  Array.isArray(m.efforts) ? m.efforts.join('|') : '', m.onlyReasoning ? 1 : 0,
+                  resultOf(m.id) ? (resultOf(m.id).ok ? 'ok' : 'fail') : '', resultOf(m.id)?.ms ?? '', resultOf(m.id)?.error || ''])) }, '导出 CSV')),
+            !consoleReady ? h('p', { className: 'wb-note' }, '体检需要控制台在跑（结论只由它写，保证两边一致）。') : null)),
         h('div', { className: 'wb-scroll wb-model-scroll', ref: layoutRef },
           h('table', { className: 'wb-table wb-model-table' + (narrow ? ' wb-narrow' : ''), 'aria-label': '可用模型列表' },
             h('thead', null, h('tr', null,
@@ -5404,20 +6456,42 @@ body.dark .wb-root,
               h('th', null, '模型'), h('th', null, '名称'),
               h('th', { className: 'num', title: '每个模型的输入/输出在「详情」顶部一起调（按该模型官方档位和上限）' }, '上下文 / 输出'),
               h('th', { className: 'num' }, '倍率'), h('th', null, '体检'), h('th', { className: 'wb-actions-col' }, '操作'))),
-            h('tbody', null, visible.flatMap((m) => {
+            h('tbody', null,
+              !visible.length ? h('tr', { className: 'wb-model-empty-row' },
+                h('td', { colSpan: 7 },
+                  h('div', { className: 'wb-model-empty' },
+                    h('strong', null, models.length ? '没有匹配的模型' : '模型目录为空'),
+                    h('p', null, models.length ? '换个关键词，或清除筛选后再看。' : '桥尚未返回模型，请稍后刷新目录。'),
+                    models.length ? h(Btn, {
+                      sm: true,
+                      onClick: () => { setSearch(''); setProbeFilter('all'); },
+                    }, '清除筛选') : null))) : null,
+              visible.flatMap((m) => {
               const probe = resultOf(m.id);
               const open = detail === m.id;
-              const rows = [h('tr', { key: m.id, className: (probe && probe.ok === false ? 'bad ' : '') + (open ? 'open' : '') },
+              const rows = [h('tr', {
+                key: m.id,
+                /*
+                 * 三个状态同时表达：体检失败（bad）、已展开（open）、
+                 * 未勾选进 dsh 选择器（off）。off 必须有视觉区分 ——
+                 * 一百多行里，"不生效的那些"和"生效的"长得一样，勾选状态就等于没显示。
+                 */
+                className: (probe && probe.ok === false ? 'bad ' : '')
+                  + (open ? 'open ' : '')
+                  + (isVisible(m.id) ? '' : 'off'),
+              },
                 h('td', null, h('input', {
                   type: 'checkbox',
                   checked: isVisible(m.id),
-                  disabled: denied.includes(m.id),
+                  disabled: denied.includes(m.id) || (m.official === false && !includeUnofficial),
                   onChange: () => toggleVisible(m.id),
                   // 窄卡片布局会隐藏表头，复选框必须自己说清是哪个模型。
                   'aria-label': t(isVisible(m.id) ? '隐藏' : '显示') + ' ' + m.id,
                   title: denied.includes(m.id)
                     ? '配置里被 modelDeny 排除，勾选不会让它出现在 dsh 选择器里'
-                    : (isVisible(m.id) ? '已显示在 dsh 选择器' : '已隐藏（保存后 dsh 选择器不再出现）'),
+                    : (m.official === false && !includeUnofficial
+                      ? '先开启「显示官方目录外的模型」'
+                      : (isVisible(m.id) ? '已显示在 dsh 选择器' : '已隐藏（保存后 dsh 选择器不再出现）')),
                 })),
                 h('td', null, m.id + (m.id === sampleModel ? ' ★' : '')),
                 h('td', null, m.name ? h(Raw, { text: String(m.name) }) : '',
@@ -5459,6 +6533,8 @@ body.dark .wb-root,
                     ? h('span', { className: 'wb-badge', title: m.promotionText || '促销进行中' }, t('进行中'))
                     : null),
                 h('td', { className: 'num' },
+                  // 卡片布局没有表头了：这个数字必须自带标签，否则「128K / 8K」没人知道是什么
+                  h('span', { className: 'wb-model-meta-label' }, '上下文 / 输出'),
                   (effectiveContextForTable(m) ? fmtContextLength(effectiveContextForTable(m)) : '—') + ' / '
                     + (effectiveOutputForTable(m) ? fmtContextLength(effectiveOutputForTable(m)) : '—'),
                   isTokenCustom(m)
@@ -5496,6 +6572,11 @@ body.dark .wb-root,
                 rows.push(h('tr', { key: m.id + ':detail', className: 'wb-detail-row', id: 'wb-model-detail-' + m.id },
                   h('td', { colSpan: 7 },
                     h('div', { className: 'wb-detail' },
+                      h('div', { className: 'wb-detail-section-head' },
+                        h('div', null,
+                          h('strong', null, '常用参数'),
+                          h('p', { className: 'wb-note' }, '修改只作用于本插件发出的请求，不改 WorkBuddy 客户端。')),
+                        h('span', { className: 'wb-badge wb-model-detail-id' }, m.id)),
                       (() => {
                         const state = buildModelDraftState(m);
                         const levels = Array.isArray(m.efforts)
@@ -5603,82 +6684,80 @@ body.dark .wb-root,
                         if (state.effortDirty) {
                           changeBits.push(`${t('思考强度')} ${state.effortStr ? t(EFFORT_LABELS[state.effortStr] || state.effortStr) : effortDefaultLabel}`);
                         }
-                        const currentBits = [
-                          `${t('输入')} ${state.effectiveContext > 0 ? fmtContextLength(state.effectiveContext) : t('未公开')}${state.contextValue > 0 ? '' : t('（自动）')}`,
-                          `${t('输出')} ${state.effectiveOutput > 0 ? fmtContextLength(state.effectiveOutput) : t('未公开')}${state.outputValue > 0 ? '' : t('（自动）')}`,
-                          `temperature ${state.tempStr || defaultTempText}`,
-                          levels.length
-                            ? `${t('思考强度')} ${state.effortStr ? t(EFFORT_LABELS[state.effortStr] || state.effortStr) : effortDefaultLabel}`
-                            : '',
-                        ].filter(Boolean);
                         const hasSavedOverrides = state.savedContext > 0 || state.savedOutput > 0
                           || String(state.savedTemperature || '').trim() !== ''
                           || String(state.effortSaved || '').trim() !== '';
-                        return h(Fragment, null,
-                          h('div', { className: 'wb-token-section' },
-                            h('div', { className: 'wb-token-head' },
-                              h('span', { className: 'wb-label' }, '上下文窗口（Token）'),
-                              h('span', { className: 'wb-note' },
-                                '输入 = dsh 上下文预算 · 输出 = 发给上游的 max_tokens · 留空 = 自动')),
+                        return h('div', { className: 'wb-detail-modules' },
+                          h('section', { className: 'wb-detail-module' },
+                            h('div', { className: 'wb-detail-module-head' },
+                              h('div', null,
+                                h('strong', null, '上下文与输出'),
+                                h('p', null, 'dsh 上下文预算与上游 max_tokens；留空 = 自动')),
+                              h('span', { className: 'wb-detail-module-tag' }, '自动保存')),
+                            h('div', { className: 'wb-detail-module-body' },
+                            h('div', { className: 'wb-token-field' },
                             h('div', { className: 'wb-token-row' },
                               h('span', { className: 'wb-label wb-token-label' }, '输入（上下文）'),
                               inputOptions.length > 1
                                 ? h('div', { className: 'wb-token-control' },
                                   renderSlider('context', inputOptions, state.contextValue, '上下文窗口输入'))
                                 : null,
-                              h('input', {
-                                className: 'wb-input wb-token-input',
-                                type: 'text',
-                                inputMode: 'numeric',
-                                autoComplete: 'off',
-                                spellCheck: false,
-                                value: state.contextStr,
-                                placeholder: inputPlaceholder,
-                                disabled: saving,
-                                'aria-label': '输入上下文 tokens',
-                                title: state.ctx.value ? `${fmtInt(state.ctx.value)} tokens` : undefined,
-                                onChange: (e) => setTokenField(m.id, 'context', e.target.value),
-                                onBlur: () => saveTokenSettings(m),
-                                onKeyDown: (e) => {
-                                  if (e.key !== 'Enter') return;
-                                  e.preventDefault();
-                                  saveTokenSettings(m);
-                                },
-                              }),
-                              state.contextValue > 0
-                                ? h('span', { className: 'wb-badge', title: '已手动设置输入上下文' }, '已覆盖')
-                                : null),
-                            h('p', { className: 'wb-note' }, ...inputInfoChildren),
-                            renderProblem('输入'),
+                              h('div', { className: 'wb-token-value' },
+                                h('input', {
+                                  className: 'wb-input wb-token-input',
+                                  type: 'text',
+                                  inputMode: 'numeric',
+                                  autoComplete: 'off',
+                                  spellCheck: false,
+                                  value: state.contextStr,
+                                  placeholder: inputPlaceholder,
+                                  disabled: saving,
+                                  'aria-label': '输入上下文 tokens',
+                                  title: state.ctx.value ? `${fmtInt(state.ctx.value)} tokens` : undefined,
+                                  onChange: (e) => setTokenField(m.id, 'context', e.target.value),
+                                  onBlur: () => saveTokenSettings(m),
+                                  onKeyDown: (e) => {
+                                    if (e.key !== 'Enter') return;
+                                    e.preventDefault();
+                                    saveTokenSettings(m);
+                                  },
+                                }),
+                                state.contextValue > 0
+                                  ? h('span', { className: 'wb-badge', title: '已手动设置输入上下文' }, '已覆盖')
+                                  : null)),
+                            h('p', { className: 'wb-note wb-token-hint' }, ...inputInfoChildren),
+                            renderProblem('输入')),
+                            h('div', { className: 'wb-token-field' },
                             h('div', { className: 'wb-token-row' },
                               h('span', { className: 'wb-label wb-token-label' }, '输出（max_tokens）'),
                               outputOptions.length > 1
                                 ? h('div', { className: 'wb-token-control' },
                                   renderSlider('output', outputOptions, state.outputValue, '最大输出 tokens'))
                                 : null,
-                              h('input', {
-                                className: 'wb-input wb-token-input',
-                                type: 'text',
-                                inputMode: 'numeric',
-                                autoComplete: 'off',
-                                spellCheck: false,
-                                value: state.outputStr,
-                                placeholder: outputPlaceholder,
-                                disabled: saving,
-                                'aria-label': '最大输出 tokens',
-                                title: state.out.value ? `${fmtInt(state.out.value)} tokens` : undefined,
-                                onChange: (e) => setTokenField(m.id, 'output', e.target.value),
-                                onBlur: () => saveTokenSettings(m),
-                                onKeyDown: (e) => {
-                                  if (e.key !== 'Enter') return;
-                                  e.preventDefault();
-                                  saveTokenSettings(m);
-                                },
-                              }),
-                              state.outputValue > 0
-                                ? h('span', { className: 'wb-badge', title: '已手动设置输出上限' }, '已覆盖')
-                                : null),
-                            h('p', { className: 'wb-note' }, ...outputInfoChildren),
+                              h('div', { className: 'wb-token-value' },
+                                h('input', {
+                                  className: 'wb-input wb-token-input',
+                                  type: 'text',
+                                  inputMode: 'numeric',
+                                  autoComplete: 'off',
+                                  spellCheck: false,
+                                  value: state.outputStr,
+                                  placeholder: outputPlaceholder,
+                                  disabled: saving,
+                                  'aria-label': '最大输出 tokens',
+                                  title: state.out.value ? `${fmtInt(state.out.value)} tokens` : undefined,
+                                  onChange: (e) => setTokenField(m.id, 'output', e.target.value),
+                                  onBlur: () => saveTokenSettings(m),
+                                  onKeyDown: (e) => {
+                                    if (e.key !== 'Enter') return;
+                                    e.preventDefault();
+                                    saveTokenSettings(m);
+                                  },
+                                }),
+                                state.outputValue > 0
+                                  ? h('span', { className: 'wb-badge', title: '已手动设置输出上限' }, '已覆盖')
+                                  : null)),
+                            h('p', { className: 'wb-note wb-token-hint' }, ...outputInfoChildren),
                             renderProblem('输出'),
                             state.warnings.length
                               ? h('p', { className: 'wb-note wb-token-warn' },
@@ -5686,14 +6765,16 @@ body.dark .wb-root,
                                   h('span', { key: 'w' + i }, w),
                                   i < state.warnings.length - 1 ? ' ' : null,
                                 ]))
-                              : null,
-                            h('p', { className: 'wb-note' },
-                              '输入/输出改完自动保存（滑块松开、输入框失焦/回车）；采样参数点「保存修改」。'),
-                            h('p', { className: 'wb-note' },
-                              '下一轮请求生效；用量弹层的分母可能停留在上一轮，发一条消息即可刷新。')),
-                          h('div', { className: 'wb-token-section', style: { marginTop: '12px' } },
-                            h('div', { className: 'wb-token-head' },
-                              h('span', { className: 'wb-label' }, '采样参数')),
+                              : null),
+                            h('p', { className: 'wb-detail-module-note' },
+                              '输入/输出修改后自动保存；下一轮请求生效。'))),
+                          h('section', { className: 'wb-detail-module' },
+                            h('div', { className: 'wb-detail-module-head' },
+                              h('div', null,
+                                h('strong', null, '采样参数'),
+                                h('p', null, 'temperature 与思考强度；留空跟随模型默认')),
+                              h('span', { className: 'wb-detail-module-tag' }, '手动保存')),
+                            h('div', { className: 'wb-detail-module-body' },
                             h('div', { className: 'wb-token-row' },
                               h('span', { className: 'wb-label wb-token-label' }, 'temperature'),
                               h('input', {
@@ -5733,20 +6814,27 @@ body.dark .wb-root,
                                 title: preset.hint,
                                 onClick: () => editParam(m.id, 'temperature', preset.value),
                               }, preset.label))),
+                            /*
+                             * 原来这里是四段并列说明（发散程度 / 留空默认 / 两项独立 / 不改客户端），
+                             * 每段都占一行、字号一样，读起来像免责声明。合并成一段：
+                             * 只留「怎么理解 + 留空会怎样 + 作用范围」三件事。
+                             */
                             h('p', { className: 'wb-note' },
-                              'temperature 控制回答的发散程度，思考强度控制回答前的思考深度；max_tokens 在上方和输入一起保存。'),
-                            h('p', { className: 'wb-note' },
-                              '留空 = 使用 WorkBuddy 默认：temperature = ', defaultTempText, '；思考强度 = 模型默认档位。清空后保存即恢复默认。'),
-                            h('p', { className: 'wb-note' },
-                              'temperature / 思考强度两项互相独立；只改一项不会影响另一项。'),
-                            h('p', { className: 'wb-note' },
-                              '这些参数只作用于本插件发给上游的请求，不会修改 WorkBuddy 客户端。')),
-                          h('div', { className: 'wb-token-savebar' },
+                              'temperature 控制发散程度、思考强度控制思考深度，两项互相独立；留空 = WorkBuddy 默认（temperature = ',
+                              defaultTempText,
+                              '）。这些参数只作用于本插件的请求，不改客户端。'))),
+                          h('div', { className: 'wb-token-savebar wb-detail-savebar' },
+                            modelFeedback.id === m.id && modelFeedback.text
+                              ? h('p', {
+                                className: 'wb-note wb-model-feedback' + (modelFeedback.bad ? ' bad' : ''),
+                                role: modelFeedback.bad ? 'alert' : 'status',
+                              }, modelFeedback.text)
+                              : null,
                             state.problems.length
                               ? h('p', { className: 'wb-note wb-token-problem' }, '请先修正标红的输入。')
                               : state.dirty
                                 ? h('p', { className: 'wb-note' }, t('未保存的修改：'), changeBits.join(' · '))
-                                : h('p', { className: 'wb-note' }, t('当前配置：'), currentBits.join(' · ')),
+                                : null,
                             h('div', { className: 'wb-actions', style: { marginTop: '2px' } },
                               h(Btn, {
                                 sm: true,
@@ -5764,7 +6852,10 @@ body.dark .wb-root,
                                 onClick: () => saveModelSettings(m),
                               }, saving ? '保存中…' : (state.dirty ? '保存修改' : '已保存')))));
                       })(),
-                      h('div', { className: 'wb-detail-grid' },
+                      h('details', { className: 'wb-detail-meta' },
+                        h('summary', null, '能力与来源'),
+                        h('div', { className: 'wb-detail-grid' },
+                        h('div', { className: 'wb-detail-group-title' }, '来源与计费'),
                         h(DetailItem, { label: '模型 ID', value: m.id }),
                         h(DetailItem, { label: '名称', value: m.name || '—' }),
                         h(DetailItem, { label: '厂商标识', value: m.vendor || '—', hint: '上游返回的厂商代码（单字母），不是厂商名' }),
@@ -5797,6 +6888,7 @@ body.dark .wb-root,
                         m.promotionUntil
                           ? h(DetailItem, { label: '促销截止', value: m.promotionUntil })
                           : null,
+                        h('div', { className: 'wb-detail-group-title' }, '能力与运行'),
                         h(DetailItem, { label: '多模态', value: m.images ? '支持图片' : '纯文本' }),
                         /*
                          * 推理能力一行要能分辨**三种**情形（这块最容易含糊）：
@@ -5858,16 +6950,24 @@ body.dark .wb-root,
                             style: b.color ? { background: b.color + '22', color: b.color, borderColor: b.color + '55' } : undefined,
                           }, b.label)))
                         : null,
-                      probe && probe.ok === false && probe.error ? h('p', { className: 'wb-note', style: { margin: '8px 0 0' } }, '体检错误：' + probe.error) : null,
-                      m.description ? h('p', { className: 'wb-note', style: { margin: '8px 0 0' } }, m.description) : null,
-                      h('div', { className: 'wb-actions', style: { marginTop: '10px' } },
+                        probe && probe.ok === false && probe.error ? h('p', { className: 'wb-note', style: { margin: '8px 0 0' } }, '体检错误：' + probe.error) : null,
+                        m.description ? h('p', { className: 'wb-note', style: { margin: '8px 0 0' } }, m.description) : null),
+                      h('div', { className: 'wb-actions wb-detail-actions' },
                         h(Btn, { onClick: () => onUseModel(m.id) }, '用这个模型对话 →'),
                         h(Btn, { onClick: () => { copyText(m.id); setCopiedId(m.id); setTimeout(() => setCopiedId(''), 2000); } }, copiedId === m.id ? '已复制 ✓' : '复制 ID'),
                         h(Btn, { onClick: () => setDetail('') }, '收起'))))));
               }
               return rows;
             })))),
-        probes?.updatedAt ? h('p', { className: 'wb-note' }, '体检结论更新于 ' + fmtTime(probes.updatedAt) + (probes.lastRun ? `（本轮 ${probes.lastRun.count} 个，范围 ${probes.lastRun.scope}）` : '')) : null);
+        h('div', { className: 'wb-model-footer' },
+          h('span', null,
+            t('目录来源：'),
+            data?.staleMs ? t('旧缓存') : t('上游目录'),
+            data?.at ? ' · ' + fmtClock(data.at) : '',
+            data?.error ? ' · ' + String(data.error) : ''),
+          h('span', { 'aria-hidden': 'true' }, '·'),
+          h('span', null, `${models.filter((m) => m.images).length} 支持图片 · ${models.filter((m) => m.reasoning).length} 支持推理 · ${models.filter((m) => m.free).length} 免费`)),
+        probes?.updatedAt ? h('p', { className: 'wb-note wb-model-probe-updated' }, '体检结论更新于 ' + fmtTime(probes.updatedAt) + (probes.lastRun ? `（本轮 ${probes.lastRun.count} 个，范围 ${probes.lastRun.scope}）` : '')) : null);
     }
 
     // ─────────────────────────── 对话测试 ───────────────────────────

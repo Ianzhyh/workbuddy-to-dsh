@@ -252,6 +252,16 @@ export class BridgeClient {
     return this.#json('/v1/checkin', { method: claim ? 'POST' : 'GET', signal, timeoutMs: 20000 });
   }
 
+  /** 本机所有已登录账号的签到状态（只读；桥侧逐个查上游，慢一点但不多）。 */
+  checkinAccounts({ signal } = {}) {
+    return this.#json('/v1/checkin/accounts', { signal, timeoutMs: 60000 });
+  }
+
+  /** 多账号一次性领取（逐个串行，四个账号约十几秒 —— 超时给足）。 */
+  checkinAll({ signal } = {}) {
+    return this.#json('/v1/checkin/all', { method: 'POST', signal, timeoutMs: 120000 });
+  }
+
   /**
    * `POST /v1/web_search`：WorkBuddy 原生网页搜索（不走 DeepSeek）。
    *

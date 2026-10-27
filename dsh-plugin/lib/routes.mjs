@@ -700,6 +700,37 @@ export function createRouteTable(deps) {
     },
     {
       kind: 'exact',
+      path: '/workbuddy/checkin/accounts',
+      async handler(req, res) {
+        if (req.method !== 'GET' && req.method !== 'HEAD') {
+          return sendJson(res, 405, { ok: false, error: `${req.method} not allowed` });
+        }
+        try {
+          const result = await client.checkinAccounts();
+          sendJson(res, 200, { ok: true, ...result });
+        } catch (error) {
+          sendJson(res, 200, { ok: false, error: String(error?.message || error) });
+        }
+      },
+    },
+    {
+      kind: 'exact',
+      path: '/workbuddy/checkin/all',
+      async handler(req, res) {
+        if (req.method !== 'POST') return sendJson(res, 405, { ok: false, error: 'POST only' });
+        // 会往每个账号各发一次领取请求：必须带面板头，避免被同机页面顺手触发
+        if (!guard(req)) return sendJson(res, 403, { ok: false, error: 'missing x-workbuddy-panel header' });
+        try {
+          const result = await client.checkinAll();
+          if (result?.ok !== false) onUpstreamMutation();
+          sendJson(res, 200, { ok: true, ...result });
+        } catch (error) {
+          sendJson(res, 200, { ok: false, error: String(error?.message || error) });
+        }
+      },
+    },
+    {
+      kind: 'exact',
       path: '/workbuddy/bridge',
       async handler(req, res) {
         if (req.method !== 'POST') return sendJson(res, 405, { ok: false, error: 'POST only' });

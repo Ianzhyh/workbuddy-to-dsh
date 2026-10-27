@@ -288,6 +288,15 @@ async function startStubUpstream(models = ['stub-model'], opts = {}) {
           res.writeHead(step.status || 200, { 'content-type': step.type || 'application/json' });
           return res.end(step.raw ?? '{}');
         }
+        /*
+         * `opts.chatSse`：按顺序逐条写出给定的 SSE 原始块（每项已含 `data: ...\n\n`）。
+         * 用于验证「桥对流式帧做了什么改写」—— 例如逐字符 reasoning 的分片下发。
+         */
+        if (Array.isArray(opts.chatSse)) {
+          res.writeHead(200, { 'content-type': 'text/event-stream' });
+          for (const block of opts.chatSse) res.write(block);
+          return res.end();
+        }
         res.writeHead(200, { 'content-type': 'text/event-stream' });
         res.write('data: {"choices":[{"delta":{"content":"ok"}}]}\n\n');
         res.write('data: {"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":1,"total_tokens":4}}\n\n');
@@ -5015,7 +5024,7 @@ test('桥：chat 流式把逐字符 reasoning 聚合，且每个 data 帧都有 
     const reasoningFrames = events.filter((e) => e !== '[DONE]')
       .flatMap((e) => e.choices || [])
       .filter((c) => typeof c.delta?.reasoning_content === 'string');
-    assert.equal(reasoningFrames.length, 1, 'reasoning 应合并成一帧');
+    assert.equal(reasoningFrames.length, 1, '短于分片阈值的 reasoning 仍合并成一帧（Cherry 场景：不能每字符一块）');
   } finally {
     await bridge.stop();
     try { await stub.close(); } catch { /* 忽略 */ }
@@ -5303,5 +5312,218 @@ test('桥：连接池排队超过上限时按超时失败，不能无限挂着',
     await bridge.stop();
     try { await stub.close(); } catch { /* 忽略 */ }
     rmSync(bridge.dir, { recursive: true, force: true });
+  }
+});
+
+/**
+ * 逐字符 reasoning 必须**分片下发**，不能攒到正文才发。
+ *
+ * 现场症状（2026-10-26）：dsh 的 sessionStats 把一轮 15.8 秒的思考算成
+ * TTFT=15755ms、解码段只剩 1701ms，于是 2045 个输出 token 被显示成
+ * 1202 tok/s（真实端到端约 130）。根因在桥的 SSE 归一：为了修 Cherry Studio
+ * 的 issue #9（每字符一个思考块），旧实现把整段 `reasoning_content` 扣在
+ * `reasoningBuf` 里，直到正文/工具/终止帧才一次性 flush —— 于是任何按
+ * 「首 token 到达时间」测量 TTFT 的客户端都会把整段思考算进首字延迟。
+ *
+ * 断言用「≥2 帧」而不是「等于 64 字符一帧」：阈值是实现细节，可调；
+ * 但不许无限期扣住。同时钉住两件不能坏的事：内容不丢字、顺序仍在正文之前。
+ */
+test('桥：逐字符 reasoning 分片下发（不能攒到正文帧才发，否则客户端 TTFT 失真）', { timeout: 60_000 }, async () => {
+  const chars = '这是一个用来验证分片阈值的思考过程，长度必须超过阈值。'.repeat(8);
+  assert.ok(chars.length > 128, `夹具要明显超过阈值（当前 ${chars.length} 字符）`);
+
+  const chunk = (delta, finish) => `data: ${JSON.stringify({
+    id: 'c1', object: 'chat.completion.chunk', created: 1, model: 'stub-model',
+    choices: [{ index: 0, delta, finish_reason: finish ?? null }],
+  })}\n\n`;
+
+  const sse = [];
+  for (const ch of chars) sse.push(chunk({ reasoning_content: ch }));
+  sse.push(chunk({ content: '完成' }));
+  sse.push(`data: {"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":5,"total_tokens":8}}\n\n`);
+  sse.push('data: [DONE]\n\n');
+
+  const stub = await startStubUpstream(['stub-model'], { chatSse: sse });
+  const bridge = await startBridge(
+    { CODEBUDDY_ENDPOINT: stub.base, WORKBUDDY_SKIP_MODEL_PREFLIGHT: '1' },
+    { auth: READABLE_FAKE_AUTH },
+  );
+  try {
+    const res = await fetch(`${bridge.baseUrl}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { ...auth, 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'stub-model', stream: true, messages: [{ role: 'user', content: 'hi' }] }),
+    });
+    assert.equal(res.status, 200);
+    const text = await res.text();
+
+    const frames = text.split('\n\n')
+      .map((block) => block.split('\n').find((line) => line.startsWith('data:')))
+      .filter(Boolean)
+      .map((line) => line.slice(5).trim())
+      .filter((raw) => raw && raw !== '[DONE]')
+      .map((raw) => { try { return JSON.parse(raw); } catch { return null; } })
+      .filter(Boolean);
+
+    const reasoningIdx = [];
+    let joined = '';
+    frames.forEach((frame, i) => {
+      const value = frame.choices?.[0]?.delta?.reasoning_content;
+      if (typeof value === 'string' && value) { reasoningIdx.push(i); joined += value; }
+    });
+
+    assert.equal(joined, chars, '分片不能丢字或改序');
+    assert.ok(
+      reasoningIdx.length >= 2,
+      `逐字符 reasoning 必须分片下发（实得 ${reasoningIdx.length} 帧）—— 攒到正文才发会让客户端把整段思考算进 TTFT`,
+    );
+
+    const firstContent = frames.findIndex((f) => {
+      const value = f.choices?.[0]?.delta?.content;
+      return typeof value === 'string' && value !== '';
+    });
+    assert.ok(firstContent > 0, '正文帧必须存在');
+    assert.ok(reasoningIdx.at(-1) < firstContent, 'reasoning 必须全部在正文之前');
+  } finally {
+    await bridge.stop();
+    try { await stub.close(); } catch { /* 忽略 */ }
+    rmSync(bridge.dir, { recursive: true, force: true });
+  }
+});
+
+/**
+ * 多账号签到：本机每个已登录账号各领各的。
+ *
+ * 钉住三件容易做错的事：
+ *   1. **按 uid 去重** —— 客户端换号会留下带时间戳的旧快照，不去重就会重复领、
+ *      并在面板里列出同一个人的好几行；
+ *   2. **没有签到活动 ≠ 失败** —— 国际版网关没有积分活动，报成 failed 会让用户
+ *      以为账号坏了（而且 `failed` 是要红的）；
+ *   3. **响应里不能有令牌** —— 这个接口会一次列出本机所有账号。
+ */
+test('桥：多账号签到 —— 按 uid 去重、逐个领取、无活动不算失败', { timeout: 90_000 }, async () => {
+  // 目录本身就是 auth 目录（mkdtemp 已建好），避免再依赖 mkdirSync
+  const authDir = mkdtempSync(join(tmpdir(), 'wb-multi-checkin-'));
+  const jwtFor = (uid) => 'x.' + Buffer.from(JSON.stringify({
+    sub: uid,
+    exp: Math.floor(Date.now() / 1000) + 3600,
+  })).toString('base64url') + '.y';
+  const writeInfo = (name, uid, domain, mtimeSec) => {
+    const file = join(authDir, name);
+    writeFileSync(file, JSON.stringify({
+      auth: { accessToken: jwtFor(uid), refreshToken: 'r', domain, expiresAt: Date.now() + 86_400_000 },
+      account: { uid, nickname: '昵称-' + uid, uin: '100' },
+    }));
+    if (mtimeSec) utimesSync(file, mtimeSec, mtimeSec);
+  };
+  // 同一 uid 的两个快照：旧的那个必须被丢掉（否则会重复出现在列表里）
+  writeInfo('a-old.info', 'uid-a', 'www.workbuddy.cn', 1_700_000_000);
+  writeInfo('a-new.info', 'uid-a', 'www.workbuddy.cn', 1_700_000_100);
+  writeInfo('b.info', 'uid-b', 'www.workbuddy.ai', 1_700_000_200);
+
+  const seen = [];
+  const upstream = createServer((req, res) => {
+    const path = new URL(req.url, 'http://127.0.0.1').pathname;
+    const uid = String(req.headers['x-user-id'] || '');
+    seen.push(`${uid} ${path}`);
+    res.writeHead(200, { 'content-type': 'application/json' });
+    if (path === '/v2/billing/meter/daily-checkin') {
+      if (uid === 'uid-b') return res.end(JSON.stringify({ code: 10086, msg: '签到活动未开启或已过期' }));
+      return res.end(JSON.stringify({ code: 0, data: { credit: 100, streak_days: 3 } }));
+    }
+    if (path === '/v2/billing/meter/checkin-activity-status') {
+      return res.end(JSON.stringify({
+        code: 0,
+        data: { active: uid !== 'uid-b', today_checked_in: false, daily_credit: 100 },
+      }));
+    }
+    return res.end(JSON.stringify({ code: 0, data: {} }));
+  });
+  await new Promise((r) => upstream.listen(0, '127.0.0.1', r));
+
+  const bridge = await startBridge(
+    {
+      WORKBUDDY_AUTH_DIR: authDir,
+      WORKBUDDY_BILLING_BASE: `http://127.0.0.1:${upstream.address().port}`,
+      WORKBUDDY_SKIP_MODEL_PREFLIGHT: '1',
+    },
+    { auth: authFileFor('uid-a') },
+  );
+  try {
+    const list = await (await fetch(`${bridge.baseUrl}/v1/checkin/accounts`, {
+      headers: auth, signal: AbortSignal.timeout(40000),
+    })).json();
+    assert.deepEqual(list.accounts.map((a) => a.userId).sort(), ['uid-a', 'uid-b'],
+      `同一 uid 的多个快照必须去重，实得 ${JSON.stringify(list.accounts.map((a) => a.userId))}`);
+    assert.ok(!JSON.stringify(list).includes('accessToken'), '响应里不能出现令牌字段');
+    const rowA = list.accounts.find((x) => x.userId === 'uid-a');
+    assert.equal(rowA.current, true, '当前正在跑模型的账号要打标记');
+    assert.equal(rowA.region, 'cn');
+    assert.equal(list.accounts.find((x) => x.userId === 'uid-b').region, 'intl', '国际版要看登录域名');
+    // 只读路径也要标出「没有签到活动」：否则面板只能显示「未签」，像是漏签了
+    assert.equal(list.accounts.find((x) => x.userId === 'uid-b').noActivity, true);
+    assert.equal(list.totals.skipped, 1);
+
+    const claim = await (await fetch(`${bridge.baseUrl}/v1/checkin/all`, {
+      method: 'POST', headers: auth, signal: AbortSignal.timeout(60000),
+    })).json();
+    assert.equal(claim.totals.claimed, 1, 'uid-a 应当领到 1 次');
+    assert.equal(claim.totals.failed, 0, `「没有签到活动」不能算失败，实得 ${JSON.stringify(claim.totals)}`);
+    assert.equal(claim.totals.skipped, 1);
+    const rowB = claim.accounts.find((x) => x.userId === 'uid-b');
+    assert.equal(rowB.noActivity, true);
+    assert.equal(rowB.error, undefined, '无活动不能同时写成错误');
+    assert.ok(seen.some((c) => c.startsWith('uid-b /v2/billing/meter/daily-checkin')),
+      'B 也必须真的问过上游（否则 skipped 是假的）');
+  } finally {
+    await bridge.stop();
+    upstream.close();
+    rmSync(authDir, { recursive: true, force: true });
+  }
+});
+
+/**
+ * 单账号签到的「没有活动」分支：必须是 200 + noActivity，而不是 502 失败。
+ *
+ * 现场症状（2026-10-26）：国际版账号的签到卡片上写着「领取失败：签到活动未开启
+ * 或已过期」，用户以为账号坏了。实际是那个网关根本没有积分活动 —— 桥把它当异常
+ * 抛出，界面就只能报错。这条用例把「没活动」钉成一种**正常状态**。
+ */
+test('桥：单账号签到「没有活动」回 200 + noActivity（不是失败）', { timeout: 60_000 }, async () => {
+  const authDir = mkdtempSync(join(tmpdir(), 'wb-noactivity-'));
+  const upstream = createServer((req, res) => {
+    const path = new URL(req.url, 'http://127.0.0.1').pathname;
+    res.writeHead(200, { 'content-type': 'application/json' });
+    if (path === '/v2/billing/meter/daily-checkin') {
+      return res.end(JSON.stringify({ code: 10086, msg: '签到活动未开启或已过期' }));
+    }
+    if (path === '/v2/billing/meter/checkin-activity-status') {
+      return res.end(JSON.stringify({ code: 0, data: { active: false, today_checked_in: false } }));
+    }
+    return res.end(JSON.stringify({ code: 0, data: {} }));
+  });
+  await new Promise((r) => upstream.listen(0, '127.0.0.1', r));
+
+  const bridge = await startBridge(
+    {
+      WORKBUDDY_AUTH_DIR: authDir,
+      WORKBUDDY_BILLING_BASE: `http://127.0.0.1:${upstream.address().port}`,
+      WORKBUDDY_SKIP_MODEL_PREFLIGHT: '1',
+    },
+    { auth: authFileFor('uid-intl', 'www.workbuddy.ai') },
+  );
+  try {
+    const res = await fetch(`${bridge.baseUrl}/v1/checkin`, {
+      method: 'POST', headers: auth, signal: AbortSignal.timeout(30000),
+    });
+    const body = await res.json();
+    assert.equal(res.status, 200, '「没有签到活动」不是失败，不能回 502');
+    assert.equal(body.ok, true);
+    assert.equal(body.noActivity, true, '必须明确标出 noActivity，界面才不会写成「领取失败」');
+    assert.equal(body.status?.active, false, '顺带把状态带回，界面可以显示「无签到活动」');
+  } finally {
+    await bridge.stop();
+    upstream.close();
+    rmSync(authDir, { recursive: true, force: true });
   }
 });
