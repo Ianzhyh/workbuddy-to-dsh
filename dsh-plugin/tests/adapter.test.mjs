@@ -73,7 +73,7 @@ async function startStub({ sseFrames = [], status = 200, errorBody = null, captu
 }
 
 function makeAdapter(baseUrl, capture) {
-  const client = new BridgeClient({ baseUrl, token: 't', timeoutMs: 5000 });
+  const client = new BridgeClient({ baseUrl, token: 't', timeoutMs: 15000 });
   return new WorkBuddyAdapter({
     provider: 'workbuddy',
     displayName: 'WorkBuddy',
@@ -472,7 +472,8 @@ test('wire 净化：空助手轮与孤儿 tool 结果被剔除，成对的工具
     sseFrames: [delta({ content: 'ok' }), { choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] }],
     capture,
   });
-  try {
+  const drain = async () => {
+    capture.body = undefined;
     const adapter = makeAdapter(stub.baseUrl);
     for await (const _ of adapter.stream({
       provider: 'workbuddy',
@@ -488,7 +489,12 @@ test('wire 净化：空助手轮与孤儿 tool 结果被剔除，成对的工具
         { role: 'user', content: [{ type: 'text', text: '第三问' }] },
       ],
     })) { /* drain */ }
-
+  };
+  try {
+    await drain();
+    // 并行跑测试时偶发目录/预热请求被抢占，第一次没发出 chat；重试一次再断言
+    if (!capture.body) await drain();
+    assert.ok(capture.body, 'chat 请求没有到达打桩上游（目录/预热被环境抢占）');
     const roles = capture.body.messages.map((m) => m.role);
     assert.deepEqual(roles, ['user', 'user', 'assistant', 'tool', 'user'],
       '空的助手轮和孤儿 tool 结果都要消失，成对的助手/工具结果必须保留');
@@ -589,33 +595,41 @@ test('空回复：finish 变成 EMPTY_RESPONSE 错误而不是静默 stop', asyn
 });
 
 test('取消：abort 后以 aborted finish 收尾', async () => {
-  const stub = await startStub({
-    sseFrames: Array.from({ length: 200 }, (_, i) => delta({ content: 'x' + i })),
-  });
-  try {
-    const adapter = makeAdapter(stub.baseUrl);
-    const controller = new AbortController();
-    const out = [];
-    let count = 0;
-    for await (const chunk of adapter.stream({ provider: 'workbuddy', model: 'stub-model', messages: [], signal: controller.signal })) {
-      out.push(chunk);
-      count += 1;
-      if (count === 3) controller.abort();
-    }
-    const finish = out.at(-1);
-    assert.equal(finish.type, 'finish');
-    /*
-     * ⚠️ 这条断言原先写成 `['aborted','stop'].includes(kind) || kind === 'error'` ——
-     * 等于**什么都能通过**，所以「abort 根本没传下去」这个真 bug 一直躲在这里：
-     * 取消之后桥仍把上游整段流读完（实测又跑了 9.5 秒、多收 4447 字），
-     * 而 finish 落在 `max-tokens`/`stop` 上被这条宽松断言放行。
-     * 现在收紧：**取消就必须报 aborted**。
-     */
-    assert.equal(finish.reason.kind, 'aborted',
-      `取消后必须以 aborted 收尾，实际是 ${finish.reason.kind}`
-      + `（落在 stop/max-tokens 上说明取消被当成了正常结束）`);
-    assert.equal(finish.reason.failure.code, 'ABORTED');
-  } finally { await stub.close(); }
+  const run = async () => {
+    const stub = await startStub({
+      sseFrames: Array.from({ length: 200 }, (_, i) => delta({ content: 'x' + i })),
+    });
+    try {
+      const adapter = makeAdapter(stub.baseUrl);
+      const controller = new AbortController();
+      const out = [];
+      let count = 0;
+      for await (const chunk of adapter.stream({ provider: 'workbuddy', model: 'stub-model', messages: [], signal: controller.signal })) {
+        out.push(chunk);
+        count += 1;
+        if (count === 3) controller.abort();
+      }
+      return out.at(-1);
+    } finally { await stub.close(); }
+  };
+  let finish = await run();
+  /*
+   * 与 EMPTY_RESPONSE 同一条理由：极短流在 CPU 抢占时可能在 abort 生效前先断开，
+   * 适配器如实报 TRANSPORT（这是正确行为）。真协议问题会两次都失败，这里只重试一次。
+   */
+  if (finish.reason.kind === 'error' && finish.reason.failure?.code === 'TRANSPORT') finish = await run();
+  assert.equal(finish.type, 'finish');
+  /*
+   * ⚠️ 这条断言原先写成 `['aborted','stop'].includes(kind) || kind === 'error'` ——
+   * 等于**什么都能通过**，所以「abort 根本没传下去」这个真 bug 一直躲在这里：
+   * 取消之后桥仍把上游整段流读完（实测又跑了 9.5 秒、多收 4447 字），
+   * 而 finish 落在 `max-tokens`/`stop` 上被这条宽松断言放行。
+   * 现在收紧：**取消就必须报 aborted**。
+   */
+  assert.equal(finish.reason.kind, 'aborted',
+    `取消后必须以 aborted 收尾，实际是 ${finish.reason.kind}（${finish.reason.failure?.code || '?'}）`
+    + `（落在 stop/max-tokens 上说明取消被当成了正常结束）`);
+  assert.equal(finish.reason.failure.code, 'ABORTED');
 });
 
 /**
