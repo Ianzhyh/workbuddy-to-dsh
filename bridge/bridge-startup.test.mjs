@@ -19,10 +19,43 @@ import { mkdtempSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSy
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { pickBridgePort, isPortInUseError, BRIDGE_PORT_MIN, BRIDGE_PORT_MAX } from '../tools/dev/bridge-ports.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const BRIDGE = join(HERE, '..', 'bridge', 'workbuddy-bridge.mjs');
 const TOKEN = 'test-token-badport-0123456789';
+
+/*
+ * 本文件里起过的子进程 —— 由文件级 `test.after` 统一收尾。
+ *
+ * 为什么需要：本文件的三个进程级用例都是「spawn → 读输出 → 断言 → finally kill」。
+ * `finally` 能覆盖断言失败，但覆盖不了**断言之前**的异常（spawn 之后、进 try 之前
+ * 那一小段，以及用例里第一个 await 抛错的情形）。一旦漏杀，子进程的 stdout/stderr
+ * 管道挂在测试进程上，`node --test` 跑完所有用例后**不退出** ——
+ * CI 上表现为 job 跑满 timeout 被 cancel，而不是一条能看懂的失败。
+ * 同批的 `bridge.test.mjs` 就是这么挂住的（见 `bridge-ports.mjs` 的注释）。
+ */
+const liveChildren = new Set();
+
+/** 起一个子进程并登记，返回它（收尾由 `test.after` 兜底）。 */
+function spawnTracked(command, args, options) {
+  const child = spawn(command, args, options);
+  liveChildren.add(child);
+  child.once('exit', () => liveChildren.delete(child));
+  return child;
+}
+
+test.after(async () => {
+  for (const child of liveChildren) {
+    try { child.kill(); } catch { /* 已经退出 */ }
+  }
+  await new Promise((resolve) => {
+    if (!liveChildren.size) { resolve(); return; }
+    const timer = setTimeout(resolve, 3000);
+    for (const child of liveChildren) child.once('exit', () => { clearTimeout(timer); resolve(); });
+  });
+  liveChildren.clear();
+});
 
 // ── 第一层：纯逻辑（第二实现） ────────────────────────────────────────────
 
@@ -40,6 +73,47 @@ function parseNum(raw, fallback, range = {}) {
   return value;
 }
 const parsePort = (raw, fallback = 8790) => parseNum(raw, fallback, { min: 1, max: 65535 });
+
+// ── 测试端口来源（`tools/dev/bridge-ports.mjs`）──────────────────────────
+//
+// 这一节防的是 2026-10-27 那次发版门禁翻车：测试自己挑端口时用了
+// `20000 + Math.random() * 20000`，这个区间横跨 Linux 的临时端口段，
+// 而打桩上游全都 `listen(0)` 被内核分到同一段里 —— 于是撞车。
+// 详见 `tools/dev/bridge-ports.mjs` 的头注释与 `startBridge` 的注释。
+
+test('测试端口落在 12000–19999，且永远避开默认端口', () => {
+  for (let i = 0; i < 500; i += 1) {
+    const p = pickBridgePort();
+    assert.ok(Number.isInteger(p), `端口必须是整数，实得 ${p}`);
+    assert.ok(p >= BRIDGE_PORT_MIN && p <= BRIDGE_PORT_MAX,
+      `端口 ${p} 越出 ${BRIDGE_PORT_MIN}–${BRIDGE_PORT_MAX}`);
+    assert.notEqual(p, 8790, '不能撞上默认的桥端口（用户本机可能正跑着一个）');
+    assert.notEqual(p, 8792, '不能撞上默认的控制台端口');
+  }
+});
+
+test('测试端口段必须整体低于临时端口下界（否则 listen(0) 迟早撞上来）', () => {
+  /*
+   * Linux 默认 32768–60999，macOS / Windows 默认 49152–65535。
+   * 取三者里**最小**的下界当红线：只有上界低于它，三个平台才都安全。
+   * 这条把"我们以为的随机"变成可验证的边界，而不是靠谁记得。
+   */
+  const EPHEMERAL_FLOOR_MIN = 32768;
+  assert.ok(BRIDGE_PORT_MAX < EPHEMERAL_FLOOR_MIN,
+    `${BRIDGE_PORT_MAX} 不低于临时端口下界 ${EPHEMERAL_FLOOR_MIN}：`
+    + '打桩上游用 listen(0)，内核会把它们分进那一段，撞车只是时间问题');
+  // 下界也别贴着桥的默认端口，给本机正在跑的实例留出空间
+  assert.ok(BRIDGE_PORT_MIN > 8792, `${BRIDGE_PORT_MIN} 离默认端口太近`);
+});
+
+test('isPortInUseError 只认真正的端口占用（别把配置写错也当成可重试）', () => {
+  assert.equal(isPortInUseError('Error: listen EADDRINUSE: address already in use 127.0.0.1:39846'), true);
+  assert.equal(isPortInUseError('listen EADDRINUSE'), true);
+  assert.equal(isPortInUseError('Error: Cannot find module ./nope.mjs'), false,
+    '依赖缺失换端口也没用，重试只会把 5 次都耗在同一个错误上');
+  assert.equal(isPortInUseError(''), false);
+  assert.equal(isPortInUseError(undefined), false, '子进程还没来得及输出时不能抛');
+});
 
 test('端口解析：非数值 / 空白 / 带单位一律回退默认（旧写法会得 NaN）', () => {
   for (const bad of ['879O', 'abc', '8790ms', '  ', 'NaN', 'Infinity', '-']) {
@@ -61,8 +135,7 @@ test('端口解析：合法值原样保留（含边界）；未设置/空串用�
   assert.equal(parsePort('8790'), 8790);
   assert.equal(parsePort('65535'), 65535);
   assert.equal(parsePort(undefined), 8790, '未设置时用默认');
-  assert.equal(parsePort(''), 8790, '空串视为未设置');
-});
+  assert.equal(parsePort(''), 8790, '空串视为未设置');});
 
 test('上限类解析：NaN 绝不能"静默取消限制"（MAX_BODY_BYTES 的安全含义）', () => {
   /*
@@ -104,7 +177,7 @@ test('桥 smoke：端口写成非数值时不再抛 ERR_SOCKET_BAD_PORT', { time
     },
   }));
 
-  const child = spawn(process.execPath, [BRIDGE], {
+  const child = spawnTracked(process.execPath, [BRIDGE], {
     cwd: dir,
     stdio: ['ignore', 'pipe', 'pipe'],
     env: {
@@ -168,11 +241,11 @@ test('桥 smoke：端口写成非数值时不再抛 ERR_SOCKET_BAD_PORT', { time
  * （同一份实现在 config.mjs 里有 `USERPROFILE` 兜底，桥这边漏了 —— 两套实现必然漂移。）
  */
 test('登录文件目录：LOCALAPPDATA / HOME 都缺时也必须给出绝对路径', async () => {
-  const child = spawn(process.execPath, [BRIDGE], {
+  const child = spawnTracked(process.execPath, [BRIDGE], {
     cwd: HERE,
     env: {
       ...process.env,
-      WORKBUDDY_PORT: String(20000 + Math.floor(Math.random() * 20000)),
+      WORKBUDDY_PORT: String(pickBridgePort()),
       WORKBUDDY_LOCAL_TOKEN: TOKEN,
       // 模拟"精简过 / 非交互式"的 Windows 环境：三者全空，只剩 USERPROFILE
       LOCALAPPDATA: '', HOME: '', XDG_DATA_HOME: '',
@@ -222,13 +295,13 @@ test('登录文件选择：两个客户端的活动文件按最近写入选，�
   utimesSync(snapshot, new Date(now), new Date(now));
   const env = {
     ...process.env,
-    WORKBUDDY_PORT: String(20000 + Math.floor(Math.random() * 20000)),
+    WORKBUDDY_PORT: String(pickBridgePort()),
     WORKBUDDY_LOCAL_TOKEN: TOKEN,
     WORKBUDDY_AUTH_DIR: dir,
     WORKBUDDY_AUTO_CHECKIN: '0',
   };
   delete env.WORKBUDDY_AUTH_FILE;
-  const child = spawn(process.execPath, [BRIDGE], { cwd: HERE, env, stdio: ['ignore', 'pipe', 'pipe'] });
+  const child = spawnTracked(process.execPath, [BRIDGE], { cwd: HERE, env, stdio: ['ignore', 'pipe', 'pipe'] });
   let output = '';
   child.stdout.on('data', (d) => { output += d; });
   child.stderr.on('data', (d) => { output += d; });
@@ -334,5 +407,99 @@ test('起了桥进程的测试文件必须隔离账本（否则会写坏使用�
     [],
     `这些测试文件起了桥却没设 WORKBUDDY_USAGE_FILE，会往仓库 bridge/usage.jsonl `
     + `（使用者的真实账本）里写测试记录：${offenders.join(', ')}`,
+  );
+});
+
+/**
+ * 起桥的端口必须来自 `bridge-ports.mjs`，不能就地写死一个区间。
+ *
+ * ## 这条守的是 2026-10-27 那次发版门禁
+ *
+ * v1.17.0 的 `release-check` 在 ubuntu-latest 上挂在一条**和代码无关**的用例上：
+ *
+ *   Error: listen EADDRINUSE: address already in use 127.0.0.1:39846
+ *     startBridge (bridge/bridge.test.mjs:131)
+ *
+ * 旧写法是 `20000 + Math.floor(Math.random() * 20000)` —— 这个区间**横跨 Linux 的
+ * 临时端口段**（默认 32768–60999）。同一批测试里的打桩上游全都走 `listen(0)`，
+ * 内核把它们分到同一段里，于是"随机挑的固定端口"迟早会等于"内核刚分给别人的端口"。
+ * macOS 那次刚好没撞上，于是同一份代码一个平台红、一个平台绿。
+ *
+ * 更糟的是失败形态：`startBridge` 一抛错，用例的 `finally` 根本没轮到执行，
+ * 打桩上游的 listen socket 留在测试进程上 → `node --test` 跑完全部用例**不退出**
+ * → CI 只能按 `timeout-minutes` 取消 job。**一条 1 秒能看懂的端口撞车，
+ * 被放大成 20 分钟 + 一条 cancelled。**
+ *
+ * ## 为什么扫源码而不是"跑一遍看看"
+ *
+ * 和上一条同理：撞车是概率事件，跑一遍很可能不撞 —— 那这条用例就永远绿。
+ * 扫源码能把**以后新增的**测试文件一起管住。
+ */
+test('起桥的测试必须用 bridge-ports.mjs 取端口（不能落在临时端口段里）', () => {
+  const files = readdirSync(HERE).filter((f) => f.endsWith('.test.mjs'));
+  const offenders = [];
+  for (const f of files) {
+    const src = readFileSync(join(HERE, f), 'utf8');
+    // 只有真的给桥指定端口（WORKBUDDY_PORT）才需要这条规则
+    if (!/WORKBUDDY_PORT\s*[:=]/u.test(src)) continue;
+    /*
+     * 判据是「端口从哪来」，不是「赋值行长什么样」：
+     * 各文件普遍写成 `const port = pickBridgePort()` 再由 `String(port)` 传下去，
+     * 两段式是正常的。真正要拦住的是**自己算一个固定区间**：
+     *
+     *   const port = 20000 + Math.floor(Math.random() * 20000);   ← 就是它撞的车
+     *
+     * 所以查两件事：引了 pickBridgePort；且没有「数字 + Math.random()」这种算式。
+     */
+    if (!/pickBridgePort/u.test(src)) {
+      offenders.push(`${f}（没引用 pickBridgePort）`);
+      continue;
+    }
+    /*
+     * 只看代码：本文件自己的注释里就引用了旧写法作对照（那是文档，不是实现），
+     * 不剥掉的话守卫会被自己的说明文字判红。
+     */
+    for (const [i, line] of src.split(/\r?\n/).entries()) {
+      if (/^\s*\*|^\s*\/\*/u.test(line)) continue;
+      const code = line.replace(/\/\/.*$/u, '');
+      for (const m of code.matchAll(/(\d{4,6})\s*\+\s*Math\.floor\(\s*Math\.random\(\)/gu)) {
+        offenders.push(`${f}:${i + 1}（${m[1]} + Math.random()… 自己算端口）`);
+      }
+    }
+  }
+  assert.deepEqual(
+    offenders,
+    [],
+    '这些写法会把测试端口落进临时端口段（打桩上游用 listen(0) 被内核分到那里），'
+    + `撞车后还会因为 finally 没跑到而挂住整个 node --test：${offenders.join('; ')}`,
+  );
+});
+
+/**
+ * 起桥的测试必须有**文件级收尾**（`test.after`），否则一次失败会挂住整个 job。
+ *
+ * 与上一条是一对：端口撞车是**诱因**，收尾缺失是**后果被放大成 20 分钟的原因**。
+ * 只修端口不改收尾，下次换个原因（断言失败、超时、Ctrl-C）照样挂住。
+ *
+ * 判据只看"这个文件里有没有 test.after" —— 内容对不对是各文件自己的事
+ * （它们各自要关的东西不同：桥进程、打桩上游、临时目录）。
+ */
+test('起桥的测试必须有 test.after 收尾（否则失败时 node --test 会挂住）', () => {
+  const files = readdirSync(HERE).filter((f) => f.endsWith('.test.mjs'));
+  const offenders = [];
+  for (const f of files) {
+    const src = readFileSync(join(HERE, f), 'utf8');
+    if (!/spawn\(\s*process\.execPath/u.test(src)) continue;
+    /*
+     * 必须看真正的调用形状 `test.after(`，而不是注释里提到过 ——
+     * 否则反证时（删掉钩子、注释留着）守卫照样变绿，等于什么都没测。
+     */
+    if (!/^test\.after\(/mu.test(src)) offenders.push(f);
+  }
+  assert.deepEqual(
+    offenders,
+    [],
+    '这些测试文件起了子进程却没有 test.after：任一用例在 try 之前抛错（端口撞车、'
+    + `桥起不来）时，监听 socket / 管道会留在测试进程上，node --test 跑完不退出：${offenders.join(', ')}`,
   );
 });

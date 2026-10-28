@@ -29,6 +29,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { pickBridgePort } from '../tools/dev/bridge-ports.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO = dirname(HERE);
@@ -60,7 +61,7 @@ writeFileSync(authFile, JSON.stringify({
   },
 }));
 
-const bridgePort = 20000 + Math.floor(Math.random() * 20000);
+const bridgePort = pickBridgePort();
 const child = spawn(process.execPath, [BRIDGE], {
   cwd: dir,
   stdio: ['ignore', 'pipe', 'pipe'],

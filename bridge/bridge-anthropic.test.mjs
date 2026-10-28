@@ -32,6 +32,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { pickBridgePort } from '../tools/dev/bridge-ports.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO = dirname(HERE);
@@ -195,7 +196,12 @@ writeFileSync(authFile, JSON.stringify({
   },
 }));
 
-const bridgePort = 19100 + (process.pid % 300);
+/*
+ * 端口不能是「pid 派生出来的固定值」：同一台机器上并行跑两份测试时，
+ * 两个 pid 相差 300 的倍数就会算出同一个端口；而且 19100+ 这段同样可能撞上
+ * 本机正在跑的东西。统一从 `bridge-ports.mjs` 取（12000–19999，避开临时端口段）。
+ */
+const bridgePort = pickBridgePort();
 const child = spawn(process.execPath, [BRIDGE], {
   env: {
     ...process.env,

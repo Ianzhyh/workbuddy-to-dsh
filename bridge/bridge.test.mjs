@@ -24,6 +24,7 @@ import { mkdtempSync, rmSync, writeFileSync, existsSync, readFileSync, readdirSy
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { pickBridgePort, isPortInUseError } from '../tools/dev/bridge-ports.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO = dirname(HERE);
@@ -83,6 +84,25 @@ function authFileFor(sub, domain = 'example.invalid') {
 
 /**
  * 起一个隔离的桥实例。
+ *
+ * ## 端口为什么不用 `listen(0)`，也不用 20000–40000 的"随机"
+ *
+ * 桥是**独立进程**，它自己 listen：测试进程这边没法把"内核分配的那个端口"
+ * 读回来交给子进程。能做的只有"挑一个、撞了再换"。
+ *
+ * 旧写法的两个问题（2026-10-27 实测，v1.17.0 发版门禁 ubuntu-latest）：
+ *
+ *   1. 区间 20000–39999 **横跨 Linux 的临时端口段**（默认 32768–60999）。
+ *      打桩上游都走 `listen(0)`，内核会把它们分到同一段里 —— 于是迟早撞上。
+ *      实测就是 `listen EADDRINUSE ... 127.0.0.1:39846`。
+ *   2. 撞了就直接抛错，**打桩上游没关**，用例的 `finally` 根本没轮到执行。
+ *      那个 listen socket 挂在测试进程上，`node --test` 等不到事件循环清空，
+ *      跑完全部用例后**进程不退** —— CI 上表现为 20 分钟后 job 被 cancel，
+ *      而不是一条"端口撞了"的失败。
+ *
+ * 现在：端口从 `bridge-ports.mjs` 取（12000–19999，在临时端口段之外），
+ * 撞上了**换端口重试**（最多 5 次），重试用尽才把原始失败抛出去。
+ *
  * @param {object} [env] 额外环境变量
  * @param {object} [opts]
  * @param {object} [opts.auth] 写入登录文件的凭据（默认 FAKE_AUTH）。
@@ -95,59 +115,86 @@ async function startBridge(env = {}, opts = {}) {
   const authFile = join(dir, 'fake-auth.info');
   writeFileSync(authFile, JSON.stringify(opts.auth || FAKE_AUTH));
 
-  // 端口 0 让内核分配：用一个事先探好的空闲端口不保险（可能与真实桥撞车）
-  const port = 20000 + Math.floor(Math.random() * 20000);
-  const child = spawn(process.execPath, [BRIDGE], {
-    cwd: dir, // 工作目录放在临时目录：账本/日志都落在里面
-    stdio: ['ignore', 'pipe', 'pipe'],
-    env: {
-      ...process.env,
-      WORKBUDDY_HOST: '127.0.0.1',
-      WORKBUDDY_PORT: String(port),
-      WORKBUDDY_LOCAL_TOKEN: TOKEN,
-      WORKBUDDY_AUTH_FILE: authFile,
-      // 凭据库必须隔离：否则测试会读到本机真实的插件登录凭据（/health 不再是 503）。
-      WORKBUDDY_CREDENTIAL_DIR: join(dir, 'credentials'),
-      WORKBUDDY_USAGE_FILE: join(dir, 'usage.jsonl'),
-      WORKBUDDY_MEDIA_STORE_FILE: join(dir, 'media-tasks.json'),
-      // 面板保存的「默认视图规模」也必须隔离：它与 .state.json 不同，
-      // 之前漏了这一条 → 测试把 `value: "4"` 写进了用户真实的
-      // `~/.workbuddy-bridge/models-default.json`，跑完测试后真实桥就少列模型，
-      // 而测试自己是"通过"的（最坏的一类污染：改的是用户数据、症状隔一轮才现形）。
-      WORKBUDDY_MODELS_DEFAULT_FILE: join(dir, 'models-default.json'),
-      WORKBUDDY_AUTO_CHECKIN: '0', // 别在测试里触发签到
-      WORKBUDDY_LOG: '0',
-      ...env,
-    },
-  });
+  /*
+   * 最多试 5 次端口。撞车时**必须**把上一个子进程收干净再重试 —— 否则
+   * 重试只是在制造新的僵尸进程，问题从"起不来"变成"越跑越慢"。
+   */
+  const attempts = 5;
+  let lastError = null;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    lastError = null;
+    const port = pickBridgePort();
+    const child = spawn(process.execPath, [BRIDGE], {
+      cwd: dir, // 工作目录放在临时目录：账本/日志都落在里面
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: {
+        ...process.env,
+        WORKBUDDY_HOST: '127.0.0.1',
+        WORKBUDDY_PORT: String(port),
+        WORKBUDDY_LOCAL_TOKEN: TOKEN,
+        WORKBUDDY_AUTH_FILE: authFile,
+        // 凭据库必须隔离：否则测试会读到本机真实的插件登录凭据（/health 不再是 503）。
+        WORKBUDDY_CREDENTIAL_DIR: join(dir, 'credentials'),
+        WORKBUDDY_USAGE_FILE: join(dir, 'usage.jsonl'),
+        WORKBUDDY_MEDIA_STORE_FILE: join(dir, 'media-tasks.json'),
+        // 面板保存的「默认视图规模」也必须隔离：它与 .state.json 不同，
+        // 之前漏了这一条 → 测试把 `value: "4"` 写进了用户真实的
+        // `~/.workbuddy-bridge/models-default.json`，跑完测试后真实桥就少列模型，
+        // 而测试自己是"通过"的（最坏的一类污染：改的是用户数据、症状隔一轮才现形）。
+        WORKBUDDY_MODELS_DEFAULT_FILE: join(dir, 'models-default.json'),
+        WORKBUDDY_AUTO_CHECKIN: '0', // 别在测试里触发签到
+        WORKBUDDY_LOG: '0',
+        ...env,
+      },
+    });
 
-  let output = '';
-  child.stdout.on('data', (d) => { output += d; });
-  child.stderr.on('data', (d) => { output += d; });
+    let output = '';
+    child.stdout.on('data', (d) => { output += d; });
+    child.stderr.on('data', (d) => { output += d; });
 
-  const baseUrl = `http://127.0.0.1:${port}`;
-  const deadline = Date.now() + 20_000;
-  while (Date.now() < deadline) {
-    if (child.exitCode !== null) throw new Error(`桥提前退出（code ${child.exitCode}）：\n${output}`);
-    try {
-      const res = await fetch(baseUrl + '/', { headers: { authorization: `Bearer ${TOKEN}` }, signal: AbortSignal.timeout(1500) });
-      if (res.status > 0) {
-        return {
-          baseUrl,
-          dir,
-          out: () => output,
-          stop: () => new Promise((resolve) => {
-            child.once('exit', resolve);
-            child.kill();
-            setTimeout(resolve, 3000);
-          }),
-        };
+    const baseUrl = `http://127.0.0.1:${port}`;
+    const deadline = Date.now() + 20_000;
+    while (Date.now() < deadline) {
+      if (child.exitCode !== null) {
+        // 端口撞了才值得重试；配置写错 / 依赖缺失换端口也没用，直接抛出。
+        lastError = new Error(`桥提前退出（code ${child.exitCode}）：\n${output}`);
+        break;
       }
-    } catch { /* 还没起来 */ }
-    await new Promise((r) => setTimeout(r, 200));
+      try {
+        const res = await fetch(baseUrl + '/', { headers: { authorization: `Bearer ${TOKEN}` }, signal: AbortSignal.timeout(1500) });
+        if (res.status > 0) {
+          return {
+            baseUrl,
+            dir,
+            out: () => output,
+            stop: () => new Promise((resolve) => {
+              child.once('exit', resolve);
+              child.kill();
+              setTimeout(resolve, 3000);
+            }),
+          };
+        }
+      } catch { /* 还没起来 */ }
+      await new Promise((r) => setTimeout(r, 200));
+    }
+
+    if (!lastError) lastError = new Error(`桥未在 20 秒内就绪：\n${output}`);
+    child.kill();
+    await new Promise((resolve) => {
+      if (child.exitCode !== null || child.signalCode) { resolve(); return; }
+      child.once('exit', resolve);
+      setTimeout(resolve, 3000);
+    });
+    if (!isPortInUseError(output)) break;
   }
-  child.kill();
-  throw new Error(`桥未在 20 秒内就绪：\n${output}`);
+
+  /*
+   * 收尾要**尽力而为**：这里已经在失败路径上了，再让 `rmSync` 抛一个
+   * （Windows 上桥刚被 kill、句柄还没释放就是 EPERM）会把真正的病因盖掉 ——
+   * 用户看到的是"临时目录删不掉"，而不是"端口撞了 / 桥起不来"。
+   */
+  try { rmSync(dir, { recursive: true, force: true }); } catch { /* 留给系统清理 */ }
+  throw lastError;
 }
 
 /**
@@ -197,6 +244,25 @@ function agentRequest(agent, port, path, { method = 'POST', body = '' } = {}) {
 }
 
 // ── 打桩上游：验证「桥实际发了什么出去」─────────────────────────────────
+/**
+ * 还没被 `close()` 掉的打桩上游。
+ *
+ * **这不是洁癖，是防"没有报错的失败"**：用例里普遍是
+ *
+ *     const stub = await startStubUpstream(...);
+ *     const bridge = await startBridge({ CODEBUDDY_ENDPOINT: stub.base }, ...);
+ *     try { ... } finally { await bridge.stop(); await stub.close(); }
+ *
+ * `startBridge` 在 `try` **之外** —— 它一抛错（实测：端口撞车 EADDRINUSE），
+ * `finally` 永远不执行，stub 的 listen socket 就留在测试进程上。
+ * `node --test` 会等事件循环清空才退出，于是**全部用例跑完后进程不退**：
+ * CI 上表现为 job 跑满 `timeout-minutes` 被 cancel（2026-10-27 实测 20 分钟），
+ * 而日志里只有一条早已打印过的失败——看起来像"卡死"，其实是收尾没做。
+ *
+ * 文件级的 `test.after` 一定会在最后执行（哪怕有模块级异常），兜住这条路。
+ */
+const openStubs = new Set();
+
 /**
  * 记录收到的每个请求（headers/body），回最小 SSE。
  *
@@ -308,13 +374,40 @@ async function startStubUpstream(models = ['stub-model'], opts = {}) {
     res.end('{}');
   });
   await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+  /*
+   * `close()` 必须自己收尾干净：`srv.close()` 只是"不再接受新连接"，
+   * 已有 keep-alive 连接上的桥进程（失败路径里它可能还活着）会让回调**永远不来**。
+   * 那等于把"进程不退"从一个地方挪到另一个地方。所以先掐连接，再带超时兜底。
+   */
+  const close = () => new Promise((r) => {
+    const done = () => { clearTimeout(timer); r(); };
+    const timer = setTimeout(done, 3000);
+    if (typeof srv.closeAllConnections === 'function') srv.closeAllConnections();
+    srv.close(done);
+  });
+  openStubs.add(close);
   return {
     base: `http://127.0.0.1:${srv.address().port}`,
     seen,
     get refreshCalls() { return refreshCalls; },
-    close: () => new Promise((r) => srv.close(r)),
+    close: async () => { openStubs.delete(close); await close(); },
   };
 }
+
+/*
+ * 收尾兜底：把没关掉的打桩上游关掉。
+ *
+ * 正常情况下每个用例的 finally 已经关干净了，这里是 0 成本的空转；
+ * 只有当某个用例在 `try` 之前就抛错（startBridge 起不来、断言写在 try 外）
+ * 时才会真正动起来。见 `openStubs` 的注释：没有这一步，漏掉的 listen socket
+ * 会让 `node --test` 跑完不退出，CI 上表现为 20 分钟后 job 被 cancel。
+ */
+test.after(async () => {
+  for (const close of openStubs) {
+    try { await close(); } catch { /* 已经关掉了 */ }
+  }
+  openStubs.clear();
+});
 
 const auth = { authorization: `Bearer ${TOKEN}` };
 

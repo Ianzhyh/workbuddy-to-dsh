@@ -25,6 +25,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { pickBridgePort, isPortInUseError } from '../tools/dev/bridge-ports.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO = dirname(HERE);
@@ -282,7 +283,12 @@ writeFileSync(authFile, JSON.stringify({
   },
 }));
 
-const bridgePort = 20000 + Math.floor(Math.random() * 20000);
+/*
+ * 端口不能落在临时端口段里：打桩上游走 `listen(0)`，内核会把它分到临时端口段
+ * （Linux 32768–60999），而旧写法 `20000 + random()*20000` 正好横跨它 ——
+ * 实测撞车过（EADDRINUSE）。理由与取端口规则见 `tools/dev/bridge-ports.mjs`。
+ */
+const bridgePort = pickBridgePort();
 const child = spawn(process.execPath, [BRIDGE], {
   cwd: dir,
   stdio: ['ignore', 'pipe', 'pipe'],
@@ -991,55 +997,67 @@ test('未带令牌：401 且不落任何上游请求', async () => {
  * 另起一个桥（带额外环境变量）—— 用来验"开关类"行为。
  *
  * 主桥的 env 在模块加载时就定死了，而开关必须**在桥启动时**生效（进程级配置），
- * 所以只能另起一个。端口随机、令牌与假上游都复用主桥那一套。
+ * 所以只能另起一个。端口随机（但避开临时端口段，见 `bridge-ports.mjs`）、
+ * 令牌与假上游都复用主桥那一套；撞端口就换一个重试。
  */
 async function startBridge(extraEnv = {}) {
-  const port = 20000 + Math.floor(Math.random() * 20000);
-  const proc = spawn(process.execPath, [BRIDGE], {
-    cwd: dir,
-    stdio: ['ignore', 'pipe', 'pipe'],
-    env: {
-      ...process.env,
-      WORKBUDDY_HOST: '127.0.0.1',
-      WORKBUDDY_PORT: String(port),
-      WORKBUDDY_LOCAL_TOKEN: TOKEN,
-      WORKBUDDY_AUTH_FILE: authFile,
-    WORKBUDDY_CREDENTIAL_DIR: join(dir, 'credentials'),
-      CODEBUDDY_ENDPOINT: `http://127.0.0.1:${UPSTREAM_PORT}`,
-      CODEBUDDY_API_KEY: 'stub-key',
-      WORKBUDDY_AUTO_CHECKIN: '0',
-      WORKBUDDY_LOG: '0',
-      // 账本隔离：同上，`cwd: dir` 挡不住（usageFile 按**脚本目录**解析）
-      WORKBUDDY_USAGE_FILE: join(dir, 'usage.jsonl'),
-      WORKBUDDY_RESPONSES_MODEL: 'resolved-default',
-      WORKBUDDY_RESPONSES_FAST_MODEL: 'resolved-fast',
-      ...extraEnv,
-    },
-  });
-  let log = '';
-  proc.stdout.on('data', (d) => { log += d; });
-  proc.stderr.on('data', (d) => { log += d; });
-  const base = `http://127.0.0.1:${port}`;
-  for (let i = 0; i < 100; i += 1) {
-    try {
-      const r = await fetch(`${base}/health`, { headers: auth });
-      if (r.status === 200 && (await r.json())?.pid === proc.pid) {
-        return {
-          base,
-          kill: () => proc.kill(),
-          post: async (payload, extraHeaders = {}) => {
-            const rr = await fetch(`${base}/v1/responses`, {
-              method: 'POST', headers: { ...auth, ...extraHeaders }, body: JSON.stringify(payload),
-            });
-            return { status: rr.status, text: await rr.text() };
-          },
-        };
-      }
-    } catch { /* 还没起来 */ }
-    await new Promise((r) => setTimeout(r, 150));
+  let lastLog = '';
+  for (let attempt = 1; attempt <= 5; attempt += 1) {
+    const port = pickBridgePort();
+    const proc = spawn(process.execPath, [BRIDGE], {
+      cwd: dir,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: {
+        ...process.env,
+        WORKBUDDY_HOST: '127.0.0.1',
+        WORKBUDDY_PORT: String(port),
+        WORKBUDDY_LOCAL_TOKEN: TOKEN,
+        WORKBUDDY_AUTH_FILE: authFile,
+        WORKBUDDY_CREDENTIAL_DIR: join(dir, 'credentials'),
+        CODEBUDDY_ENDPOINT: `http://127.0.0.1:${UPSTREAM_PORT}`,
+        CODEBUDDY_API_KEY: 'stub-key',
+        WORKBUDDY_AUTO_CHECKIN: '0',
+        WORKBUDDY_LOG: '0',
+        // 账本隔离：同上，`cwd: dir` 挡不住（usageFile 按**脚本目录**解析）
+        WORKBUDDY_USAGE_FILE: join(dir, 'usage.jsonl'),
+        WORKBUDDY_RESPONSES_MODEL: 'resolved-default',
+        WORKBUDDY_RESPONSES_FAST_MODEL: 'resolved-fast',
+        ...extraEnv,
+      },
+    });
+    let log = '';
+    proc.stdout.on('data', (d) => { log += d; });
+    proc.stderr.on('data', (d) => { log += d; });
+    const base = `http://127.0.0.1:${port}`;
+    for (let i = 0; i < 100; i += 1) {
+      if (proc.exitCode !== null) break;
+      try {
+        const r = await fetch(`${base}/health`, { headers: auth });
+        if (r.status === 200 && (await r.json())?.pid === proc.pid) {
+          return {
+            base,
+            kill: () => proc.kill(),
+            post: async (payload, extraHeaders = {}) => {
+              const rr = await fetch(`${base}/v1/responses`, {
+                method: 'POST', headers: { ...auth, ...extraHeaders }, body: JSON.stringify(payload),
+              });
+              return { status: rr.status, text: await rr.text() };
+            },
+          };
+        }
+      } catch { /* 还没起来 */ }
+      await new Promise((r) => setTimeout(r, 150));
+    }
+    lastLog = log;
+    proc.kill();
+    await new Promise((resolve) => {
+      if (proc.exitCode !== null || proc.signalCode) { resolve(); return; }
+      proc.once('exit', resolve);
+      setTimeout(resolve, 3000);
+    });
+    if (!isPortInUseError(log)) break;
   }
-  proc.kill();
-  throw new Error(`开关桥没起来\n${log.slice(-1500)}`);
+  throw new Error(`开关桥没起来\n${lastLog.slice(-1500)}`);
 }
 
 /*
