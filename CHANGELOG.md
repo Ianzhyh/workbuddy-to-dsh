@@ -17,6 +17,26 @@
 
 只支持最近 2 个 minor 版本。
 
+## [1.19.0] - 2026-10-28
+
+### Added
+
+- **限流自动切号（opt-in，默认关闭）**（[#17](https://github.com/Ianzhyh/workbuddy-to-dsh/issues/17)）：
+  桥的 `/health.rateLimit` 按「账号 + 模型」统计最近 10 分钟最终返回给客户端的 429；
+  插件配置 `accountFailoverAfter: N`（默认 `0`）后，同一模型达到 N 次会经控制台切到
+  下一个本机可用账号（控制台按需拉起、切换后照常闲置退出）。会切换钱包，只在本机
+  自有账号间切换，不导出凭据、不做公网中转；默认关闭，可能触发上游风控，请自行评估。
+
+### Changed
+
+- **非 Windows 插件登录凭据持久化**（[#16](https://github.com/Ianzhyh/workbuddy-to-dsh/issues/16)）：
+  存储默认从 `memory` 改为 `file`（Windows 仍是 `dpapi`）。file 模式用 32 字节文件密钥 +
+  AES-256-GCM 落盘，桥重启、更新插件不再需要重新登录。密钥优先取
+  `WORKBUDDY_CREDENTIAL_KEY`（推荐 Docker/NAS：64 位 hex / base64 / 口令经 scrypt，
+  不落盘）；未设置时自动生成 0600 的 `store.key`。密钥不可用时仍自动退回仅内存，
+  面板显示「文件加密 / 仅内存」与密钥来源。容器部署请把 `WORKBUDDY_CREDENTIAL_DIR`
+  挂到持久卷。
+
 ## [1.18.0] - 2026-10-28
 
 ### Changed

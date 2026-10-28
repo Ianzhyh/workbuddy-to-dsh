@@ -93,8 +93,9 @@ request ledger when the host exposes them, otherwise a clearly-labelled estimate
 - **vs the WorkBuddy2API cluster (20+ projects)**: this one deliberately stays
   **single-account · no plaintext credentials · zero runtime dependencies ·
   self-contained bridge** (desktop credentials are read on demand; plugin-sign-in
-  credentials are stored with DPAPI + AES-GCM); no multi-account pooling, no task
-  automation.
+  credentials are stored with DPAPI / file-key + AES-GCM); no multi-account pooling by
+  default and no task automation (an opt-in rate-limit failover among your own local
+  accounts is off by default; no credential export or public relay).
 
 ## Quick start (Windows)
 
@@ -146,7 +147,8 @@ instead of the DeepSeek wallet.
   (`bridge/workbuddy-bridge.mjs` plus a tiny promotion-schedule helper).
 - **No plaintext credentials on disk** — desktop AtRest keys are fetched via
   `ELECTRON_RUN_AS_NODE` on demand; plugin-sign-in credentials are stored as
-  DPAPI-protected AES-GCM envelopes. Plaintext tokens stay in memory only.
+  AES-GCM envelopes protected by DPAPI (Windows) or a file key (other platforms).
+  Plaintext tokens stay in memory only.
 - **Native web search, automatic by default** — dsh search can run through WorkBuddy
   instead of the DeepSeek wallet; the plugin stores the bridge token in a separate
   credential reference, self-tests the full chain, respects explicit user settings,
