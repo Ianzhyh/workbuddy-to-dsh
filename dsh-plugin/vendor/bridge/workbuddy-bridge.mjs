@@ -1222,6 +1222,16 @@ function wbExeInDir(dir) {
 
 /** 磁盘浅扫描：盘根 → {App | Program Files | Tencent | …} → {含 workbuddy 的目录} → exe。 */
 function wbScan() {
+  if (process.platform === 'darwin') {
+    // 包名可能被改：按名字找 .app，再读 plist
+    const found = [];
+    for (const app of wbMacAppDirs()) {
+      for (const p of wbMacAppExeCandidates(app)) {
+        if (existsSync(p) && !found.includes(p)) found.push(p);
+      }
+    }
+    return found;
+  }
   if (process.platform !== 'win32') return [];
   const found = [];
   const seen = new Set();
@@ -1257,6 +1267,61 @@ function wbScan() {
 }
 
 /**
+ * 读 macOS `.app` 的 `CFBundleExecutable`（`Contents/Info.plist`）。
+ *
+ * Electron 应用的可执行文件名由 plist 声明，不一定等于产品名：腾讯打包的
+ * WorkBuddy 5.8.x 没改名，`Contents/MacOS/` 下只有 `Electron`。只拼产品名会让
+ * 探测全部落空（「未找到可执行文件」而客户端其实装得好好的）。
+ *
+ * 只解析 XML plist；二进制 plist / 读取失败返回 ''，由 `Electron` 候选兜底。
+ * 与 lib/find-workbuddy.mjs 同款（桥保持自包含单文件，改动时两处同步）。
+ */
+const wbPlistExeCache = new Map();
+function macAppExecutableName(appDir) {
+  const plistPath = join(appDir, 'Contents', 'Info.plist');
+  if (wbPlistExeCache.has(plistPath)) return wbPlistExeCache.get(plistPath);
+  let name = '';
+  try {
+    const text = readFileSync(plistPath, 'utf8');
+    if (!text.startsWith('bplist')) {
+      const m = /<key>\s*CFBundleExecutable\s*<\/key>\s*<string>([^<]+)<\/string>/u.exec(text);
+      if (m) name = String(m[1].trim()).split(/[\\/]/).pop() || '';
+    }
+  } catch {
+    /* 没有 plist 或读不动：交给调用方的其它候选 */
+  }
+  wbPlistExeCache.set(plistPath, name);
+  return name;
+}
+
+/** 一个 `.app` 包里可能的可执行文件：产品名 / plist 声明名 / Electron 兜底。 */
+function wbMacAppExeCandidates(appDir) {
+  const macos = join(appDir, 'Contents', 'MacOS');
+  const out = [join(macos, 'WorkBuddy')];
+  const declared = macAppExecutableName(appDir);
+  if (declared) out.push(join(macos, declared));
+  out.push(join(macos, 'Electron'));
+  return out;
+}
+
+/** macOS 标准应用目录里名字像客户端的 `.app`（包名可能被改，不能只认两个固定名字）。 */
+function wbMacAppDirs() {
+  const out = [];
+  for (const root of ['/Applications', join(homedir(), 'Applications')]) {
+    try {
+      for (const entry of readdirSync(root, { withFileTypes: true })) {
+        if (entry.isDirectory() && /\.app$/i.test(entry.name) && WB_DIR_KEYWORD_RE.test(entry.name)) {
+          out.push(join(root, entry.name));
+        }
+      }
+    } catch {
+      /* 目录不存在 / 无权限 */
+    }
+  }
+  return out;
+}
+
+/**
  * 静态候选：显式覆盖 + 各平台默认安装位置，最可信在前。
  * 只做路径拼接、不碰磁盘 —— 调用方可先用它做廉价的 `existsSync` 命中判断。
  */
@@ -1278,8 +1343,16 @@ function workBuddyStaticCandidates() {
     out.push('E:\\App\\WorkBuddy\\WorkBuddyAI.exe');
     out.push('D:\\App\\WorkBuddy\\WorkBuddy.exe');
   } else if (process.platform === 'darwin') {
-    out.push('/Applications/WorkBuddy.app/Contents/MacOS/WorkBuddy');
-    out.push('/Applications/WorkBuddy AI.app/Contents/MacOS/WorkBuddy');
+    for (const app of [
+      '/Applications/WorkBuddy.app',
+      '/Applications/WorkBuddy AI.app',
+      join(homedir(), 'Applications', 'WorkBuddy.app'),
+      join(homedir(), 'Applications', 'WorkBuddy AI.app'),
+    ]) {
+      // 产品名（改过名的 build）、plist 声明名（Electron 壳的权威来源）、
+      // Electron（plist 读不出时的兜底）。
+      out.push(...wbMacAppExeCandidates(app));
+    }
   } else {
     out.push('/opt/WorkBuddy/workbuddy');
   }
@@ -1613,7 +1686,8 @@ async function atRestKey() {
       throw new Error(
         'key fetch failed: WorkBuddy 客户端可执行文件未找到'
         + '（已探测默认安装位置并扫描常见目录）。'
-        + '若客户端装在非常规目录，请在 .env 设置 WORKBUDDY_APP_EXECUTABLE 指向其 WorkBuddy.exe',
+        + '若客户端装在非常规目录，请在 .env 设置 WORKBUDDY_APP_EXECUTABLE 指向客户端可执行文件'
+        + '（macOS 在 .app/Contents/MacOS/ 下，文件名以 Info.plist 的 CFBundleExecutable 为准）',
       );
     }
     const failures = [];
