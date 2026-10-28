@@ -32,7 +32,7 @@ import { Agent as HttpsAgent } from 'node:https';
 import { join, dirname, isAbsolute } from 'node:path';
 import { homedir, userInfo, tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
-import { createCipheriv, createDecipheriv, createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
+import { createCipheriv, createDecipheriv, createHash, randomBytes, randomUUID, scryptSync, timingSafeEqual } from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { spawn } from 'node:child_process';
 import { waitDrain } from './wait-drain.mjs';
@@ -2072,18 +2072,23 @@ function decodeJwt(token) {
   catch { return {}; }
 }
 
-// ── Plugin-owned credentials: DPAPI + AES-256-GCM store ──────────────────
+// ── Plugin-owned credentials: DPAPI / file key + AES-256-GCM store ───────
 /*
  * 第二条凭据来源：不读桌面端登录文件，由本桥自己走 OAuth 设备码登录。
  * 令牌是**我们自己的**，所以必须落盘（否则桥一重启就要重登），也就必须加密：
  *
- *   store.key   32 字节随机密钥，由 Windows DPAPI（CurrentUser）保护
+ *   store.key   32 字节随机密钥。Windows 默认由 DPAPI（CurrentUser）保护；
+ *               file 模式（非 Windows 默认）直接存 0600 权限的密钥文件。
  *   <sha256(uid)>.cred  AES-256-GCM 信封（AAD 绑定 uid）
  *   active.json 当前 active 的账号（非机密）
  *
- * 换机器 / 换 Windows 用户 → DPAPI 解不开 store.key → 凭据不可用。
- * DPAPI 不可用时**绝不静默写明文**：退回进程内内存，诊断里如实说明。
- * 注意：这防的是"文件被拷走"，不防同用户的恶意进程（它也能调 DPAPI / 读内存）。
+ * file 模式优先读 `WORKBUDDY_CREDENTIAL_KEY`（不落盘，Docker/NAS 推荐）：
+ * 64 位 hex / base64(32B) 按原始密钥用，其余按口令经 scrypt 派生。
+ * 没设环境变量时生成 store.key —— 它与密文同目录，能防"单独拷走 .cred"，
+ * 但防不住整个目录被拷走；容器部署请把凭据目录挂到持久卷并设置环境变量密钥。
+ *
+ * 密钥不可用时**绝不静默写明文**：退回进程内内存，诊断里如实说明。
+ * 注意：这防的是"文件被拷走"，不防同用户的恶意进程（它也能读密钥 / 内存）。
  */
 const CREDENTIAL_SOURCE_ENV = (() => {
   const raw = String(process.env.WORKBUDDY_CREDENTIAL_SOURCE || '').trim().toLowerCase();
@@ -2116,9 +2121,15 @@ let credentialSourcePreference = null;
 let credentialSourceMeta = { desktopUid: '', updatedAt: 0 };
 const CREDENTIAL_STORE_MODE = (() => {
   const raw = String(process.env.WORKBUDDY_CREDENTIAL_STORE || '').trim().toLowerCase();
-  if (raw === 'memory' || raw === 'dpapi') return raw;
-  return process.platform === 'win32' ? 'dpapi' : 'memory';
+  if (raw === 'memory' || raw === 'dpapi' || raw === 'file') return raw;
+  return process.platform === 'win32' ? 'dpapi' : 'file';
 })();
+/**
+ * file 模式的密钥来源：优先环境变量（不落盘），否则用 store.key。
+ * 环境变量支持 64 位 hex / base64(32B) 原始密钥，其余按口令经 scrypt 派生。
+ */
+const CREDENTIAL_KEY_ENV = String(process.env.WORKBUDDY_CREDENTIAL_KEY || '').trim();
+let credentialKeySource = ''; // env | file | dpapi | ''
 const CREDENTIAL_DIR = (() => {
   const raw = String(process.env.WORKBUDDY_CREDENTIAL_DIR || '').trim();
   if (raw) return isAbsolute(raw) ? raw : join(process.cwd(), raw);
@@ -2250,6 +2261,18 @@ async function dpapiCall(verb, inputBase64) {
 const dpapiProtect = (buffer) => dpapiCall('Protect', buffer.toString('base64'));
 const dpapiUnprotect = async (base64) => Buffer.from(await dpapiCall('Unprotect', base64), 'base64');
 
+/** 解析 file 模式密钥：hex / base64(32B) 原样用，其余按口令经 scrypt 派生。 */
+function parseCredentialKey(raw) {
+  const text = String(raw || '').trim();
+  if (!text) return null;
+  if (/^[0-9a-f]{64}$/i.test(text)) return Buffer.from(text, 'hex');
+  try {
+    const decoded = Buffer.from(text, 'base64');
+    if (decoded.length === 32) return decoded;
+  } catch { /* 不是 base64：按口令处理 */ }
+  return scryptSync(text, 'workbuddy-credential-store-v1', 32);
+}
+
 /** 取/建字段密钥；失败**不静默明文**，由调用方回退到 memory。 */
 async function loadOrCreateCredentialKey() {
   if (credentialKey) return credentialKey;
@@ -2257,6 +2280,42 @@ async function loadOrCreateCredentialKey() {
   credentialKeyPending = (async () => {
     ensureCredentialDir();
     const file = credentialKeyFile();
+    /*
+     * file 模式：Windows 之外的默认。优先用环境变量密钥（推荐容器部署：
+     * 密钥不进持久卷，换机器也不会跟着被拷走），否则生成 0600 的 store.key。
+     */
+    if (CREDENTIAL_STORE_MODE === 'file') {
+      if (CREDENTIAL_KEY_ENV) {
+        const fromEnv = parseCredentialKey(CREDENTIAL_KEY_ENV);
+        if (!fromEnv || fromEnv.length !== 32) throw new Error('WORKBUDDY_CREDENTIAL_KEY is not a valid key');
+        credentialKey = fromEnv;
+        credentialKeySource = 'env';
+        credentialKeyPrint = 'env';
+        return credentialKey;
+      }
+      if (existsSync(file)) {
+        const st = statSync(file);
+        const print = `${st.mtimeMs}:${st.size}`;
+        if (credentialKey && credentialKeyPrint === print) return credentialKey;
+        let blob;
+        try { blob = readFileSync(file, 'utf8').trim(); }
+        catch (e) { throw new Error(`cannot read credential key: ${e.message}`, { cause: e }); }
+        const key = parseCredentialKey(blob);
+        if (!key || key.length !== 32) throw new Error('credential key file is malformed');
+        credentialKey = key;
+        credentialKeySource = 'file';
+        credentialKeyPrint = print;
+        return key;
+      }
+      const key = randomBytes(32);
+      writeFileAtomic(file, key.toString('hex'), 0o600);
+      credentialKey = key;
+      credentialKeySource = 'file';
+      const st = statSync(file);
+      credentialKeyPrint = `${st.mtimeMs}:${st.size}`;
+      return key;
+    }
+    // dpapi：Windows 默认
     if (existsSync(file)) {
       const st = statSync(file);
       const print = `${st.mtimeMs}:${st.size}`;
@@ -2267,12 +2326,14 @@ async function loadOrCreateCredentialKey() {
       try { credentialKey = await dpapiUnprotect(blob); }
       catch (e) { throw new Error(`credential key cannot be opened on this machine/user: ${e.message}`, { cause: e }); }
       credentialKeyPrint = print;
+      credentialKeySource = 'dpapi';
       return credentialKey;
     }
     const key = randomBytes(32);
     const blob = await dpapiProtect(key);
     writeFileAtomic(file, blob, 0o600);
     credentialKey = key;
+    credentialKeySource = 'dpapi';
     const st = statSync(file);
     credentialKeyPrint = `${st.mtimeMs}:${st.size}`;
     return key;
@@ -2364,7 +2425,7 @@ function readActiveUid() {
   } catch { return ''; }
 }
 
-/** 写入一条插件凭据；返回 `{stored:'dpapi'|'memory', degraded?:true, reason?}`。 */
+/** 写入一条插件凭据；返回 `{stored:'dpapi'|'file'|'memory', degraded?:true, reason?}`。 */
 async function savePluginCredential(cred) {
   const uid = String(cred.uid || '').trim();
   if (!uid) throw new Error('credential has no uid');
@@ -2381,7 +2442,7 @@ async function savePluginCredential(cred) {
       writeFileAtomic(credentialFileFor(uid), await sealCredential(record), 0o600);
       writeActiveUid(uid);
       invalidatePluginAuthCache();
-      return { stored: 'dpapi' };
+      return { stored: credentialStoreMode() };
     });
   } catch (e) {
     credentialStoreFallback = String(e?.message || e);
@@ -2669,6 +2730,7 @@ async function credentialStatus() {
     configured: await effectiveSource(),
     envPinned: CREDENTIAL_SOURCE_PINNED,
     storeMode: credentialStoreMode(),
+    storeKeySource: credentialKeySource,
     storeDir: credentialStoreMode() === 'memory' ? '' : CREDENTIAL_DIR,
     fallbackReason: credentialStoreFallback,
     failover: CREDENTIAL_FAILOVER,
@@ -2704,6 +2766,11 @@ async function credentialStatus() {
       expiresAt: auth.expiresAt ? new Date(auth.expiresAt).toISOString() : '',
     };
   } catch (e) { status.error = String(e?.message || e).slice(0, 400); }
+  // 读取凭据时才真正加载密钥：字段在对象字面量里可能还是空，这里补齐
+  status.storeMode = credentialStoreMode();
+  status.storeKeySource = credentialKeySource;
+  status.storeDir = credentialStoreMode() === 'memory' ? '' : CREDENTIAL_DIR;
+  status.fallbackReason = credentialStoreFallback;
   status.loginRegion = await suggestedLoginRegion();
   return status;
 }
@@ -4848,6 +4915,51 @@ async function acquireRateSlot(clientSignal, scope = 'local') {
   }
 }
 
+/**
+ * 上游限流统计（runtime only，不进账本/日志）。
+ *
+ * 按「账号 + 模型」记最近 10 分钟被上游 429 的次数，供插件侧 opt-in 的
+ * 自动切号判断使用。只有**最终返回给客户端的 429** 才计数（桥内等待重试
+ * 成功的不算），所以它反映的是用户真正看到的失败次数。
+ */
+const RATE_LIMIT_STATS_WINDOW_MS = 10 * 60_000;
+const rateLimitStats = new Map(); // `${source}:${uid}\0${model}` -> { count, lastAt }
+function noteUpstream429(auth, model) {
+  const key = `${auth?.source || ''}:${auth?.uid || auth?.userId || ''}\0${model || ''}`;
+  const now = Date.now();
+  const prev = rateLimitStats.get(key);
+  const rec = prev && now - prev.lastAt <= RATE_LIMIT_STATS_WINDOW_MS ? prev : { count: 0, lastAt: 0 };
+  rec.count += 1;
+  rec.lastAt = now;
+  rateLimitStats.set(key, rec);
+  if (rateLimitStats.size > 300) {
+    for (const [k, v] of rateLimitStats) {
+      if (now - v.lastAt > RATE_LIMIT_STATS_WINDOW_MS) rateLimitStats.delete(k);
+    }
+  }
+}
+function rateLimitSummary(auth) {
+  const prefix = `${auth?.source || ''}:${auth?.uid || auth?.userId || ''}\0`;
+  const now = Date.now();
+  const models = [];
+  let top = { count: 0, model: '', lastAt: 0 };
+  for (const [key, rec] of rateLimitStats) {
+    if (!key.startsWith(prefix)) continue;
+    if (now - rec.lastAt > RATE_LIMIT_STATS_WINDOW_MS) { rateLimitStats.delete(key); continue; }
+    const model = key.slice(prefix.length);
+    models.push({ model, count: rec.count, lastAt: new Date(rec.lastAt).toISOString() });
+    if (rec.count > top.count) top = { count: rec.count, model, lastAt: rec.lastAt };
+  }
+  models.sort((a, b) => b.count - a.count);
+  return {
+    windowMs: RATE_LIMIT_STATS_WINDOW_MS,
+    count: top.count,
+    model: top.model,
+    lastAt: top.lastAt ? new Date(top.lastAt).toISOString() : '',
+    models: models.slice(0, 5),
+  };
+}
+
 async function callUpstream(bodyString, model, conversationId, clientSignal, { skipRateLimit = false } = {}) {
   // 限流闸门（opt-in；默认关）。放在最前：超限的请求连凭据都不读、更不打上游。
   // 限流桶按调用方分（local / 各 client key）—— B2 凭据分层的一部分。
@@ -4973,6 +5085,8 @@ async function callUpstream(bodyString, model, conversationId, clientSignal, { s
       return { res, bodyText: t, upstreamStartedAt: upEnter };
     }
   }
+  // 最终仍是 429：记一笔（供插件侧 opt-in 的自动切号判断）；等待重试成功的不算
+  if (res.status === 429) noteUpstream429(auth, model);
 
   /*
    * 上游 5xx（网关/模型服务短时中断）：在桥这层等一小会儿原样重发。
@@ -9854,6 +9968,7 @@ async function handleRequest(req, res) {
       const credential = {
         configured: await effectiveSource(),
         storeMode: credentialStoreMode(),
+        storeKeySource: credentialKeySource,
         storeDir: credentialStoreMode() === 'memory' ? '' : CREDENTIAL_DIR,
         fallbackReason: credentialStoreFallback,
         source: '',
@@ -9881,6 +9996,11 @@ async function handleRequest(req, res) {
         if ((await effectiveSource()) !== a.source) a = await resolveAuth();
         region = upstreamRegion(a);
         credential.source = a.source;
+        // 读取凭据时才加载密钥：对象字面量里的值可能还没填上
+        credential.storeMode = credentialStoreMode();
+        credential.storeKeySource = credentialKeySource;
+        credential.storeDir = credentialStoreMode() === 'memory' ? '' : CREDENTIAL_DIR;
+        credential.fallbackReason = credentialStoreFallback;
         try {
           credential.pluginCount = credentialStoreMode() === 'memory'
             ? memoryCredentials.size
@@ -9915,6 +10035,8 @@ async function handleRequest(req, res) {
         startedAt: new Date(STARTED_AT).toISOString(),
         uptimeMs: Date.now() - STARTED_AT,
         auth,
+        // 最近 10 分钟「最终返回给客户端的 429」按账号+模型计数（runtime only）
+        rateLimit: rateLimitSummary(auth ? { source: auth.source, uid: auth.userId } : null),
         authFile: AUTH_PATH,
         ...(AUTH_PATH !== AUTH_PINNED_PATH ? { authFilePinned: AUTH_PINNED_PATH, authFollow: true } : {}),
         credential,
@@ -10079,13 +10201,16 @@ async function handleRequest(req, res) {
     }
 
     if (url.pathname === '/v1/auth/credentials' && req.method === 'GET') {
+      const credentials = await listPluginCredentials();
       return json(res, 200, {
         ok: true,
         configuredSource: await effectiveSource(),
+        // 读取动作本身会加载密钥：状态字段必须放在 credentials 之后取
         storeMode: credentialStoreMode(),
+        storeKeySource: credentialKeySource,
         fallbackReason: credentialStoreFallback,
         activeUid: readActiveUid(),
-        credentials: await listPluginCredentials(),
+        credentials,
         ...(pluginCredentialError ? { error: pluginCredentialError } : {}),
       });
     }

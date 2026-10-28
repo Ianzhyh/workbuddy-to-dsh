@@ -34,7 +34,7 @@ vendor 指纹、诊断项与最近失败归因；**不含令牌、密钥、对�
 | `quota-history.jsonl` | 最近 30 天余额快照（账实核对用） |
 | `media-tasks.json` | 媒体任务元数据（同步任务重启后仍可查；不含 prompt） |
 | `bridge-token` | 本地回环令牌（旧客户端配置里填的就是它） |
-| `credentials/` | 插件登录凭据（DPAPI + AES-GCM 信封） |
+| `credentials/` | 插件登录凭据（Windows DPAPI / 其他平台文件密钥 + AES-GCM 信封） |
 
 可用 `WORKBUDDY_DATA_DIR` 覆盖。旧版把 state/usage/token 放在安装目录里；
 新版首次启动会从旧路径**复制**一份到新目录（旧文件保留作回滚备份），
@@ -62,8 +62,9 @@ node tools\backup.mjs --restore D:\wb-backup --yes
 
 恢复只覆盖备份里**存在**的文件：当前数据目录里多出来的文件会原样保留，不会被删。
 
-> 备份里含**本地令牌**和**插件加密凭据**，按敏感文件保管。插件凭据绑定当前
-> Windows 用户 / 机器（DPAPI），换机恢复后解不开，需要在插件里重新登录；
+> 备份里含**本地令牌**和**插件加密凭据**，按敏感文件保管。Windows 上插件凭据绑定
+> 当前用户 / 机器（DPAPI），换机恢复后解不开；其他平台为文件密钥模式，整个
+> `credentials/` 一起恢复即可继续用（也意味着它按敏感文件对待）。
 > 桌面端凭据不在这份备份里，跟着 WorkBuddy 客户端自己的登录态走。
 
 ---
@@ -594,10 +595,12 @@ spawnSync(systemExe('netstat'), ['-ano'], {
   覆盖（后两个仅应急/测试用）。
 - **刷新失败 / 令牌失效**：在面板里「退出登录」后重新走一次授权；不要手工编辑
   `credentials/` 下的文件（信封是加密的，改坏只能重登）。
-- **「凭据存储：仅内存」**：DPAPI（PowerShell）不可用时会自动退回内存，桥重启后需要重新登录。
+- **「凭据存储：仅内存」**：密钥不可用（Windows DPAPI/PowerShell 失败、`store.key` 损坏、
+  `WORKBUDDY_CREDENTIAL_KEY` 无效）时会自动退回内存，桥重启后需要重新登录。
   这是有意的安全降级，不会静默写明文。想主动不落盘可设 `WORKBUDDY_CREDENTIAL_STORE=memory`。
-- **换机器 / 换 Windows 用户后凭据不可用**：`store.key` 由 DPAPI 绑定当前用户，复制
-  `credentials/` 到别处解不开；重新登录即可。
+- **换机器 / 换 Windows 用户后凭据不可用**：Windows 的 `store.key` 由 DPAPI 绑定当前用户，
+  复制 `credentials/` 到别处解不开；其他平台是文件密钥模式，整个目录一起迁移即可。
+  换 `WORKBUDDY_CREDENTIAL_KEY` 后旧凭据同样解不开，重新登录即可。
 - **账号列表里没有标「插件」的账号，但凭据目录里确有 `.cred` 文件**：通常是密钥不匹配（换了用户/机器/build）。
   面板会显示「插件凭据读取失败」；退出后重新登录。
 

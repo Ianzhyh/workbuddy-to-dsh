@@ -8,8 +8,8 @@
 |---|---|---|
 | Windows 10/11 + WorkBuddy 桌面端 | ✅ 实测 | AtRest 解密、桥、控制台、插件登录、媒体、CI 主门禁 |
 | Windows + 仅插件登录（无桌面端） | ✅ 实测 | 浏览器设备码授权；凭据 DPAPI + AES-GCM |
-| macOS / Linux | ⚪ 单测与 CI 矩阵 | 路径与调用逻辑已实现；**桌面凭据解密未实测**；插件登录会退回仅内存 |
-| Docker | ⚪ API key 模式 | 不能复用桌面凭据；必须显式 `WORKBUDDY_LOCAL_TOKEN`，数据挂 `/data` |
+| macOS / Linux | ⚪ 单测与 CI 矩阵 | 路径与调用逻辑已实现；**桌面凭据解密未实测**；插件登录用文件密钥 + AES-GCM 落盘 |
+| Docker | ⚪ API key / 插件登录 | 不能复用桌面凭据；必须显式 `WORKBUDDY_LOCAL_TOKEN`，数据挂 `/data`；插件登录建议设 `WORKBUDDY_CREDENTIAL_KEY` |
 
 ## 客户端与协议
 

@@ -541,13 +541,14 @@ export const config = {
     /*
      * 第二条凭据来源（插件登录）。凭据由桥自己保管：
      *   - source：auto（桌面端优先，本地不可用时回退插件）/ desktop / plugin / api-key
-     *   - store ：dpapi（Windows 加密落盘）或 memory（不落盘，重启需重登）
+     *   - store ：dpapi（Windows 加密落盘）/ file（非 Windows 默认：文件密钥 +
+     *             AES-GCM 落盘，重启/更新插件不用重登）/ memory（不落盘）
      *   - dir   ：凭据目录；默认在用户目录下，与仓库/插件目录无关
      */
     // 空串 = 不锁定；由桥按 auto + 运行时/持久化选择决定。只有显式设置才注入，
     // 否则会把 UI 里的来源切换当成"被环境变量锁定"而拒绝。
     credentialSource: env.WORKBUDDY_CREDENTIAL_SOURCE || '',
-    credentialStore: env.WORKBUDDY_CREDENTIAL_STORE || (process.platform === 'win32' ? 'dpapi' : 'memory'),
+    credentialStore: env.WORKBUDDY_CREDENTIAL_STORE || (process.platform === 'win32' ? 'dpapi' : 'file'),
     credentialDir: env.WORKBUDDY_CREDENTIAL_DIR || join(homedir(), '.workbuddy-bridge', 'credentials'),
     loginRegion: env.WORKBUDDY_LOGIN_REGION || 'cn',
   },

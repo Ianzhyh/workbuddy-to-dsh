@@ -70,7 +70,7 @@ dsh 设置 → WorkBuddy（9 个标签页）═══ 同一份状态 ═══ 
 
 - **零配置接入** —— 不需要 API Key：有桌面端就复用登录态；没有桌面端就点「插件登录」
 - **插件内登录** —— 设置页点「开始登录」→ 浏览器授权；**不安装、不切换桌面端**也能用；
-  凭据 DPAPI 加密落盘（可关），不读桌面端登录文件
+  凭据加密落盘（Windows DPAPI / 其他平台文件密钥，可关），不读桌面端登录文件
 - **模型直接进选择器** —— 原生 `provider: workbuddy` 路由，不写任何配置文件；
   模型名直接带 `×0.11` 积分倍率 /「免费」标记
 - **模型管理** —— 启用 / 禁用、体检（可用性 · 消耗倍率 · 实测成本）、详情、CSV 导出
@@ -149,7 +149,7 @@ dsh plugin --profile desktop add github:Ianzhyh/workbuddy-to-dsh
 - **二选一**：
   - WorkBuddy 桌面端**已登录**（复用它的登录态，凭据不落盘）；或
   - **不装桌面端**：在插件里用「插件登录（不依赖桌面端）」完成一次浏览器授权
-    （需要一个 WorkBuddy / CodeBuddy 账号；凭据由插件保管，DPAPI 加密落盘）
+    （需要一个 WorkBuddy / CodeBuddy 账号；凭据由插件保管并加密落盘：Windows DPAPI，其他平台文件密钥）
 
 拷 `dsh-plugin/` 文件夹（或 `npm run pack:plugin` 出的 tgz）过去 → 对方跑一次
 `node <插件>/scripts/preflight.mjs` 自检 → 用 dsh 的插件安装指向它 → 重启 dsh。
@@ -209,15 +209,18 @@ npm run release:check      # = vendor:check + 单测 + 独立分发演练（发�
 
 | 文件 | 说明 |
 |---|---|
-| `store.key` | 32 字节随机密钥，由 **Windows DPAPI（当前用户）** 保护 |
+| `store.key` | 32 字节随机密钥：Windows 由 **DPAPI（当前用户）** 保护；其他平台为 0600 密钥文件（可用 `WORKBUDDY_CREDENTIAL_KEY` 改为环境变量、不落盘） |
 | `<hash>.cred` | AES-256-GCM 信封（AAD 绑定 uid），刷新轮换后原子回写 |
 | `active.json` / `source.json` | 当前账号 / 来源选择，非机密 |
 
-- 换机器 / 换 Windows 用户 → 解不开；复制目录到别处不可用。
-- DPAPI 不可用（组策略禁用 PowerShell 等）→ **自动退回仅内存**，绝不静默写明文；
-  面板/诊断会明确显示「凭据存储：仅内存」。
-- 同用户的恶意进程仍能调用 DPAPI / 读进程内存 —— 这是无 TPM/Hello 方案的共同上限。
+- Windows 换机器 / 换用户 → DPAPI 解不开。file 模式把整个 `credentials/`（含 `store.key`）
+  拷走可以解密；容器/NAS 建议设置 `WORKBUDDY_CREDENTIAL_KEY` 并把目录挂持久卷。
+- 密钥不可用（DPAPI 失败 / 密钥文件损坏 / 环境变量无效）→ **自动退回仅内存**，
+  绝不静默写明文；面板/诊断会显示「仅内存」与回退原因。
+- 同用户的恶意进程仍能读密钥 / 进程内存 —— 这是无 TPM/Hello 方案的共同上限。
 - `WORKBUDDY_CREDENTIAL_STORE=memory` 可主动选择不落盘（桥重启后需要重新登录）。
+- 非 Windows 默认 `file`：桥重启 / 更新插件不需要重新登录；旧版本升级后需要再登录一次
+  才会写出持久凭据。
 - 「退出登录」只删除插件自己保存的那份凭据，**不会注销上游账号**。
 - **同账号识别与互通**：桌面端 JWT 的 `sub` 与插件凭据的 `uid` 是同一套账号标识。
   两边是同一账号时，账号页**合并成一行**：桌面账号 + 「双凭据」+「用插件凭据」，
@@ -245,6 +248,7 @@ npm run release:check      # = vendor:check + 单测 + 独立分发演练（发�
     autoStart: true
     consoleAutoStart: false            # 控制台默认按需启动（打开数据面板时自动拉起）
     consoleIdleExitMs: 600000          # 按需拉起的控制台闲置 10 分钟自动退出（0 = 常驻）
+    accountFailoverAfter: 0            # 高级：同模型 10 分钟内 N 次 429 后自动切号（0 = 关）
     consolePort: 8792                  # 默认跟 .env 的 DASHBOARD_PORT 对齐
     displayName: WorkBuddy
     loginRegion: cn                    # 插件登录默认区域：cn / global
@@ -257,6 +261,11 @@ npm run release:check      # = vendor:check + 单测 + 独立分发演练（发�
 ```
 
 完整默认值见 [`lib/index.js`](lib/index.js) 的 `DEFAULTS`。
+
+> `accountFailoverAfter` 默认 `0`（关闭）。显式开启后，同一账号同一模型在 10 分钟内
+> 被上游 429 达到 N 次时会切到下一个本机可用账号（会切换钱包，控制台按需拉起完成切换）。
+> 只在本机已配置的自有账号间切换，不导出凭据、不做公网中转；可能触发上游风控，
+> 是否开启与后果由使用者自行判断。
 
 `projectRoot` 的探测顺序：配置 → `WORKBUDDY_ROOT` 环境变量 → 插件目录的上一级
 （插件放在仓库里时）→ `node_modules` 上溯三级 → `~/workbuddy-to-dsh` → `E:\workbuddy-to-dsh`。

@@ -437,6 +437,11 @@ export const DEFAULTS = {
    * 轮询天然保活，只有页面/数据请求都停了才会计时。
    */
   consoleIdleExitMs: 10 * 60_000,
+  /**
+   * 账号限流自动切换（高级，默认关闭 = 0）：同一账号同一模型在 10 分钟内被
+   * 上游 429 达到 N 次后，切到下一个可用账号。会切换钱包，只在显式配置时生效。
+   */
+  accountFailoverAfter: 0,
   consoleHost: '127.0.0.1',
   consolePort: 8792,
   provider: 'workbuddy',
@@ -452,7 +457,7 @@ export const DEFAULTS = {
    * 没有意义，还会让"登录成功后切到插件"看起来像被环境变量挡住。
    */
   credentialSource: '',
-  /** 凭据存储：'' = 平台默认（Windows dpapi，其余 memory）；可显式写 dpapi / memory。 */
+  /** 凭据存储：'' = 平台默认（Windows dpapi，其余 file）；可显式写 dpapi / file / memory。 */
   credentialStore: '',
   /** 凭据目录：'' = 桥按用户目录推导；显式写则必须可写。 */
   credentialDir: '',
@@ -487,6 +492,24 @@ function asMs(value, fallback) {
   if (value === undefined || value === null) return fallback;
   const n = Number(value);
   return Number.isFinite(n) && n >= 0 ? n : fallback;
+}
+
+/**
+ * 从控制台账号列表挑下一个可切换账号（纯函数，导出给单测）。
+ * 跳过不可用 / 隐藏 / 当前账号；按列表顺序循环。
+ */
+export function pickAccountFailoverTarget(accounts, currentUid = '') {
+  const usable = (Array.isArray(accounts) ? accounts : [])
+    .filter((a) => a && a.usable === true && a.hidden !== true);
+  if (usable.length < 2) return null;
+  const current = usable.find((a) => a.active === true)
+    || (currentUid ? usable.find((a) => String(a.userId || a.account || '') === String(currentUid)) : null);
+  const start = current ? usable.indexOf(current) : -1;
+  for (let i = 1; i <= usable.length; i += 1) {
+    const cand = usable[(start + i + usable.length) % usable.length];
+    if (!current || cand.name !== current.name) return cand;
+  }
+  return null;
 }
 
 function asBool(value, fallback) {
@@ -529,6 +552,7 @@ export function resolveConfig(raw = {}) {
     autoStartTimeoutMs: Number(cfg.autoStartTimeoutMs) || DEFAULTS.autoStartTimeoutMs,
     consoleAutoStart: asBool(cfg.consoleAutoStart, DEFAULTS.consoleAutoStart),
     consoleIdleExitMs: asMs(cfg.consoleIdleExitMs, DEFAULTS.consoleIdleExitMs),
+    accountFailoverAfter: Math.max(0, Math.floor(Number(cfg.accountFailoverAfter) || 0)),
     consoleHost: String(cfg.consoleHost || DEFAULTS.consoleHost),
     consolePort: Number(cfg.consolePort) || DEFAULTS.consolePort,
     provider: String(cfg.provider || DEFAULTS.provider),
@@ -538,7 +562,7 @@ export function resolveConfig(raw = {}) {
     loginRegion: ['cn', 'global'].includes(String(cfg.loginRegion)) ? String(cfg.loginRegion) : DEFAULTS.loginRegion,
     credentialSource: ['auto', 'desktop', 'plugin', 'api-key'].includes(String(cfg.credentialSource))
       ? String(cfg.credentialSource) : DEFAULTS.credentialSource, // '' = 不锁定
-    credentialStore: ['dpapi', 'memory'].includes(String(cfg.credentialStore)) ? String(cfg.credentialStore) : '',
+    credentialStore: ['dpapi', 'file', 'memory'].includes(String(cfg.credentialStore)) ? String(cfg.credentialStore) : '',
     credentialDir: String(cfg.credentialDir || ''),
     bridgeAliveTtlMs: Number(cfg.bridgeAliveTtlMs) || DEFAULTS.bridgeAliveTtlMs,
     modelAllow: asStringArray(cfg.modelAllow),
@@ -2091,6 +2115,60 @@ export function apply(ctx, rawConfig = {}) {
     finally { identityPolling = false; }
   }
 
+  /*
+   * 限流自动切号（opt-in，默认关闭）。
+   *
+   * 桥的 `/health.rateLimit` 按「账号 + 模型」统计最近 10 分钟最终返回给
+   * 客户端的 429 次数；达到阈值后借控制台的 `/api/account/switch` 切换
+   * （它是 .state.json 的唯一写者，并负责停/起桥与清理体检结论）。控制台
+   * 没跑时按需拉起，用完照常闲置退出。只在本机用户自己配置的账号间切换。
+   */
+  let autoSwitchBusy = false;
+  let lastAutoSwitchAt = 0;
+  async function maybeAutoSwitchAccount() {
+    if (autoSwitchBusy || Date.now() - lastAutoSwitchAt < 60_000) return;
+    autoSwitchBusy = true;
+    try {
+      const health = await client.health(AbortSignal.timeout(4000)).catch(() => null);
+      const limit = health?.rateLimit;
+      if (!limit || Number(limit.count) < config.accountFailoverAfter) return;
+      // 无论这次是否切成功都至少隔 60 秒再试，避免无可用账号时每 10 秒解一遍账号列表
+      lastAutoSwitchAt = Date.now();
+      const ensured = await consoleSupervisor.ensure({});
+      if (!ensured.ok) {
+        log(`自动切号跳过：控制台未就绪（${ensured.error}）`);
+        return;
+      }
+      const listed = await fetch(`${consoleSupervisor.url}/api/accounts`, { signal: AbortSignal.timeout(10_000) })
+        .then((r) => r.json()).catch(() => null);
+      const target = pickAccountFailoverTarget(listed?.accounts, health?.auth?.userId || '');
+      if (!target) {
+        log(`自动切号跳过：没有其它可用账号（${limit.model || '?'} 已限流 ${limit.count} 次）`);
+        return;
+      }
+      const res = await fetch(`${consoleSupervisor.url}/api/account/switch`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-workbuddy-panel': '1' },
+        body: JSON.stringify({ file: target.name }),
+        signal: AbortSignal.timeout(45_000),
+      });
+      const out = await res.json().catch(() => null);
+      if (!res.ok || !out?.switched) {
+        log(`自动切号失败：${out?.error || `HTTP ${res.status}`}`);
+        return;
+      }
+      // 控制台已写 .state.json 并重启桥；把插件的 supervisor 同步到新账号，
+      // 否则下一次 ensureReady 会按旧 authFile 把桥又重启回去。
+      syncBridgeAccountConfig();
+      adapter.invalidate();
+      log(`上游限流 ${limit.count} 次（${limit.model || '?'}），已自动切换账号 -> ${target.name}`);
+    } catch (error) {
+      log('自动切号异常', error);
+    } finally {
+      autoSwitchBusy = false;
+    }
+  }
+
   if (config.autoStart) {
     void (async () => {
       try {
@@ -2137,6 +2215,14 @@ export function apply(ctx, rawConfig = {}) {
         log('自动启动控制台失败', error);
       }
     })();
+  }
+  if (config.accountFailoverAfter > 0) {
+    const timer = setInterval(() => { void maybeAutoSwitchAccount(); }, 10_000);
+    timer.unref?.();
+    if (typeof ctx.effect === 'function') {
+      ctx.effect(() => () => clearInterval(timer), 'workbuddy.account-failover');
+    }
+    log(`限流自动切号已开启：同一模型 10 分钟内 ${config.accountFailoverAfter} 次 429 后切换账号`);
   }
 
   /*

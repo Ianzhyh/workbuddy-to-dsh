@@ -1125,6 +1125,8 @@ body.dark .wb-root,
       '插件登录': 'Plugin sign-in',
       '（由环境变量锁定）': ' (pinned by an environment variable)',
       '凭据存储：DPAPI 加密': 'Credential store: DPAPI encrypted',
+      '凭据存储：文件加密': 'Credential store: encrypted file',
+      '凭据存储：文件加密（环境变量密钥）': 'Credential store: encrypted file (key from env)',
       '凭据存储：仅内存': 'Credential store: memory only',
       '插件凭据读取失败：': 'Could not read plugin credential: ',
       '桌面端登录态当前不可用；请选择「自动」或改用插件登录。':
@@ -4310,7 +4312,10 @@ body.dark .wb-root,
                 onChange: (e) => switchSource(e.target.value),
               }),
             h('span', { className: 'wb-note' },
-              data?.storeMode === 'dpapi' ? '凭据存储：DPAPI 加密' : '凭据存储：仅内存'),
+              data?.storeMode === 'dpapi' ? '凭据存储：DPAPI 加密'
+                : data?.storeMode === 'file'
+                  ? (data?.storeKeySource === 'env' ? '凭据存储：文件加密（环境变量密钥）' : '凭据存储：文件加密')
+                  : '凭据存储：仅内存'),
             h('span', { className: 'wb-note' }, '实际使用：'),
             h('span', { className: 'wb-note' }, credentialSourceLabel(effectiveSource)))
           : null,

@@ -29,7 +29,7 @@
 - `quota-history.jsonl`：余额快照
 - `media-tasks.json`：媒体任务元数据
 - `bridge-token`：本地回环令牌
-- `credentials/`：插件登录凭据（DPAPI + AES-GCM）
+- `credentials/`：插件登录凭据（Windows DPAPI / 其他平台文件密钥 + AES-GCM）
 
 这些是**本项目自己的数据**，不含上游明文凭据；需要备份/迁移时整目录复制即可。删除它不会删 WorkBuddy 客户端登录态。
 

@@ -17,7 +17,7 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createHash } from 'node:crypto';
+import { createCipheriv, createHash, randomBytes } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { createServer, request as httpRequest, Agent as HttpAgent } from 'node:http';
 import { mkdtempSync, rmSync, writeFileSync, existsSync, readFileSync, readdirSync, utimesSync } from 'node:fs';
@@ -2258,6 +2258,61 @@ test('桥：上游 429（14003）在桥这层等待重试，客户端无感', { 
 });
 
 /**
+ * 自动切号的数据源：/health 必须能按「账号 + 模型」数出最近 10 分钟真正
+ * 返回给客户端的 429。桥内等待重试成功的不算（否则会把偶发抖动误判成限流）。
+ */
+test('桥：持续 429 时 /health 按账号+模型计数（自动切号的数据源）', { timeout: 90_000 }, async () => {
+  const srv = createServer((req, res) => {
+    const path = new URL(req.url, 'http://127.0.0.1').pathname;
+    if (path === '/v2/enterprises/personal/models') {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      return res.end(JSON.stringify({
+        code: 0,
+        data: { models: [{ id: 'rate-model', maxInputTokens: 128000, maxOutputTokens: 4096 }] },
+      }));
+    }
+    if (path === '/v3/config') {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      return res.end(JSON.stringify({ code: 0, data: { models: [] } }));
+    }
+    if (path === '/v2/chat/completions') {
+      req.resume();
+      res.writeHead(429, { 'content-type': 'application/json' });
+      return res.end(JSON.stringify({ code: 14003, msg: 'too many requests' }));
+    }
+    res.writeHead(404, { 'content-type': 'application/json' });
+    res.end('{}');
+  });
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+  const bridge = await startBridge(
+    { CODEBUDDY_ENDPOINT: `http://127.0.0.1:${srv.address().port}`, WORKBUDDY_429_WAITS: '' },
+    { auth: READABLE_FAKE_AUTH },
+  );
+  try {
+    await fetch(bridge.baseUrl + '/v1/models?all=1', { headers: auth }); // 预热目录
+    for (let i = 0; i < 3; i += 1) {
+      const r = await fetch(bridge.baseUrl + '/v1/chat/completions', {
+        method: 'POST',
+        headers: { ...auth, 'content-type': 'application/json' },
+        body: JSON.stringify({ model: 'rate-model', messages: [{ role: 'user', content: 'hi' }] }),
+        signal: AbortSignal.timeout(15_000),
+      });
+      assert.equal(r.status, 429);
+      await r.text();
+    }
+    const health = await (await fetch(bridge.baseUrl + '/health', { headers: auth })).json();
+    assert.equal(health.rateLimit?.count, 3, '/health 必须数到 3 次 429');
+    assert.equal(health.rateLimit?.model, 'rate-model');
+    assert.ok(health.rateLimit?.windowMs >= 60_000, '计数窗口必须是分钟级');
+    assert.equal(health.rateLimit?.models?.[0]?.count, 3, '按模型明细要给出同一个计数');
+  } finally {
+    await bridge.stop();
+    try { await srv.close(); } catch { /* 忽略 */ }
+    rmSync(bridge.dir, { recursive: true, force: true });
+  }
+});
+
+/**
  * 上游 5xx 重试：2026-10-15 的真实故障里，多数 500/502 在 1 秒后原样重发即可成功。
  * 桥不重试 = 用户丢掉一整轮已经发出去的上下文。
  */
@@ -4015,7 +4070,7 @@ test('插件登录：设备码 → 加密落盘 → auto 回退 → 刷新轮换
   await new Promise((r) => stub.listen(0, '127.0.0.1', r));
   const stubBase = `http://127.0.0.1:${stub.address().port}`;
 
-  const storeMode = process.platform === 'win32' ? 'dpapi' : 'memory';
+  const storeMode = process.platform === 'win32' ? 'dpapi' : 'file';
   const sharedEnv = {
     CODEBUDDY_ENDPOINT: stubBase,
     WORKBUDDY_LOGIN_BASE: stubBase,
@@ -4121,7 +4176,7 @@ test('插件登录：设备码 → 加密落盘 → auto 回退 → 刷新轮换
     assert.equal(refreshHeaders[0]['x-user-id'], 'uid-1');
 
     // ⑤ 落盘形态：只有密文，令牌不出现在文件里
-    if (storeMode === 'dpapi') {
+    if (storeMode !== 'memory') {
       const files = readdirSync(credDir);
       assert.ok(files.includes('store.key'), 'DPAPI 密钥必须独立落在 store.key');
       const credFile = files.find((f) => f.endsWith('.cred'));
@@ -4137,7 +4192,7 @@ test('插件登录：设备码 → 加密落盘 → auto 回退 → 刷新轮换
     }
 
     // ⑥ 重启桥：必须用持久化后的 access token（证明轮换后的 refresh 也落盘了）
-    if (storeMode === 'dpapi') {
+    if (storeMode !== 'memory') {
       await bridge1.stop();
       bridge2 = await startBridge({ ...sharedEnv, WORKBUDDY_AUTH_FILE: missingAuth }, { auth: READABLE_FAKE_AUTH });
       assert.equal((await chat(bridge2.baseUrl)).status, 200);
@@ -4146,7 +4201,7 @@ test('插件登录：设备码 → 加密落盘 → auto 回退 → 刷新轮换
     }
 
     // ⑥b 来源=plugin，但用户在桌面客户端换号：桥必须跟随桌面（issue #6 的残留形态）
-    if (storeMode === 'dpapi') {
+    if (storeMode !== 'memory') {
       const followPath = join(credRoot, 'desktop-follow.info');
       writeFileSync(followPath, JSON.stringify(authFileFor('uid-1')));
       // 模拟「用户在桌面文件最后一次写入之后才选择插件来源」：此刻不该抢桌面
@@ -4181,7 +4236,7 @@ test('插件登录：设备码 → 加密落盘 → auto 回退 → 刷新轮换
      * ⑥c 旧 source.json（没有 desktopUid 基线）但桌面文件在选择之后被重写：
      * 升级后第一次就要跟上用户刚做的换号，不能要求再换一次。
      */
-    if (storeMode === 'dpapi') {
+    if (storeMode !== 'memory') {
       const legacyFollow = join(credRoot, 'legacy-follow.info');
       writeFileSync(legacyFollow, JSON.stringify(authFileFor('legacy-desktop-new')));
       writeFileSync(join(credDir, 'source.json'), JSON.stringify({
@@ -4208,13 +4263,13 @@ test('插件登录：设备码 → 加密落盘 → auto 回退 → 刷新轮换
 
     // ⑦ auto：桌面端可用时仍然优先桌面端（老行为不变）
     // 先把来源偏好写回 auto —— 否则上一段的登录会把偏好留在 plugin。
-    if (storeMode === 'dpapi') {
+    if (storeMode !== 'memory') {
       writeFileSync(join(credDir, 'source.json'), JSON.stringify({ source: 'auto' }));
     }
     bridge3 = await startBridge({ ...sharedEnv }, { auth: READABLE_FAKE_AUTH });
     const sourceBoth = await (await fetch(`${bridge3.baseUrl}/v1/auth/source`, { headers: auth })).json();
     assert.equal(sourceBoth.desktop.available, true);
-    assert.equal(sourceBoth.plugin.count, storeMode === 'dpapi' ? 1 : 0);
+    assert.equal(sourceBoth.plugin.count, storeMode !== 'memory' ? 1 : 0);
     assert.equal(sourceBoth.effective.source, 'desktop', 'auto 必须桌面端优先');
     assert.equal((await chat(bridge3.baseUrl)).status, 200);
     assert.equal(chatAuths.at(-1), 'Bearer fake-access-token', 'auto 下请求应使用桌面端令牌');
@@ -4231,7 +4286,7 @@ test('插件登录：设备码 → 加密落盘 → auto 回退 → 刷新轮换
      * 接管到插件凭据，且请求身份切到 WorkBuddy。memory 模式下另一个进程没有
      * 插件凭据（设计如此），这条只在能落盘的 Windows 跑。
      */
-    if (storeMode === 'dpapi') {
+    if (storeMode !== 'memory') {
       const sameAuth = {
         auth: {
           accessToken: desktopJwtForSameAccount,
@@ -4252,7 +4307,7 @@ test('插件登录：设备码 → 加密落盘 → auto 回退 → 刷新轮换
     }
 
     // ⑩ 不同账号：默认不接管（上一步已证）；显式 any 才允许跨账号接管
-    if (storeMode === 'dpapi') {
+    if (storeMode !== 'memory') {
       const otherAuth = {
         auth: {
           accessToken: desktopJwtOtherAccount,
@@ -4281,6 +4336,120 @@ test('插件登录：设备码 → 加密落盘 → auto 回退 → 刷新轮换
       if (b) { try { rmSync(b.dir, { recursive: true, force: true }); } catch { /* 忽略 */ } }
     }
     rmSync(credRoot, { recursive: true, force: true });
+  }
+});
+
+/**
+ * file 模式（非 Windows 默认）：`WORKBUDDY_CREDENTIAL_KEY` 让密钥不落盘，
+ * 凭据仍是 AES-GCM 密文；模拟插件更新 / 服务重启后必须还能读出。
+ */
+test('插件登录：file 模式用环境变量密钥加密落盘，重启后仍可用', { timeout: 60_000 }, async () => {
+  const key = Buffer.alloc(32, 0x5a);
+  const uid = 'uid-file-mode';
+  const credDir = mkdtempSync(join(tmpdir(), 'wb-file-store-'));
+  const cred = {
+    uid,
+    accessToken: 'plugin-access-file',
+    refreshToken: 'plugin-refresh-file',
+    expiresAtMs: Date.now() + 3_600_000,
+    region: 'cn',
+    domain: 'www.codebuddy.cn',
+    updatedAt: new Date().toISOString(),
+  };
+  const credFile = join(credDir, `${createHash('sha256').update(uid).digest('hex').slice(0, 24)}.cred`);
+  const iv = randomBytes(12);
+  const cipher = createCipheriv('aes-256-gcm', key, iv);
+  cipher.setAAD(Buffer.from(`workbuddy-credential\0${uid}\0v1`, 'utf8'));
+  const data = Buffer.concat([cipher.update(JSON.stringify(cred), 'utf8'), cipher.final()]);
+  writeFileSync(credFile, JSON.stringify({
+    v: 1,
+    alg: 'aes-256-gcm',
+    uid,
+    iv: iv.toString('base64'),
+    tag: cipher.getAuthTag().toString('base64'),
+    data: data.toString('base64'),
+  }));
+  writeFileSync(join(credDir, 'active.json'), JSON.stringify({ uid }));
+
+  const env = {
+    WORKBUDDY_CREDENTIAL_STORE: 'file',
+    WORKBUDDY_CREDENTIAL_KEY: key.toString('hex'),
+    WORKBUDDY_CREDENTIAL_DIR: credDir,
+    WORKBUDDY_CREDENTIAL_SOURCE: 'plugin',
+  };
+  const readStatus = async (base) => {
+    const res = await fetch(`${base}/v1/auth/source`, { headers: auth });
+    assert.equal(res.status, 200);
+    return res.json();
+  };
+
+  let bridge = await startBridge(env);
+  try {
+    const source = await readStatus(bridge.baseUrl);
+    assert.equal(source.storeMode, 'file');
+    assert.equal(source.storeKeySource, 'env');
+    assert.equal(source.plugin.count, 1);
+    assert.equal(source.plugin.activeUid, uid);
+    assert.equal(source.effective.source, 'plugin');
+    const text = await (await fetch(`${bridge.baseUrl}/v1/auth/credentials`, { headers: auth })).text();
+    assert.ok(!text.includes('plugin-access-file'), '凭据清单不能回显 access token');
+    assert.ok(!text.includes('plugin-refresh-file'), '凭据清单不能回显 refresh token');
+    assert.ok(!existsSync(join(credDir, 'store.key')), '环境变量密钥不应落盘');
+    assert.ok(!readFileSync(credFile, 'utf8').includes('plugin-access-file'), '凭据文件里不能有明文令牌');
+  } finally {
+    await bridge.stop();
+  }
+
+  // 模拟插件更新 / 服务重启：凭据仍能读出
+  bridge = await startBridge({ ...env });
+  try {
+    const source = await readStatus(bridge.baseUrl);
+    assert.equal(source.storeMode, 'file');
+    assert.equal(source.plugin.count, 1);
+    assert.equal(source.effective.source, 'plugin');
+  } finally {
+    await bridge.stop();
+    rmSync(credDir, { recursive: true, force: true });
+  }
+});
+
+test('插件登录：file 模式未设环境变量密钥时使用 store.key', { timeout: 60_000 }, async () => {
+  const key = Buffer.alloc(32, 0x3c);
+  const uid = 'uid-file-key';
+  const credDir = mkdtempSync(join(tmpdir(), 'wb-file-key-'));
+  writeFileSync(join(credDir, 'store.key'), key.toString('hex'), { mode: 0o600 });
+  const cred = {
+    uid,
+    accessToken: 'plugin-access-keyfile',
+    refreshToken: 'plugin-refresh-keyfile',
+    expiresAtMs: Date.now() + 3_600_000,
+    region: 'cn',
+    domain: 'www.codebuddy.cn',
+  };
+  const iv = randomBytes(12);
+  const cipher = createCipheriv('aes-256-gcm', key, iv);
+  cipher.setAAD(Buffer.from(`workbuddy-credential\0${uid}\0v1`, 'utf8'));
+  const data = Buffer.concat([cipher.update(JSON.stringify(cred), 'utf8'), cipher.final()]);
+  writeFileSync(join(credDir, `${createHash('sha256').update(uid).digest('hex').slice(0, 24)}.cred`), JSON.stringify({
+    v: 1, alg: 'aes-256-gcm', uid,
+    iv: iv.toString('base64'), tag: cipher.getAuthTag().toString('base64'), data: data.toString('base64'),
+  }));
+  writeFileSync(join(credDir, 'active.json'), JSON.stringify({ uid }));
+
+  const bridge = await startBridge({
+    WORKBUDDY_CREDENTIAL_STORE: 'file',
+    WORKBUDDY_CREDENTIAL_DIR: credDir,
+    WORKBUDDY_CREDENTIAL_SOURCE: 'plugin',
+  });
+  try {
+    const source = await (await fetch(`${bridge.baseUrl}/v1/auth/source`, { headers: auth })).json();
+    assert.equal(source.storeMode, 'file');
+    assert.equal(source.storeKeySource, 'file');
+    assert.equal(source.plugin.count, 1);
+    assert.equal(source.effective.source, 'plugin');
+  } finally {
+    await bridge.stop();
+    rmSync(credDir, { recursive: true, force: true });
   }
 });
 

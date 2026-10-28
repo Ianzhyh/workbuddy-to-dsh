@@ -21,7 +21,7 @@
 |---|---|
 | **不内置任何密钥** | AtRest 字段密钥每次从写入登录文件的那个客户端现取；项目内不存在密钥副本 |
 | **桌面端令牌不落盘** | 从桌面端登录文件读出的令牌只在内存中解密后用于构造请求头，不写文件、不写日志 |
-| **插件登录令牌加密落盘（可关）** | 走插件登录时令牌由我们保管：默认 DPAPI + AES-256-GCM 落盘，`WORKBUDDY_CREDENTIAL_STORE=memory` 可改为仅内存；两种模式都不写日志 |
+| **插件登录令牌加密落盘（可关）** | 走插件登录时令牌由我们保管：Windows 默认 DPAPI、其他平台默认文件密钥，统一用 AES-256-GCM 信封落盘；`WORKBUDDY_CREDENTIAL_STORE=memory` 可改为仅内存；任何模式都不写日志 |
 | **不写回登录文件** | 登录文件是客户端的加密存储，写入明文会破坏它。刷新结果只留在桥进程内存中 |
 | **不记录对话内容** | 开启日志时只记录模型名、消息数、工具数 |
 | **不绕过鉴权** | 只驱动使用者**自己已登录**的账号；不提供、也不接受任何绕过认证的手段 |
@@ -50,7 +50,10 @@ WorkBuddy.exe（以 ELECTRON_RUN_AS_NODE 运行）
 这条路径的令牌是**我们自己的**，因此有独立的存储与威胁模型：
 
 ```
-store.key   32 字节随机密钥，DPAPI(CurrentUser) 保护
+store.key   32 字节随机密钥
+              ├─ Windows：DPAPI(CurrentUser) 保护
+              └─ 其他平台（file）：0600 原始密钥；或优先用
+                 WORKBUDDY_CREDENTIAL_KEY（env，不落盘）
     │
     ▼
 <hash>.cred AES-256-GCM 信封（AAD 绑定 uid）→ 只在桥进程内存中解密
@@ -58,11 +61,11 @@ store.key   32 字节随机密钥，DPAPI(CurrentUser) 保护
 
 | 能防 | 不能防 |
 |---|---|
-| 把 `credentials/` 拷到另一台电脑 / 另一个 Windows 用户 → DPAPI 解不开 | 以**同一个 Windows 用户**运行的恶意程序（它也能调 DPAPI、也能读进程内存） |
+| 把 `credentials/` 拷到另一台电脑 / 另一个 Windows 用户（DPAPI 模式）→ 解不开 | 以**同一个 Windows 用户**运行的恶意程序（它也能调 DPAPI、也能读进程内存） |
 | 直接打开凭据文件 → 只有密文 | 连同整个用户配置目录与 DPAPI 主密钥一起搬走（不属于"轻易使用"） |
-| 日志 / 账本 / 诊断 / API 响应 → 永远不出现令牌 | — |
+| 日志 / 账本 / 诊断 / API 响应 → 永远不出现令牌 | file 模式未设 `WORKBUDDY_CREDENTIAL_KEY` 时，整个 `credentials/` 被拷走（含 `store.key`）可解密。容器/NAS 建议设置环境变量密钥并把目录放持久卷 |
 
-- DPAPI 不可用时**自动退回仅内存**，绝不静默写明文；面板与诊断会明确显示存储模式。
+- 密钥不可用（DPAPI 失败 / `store.key` 损坏 / `WORKBUDDY_CREDENTIAL_KEY` 无效）时会**自动退回仅内存**，绝不静默写明文；面板与诊断会明确显示存储模式与密钥来源。
 - 刷新轮换后的 refresh token 会原子回写（跨进程锁 + 单飞），避免并发刷新把会话吊销。
 - **凭据接管只在同一账号内自动发生**：桌面 JWT 的 `sub` 与插件 `uid` 相等时，401/403
   会换另一条凭据重试（钱包不变）。不同账号默认**不会**自动接管；`WORKBUDDY_CREDENTIAL_FAILOVER=any`
@@ -165,8 +168,9 @@ icacls "%USERPROFILE%\.workbuddy-bridge\client-configs" /T
   缓存 6 小时（最多 500 条），桥重启即消失。**缓存按账号作用域**（endpoint + userId；
   没有 userId 的 API key 模式回退到 token 指纹），切换账号后不会读到上一个账号的产物。
   产物文件只写到用户显式给的 `save_to`。
-- **不做多账号池化/转售/绕过风控**：只驱动当前登录的本人账号；临时 key 只在内存，
-  不导出、不写日志。
+- **默认不做多账号池化/转售**：只驱动当前登录的本人账号；临时 key 只在内存，不导出、
+  不写日志。可选的限流自动切号（插件 `accountFailoverAfter`，默认 `0`）仅在本机已配置的
+  自有账号间切换，由使用者显式开启并自行承担上游风控风险；不提供公网中转或代他人调用。
 
 ---
 
@@ -179,7 +183,7 @@ icacls "%USERPROFILE%\.workbuddy-bridge\client-configs" /T
 | `%LOCALAPPDATA%\CodeBuddyExtension\Data\Public\auth\*.info` | 加密后的 access/refresh token |
 | `~/.dsh/.credentials.yaml` | 各 provider 的 API key（含本项目写入的占位值） |
 | `~/.workbuddy/keyblob` | 客户端主密钥的包裹信息 |
-| `%USERPROFILE%\.workbuddy-bridge\credentials\` | **插件登录凭据**：`store.key`（DPAPI 保护）+ `.cred`（AES-GCM 密文）。复制到别的机器/用户不可用，但仍按敏感文件对待 |
+| `%USERPROFILE%\.workbuddy-bridge\credentials\` | **插件登录凭据**：`store.key`（Windows DPAPI 保护；file 模式为 0600 密钥文件）+ `.cred`（AES-GCM 密文）。DPAPI 模式复制到别的机器/用户不可用；file 模式若连同 `store.key` 一起被拷走则可解密。无论哪种都按敏感文件对待 |
 | `%USERPROFILE%\.workbuddy-bridge\bridge-token` | 本地回环令牌（随机生成；已 gitignore；`WORKBUDDY_DATA_DIR` 可覆盖） |
 | `~/.codex/config.toml`、`~/.claude/settings.json`、`opencode.json` | 一键接入写进去的**回环令牌**（写入后自动收紧权限） |
 | `.backup/client-configs/**` | 上述配置的**整份备份**（含历史令牌；已自动收紧） |

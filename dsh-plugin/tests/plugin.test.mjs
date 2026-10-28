@@ -14,7 +14,7 @@ import { fileURLToPath } from 'node:url';
 import { locateProviderBlock, stripProviderBlock, cleanFile, detectInFile } from '../lib/legacy.mjs';
 import {
   resolveConfig, detectProjectRoot, apply, readProjectEnv, DEFAULTS,
-  collectBridgeExtraEnv, BRIDGE_ENV_PASSTHROUGH,
+  collectBridgeExtraEnv, BRIDGE_ENV_PASSTHROUGH, pickAccountFailoverTarget,
 } from '../lib/index.js';
 import { BridgeSupervisor, bridgeBuildHash } from '../lib/bridge.mjs';
 
@@ -994,6 +994,33 @@ test('默认值：插件拉起的控制台闲置 10 分钟退出，显式 0 仍�
   assert.equal(resolveConfig({ consoleIdleExitMs: '120000' }).consoleIdleExitMs, 120_000);
   assert.equal(resolveConfig({ consoleIdleExitMs: -1 }).consoleIdleExitMs, 600_000, '负数按非法值回默认');
   assert.equal(resolveConfig({ consoleIdleExitMs: 'abc' }).consoleIdleExitMs, 600_000, '非法值回默认');
+});
+
+test('默认值：限流自动切号默认关闭，显式配置才生效', () => {
+  assert.equal(resolveConfig({}).accountFailoverAfter, 0);
+  assert.equal(resolveConfig({ accountFailoverAfter: 3 }).accountFailoverAfter, 3);
+  assert.equal(resolveConfig({ accountFailoverAfter: -2 }).accountFailoverAfter, 0);
+  assert.equal(resolveConfig({ accountFailoverAfter: 'abc' }).accountFailoverAfter, 0);
+});
+
+test('限流自动切号：跳过当前 / 隐藏 / 不可用账号，按列表循环选下一个', () => {
+  const accounts = [
+    { name: 'a.info', active: true, usable: true, userId: 'u1' },
+    { name: 'b.info', usable: false },
+    { name: 'c.info', usable: true, hidden: true },
+    { name: 'd.info', usable: true, userId: 'u4' },
+  ];
+  assert.equal(pickAccountFailoverTarget(accounts, 'u1')?.name, 'd.info');
+  assert.equal(pickAccountFailoverTarget([{ name: 'a.info', active: true, usable: true }], 'u1'), null);
+  assert.equal(pickAccountFailoverTarget([
+    { name: 'x.info', usable: true },
+    { name: 'y.info', usable: true },
+  ], '')?.name, 'x.info', '没有 active 标记时从第一个可用账号开始');
+  assert.equal(pickAccountFailoverTarget([
+    { name: 'a.info', active: true, usable: true },
+    { name: 'b.info', usable: true },
+    { name: 'c.info', usable: true },
+  ], 'u1')?.name, 'b.info', '按列表顺序循环，而不是随机');
 });
 
 test('collectBridgeExtraEnv：版本/11128/预检/超时真正透传给桥，且不泄露凭据', () => {
