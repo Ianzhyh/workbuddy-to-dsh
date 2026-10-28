@@ -411,6 +411,7 @@ test('apply() 装配：注册 llm 路由、10 个工具、命令、HTTP 路由',
     assert.equal(result.state.route.registered, true);
     assert.ok(result.consoleSupervisor, 'apply() 必须返回控制台管理器');
     assert.equal(result.consoleSupervisor.url, 'http://127.0.0.1:8792');
+    assert.equal(result.consoleSupervisor.idleExitMs, 600_000, '闲置退出默认值应传给控制台管理器');
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -982,6 +983,19 @@ test('默认值：插件把空闲看门狗默认开到 5 分钟，显式 0 仍�
   assert.equal(resolveConfig({ streamIdleTimeoutMs: '120000' }).streamIdleTimeoutMs, 120_000);
 });
 
+test('默认值：控制台默认按需启动，不随 dsh 常驻', () => {
+  assert.equal(resolveConfig({}).consoleAutoStart, false);
+  assert.equal(resolveConfig({ consoleAutoStart: true }).consoleAutoStart, true);
+});
+
+test('默认值：插件拉起的控制台闲置 10 分钟退出，显式 0 仍可常驻', () => {
+  assert.equal(resolveConfig({}).consoleIdleExitMs, 600_000);
+  assert.equal(resolveConfig({ consoleIdleExitMs: 0 }).consoleIdleExitMs, 0);
+  assert.equal(resolveConfig({ consoleIdleExitMs: '120000' }).consoleIdleExitMs, 120_000);
+  assert.equal(resolveConfig({ consoleIdleExitMs: -1 }).consoleIdleExitMs, 600_000, '负数按非法值回默认');
+  assert.equal(resolveConfig({ consoleIdleExitMs: 'abc' }).consoleIdleExitMs, 600_000, '非法值回默认');
+});
+
 test('collectBridgeExtraEnv：版本/11128/预检/超时真正透传给桥，且不泄露凭据', () => {
   const projectEnv = {
     WORKBUDDY_APP_VERSION: '5.8.3',
@@ -995,6 +1009,7 @@ test('collectBridgeExtraEnv：版本/11128/预检/超时真正透传给桥，且
     WORKBUDDY_SEARCH_TIMEOUT_MS: '5000',
     WORKBUDDY_SEARCH_MAX_RESULTS: '8',
     WORKBUDDY_MIORA_BASE: 'https://miora.example',
+    WORKBUDDY_APP_EXECUTABLE: '/Applications/WorkBuddy.app/Contents/MacOS/Electron',
     // 下面两个是机密/连接参数，绝不能进“非机密透传”清单
     WORKBUDDY_LOCAL_TOKEN: 'must-not-leak',
     CODEBUDDY_API_KEY: 'must-not-leak',
@@ -1012,6 +1027,8 @@ test('collectBridgeExtraEnv：版本/11128/预检/超时真正透传给桥，且
   assert.equal(out.WORKBUDDY_SEARCH_TIMEOUT_MS, '5000');
   assert.equal(out.WORKBUDDY_SEARCH_MAX_RESULTS, '8');
   assert.equal(out.WORKBUDDY_MIORA_BASE, 'https://miora.example');
+  assert.equal(out.WORKBUDDY_APP_EXECUTABLE, '/Applications/WorkBuddy.app/Contents/MacOS/Electron',
+    '.env 的客户端路径覆盖必须传到插件拉起的桥（macOS 自救路径）');
   assert.equal(out.WORKBUDDY_LOCAL_TOKEN, undefined);
   assert.equal(out.CODEBUDDY_API_KEY, undefined);
   assert.equal(out.WORKBUDDY_CLIENT_KEYS, undefined);

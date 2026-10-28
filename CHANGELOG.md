@@ -17,6 +17,66 @@
 
 只支持最近 2 个 minor 版本。
 
+## [1.18.0] - 2026-10-28
+
+### Changed
+
+- **控制台改为按需启动 + 闲置自动退出**（[#14](https://github.com/Ianzhyh/workbuddy-to-dsh/issues/14)）：
+  控制台常驻约 80MB，而多数时间没人看数据。插件默认 `consoleAutoStart: false`
+  （不随 dsh 启动）：面板第一次取数时由 `console-api` 透传前 `ensure` 透明拉起，
+  `workbuddy console` / 工具入口也照旧；使用完闲置 `consoleIdleExitMs`（默认
+  `600000`，`0` = 常驻）后自动退出。计活动只看页面/数据请求，插件每 20 秒的探活
+  （`/`、`/api/version`）不算，页面打开时每 2 秒的 `/api/identity` 轮询会保活。
+  手动 `node dashboard/server.mjs` 不设 `DASHBOARD_IDLE_EXIT_MS` 就保持常驻。
+  面板状态从「未运行（黄）」改为「按需启动（中性）」。`ConsoleSupervisor.stop()`
+  同步加固：先确认端口上仍是自己拉起的那个实例再 kill，避免闲置退出后 PID 被
+  系统回收导致误杀。
+- **GitHub / npm 直装包不再重复携带 `dsh-plugin/vendor/`**：根包形态下
+  `projectRoot` 永远解析到安装根（那里已有 `bridge/`、`dashboard/`、`lib/`），
+  vendor 是 1.7MB 的逐字节副本、永远轮不到。子包 tgz（单文件夹分发）仍保留
+  vendor；`verify-github-install` 增加「根包不含 vendor、子包仍有 vendor」断言。
+
+### Fixed
+
+- **控制台卡片不再每次轮询都重播入场动画**：`renderCards()` 每 20 秒重设
+  `innerHTML`，整屏卡片会跟着重新浮现；现在首屏播一次后加 `settled` 落回静止态
+  （`test-card-motion` 回归）。
+- **登录来源面板重复渲染导致下拉偶发点不开**：`/api/login` 首屏可能加载两次，
+  数据相同也会重设 `innerHTML`，把刚打开的下拉换掉。现在按渲染指纹跳过重复重绘
+  （`test-dropdowns` 第 0 个下拉回归）。
+- **英文模式残留「桌面端凭据 / 桌面端」两处中文**：账号卡与令牌卡副行是拼接串，
+  补规则拆开翻译；同时补齐「桌面文件未生效」的英文。
+- **390px 窄屏「客户端一键拉取给 ___」横向溢出 50px**：允许该行收缩并换行，
+  `test-i18n` 的 390px 视口断言恢复全绿。
+- **macOS 探测不到 WorkBuddy 可执行文件**（[#13](https://github.com/Ianzhyh/workbuddy-to-dsh/issues/13)）：
+  腾讯 WorkBuddy 5.8.x 是未改名的 Electron 壳，`Contents/MacOS/` 下的可执行文件叫
+  `Electron` 而不是 `WorkBuddy`，写死产品名的候选全部落空 → `key fetch failed`，
+  控制台账号页显示不可用（模型调用走其它凭据，所以不易察觉）。现在按
+  `Info.plist` 的 `CFBundleExecutable` 生成候选并兜底 `Electron`、覆盖
+  `~/Applications`，并扫描两个应用目录里名字含 `workbuddy` / `codebuddy` 的任意
+  `.app`（改过包名也能找到）；`WORKBUDDY_APP_EXECUTABLE` 也补进插件→桥的环境
+  透传白名单。回归用例：`darwin 下按 Info.plist 的 CFBundleExecutable 列出可执行文件`、
+  `darwin 下二进制/缺失 plist 时仍有 Electron 兜底`、`任意 WorkBuddy*.app 目录名`。
+- **发版门禁不再被测试端口撞车挂死**：`release-check` 的 `cross-platform (ubuntu-latest)`
+  在 v1.17.0 上跑了 20 分钟后被 cancel，唯一失败的用例报
+  `listen EADDRINUSE: address already in use 127.0.0.1:39846`。两个独立问题叠在一起：
+
+  1. **端口区间横跨临时端口段**。测试给桥指定端口时用的是
+     `20000 + Math.floor(Math.random() * 20000)`，而打桩上游一律 `listen(0)`
+     （内核分配，Linux 默认落在 32768–60999）—— 随机挑的固定端口迟早等于
+     内核刚分给另一个 stub 的端口。现在统一走 `tools/dev/bridge-ports.mjs`
+     取 **12000–19999**，严格低于三大平台的临时端口下界，并避开默认的 8790/8792。
+  2. **一次失败被放大成 20 分钟**。`startBridge()` 抛错时用例的 `finally`
+     根本没轮到执行，打桩上游的 listen socket 留在测试进程上，
+     `node --test` 跑完全部用例后**不退出**，CI 只能按 `timeout-minutes` 取消 job。
+     现在 `startBridge()` 撞端口会换端口重试（最多 5 次，非端口错误不重试），
+     并且各测试文件都补了文件级 `test.after` 兜底关掉泄漏的 stub / 子进程。
+     顺带修掉 `bridge-anthropic.test.mjs` 的 `19100 + pid % 300`：同一台机器上
+     并行跑两份测试时，两个 pid 相差 300 的倍数就会算出同一个端口。
+
+  回归用例（撤掉修复即红）：`起桥的测试必须用 bridge-ports.mjs 取端口`、
+  `起桥的测试必须有 test.after 收尾`、`测试端口段必须整体低于临时端口下界`。
+
 ## [1.17.0] - 2026-10-27
 
 ### Added

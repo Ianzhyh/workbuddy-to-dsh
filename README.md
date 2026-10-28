@@ -49,7 +49,7 @@ dsh 的模型选择器里，日常需要的接入、管理、监控、运维能�
 
 - **没装桌面端也能用**：插件内设备码登录，不下载、不安装 WorkBuddy 客户端。
 - **装了桌面端更省事**：已登录的账号自动复用，第 2 步都可以跳过。
-- **不填任何东西**：不需要 API Key、Base URL、令牌、端口或环境变量；桥与控制台由插件自动拉起。
+- **不填任何东西**：不需要 API Key、Base URL、令牌、端口或环境变量；桥由插件自动拉起，控制台在第一次打开数据页时按需拉起。
 - **国内 / 国际版自动预选**：登录区域跟随现有账号或桌面端域名，不用每次手动切。
 - **模型选择器即时刷新**：登录、切号、重启桥后自动广播目录更新，不需要重启 dsh。
 - **聊天页闭环**：未登录时空会话里直接「连接 WorkBuddy」；已有对话遇到凭据失效时，顶部胶囊位会变成登录入口。对话页顶部常驻「积分 N」（悬停看套餐余量 / 今日已用 / 最近一次，点一下刷新）；每轮回复末尾显示本轮积分（优先按本轮 tokens 与本地账本核对）。
@@ -179,7 +179,7 @@ dsh plugin --profile desktop add github:Ianzhyh/workbuddy-to-dsh
 
 # 方式二：release 附件（tgz 安装包，无构建、无需 allowBuilds 授权）
 #   从 GitHub Releases 下载 dsh-plugin-workbuddy-<版本>.tgz 后：
-dsh plugin --profile desktop add ./dsh-plugin-workbuddy-1.17.0.tgz
+dsh plugin --profile desktop add ./dsh-plugin-workbuddy-1.18.0.tgz
 
 # 方式三：从源码（插件在 dsh-plugin/ 子目录，接第 1 步的 git clone）
 dsh plugin --profile desktop add workbuddy-to-dsh/dsh-plugin
@@ -476,6 +476,11 @@ node tools\connect.mjs apply codex --model glm-5.3
 > 与控制台网页共享同一个桥、同一份 `.state.json`（账号切换等写操作由插件透传给控制台执行，
 > 保证只有它写），在任意一边改，另一边同步变化。**按模型编辑输入/输出 Token 是插件面板
 > 额外提供的能力**，控制台网页只读展示；原控制台照常可用。
+>
+> **资源占用**：桥常驻约 130MB。控制台另占约 80MB，但**默认不随 dsh 启动**：
+> 第一次打开面板的数据页或执行 `workbuddy console` 时按需拉起，闲置 10 分钟自动
+> 退出（页面打开期间会被轮询保活）。想常驻：`consoleAutoStart: true`；想让按需
+> 拉起的实例不自动回收：`consoleIdleExitMs: 0`。
 
 | | 装插件后 | 不装插件 |
 |---|---|---|

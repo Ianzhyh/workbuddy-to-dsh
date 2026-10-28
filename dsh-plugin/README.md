@@ -109,7 +109,7 @@ dsh 设置页与控制台网页是**两个前端、一个后端**，所以天然
 | **动态模型目录** | 模型列表每次向桥要（带 1 分钟缓存），上游加/减模型不必改配置、不必重启 |
 | **活动倍率** | 解析上游 `schedule`：夜间免费/折扣到点自动切换倍率，过期活动自动隐藏；dsh 选择器、插件面板、控制台同源 |
 | **桥的生命周期** | 启动时复用已在跑的桥，没跑就按配置拉起；桥仍是**独立进程**，控制台、`start-bridge.cmd`、其它 OpenAI 客户端照旧可用 |
-| **控制台的生命周期** | 同样复用/拉起 `dashboard/server.mjs`，让它常驻；dsh 里一个链接就进完整控制台（不会自动弹浏览器窗口） |
+| **控制台的生命周期** | 默认按需：打开数据面板或执行 `workbuddy console` 时才拉起 `dashboard/server.mjs`，闲置 10 分钟自动退出；不自动弹浏览器窗口 |
 | **10 个工具** | `workbuddy_status` / `workbuddy_models` / `workbuddy_usage` / `workbuddy_checkin` / `workbuddy_web_search`（原生搜索兜底）/ `workbuddy_generate_video`（文生视频 / 首尾帧 / 参考图）/ `workbuddy_video_status` / `workbuddy_generate_image`（文生图 / 图生图）/ `workbuddy_image_status` / `workbuddy_bridge`（后者 `action=console` 可确保控制台在跑） |
 | **斜杠命令** | `/workbuddy status\|models\|usage\|checkin\|console\|websearch\|start\|stop\|restart\|cleanup` |
 | **dsh 里的设置页** | 设置 → **WorkBuddy**，9 个标签页 = 控制台的全部功能：概览（含网页搜索状态 / 自动接入 / 一键接入、待办提醒与诊断报告）/ 账号（切换）/ 用量（趋势图 + 积分排行 + CSV）/ 请求（筛选 + CSV）/ 签到（领取 + 自动开关）/ 诊断 / 模型（体检 + 详情）/ 对话测试（多轮流式）/ 日志（过滤 + 清空） |
@@ -243,7 +243,8 @@ npm run release:check      # = vendor:check + 单测 + 独立分发演练（发�
     bridgePort: 8790
     localToken: wb-local-bridge
     autoStart: true
-    consoleAutoStart: true             # 控制台（数据界面）也由插件复用/拉起
+    consoleAutoStart: false            # 控制台默认按需启动（打开数据面板时自动拉起）
+    consoleIdleExitMs: 600000          # 按需拉起的控制台闲置 10 分钟自动退出（0 = 常驻）
     consolePort: 8792                  # 默认跟 .env 的 DASHBOARD_PORT 对齐
     displayName: WorkBuddy
     loginRegion: cn                    # 插件登录默认区域：cn / global

@@ -80,6 +80,10 @@ github:Ianzhyh/workbuddy-to-dsh
 dsh plugin --profile desktop add github:Ianzhyh/workbuddy-to-dsh
 ```
 
+> 路线 C / D 装的是**仓库根包**：桥、控制台、共享库在根目录各有一份，
+> `dsh-plugin/vendor/` 不再重复打包（省约 1.7MB）；vendor 只用于路线 A / B
+> 的单文件夹分发。
+
 ### 路线 D：npm 包名（发布后可用）
 
 根包 `workbuddy-to-dsh` 已按可发布形态准备好（`private: false` + `publishConfig`）。
@@ -119,7 +123,7 @@ dsh plugin --profile desktop add workbuddy-to-dsh
 | 东西 | 位置 / 端口 | 备注 |
 |---|---|---|
 | 桥 | `127.0.0.1:8790`，脚本 `<插件>/vendor/bridge/workbuddy-bridge.mjs` | 本地 token 首次启动随机生成，落在 `%USERPROFILE%\.workbuddy-bridge\bridge-token`（`WORKBUDDY_DATA_DIR` 可覆盖） |
-| 控制台网页 | `127.0.0.1:8792`，脚本 `<插件>/vendor/dashboard/server.mjs` | 插件会复用/拉起，不自动弹浏览器 |
+| 控制台网页 | `127.0.0.1:8792`，脚本 `<插件>/vendor/dashboard/server.mjs` | 插件默认按需拉起、闲置 10 分钟退出；不自动弹浏览器 |
 | 运行期状态 | `%USERPROFILE%\.workbuddy-bridge\{state.json,usage.jsonl,credentials/}`；日志在 `<插件>/vendor/bridge/bridge.log`、`dashboard/console.log` | 状态与账本**不放安装目录**，换 tgz/重装不丢；日志仍在插件目录 |
 | 凭据 | 只读 WorkBuddy 自己的登录文件，现取现解，不复制不外传 | — |
 

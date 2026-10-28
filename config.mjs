@@ -520,6 +520,15 @@ export const config = {
      * 因此改端口后不会再打开一个空页面。
      */
     openBrowser: env.DASHBOARD_OPEN_BROWSER === '1',
+    /**
+     * 闲置多久自动退出（毫秒，0 = 不退出）。
+     *
+     * 插件在 dsh 里拉起控制台后会常驻 80+MB，但多数时间没人看数据 —— 所以插件
+     * 启动控制台时默认注入 10 分钟；手动 `node dashboard/server.mjs` 不设这个
+     * 变量就不退出，行为与以前一致。页面打开期间每 2 秒的 `/api/identity`
+     * 轮询天然保活，只有页面/数据请求都停了才会计时。
+     */
+    idleExitMs: numEnv('DASHBOARD_IDLE_EXIT_MS', 0, { min: 0 }),
   },
   workbuddy: {
     /*

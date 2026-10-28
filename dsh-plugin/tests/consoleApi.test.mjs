@@ -126,6 +126,64 @@ test('console-api 透传：白名单 / 方法 / 面板头 / 控制台未运行',
   } finally { await fake.close(); }
 });
 
+test('console-api：控制台闲置退出后，首次取数自动拉起；foreign 不硬拉', async () => {
+  const fake = await startFakeConsole();
+  let running = false;
+  let ensured = 0;
+  const handler = createConsoleApiHandler({
+    consoleSupervisor: {
+      url: `http://127.0.0.1:${fake.port}`,
+      probe: async () => (running ? { state: 'running' } : { state: 'stopped', error: '连接被拒绝' }),
+      ensure: async () => {
+        ensured += 1;
+        running = true;
+        return { ok: true, started: true };
+      },
+    },
+    log: () => {},
+  });
+
+  try {
+    // 面板第一次取数 → 顺手 ensure，请求本身照常成功（用户不用先点“启动控制台”）
+    const res = await call(handler, { path: `${CONSOLE_API_PREFIX}/overview` });
+    assert.equal(ensured, 1, '停机状态下应自动 ensure 一次');
+    assert.equal(res.status, 200);
+    assert.equal(res.json.echoed, true);
+
+    // 第二次已经在跑 → 不再重复拉起
+    const again = await call(handler, { path: `${CONSOLE_API_PREFIX}/overview` });
+    assert.equal(again.status, 200);
+    assert.equal(ensured, 1, '已在运行就不该再 ensure');
+  } finally { await fake.close(); }
+
+  // 端口被别的服务占着（foreign）：拉起来也是别人的 8792，直接 503 让人看清
+  let foreignEnsured = 0;
+  const foreign = createConsoleApiHandler({
+    consoleSupervisor: {
+      url: 'http://127.0.0.1:1',
+      probe: async () => ({ state: 'foreign', error: '端口 8792 上有 HTTP 服务，但不是 WorkBuddy 控制台' }),
+      ensure: async () => { foreignEnsured += 1; return { ok: true }; },
+    },
+    log: () => {},
+  });
+  const conflict = await call(foreign, { path: `${CONSOLE_API_PREFIX}/overview` });
+  assert.equal(conflict.status, 503);
+  assert.equal(foreignEnsured, 0, 'foreign 状态不应尝试拉起');
+
+  // ensure 失败：把失败原因带给面板，而不是一句“没有在运行”
+  const failing = createConsoleApiHandler({
+    consoleSupervisor: {
+      url: 'http://127.0.0.1:1',
+      probe: async () => ({ state: 'stopped', error: '连接被拒绝' }),
+      ensure: async () => ({ ok: false, state: 'stopped', error: '启动控制台失败：端口被占用' }),
+    },
+    log: () => {},
+  });
+  const down = await call(failing, { path: `${CONSOLE_API_PREFIX}/diagnose` });
+  assert.equal(down.status, 503);
+  assert.match(down.json.error, /端口被占用/);
+});
+
 test('console-api：控制台进程消失时给 502 而不是挂住', async () => {
   const dead = createConsoleApiHandler({
     consoleSupervisor: { url: 'http://127.0.0.1:1', probe: async () => ({ state: 'running' }) },

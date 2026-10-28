@@ -2285,7 +2285,25 @@ const I18N_RULES_EN = [
    * 半句英文半句中文。tooltip 也算用户可见文案（TreeWalker 扫不到，靠属性扫描兜）。
    */
   [/^(模型 \d+) (.+)$/, (m, g, k) => translateText(g) + ' ' + translateText(k)],
+  /*
+   * 账号卡片副行 / 令牌剩余副行里的「来源 + 凭据」是拼出来的：
+   *   `至 2026/11/11 19:33:20 · 桌面端凭据`
+   *   `330000000000 · uid 00000000… · 桌面端`
+   * 整串查不到词条，必须用规则拆开翻译。
+   *
+   * 带「至」的那条必须排在通用 `至 (.+)` **之前**：通用规则会先匹配并把
+   * 整串剩下的「桌面端凭据」原样留下（translateText 不递归重跑规则）。
+   */
+  [/^至 (.+) · (桌面端|插件登录|插件|自动|API Key)凭据$/,
+    (m, when, label) => 'until ' + when + ' · ' + translateText(label) + ' credential'],
   [/^至 (.+)$/, 'until $1'],
+  [/^(.*) · (桌面端|插件登录|插件|自动|API Key)凭据$/,
+    (m, head, label) => head + ' · ' + translateText(label) + ' credential'],
+  [/^(桌面端|插件登录|插件|自动|API Key)凭据$/, (m, label) => translateText(label) + ' credential'],
+  [/^(.*)　桌面文件 (.+)… 未生效$/,
+    (m, head, uid) => translateText(head) + ' · Desktop file ' + uid + '… not in effect'],
+  [/^(.*) · uid ([^ ·]+)… · (桌面端|插件登录|插件|自动|API Key)$/,
+    (m, head, uid, label) => (head ? head + ' · ' : '') + 'uid ' + uid + '… · ' + translateText(label)],
   [/^本地 (.+)$/, 'Local $1'],
   [/^运行 (.+)$/, (m, d) => 'up ' + translateText(d)],
   [/^PID (\d+) 目录 (\d+) 个模型$/, 'PID $1 · catalog $2 models'],
@@ -4766,6 +4784,15 @@ function credentialSourceLabel(source) {
 }
 /** 实际生效的凭据来源（来自 /api/login 的 effective.source）；账号列表据此决定「使用中」标在哪。 */
 let lastCredentialSource = '';
+/**
+ * 登录来源面板的渲染指纹。
+ *
+ * `/api/login` 可能在首屏被加载两次（首帧身份校正、或账号变化），两次数据
+ * 完全一样却会重设 `innerHTML` —— 用户/自动化刚打开的下拉会被无声换掉，
+ * 表现就是「点了没反应」（test-dropdowns 的第 0 个下拉踩过）。同步数据不重绘，
+ * 也顺带保住用户正在操作的表单状态。
+ */
+let lastPluginLoginKey = '';
 
 function stopPluginLoginTimer() {
   if (pluginLoginState.timer) { clearInterval(pluginLoginState.timer); pluginLoginState.timer = null; }
@@ -4792,6 +4819,14 @@ async function loadPluginLogin() {
 function renderPluginLogin() {
   const el = $('pluginLoginBody');
   if (!el) return;
+  const key = JSON.stringify([
+    pluginLoginState.data,
+    pluginLoginState.region,
+    pluginLoginState.pending ? 1 : 0,
+    pluginLoginState.busy,
+  ]);
+  if (key === lastPluginLoginKey) return;
+  lastPluginLoginKey = key;
   const d = pluginLoginState.data || {};
   if (d.ok === false) {
     el.innerHTML = '<div class="empty">' + escapeAttr(d.error || '桥未运行，无法读取凭据来源。') + '</div>';
@@ -5841,6 +5876,10 @@ async function loadOverview() {
  * 渲染状态卡。模型目录与桥状态是**两个来源**：目录后到时用占位，
  * 到了再补（避免桥冷启动时整页陪着等上游）。
  */
+/** 首屏入场动画只播一次：之后的轮询重绘直接落到静止态（见 style.css 的 .settled）。 */
+let cardsIntroPlayed = false;
+let cardsIntroTimer = null;
+
 function renderCards() {
   const d = lastOverview;
   if (!d) return;
@@ -5951,7 +5990,17 @@ function renderCards() {
     b.upstream ? b.upstream.replace('https://', '') : '—',
     '本地 ' + b.endpoint, true, 'info'));
 
-  $('cards').innerHTML = cards.join('');
+  const cardsEl = $('cards');
+  if (cardsIntroPlayed) cardsEl.classList.add('settled');
+  cardsEl.innerHTML = cards.join('');
+  if (!cardsIntroPlayed && !cardsIntroTimer) {
+    // 最长延迟 315ms + 动画 340ms；留一点余量，别在动画途中切换
+    cardsIntroTimer = setTimeout(() => {
+      cardsIntroPlayed = true;
+      cardsIntroTimer = null;
+      cardsEl.classList.add('settled');
+    }, 750);
+  }
 }
 
 /** 模型目录：独立于 /api/overview，慢也不拖累徽章与卡片。 */

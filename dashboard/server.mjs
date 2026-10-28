@@ -1031,9 +1031,61 @@ function normalizeModelList(value) {
 // `lib/client-connect.mjs` 的 buildConnectBase / contextForClient —— 命令行
 // `tools/connect.mjs` 与本控制台共用同一份口径，两边不会各写一套而漂移。
 
+/**
+ * 闲置自动退出：控制台常驻 80+MB，但多数时间没人看数据。
+ *
+ * 只对**插件拉起**的控制台开启（插件注入 `DASHBOARD_IDLE_EXIT_MS`；手动
+ * `node dashboard/server.mjs` 不设就不退出，行为与以前一致）。计活动只看
+ * 页面/数据请求：插件每 20 秒探活打的 `/` 与 `/api/version` 不算，否则永远
+ * 等不到闲置。页面打开后每 2 秒的 `/api/identity` 轮询会持续保活；SSE
+ * 长连接在途时也不退出（activeRequests > 0）。
+ */
+const IDLE_EXIT_MS = config.dashboard.idleExitMs;
+const IDLE_PROBE_ROUTES = new Set(['/', '/api/version']);
+let lastActivityAt = Date.now();
+let activeRequests = 0;
+
+function touchConsoleActivity(route) {
+  if (!IDLE_EXIT_MS || IDLE_PROBE_ROUTES.has(route)) return;
+  lastActivityAt = Date.now();
+}
+
+function shutdownForIdle(idleForMs) {
+  console.log(`控制台已闲置 ${Math.max(1, Math.round(idleForMs / 60_000))} 分钟，自动退出（下次由插件按需拉起）`);
+  try { server.close(() => process.exit(0)); } catch { process.exit(0); }
+  // 没有在途请求（activeRequests === 0）才会走到这里：keep-alive 连接可直接断开
+  server.closeIdleConnections?.();
+  server.closeAllConnections?.();
+  // 兜底：个别平台 close 回调仍可能不触发
+  const force = setTimeout(() => process.exit(0), 3000);
+  force.unref?.();
+}
+
+function startIdleExitWatchdog() {
+  if (!IDLE_EXIT_MS) return;
+  const tick = Math.min(60_000, Math.max(1000, Math.floor(IDLE_EXIT_MS / 4)));
+  const timer = setInterval(() => {
+    if (activeRequests > 0) return;
+    const idleFor = Date.now() - lastActivityAt;
+    if (idleFor < IDLE_EXIT_MS) return;
+    clearInterval(timer);
+    shutdownForIdle(idleFor);
+  }, tick);
+  timer.unref?.();
+}
+
 const server = createServer(async (req, res) => {
+  activeRequests += 1;
+  let released = false;
+  const release = () => {
+    if (released) return;
+    released = true;
+    activeRequests -= 1;
+  };
+  res.once('close', release);
   const url = new URL(req.url, config.dashboard.url);
   const route = url.pathname;
+  touchConsoleActivity(route);
 
   try {
     // 跨站来源一律拒（DNS rebinding 的防线，见 originAllowed 的说明）。
@@ -2083,6 +2135,7 @@ function isMainModule() {
 
 /** 启动控制台服务（进程入口调用；测试 import 时不执行）。 */
 function startConsoleServer() {
+  startIdleExitWatchdog();
   server.listen(config.dashboard.port, config.dashboard.host, async () => {
     console.log(`WorkBuddy 控制台  ->  ${config.dashboard.url}`);
     console.log(`登录文件          ->  ${effectiveAuthFile()}`);

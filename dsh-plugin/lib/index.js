@@ -423,8 +423,20 @@ export const DEFAULTS = {
   autoWebSearch: true,
   autoStart: true,
   autoStartTimeoutMs: 30_000,
-  /** 控制台（数据界面）也由插件复用/拉起：dsh 里给个入口就够了，不重复造仪表盘。 */
-  consoleAutoStart: true,
+  /**
+   * 控制台默认**不随 dsh 启动**：它占 80+MB，而多数时间没人看数据。
+   * 面板第一次取数（console-api 透传前会 ensure）或 `workbuddy console` 时
+   * 按需拉起，闲置 `consoleIdleExitMs` 后自动退出。要恢复常驻设 true。
+   */
+  consoleAutoStart: false,
+  /**
+   * 插件拉起的控制台闲置多久自动退出（毫秒，0 = 常驻）。
+   *
+   * 控制台常驻 80+MB，而多数时间没人看数据；闲置后退出，下次面板取数或
+   * `workbuddy console` 会再自动拉起。页面打开期间每 2 秒的 `/api/identity`
+   * 轮询天然保活，只有页面/数据请求都停了才会计时。
+   */
+  consoleIdleExitMs: 10 * 60_000,
   consoleHost: '127.0.0.1',
   consolePort: 8792,
   provider: 'workbuddy',
@@ -470,6 +482,13 @@ export const DEFAULTS = {
   log: true,
 };
 
+/** 毫秒配置：undefined/null → 默认；非法或负数 → 默认；0 合法（表示关闭）。 */
+function asMs(value, fallback) {
+  if (value === undefined || value === null) return fallback;
+  const n = Number(value);
+  return Number.isFinite(n) && n >= 0 ? n : fallback;
+}
+
 function asBool(value, fallback) {
   if (value === undefined || value === null) return fallback;
   if (typeof value === 'boolean') return value;
@@ -509,6 +528,7 @@ export function resolveConfig(raw = {}) {
     autoStart: asBool(cfg.autoStart, DEFAULTS.autoStart),
     autoStartTimeoutMs: Number(cfg.autoStartTimeoutMs) || DEFAULTS.autoStartTimeoutMs,
     consoleAutoStart: asBool(cfg.consoleAutoStart, DEFAULTS.consoleAutoStart),
+    consoleIdleExitMs: asMs(cfg.consoleIdleExitMs, DEFAULTS.consoleIdleExitMs),
     consoleHost: String(cfg.consoleHost || DEFAULTS.consoleHost),
     consolePort: Number(cfg.consolePort) || DEFAULTS.consolePort,
     provider: String(cfg.provider || DEFAULTS.provider),
@@ -623,6 +643,8 @@ export const BRIDGE_ENV_PASSTHROUGH = Object.freeze([
   'WORKBUDDY_LOGIN_UA',
   'WORKBUDDY_LOGIN_BASE',
   'WORKBUDDY_LOGIN_ORIGIN',
+  // 客户端可执行文件路径覆盖（非常规安装目录 / 自定义包名）
+  'WORKBUDDY_APP_EXECUTABLE',
   // 桌面端出站身份（上游版本漂移时的逃生门）
   'WORKBUDDY_APP_VERSION',
   'WORKBUDDY_IDE_VERSION',
@@ -760,6 +782,8 @@ export function apply(ctx, rawConfig = {}) {
   reconcile('loginRegion', 'WORKBUDDY_LOGIN_REGION');
   // 控制台端口跟项目自己的 config.mjs 同源（读同一个 DASHBOARD_PORT）
   reconcile('consolePort', 'DASHBOARD_PORT', (raw, fallback) => Number(raw) || fallback);
+  // 手动启动控制台也读同一个 DASHBOARD_IDLE_EXIT_MS（0 = 常驻）
+  reconcile('consoleIdleExitMs', 'DASHBOARD_IDLE_EXIT_MS', (raw, fallback) => asMs(raw, fallback));
   if (!explicit.has('autoCheckin') && (projectEnv.WORKBUDDY_AUTO_CHECKIN ?? process.env.WORKBUDDY_AUTO_CHECKIN) !== undefined) {
     config.autoCheckin = asBool(projectEnv.WORKBUDDY_AUTO_CHECKIN ?? process.env.WORKBUDDY_AUTO_CHECKIN, true);
   }
@@ -831,12 +855,13 @@ export function apply(ctx, rawConfig = {}) {
     return changed;
   };
 
-  /** 控制台（数据界面）：插件只负责让它常驻 + 给入口，界面本身仍是它自己的。 */
+  /** 控制台（数据界面）：默认按需拉起（首次取数 / console 命令），闲置自动退出。 */
   const consoleSupervisor = new ConsoleSupervisor({
     projectRoot: projectRoot || process.cwd(),
     host: config.consoleHost,
     port: config.consolePort,
     autoStart: config.consoleAutoStart,
+    idleExitMs: config.consoleIdleExitMs,
     nodePath: config.nodePath || undefined,
     onLog: (line) => log(line),
   });

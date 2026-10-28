@@ -94,6 +94,14 @@ try {
   // files 白名单收紧后，本地 npm pack 也不该把运行日志 / 备份 / 测试带进发布物
   const junk = rootPaths.filter((p) => /\.(?:log|jsonl)$/i.test(p) || /\.bak(?:-|$)/i.test(p) || /\.test\.mjs$/i.test(p));
   check(junk.length === 0, '根包不包含日志 / 备份 / 测试文件', junk.length ? junk.join(', ') : '干净');
+  /*
+   * GitHub 直装用的是**仓库根包**，projectRoot 解析到安装目录本身（下面第 4 步
+   * 会验证）；`dsh-plugin/vendor/` 在这个形态里永远轮不到，却是 1.7MB 的逐字节
+   * 重复副本。子包 tgz（第 5 步）仍然需要 vendor，那里单独校验。
+   */
+  const vendored = rootPaths.filter((p) => p.startsWith('dsh-plugin/vendor/'));
+  check(vendored.length === 0, '根包不重复携带 dsh-plugin/vendor',
+    vendored.length ? `${vendored.length} 个文件` : '已排除（直装走根目录副本）');
 
   // ── 2. 装进临时 profile 的 node_modules（真实安装路径）
   mkdirSync(profileDir, { recursive: true });
@@ -136,8 +144,6 @@ try {
     'dsh-plugin/lib/index.js',
     'dsh-plugin/lib/client.js',
     'dsh-plugin/lib/packageNames.mjs',
-    'dsh-plugin/vendor/bridge/workbuddy-bridge.mjs',
-    'dsh-plugin/vendor/bridge/promotions.mjs',
   ];
   const missing = required.filter((rel) => !existsSync(join(installedDir, rel)));
   check(missing.length === 0, '根包包含全部运行时文件', missing.length ? `缺少 ${missing.join(', ')}` : `${required.length} 项齐全`);

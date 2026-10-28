@@ -109,6 +109,7 @@ export class ConsoleSupervisor {
    * @param {string} [options.host]
    * @param {number} [options.port]
    * @param {boolean} [options.autoStart]
+   * @param {number} [options.idleExitMs] 闲置自动退出（0 = 常驻；只作用于本进程拉起的实例）
    * @param {string} [options.nodePath]
    * @param {Record<string,string|undefined>} [options.env]
    * @param {(line: string) => void} [options.onLog]
@@ -120,6 +121,7 @@ export class ConsoleSupervisor {
     this.host = options.host || '127.0.0.1';
     this.port = options.port || 8792;
     this.autoStart = options.autoStart !== false;
+    this.idleExitMs = Number(options.idleExitMs) > 0 ? Number(options.idleExitMs) : 0;
     this.nodePath = options.nodePath || process.execPath;
     this.env = options.env || {};
     this.onLog = options.onLog || (() => {});
@@ -393,6 +395,8 @@ export class ConsoleSupervisor {
       DASHBOARD_AUTO_START_BRIDGE: process.env.DASHBOARD_AUTO_START_BRIDGE ?? '0',
       // 关键：不要让 dsh 每次启动都弹一个浏览器窗口
       DASHBOARD_OPEN_BROWSER: '0',
+      // 插件拉起的控制台默认闲置退出，不用时把 80+MB 内存还回来；0 = 常驻
+      ...(this.idleExitMs > 0 ? { DASHBOARD_IDLE_EXIT_MS: String(this.idleExitMs) } : {}),
       ...this.env,
       /*
        * 监听地址必须与 supervisor 探测的地址一致。插件配置里的 consolePort
@@ -446,6 +450,26 @@ export class ConsoleSupervisor {
           ? '这个控制台不是插件启动的（可能是你双击 启动.cmd 起的），插件不会去停它'
           : '控制台没有在运行',
       };
+    }
+    /*
+     * 闲置退出后 spawnedPid 会变成陈旧值；PID 可能已被系统回收给别的进程。
+     * 先确认端口上确实是**我们那个**实例，再去 kill —— 宁可报“没在运行”，
+     * 也绝不误杀一个刚好复用了这个 PID 的无关进程。
+     */
+    const status = await this.probe({ cached: false });
+    if (status.state !== 'running') {
+      this.spawnedPid = null;
+      return {
+        ok: false,
+        stopped: false,
+        error: status.state === 'stopped' ? '控制台没有在运行' : (status.error || '控制台没有在运行'),
+      };
+    }
+    const version = await this.fetchVersion();
+    const livePid = Number(version?.pid) || 0;
+    if (livePid && livePid !== pid) {
+      this.spawnedPid = null;
+      return { ok: false, stopped: false, error: `控制台已是另一个实例（pid ${livePid}），插件不会去停它` };
     }
     try {
       process.kill(pid, 'SIGTERM');

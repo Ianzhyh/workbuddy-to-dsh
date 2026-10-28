@@ -951,6 +951,8 @@ body.dark .wb-root,
       '桥未运行': 'Bridge not running',
       '控制台运行中': 'Console running',
       '控制台未运行': 'Console not running',
+      '控制台按需启动': 'Console starts on demand',
+      '按需启动': 'On demand',
       '运行中': 'Running',
       '未运行': 'Not running',
       '凭据异常': 'Credentials error',
@@ -3986,7 +3988,12 @@ body.dark .wb-root,
           health ? h(Row, { label: '进程 / 地址' },
             (health.pid ? 'pid ' + health.pid + ' · ' : '') + (status?.config?.bridgeUrl || '') + '/v1') : null,
           health?.uptimeMs ? h(Row, { label: '已运行' }, fmtDuration(health.uptimeMs)) : null,
-          h(Row, { label: '数据控制台' }, h(Pill, { tone: con.state === 'running' ? 'ok' : 'bad', text: con.state === 'running' ? '运行中' : (con.state || '未运行') })),
+          h(Row, { label: '数据控制台' }, h(Pill, con.state === 'running'
+            ? { tone: 'ok', text: '运行中' }
+            /* 默认按需启动：没跑是正常状态，不要用红色报成故障 */
+            : con.autoStart === false
+              ? { tone: '', text: '按需启动' }
+              : { tone: 'warn', text: con.state || '未运行' })),
 
           h('div', { className: 'wb-section-title' }, '账号'),
           health?.auth ? h(Row, { label: '凭据来源' }, credentialSourceLabel(health.auth.source || 'desktop')) : null,
@@ -8206,7 +8213,9 @@ body.dark .wb-root,
               : status?.bridge?.state === 'unauthenticated' ? h(Pill, { tone: 'warn', text: '未登录' })
                 : status?.bridge?.state === 'degraded' ? h(Pill, { tone: 'warn', text: '桥凭据异常' })
                   : h(Pill, { tone: 'bad', text: '桥未运行' }),
-            con.state === 'running' ? h(Pill, { tone: 'ok', text: '控制台运行中' }) : h(Pill, { tone: 'warn', text: '控制台未运行' }),
+            con.state === 'running' ? h(Pill, { tone: 'ok', text: '控制台运行中' })
+              : con.autoStart === false ? h(Pill, { tone: '', text: '控制台按需启动' })
+                : h(Pill, { tone: 'warn', text: '控制台未运行' }),
             // 语言开关：与控制台右上角那个同款（显示的是「可切到的那门语言」）。
             // 标签用 Raw 渲染 —— 它是语言代码、不是文案，**不能**过翻译
             // （词条表里有 `'中': 'Medium'`，那是「思考强度」的选项，

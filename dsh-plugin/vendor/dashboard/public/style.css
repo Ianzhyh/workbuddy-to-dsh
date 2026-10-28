@@ -1322,6 +1322,12 @@ button.mini {
  *      而这张网格的张数是固定的，nth-child 足够且零风险。
  */
 .cards > .card { animation: cardRise 0.34s var(--ease) backwards; }
+/*
+ * 入场动画只在首屏播一次。`renderCards()` 每次轮询都重设 innerHTML，
+ * 若不加这道开关，整屏卡片会每 20 秒重新浮现一次；同时 `backwards` 的
+ * 结束帧还会永久压住 `.card:hover` 的抬升（见 test-card-motion）。
+ */
+.cards.settled > .card { animation: none; }
 .cards > .card:nth-child(1) { animation-delay: 0ms; }
 .cards > .card:nth-child(2) { animation-delay: 45ms; }
 .cards > .card:nth-child(3) { animation-delay: 90ms; }
@@ -2779,6 +2785,12 @@ pre.log {
 
 @media (max-width: 520px) {
   .cards { grid-template-columns: 1fr; }
+  /*
+   * 「客户端一键拉取给 ___」在英文下文案 + 下拉一起超过 390px（实测溢出 50px）。
+   * 允许它收缩并换行：下拉掉到第二行，整页不再出现横向滚动条。
+   */
+  .regbar-modeldefault .check { flex: 0 1 auto; min-width: 0; flex-wrap: wrap; row-gap: 6px; }
+  .regbar-modeldefault select { max-width: 100%; }
   .actions { flex-direction: column; align-items: stretch; }
   .action-group { width: 100%; justify-content: space-between; }
   .actions .msg { margin-left: 0; width: 100%; }

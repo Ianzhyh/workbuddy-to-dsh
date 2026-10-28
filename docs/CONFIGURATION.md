@@ -61,12 +61,17 @@ copy .env.example .env
 |---|---|---|
 | `DASHBOARD_PORT` | `8792` | 控制台端口 |
 | `DASHBOARD_AUTO_START_BRIDGE` | `1` | 控制台启动时自动拉起桥（"双击即用"的关键）。设为 `0` 则改为手动点「启动桥服务」 |
+| `DASHBOARD_IDLE_EXIT_MS` | 插件拉起时 `600000`；手动启动 `0` | 控制台闲置多久自动退出（毫秒，`0` = 不退出）。计活动只看页面/数据请求：插件探活（`/`、`/api/version`）不算，页面打开期间每 2 秒的身份轮询会保活。闲置退出后，面板取数或 `workbuddy console` 会自动拉起 |
 | `WORKBUDDY_QUOTA_TTL_MS` | `60000` | 积分余额的缓存时长。总览每 20 秒轮询一次，而积分要打上游计费网关；调小可更快反映余额变化（如签到后），代价是更频繁的上游查询 |
 | `WORKBUDDY_QUOTA_SNAPSHOT_MS` | `3600000` | 余额快照采集间隔（毫秒）。用量页「账实差额」用首尾快照对比本地账本；`0` = 每次读到余额都记一条（只建议测试用） |
 | `WORKBUDDY_IMAGE_SYNC_WAIT_S` | `90` | OpenAI Images 兼容端点提交后最多等待秒数；超时回 202 + job id |
 | `WORKBUDDY_IMAGE_B64_MAX_BYTES` | `20971520` | `response_format=b64_json` 时单张产物上限（字节），超过回 502 |
 | `WORKBUDDY_MEDIA_IDEMPOTENCY_MS` | `600000` | 媒体提交幂等窗口（毫秒）。带 `Idempotency-Key` 的重复请求只提交一次；`0` = 关闭 |
 | `WORKBUDDY_MEDIA_STORE` | `1` | `1` = 媒体任务元数据落盘到 `<WORKBUDDY_DATA_DIR>/media-tasks.json`（同步任务重启可查）；`0` = 纯内存 |
+
+> 插件侧默认 `consoleAutoStart: false`（控制台不随 dsh 启动，面板第一次取数时按需拉起）
+> 与 `consoleIdleExitMs: 600000`（闲置 10 分钟退出）。插件拉起时会把后者注入成
+> `DASHBOARD_IDLE_EXIT_MS`；`.env` 里显式写这个变量也能覆盖。
 
 ### WorkBuddy 客户端
 
@@ -197,7 +202,10 @@ config.dsh.settingsPath;                  // → X:\my-dsh\settings.yaml
    - 运行中进程的镜像路径（客户端在用时即安装位置）；
    - 注册表安装记录：卸载项（`DisplayIcon` / `UninstallString`）、深链协议
      （`workbuddy://…`）、App Paths —— 官方安装器必写，**装到任何目录都有**。
-5. macOS：`/Applications/WorkBuddy.app/Contents/MacOS/WorkBuddy`；Linux：`/opt/WorkBuddy/workbuddy`
+5. macOS：`/Applications` 与 `~/Applications` 下的 `WorkBuddy.app` / `WorkBuddy AI.app`，
+   以及名字含 `workbuddy` / `codebuddy` 的任意 `.app`（用户改过包名也能找到）。
+   可执行文件名以 `Contents/Info.plist` 的 `CFBundleExecutable` 为准（腾讯 WorkBuddy
+   5.8.x 是未改名的 `Electron`），读不出时兜底 `Electron`；Linux：`/opt/WorkBuddy/workbuddy`
 
 前两层零成本；扫描只在前面落空时执行一次（带目录预算与缓存）；系统信号兜底最贵
 （且失败后 2 分钟内不重试）。exe 被卸载或移动后会自动重探（重探有 5 秒防抖，避免在

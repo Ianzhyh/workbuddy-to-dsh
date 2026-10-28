@@ -88,7 +88,20 @@ export function createConsoleApiHandler({ consoleSupervisor, log = () => {}, onU
       (sub === '/checkin' && method === 'POST')
       || (sub === '/account/switch' && method === 'POST');
 
-    const probe = await consoleSupervisor.probe({ cached: true });
+    // 不用缓存：闲置退出后缓存里可能还留着「running」，会白白吃一次 502。
+    // 本机回环探测是毫秒级，而且这条路径只在用户真的取数时才走。
+    let probe = await consoleSupervisor.probe({ cached: false });
+    /*
+     * 控制台可能因闲置被自动回收（插件拉起时默认 10 分钟）。面板第一次取数
+     * 顺手把它拉起来，用户不必先点「启动控制台」再回来 —— 闲置退出应该是
+     * 无感的。只有 stopped 才拉：foreign（端口被别的服务占了）拉了也没用。
+     */
+    if (probe.state === 'stopped' && typeof consoleSupervisor.ensure === 'function') {
+      const ensured = await consoleSupervisor.ensure({});
+      probe = ensured?.ok
+        ? { state: 'running' }
+        : { state: ensured?.state || 'stopped', error: ensured?.error || probe.error };
+    }
     if (probe.state !== 'running') {
       return sendJson(res, 503, {
         ok: false,
