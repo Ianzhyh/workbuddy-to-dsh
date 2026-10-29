@@ -1390,6 +1390,14 @@ const server = createServer(async (req, res) => {
           id: m.id,
           name: m.name || m.id,
           context: Number(m.context_window) || 0,
+          // 模型**上限**（与默认档 context_window 是两回事）：Claude Code 不读
+          // /v1/models，它的窗口只能靠 CLAUDE_CODE_MAX_CONTEXT_TOKENS 告诉，
+          // 给默认档就等于告诉它"你只有 300K"。
+          contextMax: Math.max(
+            Number(m.context_window_max) || 0,
+            ...(Array.isArray(m.context_window_options) ? m.context_window_options.map(Number) : []),
+            Number(m.context_window) || 0,
+          ),
           maxOutput: Number(m.max_output_tokens) || 0,
           supportsReasoning: m.supports_reasoning === true,
           supportsImages: m.supports_images === true,

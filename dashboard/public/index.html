@@ -7515,15 +7515,30 @@ function openAIEnvText(d) {
 function claudeCodeConfigText(d) {
   const base = (d && d.baseUrlAnthropic) || 'http://127.0.0.1:8790';
   const key = (d && d.token) || 'wb-local-bridge';
+  const model = (d && d.anthropicModel) || 'glm-5.3';
+  const fast = (d && d.anthropicFastModel) || '';
+  const detail = ((d && d.modelDetails) || []).find((m) => m.id === model) || null;
+  // Claude Code 对不认识的模型 id 一律按 200K 假设窗口；v2.1.193+ 用这个变量覆盖。
+  const ctx = detail ? Number(detail.contextMax) || Number(detail.context) || 0 : 0;
+  const ctxLines = ctx > 0 ? ['export CLAUDE_CODE_MAX_CONTEXT_TOKENS=' + ctx] : [];
+  const ctxLinesWin = ctx > 0 ? ['$env:CLAUDE_CODE_MAX_CONTEXT_TOKENS="' + ctx + '"'] : [];
+  const fastLines = fast ? ['export ANTHROPIC_DEFAULT_HAIKU_MODEL=' + fast] : [];
+  const fastLinesWin = fast ? ['$env:ANTHROPIC_DEFAULT_HAIKU_MODEL="' + fast + '"'] : [];
   return [
     '# macOS / Linux',
     'export ANTHROPIC_BASE_URL=' + base,
     'export ANTHROPIC_API_KEY=' + key,
+    'export ANTHROPIC_MODEL=' + model,
+    ...fastLines,
+    ...ctxLines,
     'claude',
     '',
     '# Windows PowerShell',
     '$env:ANTHROPIC_BASE_URL="' + base + '"',
     '$env:ANTHROPIC_API_KEY="' + key + '"',
+    '$env:ANTHROPIC_MODEL="' + model + '"',
+    ...fastLinesWin,
+    ...ctxLinesWin,
     'claude',
   ].join('\n');
 }

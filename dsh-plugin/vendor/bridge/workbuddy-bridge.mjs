@@ -850,6 +850,48 @@ function effortsFor(id) {
 }
 
 /**
+ * Anthropic 的 `thinking.budget_tokens` → 上游 `reasoning_effort`。
+ *
+ * 为什么不原样透传 `thinking`：上游只认 `reasoning_effort`，塞 thinking 会 400。
+ * 预算→档位是**近似映射**（上游按 token 预算内部控制思考量），口径写死在这里：
+ *   ≤2k → low、≤8k → medium、≤24k → high、≤64k → xhigh、>64k → max。
+ *
+ * 只对**实测过档位**的模型下发（`REASONING_EFFORTS_BY_MODEL` 里没有这个模型
+ * 就不下发）—— 与 OpenAI 路径同纪律：没有实测数据时擅自加参数，等于静默改行为。
+ */
+function effortForThinkingBudget(model, budget) {
+  const supported = REASONING_EFFORTS_BY_MODEL[model];
+  if (!Array.isArray(supported) || !supported.length) return '';
+  const wanted = budget <= 0 ? 'medium'
+    : budget <= 2000 ? 'low'
+      : budget <= 8000 ? 'medium'
+        : budget <= 24000 ? 'high'
+          : budget <= 64000 ? 'xhigh' : 'max';
+  const ladder = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
+  const target = ladder.indexOf(wanted);
+  let best = '';
+  let bestDist = Infinity;
+  for (const eff of supported) {
+    const idx = ladder.indexOf(eff);
+    if (idx < 0) continue;
+    const dist = Math.abs(idx - target);
+    if (dist < bestDist) {
+      bestDist = dist;
+      best = eff;
+    }
+  }
+  return best;
+}
+
+/** 该模型的输出上限（目录优先，其次 FEATURED）；取不到返回 0。 */
+function maxOutputForModel(modelId) {
+  const hit = catalogCache.models.find((m) => m.id === modelId);
+  if (hit && Number(hit.maxOutput) > 0) return Number(hit.maxOutput);
+  const featured = FEATURED.find((x) => x.id === modelId);
+  return Number(featured?.maxOutput) || 0;
+}
+
+/**
  * 上游目录里 `reasoning.supportedEfforts` 的合法取值。
  *
  * 官方客户端（以及 dsh 适配器）只认这几个 id；未知值既不能展示也不能下发。
@@ -5486,11 +5528,91 @@ const usageOf = (u) => ({
 const ANTHROPIC_MODEL = process.env.WORKBUDDY_ANTHROPIC_MODEL || 'glm-5.3';
 const ANTHROPIC_FAST_MODEL = process.env.WORKBUDDY_ANTHROPIC_FAST_MODEL || 'glm-5.3-flash';
 
-function resolveAnthropicModel(requested) {
-  const name = typeof requested === 'string' ? requested : '';
-  if (name && catalogCache.models.some((m) => m.id === name)) return name;
-  if (name && /haiku|flash|mini|small|fast/i.test(name)) return ANTHROPIC_FAST_MODEL;
-  return ANTHROPIC_MODEL;
+/*
+ * ── 请求里的模型名 → 实际出站的模型（Anthropic / Responses 共用机制，别名表分开）──
+ *
+ * 为什么不能只做「精确匹配 + 小快正则」两档（issue #18）：
+ *   ① Claude Code 会给模型名加后缀（`deepseek-v4.1-flash[1m]` = "按 1M 上下文用"），
+ *      精确匹配必然失败 → 落进「小快正则」→ **静默换成另一个模型**（用户毫不知情）。
+ *   ② 目录冷启动时（桥刚起、还没抓过上游目录）任何名字都匹配不上 → 同样被静默改写。
+ *
+ * 现在的判定顺序：
+ *   1. 剥掉客户端后缀；
+ *   2. 精确命中目录（或 FEATURED 的精选 id）→ 原样用（用户指定的就是它）；
+ *   3. **客户端原生别名**（claude-* / gpt-* / codex-* …）→ 映射到默认/小快模型 ——
+ *      这是兼容（各客户端就会发这些名字），不是"偷偷换模型"；
+ *   4. 其它名字 → **原样交给上游裁决**：目录已知时由预校验明确报 404
+ *      （`preflightModelError`，与 OpenAI 路径同一套判据；`WORKBUDDY_SKIP_MODEL_PREFLIGHT=1`
+ *      仍是那个逃生门），目录还冷着就直接转发上游 —— 既不静默换模型，也不因为
+ *      上游抖动就让请求失败。
+ */
+/** 客户端可能给模型名加的后缀（Claude Code 的 `[1m]` 等）：只认**尾部**标签。 */
+const CLIENT_MODEL_SUFFIX_RE = /\[[a-z0-9]{1,8}\]\s*$/i;
+function stripClientModelSuffix(name) {
+  const text = typeof name === 'string' ? name.trim() : '';
+  if (!text) return '';
+  const hit = text.match(CLIENT_MODEL_SUFFIX_RE);
+  return hit && hit.index > 0 ? text.slice(0, hit.index).trim() : text;
+}
+
+/**
+ * 客户端原生模型名（别名）—— **封闭白名单**，不能靠"长得像"。
+ *
+ * 旧实现用 `/haiku|flash|mini|small|fast/i` 猜"客户端在要小快模型"，而 `flash`
+ * 恰恰是 WorkBuddy 真实模型名的一部分（`deepseek-v4.1-flash` / `glm-5.3-flash`）：
+ * 于是 `deepseek-v4.1-flash[1m]` 落进这一档被换成 `glm-5.3-flash`（issue #18）。
+ *
+ * 现在只有**客户端真会发的那些名字**才算别名：
+ *   - Anthropic 侧（Claude Code）：`claude-*` / `sonnet` / `opus` / `fable` /
+ *     `opusplan` / `default`；名字里带 `haiku` 的走小快模型；
+ *   - Responses 侧（Codex）：`gpt-*` / `o1…` / `codex-*`；名字里带
+ *     `mini` / `nano` / `small` / `fast` 的走小快模型（**刻意不匹配 `codex`**：
+ *     `gpt-5.1-codex` 是它的主力模型，不能降级）。
+ */
+const ANTHROPIC_ALIAS_MAIN_RE = /^(?:claude|opus|sonnet|fable|opusplan|default)(?:[-_. ].*)?$/i;
+const ANTHROPIC_ALIAS_FAST_RE = /haiku/i;
+const RESPONSES_ALIAS_MAIN_RE = /^(?:gpt|chatgpt|o[0-9]|codex)(?:[-_. ].*)?$/i;
+const RESPONSES_ALIAS_FAST_RE = /mini|nano|small|fast/i;
+
+function classifyClientAlias(id, protocol) {
+  if (protocol === 'responses') {
+    if (RESPONSES_ALIAS_MAIN_RE.test(id) && RESPONSES_ALIAS_FAST_RE.test(id)) return 'fast';
+    if (RESPONSES_ALIAS_MAIN_RE.test(id)) return 'main';
+    return '';
+  }
+  if (ANTHROPIC_ALIAS_MAIN_RE.test(id) && ANTHROPIC_ALIAS_FAST_RE.test(id)) return 'fast';
+  if (ANTHROPIC_ALIAS_MAIN_RE.test(id)) return 'main';
+  return '';
+}
+
+/**
+ * 解析请求里的模型名。
+ *
+ * 判定顺序：
+ *   1. 剥掉客户端后缀（`[1m]` 等）；
+ *   2. 精确命中目录（或 FEATURED 的精选 id）→ 原样用（用户指定的就是它）；
+ *   3. **客户端原生别名** → 映射到默认 / 小快模型（兼容，不是偷换模型）；
+ *   4. 其它名字 → **原样交给上游裁决**：目录已知时由预校验明确报 404
+ *      （`preflightModelError`，与 OpenAI 路径同一套判据），目录还冷着时直接
+ *      转发上游 —— 既不静默换模型，也不因为上游抖动就让请求失败。
+ *
+ * 小快模型用**配置值**（`WORKBUDDY_ANTHROPIC_FAST_MODEL` /
+ * `WORKBUDDY_RESPONSES_FAST_MODEL`），不按目录替换：配置值不在目录里时预校验
+ * 会明确报 404 —— 响亮地坏，好过静默地跑别的模型。
+ */
+function resolveRequestedModel(requested, { defaultModel, fastModel, protocol }) {
+  const raw = typeof requested === 'string' ? requested.trim() : '';
+  const id = stripClientModelSuffix(raw);
+  if (!id) return { id: defaultModel, requested: raw, alias: true };
+  const known = (m) => m && m.id === id;
+  if (catalogCache.models.some(known) || FEATURED.some(known)) {
+    return { id, requested: raw, alias: false };
+  }
+  const alias = classifyClientAlias(id, protocol);
+  if (alias === 'fast') return { id: fastModel || defaultModel, requested: raw, alias: true };
+  if (alias === 'main') return { id: defaultModel, requested: raw, alias: true };
+  log(`${protocol}: unknown model id; forwarding as-is`, id);
+  return { id, requested: raw, alias: false };
 }
 
 /**
@@ -5681,6 +5803,52 @@ function anthropicToolResultContent(content) {
   return JSON.stringify(content);
 }
 
+/**
+ * Anthropic 的 `tool_result.is_error` 必须透传。
+ *
+ * Claude Code 的工具失败（文件不存在、命令报错、编辑没命中）会带着
+ * `is_error:true` 回传；上游这条协议没有错误位，于是把内容原样当**成功结果**
+ * 喂给模型 —— 模型于是以为文件已经改好、路径已经建好，继续基于错误结果推理
+ * （用户看到的是「Claude Code 自信地说改完了，其实没改」）。这里在内容前加
+ * 明确错误标记，让模型知道上一次调用失败了。
+ */
+function markToolError(content, isError) {
+  if (!isError) return content;
+  const note = '[tool_error] 上一次工具调用失败了（客户端标记为错误），请据此判断，不要当成成功：';
+  if (typeof content === 'string') return `${note}\n${content}`;
+  if (Array.isArray(content)) return [{ type: 'text', text: note }, ...content];
+  return note;
+}
+
+/**
+ * 服务端工具块（web_search / code_execution / server_tool_use 等）→ 带标签的文本。
+ *
+ * 上游没有这些能力，但**不能静默丢**：丢掉等于模型凭空失忆（"我刚才搜过"没了）。
+ * 降级成文本，至少让模型知道发生过什么。
+ */
+function anthropicServerToolText(block) {
+  const type = String(block?.type || 'server_tool');
+  let payload = '';
+  try {
+    payload = JSON.stringify(block?.content ?? block?.result ?? block?.input ?? '');
+  } catch {
+    payload = '';
+  }
+  return `[${type}] ${String(payload || '').slice(0, 2000)}`;
+}
+
+/** 不认识的内容块 → 带标签的文本（同样不静默丢）。 */
+function anthropicUnsupportedBlockText(block) {
+  const type = String(block?.type || 'unknown');
+  let payload = '';
+  try {
+    payload = JSON.stringify(block ?? '');
+  } catch {
+    payload = '';
+  }
+  return `[anthropic block:${type}] ${String(payload).slice(0, 500)}`;
+}
+
 /** Anthropic 的 image block → OpenAI 的 image_url（base64 走 data URI）。 */
 function anthropicImageToOpenAI(block) {
   const src = block && block.source;
@@ -5746,9 +5914,29 @@ function anthropicToOpenAIMessages(body) {
            * ⚠️ 用 `anthropicToolResultContent`（保留 image 块），不是 `…Text`。
            * Claude Code 的截图工具把图放在 `tool_result.content` 里；
            * 只取 text 块会让图片**静默消失**（不报错、模型只是"看不见"）。
+           *
+           * `is_error` 也要带过去：工具失败被当成成功结果，模型会以为已经改好了。
            */
-          content: anthropicToolResultContent(block.content),
+          content: markToolError(anthropicToolResultContent(block.content), block.is_error === true),
         });
+      } else if (block.type === 'mcp_tool_use') {
+        /*
+         * MCP 工具调用（Claude Code 的 MCP server）：形状与 tool_use 同构，
+         * 当成一次函数调用交给上游 —— 丢掉等于模型凭空失忆这次调用。
+         * 对应的结果仍走上面 tool_result 那条（tool_use_id 对得上）。
+         */
+        toolCalls.push({
+          id: block.id || `call_${trace().slice(0, 20)}`,
+          type: 'function',
+          function: { name: block.name || '', arguments: JSON.stringify(block.input ?? {}) },
+        });
+      } else if (block.type === 'server_tool_use' || block.type === 'web_search_tool_result'
+        || block.type === 'code_execution_tool_result') {
+        parts.push({ type: 'text', text: anthropicServerToolText(block) });
+      } else if (block.type === 'thinking' || block.type === 'redacted_thinking') {
+        parts.push({ type: 'text', text: '[thinking] （客户端回传的思考块，桥不解析其内容）' });
+      } else {
+        parts.push({ type: 'text', text: anthropicUnsupportedBlockText(block) });
       }
     }
 
@@ -5835,6 +6023,10 @@ function openAIToAnthropicMessage(agg, model) {
     usage: {
       input_tokens: Number(agg.usage?.prompt_tokens) || 0,
       output_tokens: Number(agg.usage?.completion_tokens) || 0,
+      // 上游没有 prompt caching 语义，但 Claude Code 会读这两个字段算上下文占用；
+      // 给 0 比**缺字段**更兼容（缺字段时部分客户端会当成 undefined 而报错）。
+      cache_creation_input_tokens: 0,
+      cache_read_input_tokens: 0,
     },
   };
 }
@@ -5883,7 +6075,7 @@ async function relayAnthropicStream(up, res, model, estInputTokens) {
       stop_sequence: null,
       // input_tokens 在流开始时上游还没给，先用字符数粗估；真实值在
       // message_delta 里补正。给 0 会让 Claude Code 的上下文占用显示失真。
-      usage: { input_tokens: estInputTokens, output_tokens: 0 },
+      usage: { input_tokens: estInputTokens, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
     },
   });
 
@@ -6122,6 +6314,8 @@ async function relayAnthropicStream(up, res, model, estInputTokens) {
     usage: {
       input_tokens: Number(usage?.prompt_tokens) || estInputTokens,
       output_tokens: Number(usage?.completion_tokens) || 0,
+      cache_creation_input_tokens: 0,
+      cache_read_input_tokens: 0,
     },
   });
   write('message_stop', { type: 'message_stop' });
@@ -6203,12 +6397,10 @@ async function relayAnthropicStream(up, res, model, estInputTokens) {
 const RESPONSES_MODEL = process.env.WORKBUDDY_RESPONSES_MODEL || 'glm-5.3';
 const RESPONSES_FAST_MODEL = process.env.WORKBUDDY_RESPONSES_FAST_MODEL || 'glm-5.3-flash';
 
-function resolveResponsesModel(requested) {
-  const name = typeof requested === 'string' ? requested : '';
-  if (name && catalogCache.models.some((m) => m.id === name)) return name;
-  if (name && /mini|nano|small|fast|flash|haiku/i.test(name)) return RESPONSES_FAST_MODEL;
-  return RESPONSES_MODEL;
-}
+/*
+ * 模型名解析与 Anthropic 层共用 `resolveRequestedModel()`（见那里的判定顺序）：
+ * 剥后缀 → 目录精确命中 → 客户端原生别名 → 未知 id 明确报错。
+ */
 
 /** Responses 的 id 形如 `resp_…` / `msg_…` / `fc_…`；统一在这里生成。 */
 const responsesId = (prefix) => `${prefix}_${trace().slice(0, 32)}`;
@@ -11283,7 +11475,39 @@ async function handleRequest(req, res) {
 
       // Anthropic 的 `stream` 缺省是 false（与 OpenAI 相反）
       const wantStream = body.stream === true;
-      const model = resolveAnthropicModel(body.model);
+      /*
+       * 模型名解析（与 Responses 共用 `resolveRequestedModel`）：剥后缀 → 目录精确命中
+       * → 客户端别名 → 未知 id 明确报错。**不再静默换成别的模型**（issue #18）。
+       */
+      /*
+       * 模型 id 会进出站的 `X-Model-ID` 头：**长度**与**字符集**先校验
+       * （与 `/v1/chat/completions` 同一套护栏）—— 否则超长或带非可见 ASCII 的 id
+       * 会让 Node 的 http.request 直接抛异常，客户端只会收到 500。
+       */
+      const requestedName = typeof body.model === 'string' ? body.model : '';
+      if (requestedName.length > MAX_MODEL_ID_LEN) {
+        const message = `workbuddy-bridge: model id too long (${requestedName.length} chars, max ${MAX_MODEL_ID_LEN})`;
+        const trimmed = shortError(requestedName, MAX_MODEL_ID_LEN);
+        log('rejected oversized model id (anthropic)', trimmed);
+        recordRequest({
+          model: trimmed, stream: wantStream, ms: 0, ok: false, status: 400, code: null, error: message,
+        });
+        return json(res, 400, { type: 'error', error: { type: 'invalid_request_error', message } });
+      }
+      if (requestedName && !HEADER_SAFE_RE.test(requestedName)) {
+        const message = 'workbuddy-bridge: model id contains characters that are not allowed in a header';
+        const trimmed = shortError(requestedName, MAX_MODEL_ID_LEN);
+        log('rejected unsafe model id (anthropic)', trimmed);
+        recordRequest({
+          model: trimmed, stream: wantStream, ms: 0, ok: false, status: 400, code: null, error: message,
+        });
+        return json(res, 400, { type: 'error', error: { type: 'invalid_request_error', message } });
+      }
+      const model = resolveRequestedModel(body.model, {
+        defaultModel: ANTHROPIC_MODEL,
+        fastModel: ANTHROPIC_FAST_MODEL,
+        protocol: 'anthropic',
+      }).id;
       const messages = anthropicToOpenAIMessages(body);
       const tools = anthropicToolsToOpenAIMessages(body.tools);
       const toolChoice = anthropicToolChoiceToOpenAI(body.tool_choice);
@@ -11295,6 +11519,25 @@ async function handleRequest(req, res) {
       if (typeof body.temperature === 'number') oai.temperature = body.temperature;
       if (typeof body.top_p === 'number') oai.top_p = body.top_p;
       if (Array.isArray(body.stop_sequences) && body.stop_sequences.length) oai.stop = body.stop_sequences;
+      /*
+       * Claude Code 的扩展思考开关（`thinking`）→ 上游 `reasoning_effort`：
+       * 上游只认 effort，透传 thinking 会直接 400。原先整个 thinking 被丢掉，
+       * 用户开了"思考"却看不到任何思考、模型也不思考（issue #18 的连带缺口）。
+       */
+      if (body.thinking && typeof body.thinking === 'object' && body.thinking.type === 'enabled') {
+        const effort = effortForThinkingBudget(model, Number(body.thinking.budget_tokens) || 0);
+        if (effort) oai.reasoning_effort = effort;
+      }
+      /*
+       * 输出上限按模型能力收敛：Claude Code 按自己的假设窗口算 max_tokens，
+       * 可能超过该模型的上限，上游会直接 400。收敛并留痕（与 OpenAI 路径
+       * `max_completion_tokens` 的处理同纪律）。
+       */
+      const outCap = maxOutputForModel(model);
+      if (outCap > 0 && Number(oai.max_tokens) > outCap) {
+        log('clamped max_tokens to model limit (anthropic)', `${oai.max_tokens} -> ${outCap}`);
+        oai.max_tokens = outCap;
+      }
 
       const toolError = toolNameError(tools);
       if (toolError) {
@@ -11481,7 +11724,35 @@ async function handleRequest(req, res) {
       }
 
       const wantStream = body.stream === true;
-      const model = resolveResponsesModel(body.model);
+      /* 同 Anthropic 侧：模型 id 进请求头前先过长度与字符集（否则会 500）。 */
+      const requestedName = typeof body.model === 'string' ? body.model : '';
+      if (requestedName.length > MAX_MODEL_ID_LEN) {
+        const message = `workbuddy-bridge: model id too long (${requestedName.length} chars, max ${MAX_MODEL_ID_LEN})`;
+        const trimmed = shortError(requestedName, MAX_MODEL_ID_LEN);
+        log('rejected oversized model id (responses)', trimmed);
+        recordRequest({
+          model: trimmed, stream: wantStream, ms: 0, ok: false, status: 400, code: null, error: message,
+        });
+        return json(res, 400, {
+          error: { type: 'invalid_request_error', code: 'invalid_request', message },
+        });
+      }
+      if (requestedName && !HEADER_SAFE_RE.test(requestedName)) {
+        const message = 'workbuddy-bridge: model id contains characters that are not allowed in a header';
+        const trimmed = shortError(requestedName, MAX_MODEL_ID_LEN);
+        log('rejected unsafe model id (responses)', trimmed);
+        recordRequest({
+          model: trimmed, stream: wantStream, ms: 0, ok: false, status: 400, code: null, error: message,
+        });
+        return json(res, 400, {
+          error: { type: 'invalid_request_error', code: 'invalid_request', message },
+        });
+      }
+      const model = resolveRequestedModel(body.model, {
+        defaultModel: RESPONSES_MODEL,
+        fastModel: RESPONSES_FAST_MODEL,
+        protocol: 'responses',
+      }).id;
       const messages = responsesToOpenAIMessages(body);
       /*
        * 工具可能出现在三个地方：
