@@ -17,6 +17,16 @@
 
 只支持最近 2 个 minor 版本。
 
+## [1.19.1] - 2026-10-29
+
+### Added
+
+- **Web 控制台也支持限流自动切号**（[#17](https://github.com/Ianzhyh/workbuddy-to-dsh/issues/17)）：
+  在 `.env` 设 `WORKBUDDY_ACCOUNT_FAILOVER_AFTER=N`（默认 `0` = 关），控制台会按
+  「账号」页顺序切到下一个可用桌面账号（写 `.state.json` 并重启桥）。只处理桌面来源，
+  会切换钱包、默认关闭；dsh 插件用户继续用插件配置 `accountFailoverAfter`，两边不要同时开。
+  「切换账号」路由与自动切号共用同一条 `switchDesktopAccount()` 实现，避免两套规则漂移。
+
 ## [1.19.0] - 2026-10-28
 
 ### Added
