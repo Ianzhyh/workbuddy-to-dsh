@@ -17,6 +17,19 @@
 
 只支持最近 2 个 minor 版本。
 
+## [Unreleased]
+
+### Fixed
+
+- **Claude Code 里带 `[1m]` 后缀的模型会被静默换成 `glm-5.3-flash`**：Claude Code
+  只认识带 `[1m]` 后缀（或目录声明 1M）的模型名，其它名字一律按 200K 规划会话，
+  于是用户按它的提示改成 `deepseek-v4.1-flash[1m]`。桥把后缀当成模型 id 的一部分，
+  精确匹配落空后撞上 `/haiku|flash|mini|small|fast/` 的「小快模型」正则 ——
+  请求实际发给了 `glm-5.3-flash`，而客户端界面仍显示 deepseek。现在解析模型名时
+  先剥掉后缀再匹配；`claude-haiku-*[1m]` 这类仍照旧走 fast 模型。
+- **`anthropic-beta: context-1m-2025-08-07` 被忽略**：客户端显式要 1M 时，
+  `/v1/models` 仍只报官方默认档（多数模型 300K），自动压缩提前触发。现在带这条
+  beta 头时按模型真实上限（`maxInputTokens`）对外声明；不带时行为不变。
 ## [1.19.3] - 2026-10-29
 
 ### Fixed
@@ -56,7 +69,6 @@
 
 - Claude Code 接入额外写 `env.ANTHROPIC_DEFAULT_HAIKU_MODEL`（后台任务模型），
   手动接入片段补 `ANTHROPIC_MODEL` 与 `CLAUDE_CODE_MAX_CONTEXT_TOKENS`。
-
 ## [1.19.1] - 2026-10-29
 
 ### Added
