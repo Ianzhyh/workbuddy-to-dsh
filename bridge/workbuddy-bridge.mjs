@@ -891,6 +891,17 @@ function contextWindowForModel(model) {
 }
 
 /**
+ * 模型真实上限（`maxInputTokens`）—— 客户端显式要 1M 时用它，而不是默认档。
+ *
+ * 显式覆盖也照旧生效（用户钉的预算优先），但不会超过模型上限。
+ */
+function maxContextWindowForModel(model) {
+  const max = Number(model?.context) || 0;
+  const wanted = CONTEXT_WINDOW_OVERRIDE || max;
+  return max && wanted > max ? max : wanted;
+}
+
+/**
  * 同一模型在 `/v2/.../models` 与 `/v3/config` 里各有一份描述。
  *
  * 两个端点字段并不等价：`/v3/config` 带官方选择器用的 `reasoning.supportedEfforts`
@@ -5486,11 +5497,43 @@ const usageOf = (u) => ({
 const ANTHROPIC_MODEL = process.env.WORKBUDDY_ANTHROPIC_MODEL || 'glm-5.3';
 const ANTHROPIC_FAST_MODEL = process.env.WORKBUDDY_ANTHROPIC_FAST_MODEL || 'glm-5.3-flash';
 
+/**
+ * Claude Code 的 `[1m]` 模型名后缀（`deepseek-v4.1-flash[1m]`）。
+ *
+ * 它**不是**上游模型 id 的一部分，而是客户端的开关：Claude Code 对不认识的
+ * 模型名一律按 200K 规划会话（自动压缩、用量分母），只有名字带 `[1m]` 时才承认
+ * 1M 上下文（二进制里的判断是 `/\[1m\]/i`）。客户端会在提示里让用户加这个后缀。
+ *
+ * ⚠️ 所以必须在匹配**之前**剥掉：不剥的话精确匹配落空，再撞上下面那条
+ * 「名字里有 flash 就算小快模型」的正则 —— 实测 `deepseek-v4.1-flash[1m]`
+ * 被静默路由成 `glm-5.3-flash`，客户端界面仍显示 deepseek。
+ */
+const MODEL_1M_SUFFIX_RE = /\[1m\]$/i;
+
+/** Anthropic 的 1M 长上下文 beta 头值（`anthropic-beta: context-1m-2025-08-07`）。 */
+const LONG_CONTEXT_BETA = 'context-1m-2025-08-07';
+
 function resolveAnthropicModel(requested) {
-  const name = typeof requested === 'string' ? requested : '';
+  const name = typeof requested === 'string' ? requested.trim().replace(MODEL_1M_SUFFIX_RE, '') : '';
   if (name && catalogCache.models.some((m) => m.id === name)) return name;
   if (name && /haiku|flash|mini|small|fast/i.test(name)) return ANTHROPIC_FAST_MODEL;
   return ANTHROPIC_MODEL;
+}
+
+/**
+ * 客户端是否带了 Anthropic 的 1M 长上下文 beta 头（`context-1m-2025-08-07`）。
+ *
+ * Claude Code 在模型支持 `supports_1m_beta`、或换了别的客户端时会把这条头发过来；
+ * 桥原本完全忽略 `anthropic-beta`，于是 `/v1/models` 只能报默认档（300K），
+ * 客户端即使显式要 1M 也拿不到。
+ *
+ * `anthropic-beta` 既可以是一条头里逗号分隔，也可以重复多条 —— 两种都要认；
+ * beta 名大小写不敏感。
+ */
+function hasLongContextBeta(req) {
+  const raw = req?.headers?.['anthropic-beta'];
+  const list = Array.isArray(raw) ? raw : (typeof raw === 'string' ? [raw] : []);
+  return list.some((v) => String(v).split(',').some((b) => b.trim().toLowerCase() === LONG_CONTEXT_BETA));
 }
 
 /**
@@ -10321,6 +10364,16 @@ async function handleRequest(req, res) {
         );
       }
 
+      /*
+       * 客户端显式要 1M（`anthropic-beta: context-1m-2025-08-07`）时，目录里
+       * 报的是该模型**真实上限**而不是官方默认档（多数是 300K）。
+       *
+       * 为什么需要：Claude Code 只在模型"已识别 + 开了 1M"时才按 1M 规划会话，
+       * 而它的识别依据之一就是目录里的窗口。原先桥完全忽略 `anthropic-beta`，
+       * 于是即使客户端点名要 1M，拿到的仍是 300K —— 自动压缩提前触发。
+       * 只在有 beta 头时才换，默认视图的行为保持不变。
+       */
+      const longContext = hasLongContextBeta(req);
       // 促销是否生效按“现在”算，而不是目录抓取那一刻：夜间免费/折扣在
       // 23:00、08:00 切换时，只要客户端重新拉目录就能看到新价格。
       const promoNow = new Date();
@@ -10355,7 +10408,7 @@ async function handleRequest(req, res) {
           && Array.isArray(efforts) && efforts.includes(m.defaultReasoningEffort)
           ? m.defaultReasoningEffort
           : '';
-        const contextWindow = contextWindowForModel(m);
+        const contextWindow = longContext ? maxContextWindowForModel(m) : contextWindowForModel(m);
         return {
           id: m.id,
           object: 'model',

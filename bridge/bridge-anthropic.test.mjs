@@ -63,7 +63,27 @@ const upstream = createServer((req, res) => {
   req.on('end', () => {
     if (!req.url.startsWith('/v2/chat/completions')) {
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ code: 0, data: { models: [] } }));
+      res.end(JSON.stringify({
+        code: 0,
+        data: {
+          /*
+           * 目录：`[1m]` 后缀只有在**精确命中真实模型**时才安全（否则会落进
+           * "名字里有 flash 就算小快模型"的正则），所以用例必须让桥先看到一个
+           * 真实存在、且名字里带 flash 的模型 —— 那正是出问题的 `deepseek-v4.1-flash`。
+           *
+           * `maxInputTokens` 是真实上限 1M，`contextWindow.defaultLength` 是官方
+           * 默认档 300K：两者不同正是「客户端要 1M 却被报 300K」的来源。
+           */
+          models: [{
+            id: 'deepseek-v4.1-flash',
+            name: 'DeepSeek-V4.1-Flash',
+            maxInputTokens: 1000000,
+            maxOutputTokens: 128000,
+            supportsToolCall: true,
+            contextWindow: { defaultLength: 300000, supportedLengths: [300000, 600000, 1000000] },
+          }],
+        },
+      }));
       return;
     }
     try { lastUpstreamBody = JSON.parse(Buffer.concat(chunks).toString('utf8')); }
@@ -506,6 +526,84 @@ test('Anthropic 未知 thinking / anthropic-beta：忽略而不是 400', async (
   assert.ok(lastUpstreamBody, '应当转发到上游');
   assert.equal('thinking' in lastUpstreamBody, false,
     '桥不支持的 thinking 字段不能原样塞给上游（上游会 400）');
+});
+
+/*
+ * Claude Code 对不认识的模型名一律按 200K 规划会话，只有名字带 `[1m]` 时才承认
+ * 1M —— 而桥原先把这个后缀当成模型名的一部分：精确匹配落空后撞上
+ * `/haiku|flash|mini|small|fast/` 正则，`deepseek-v4.1-flash[1m]` 被**静默**
+ * 路由成 `glm-5.3-flash`（界面仍显示 deepseek）。下面两条钉住这一点。
+ */
+const askModel = (model, extraHeaders = {}) => fetch(`${BASE}/v1/messages`, {
+  method: 'POST',
+  headers: { 'x-api-key': TOKEN, 'content-type': 'application/json', 'anthropic-version': '2023-06-01', ...extraHeaders },
+  body: JSON.stringify({ model, max_tokens: 8, stream: false, messages: [{ role: 'user', content: 'hi' }] }),
+});
+
+test('模型名带 [1m] 后缀：剥掉后缀后精确命中真实模型，不得被 flash 正则带去 fast 模型', async () => {
+  await waitReady();
+  scenario = { kind: 'text' };
+  lastUpstreamBody = null;
+  const res = await askModel('deepseek-v4.1-flash[1m]');
+  assert.equal(res.status, 200);
+  const j = await res.json();
+  assert.equal(j.model, 'deepseek-v4.1-flash',
+    '带 [1m] 的 deepseek-v4.1-flash 必须仍在 deepseek 上，不能被当成“小快模型”换成 glm-5.3-flash');
+  assert.equal(lastUpstreamBody?.model, 'deepseek-v4.1-flash',
+    '发往上游的 model 不能带 [1m] 后缀（上游不认识它）');
+});
+
+test('模型名带 [1m] 后缀 + 未知模型：后缀不影响小快模型判定', async () => {
+  await waitReady();
+  scenario = { kind: 'text' };
+  lastUpstreamBody = null;
+  const res = await askModel('claude-haiku-4-5[1m]');
+  assert.equal(res.status, 200);
+  await res.json();
+  assert.equal(lastUpstreamBody?.model, 'glm-5.3-flash',
+    '剥掉后缀后仍是 haiku，后台小任务照旧走 fast 模型 —— 修复不能把这条路径一起改掉');
+});
+
+/*
+ * `/v1/models` 的上下文声明：默认给官方默认档（300K），客户端显式要 1M
+ * （`anthropic-beta: context-1m-2025-08-07`）时给真实上限（1M）。
+ *
+ * Claude Code 判断“这个模型能不能上 1M”看的就是这里；原先桥完全忽略
+ * `anthropic-beta`，于是要了 1M 也还是 300K，自动压缩提前触发。
+ */
+const getModels = (extraHeaders = {}) => fetch(`${BASE}/v1/models?all=1`, {
+  headers: { 'x-api-key': TOKEN, ...extraHeaders },
+});
+
+/** 取目录里某个模型的上下文声明（读不到就返回 undefined，便于断言“缺失”）。 */
+async function contextOf(id, extraHeaders) {
+  const r = await getModels(extraHeaders);
+  assert.equal(r.status, 200);
+  const j = await r.json();
+  const m = j.data.find((x) => x.id === id);
+  assert.ok(m, `目录里应有 ${id}，实际：${JSON.stringify(j.data.map((x) => x.id))}`);
+  return m.context_window;
+}
+
+test('/v1/models：默认报官方默认档（300K），不是上限 1M', async () => {
+  await waitReady();
+  assert.equal(await contextOf('deepseek-v4.1-flash'),
+    300000, '不给 1M beta 头时应保持原来的默认档，修复不能把默认视图一起改成 1M');
+});
+
+test('/v1/models：带 context-1m beta 头时报真实上限 1M', async () => {
+  await waitReady();
+  assert.equal(await contextOf('deepseek-v4.1-flash', { 'anthropic-beta': 'context-1m-2025-08-07' }),
+    1000000, '客户端显式要 1M 时应拿到真实上限');
+});
+
+test('/v1/models：beta 头可以和其他 beta 逗号分隔，也能单独指定', async () => {
+  await waitReady();
+  assert.equal(await contextOf('deepseek-v4.1-flash', {
+    'anthropic-beta': 'interleaved-thinking-2025-05-14, CONTEXT-1M-2025-08-07 ',
+  }), 1000000, '逗号分隔且大小写不同也要认出来');
+  assert.equal(await contextOf('deepseek-v4.1-flash', { 'anthropic-beta': 'some-unknown-beta-2026' }),
+    300000, '无关的 beta 头不能顺带把窗口放大');
 });
 
 test('上游 401：Anthropic 路径回 502 + authentication_error，并提示重登 WorkBuddy', async () => {
