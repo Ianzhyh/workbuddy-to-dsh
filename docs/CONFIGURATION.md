@@ -40,6 +40,7 @@ copy .env.example .env
 | `WORKBUDDY_CONVERSATION_ID_BODY` | `1` | 上游按 body 的 `conversation_id` 分前缀缓存槽。客户端没带时，桥用「首条 system + 首条 user + 模型」的指纹补稳定值；若上游把它当未知字段拒绝，会自动去掉并关闭本进程注入 |
 | `WORKBUDDY_SSE_NORMALIZE` | `1` | chat 流式帧归一：补齐缺失的 `choices[0].delta`、把逐字符 `reasoning_content` 聚合成一段、`[DONE]` 只发一次。`0` = 原始字节透传（用于 A/B 或客户端特殊兼容） |
 | `WORKBUDDY_SKIP_MODEL_PREFLIGHT` | 未设 | `1` = 跳过本地模型目录预校验，未知模型也转发给上游（目录漏列可用模型时用）。默认未知模型在本地回 **404**（OpenAI/Anthropic 客户端据此切模型） |
+| 未知模型名 | 明确报 404 | Anthropic / Responses 路径遇到**目录里没有**的模型名时，默认**明确报 404**（不再悄悄换成默认模型 —— 那会让"以为在用 A、实际在用 B"）。客户端原生别名（`claude-*` / `gpt-*` / `codex-*`）照旧映射到默认/小快模型。逃生门仍是 `WORKBUDDY_SKIP_MODEL_PREFLIGHT=1`（放行未知 id 给上游） |
 | `WORKBUDDY_MODELS_DEFAULT` | `curated` | `GET /v1/models`（**不带参数**，即客户端「获取模型列表」按钮打的那个地址）默认返回哪些模型：`curated` = 3 个精选（原行为）、`all` = 全量目录、正整数 N = 精选在前补到 N 个。面板「可用模型 → 客户端一键拉取给」保存的值**优先于**本变量且立即生效；请求级 `?limit=N` 再覆盖两者。`?all=1` 始终全量，不受影响 |
 | `WORKBUDDY_SHAPE` | 未设 | `1` = 额外打印请求形状（角色计数、工具名、客户端头；仍不含对话内容），排查 11128 字段用 |
 | `WORKBUDDY_LOG` | `1` | `1` 时打印每次请求的模型、消息数、工具数（**不含对话内容**） |
@@ -136,7 +137,7 @@ copy .env.example .env
 | 客户端 | 写什么 | 怎么切换 |
 |---|---|---|
 | opencode | `provider.workbuddy.models` 里声明**勾选的每一个**；`model` 指向主模型 | TUI 里直接选 |
-| Claude Code | `modelPicker.options` 列出勾选的模型（`replaceBuiltInOptions: true`）+ `env.ANTHROPIC_MODEL` 指主模型 | `/model` 选择器 |
+| Claude Code | `modelPicker.options` 列出勾选的模型（`replaceBuiltInOptions: true`）+ `env.ANTHROPIC_MODEL` 指主模型 + `env.CLAUDE_CODE_MAX_CONTEXT_TOKENS`（上下文上限，Claude Code 不读 `/v1/models`，只能靠它）+ `env.ANTHROPIC_DEFAULT_HAIKU_MODEL`（后台任务模型） | `/model` 选择器 |
 | Codex | `model` 指主模型；勾选的模型写进 `model_catalog_json` 指向的**目录文件** | `-m <模型>` 或 Codex 的模型选择器 |
 
 > Codex 的那份目录是**第二个文件**：默认写在 `config.toml` 同目录下的

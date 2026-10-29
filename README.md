@@ -181,7 +181,7 @@ dsh plugin --profile desktop add github:Ianzhyh/workbuddy-to-dsh
 
 # 方式二：release 附件（tgz 安装包，无构建、无需 allowBuilds 授权）
 #   从 GitHub Releases 下载 dsh-plugin-workbuddy-<版本>.tgz 后：
-dsh plugin --profile desktop add ./dsh-plugin-workbuddy-1.19.1.tgz
+dsh plugin --profile desktop add ./dsh-plugin-workbuddy-1.19.2.tgz
 
 # 方式三：从源码（插件在 dsh-plugin/ 子目录，接第 1 步的 git clone）
 dsh plugin --profile desktop add workbuddy-to-dsh/dsh-plugin
@@ -452,6 +452,14 @@ node tools\connect.mjs apply codex --model glm-5.3
 **Claude Code 的模型名会被映射。** 它发的是 `claude-sonnet-4-…`，上游没有这些 id，
 桥会映射到真实模型（默认 `glm-5.3`）。想指定就用 `WORKBUDDY_ANTHROPIC_MODEL=<上游真实模型 id>`；
 走「一键接入」时会把你选的模型直接写进 `settings.json` 的 `env.ANTHROPIC_MODEL`，无需再设环境变量。
+**你显式指定的模型名不会被悄悄换成别的模型**：上游目录里没有这个名字就直接报 404
+（`WORKBUDDY_SKIP_MODEL_PREFLIGHT=1` 可放行给上游裁决）。
+
+**Claude Code 的上下文窗口怎么开。** 它对**不认识的模型 id** 一律按 200K 假设窗口
+（它不读 `/v1/models`），所以「一键接入」会额外写一行
+`env.CLAUDE_CODE_MAX_CONTEXT_TOKENS=<该模型的上限>`（v2.1.193+ 认这个变量）；
+dsh 面板里按模型设的上下文窗口也会落到这一行。老版本 Claude Code 认不了这个变量，
+可以给模型名加 `[1m]` 后缀（桥会剥掉后缀再匹配）。
 
 **已知限制：知识库 / RAG 用不了。** 上游只提供对话模型，没有任何 embedding 模型，
 `POST /v1/embeddings` 会明确返回 **501**。需要 RAG 的客户端请另配一个 embedding
@@ -644,6 +652,7 @@ copy .env.example .env
 | `WORKBUDDY_DATA_DIR` | `%USERPROFILE%\.workbuddy-bridge` | 运行期数据目录：state / 用量账本 / 本地令牌。**不要在安装目录里找它们**——换 tgz / 重装会丢 |
 | `DASHBOARD_PORT` | `8792` | 控制台端口 |
 | `WORKBUDDY_APP_EXECUTABLE` | 自动探测 | WorkBuddy 客户端路径 |
+
 | `WORKBUDDY_AUTH_FILE` | 自动定位 | 登录文件；多账号时务必显式指定 |
 | `WORKBUDDY_CONTEXT_WINDOW` | 官方默认（多为 `300000`） | dsh 的上下文容量按模型解析。**推荐在插件「模型 → 详情 → 上下文窗口（Token）」里按模型单独调**（输入/输出改完自动保存；保存后下一轮请求按新预算解析，用量分母可能显示上一轮，发一条消息刷新；切换模型用该模型自己的预算）；本变量作为面板「自动」时的桥端默认值，也供不使用面板的其它 OpenAI 客户端使用，可钉到 `600000` / `1000000`（不超过模型上限） |
 | `WORKBUDDY_ANTHROPIC_MODEL` | `glm-5.3` | Claude Code 的模型名映射到哪个真实模型（也可直接填上游真实 id） |

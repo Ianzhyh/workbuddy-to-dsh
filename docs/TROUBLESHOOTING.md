@@ -436,7 +436,10 @@ claude
 | `404 no route for POST /v1/messages` | 桥版本太旧（早于 Anthropic 兼容层），或地址填成了别的服务 |
 | `404` 且地址里带了 `/v1` | `ANTHROPIC_BASE_URL` **不能**带 `/v1`，Claude Code 会自己拼 `/v1/messages` |
 | `401` | 令牌不对。桥同时接受 `Authorization: Bearer <token>` 和 `x-api-key: <token>` 两种写法 |
-| 模型名被「换掉」了 | **这是设计行为**：Claude Code 发的 `claude-sonnet-4-…` 在上游不存在，桥会映射到真实模型。默认 `glm-5.3`（小快模型走 `glm-5.3-flash`）。想指定就用 `WORKBUDDY_ANTHROPIC_MODEL=<上游真实模型 id>`，桥会优先精确匹配 |
+| 模型名被「换掉」了 | **客户端别名**（`claude-sonnet-4-…`）在上游不存在，桥映射到真实模型：默认 `glm-5.3`（小快模型走 `glm-5.3-flash`）。想指定就用 `WORKBUDDY_ANTHROPIC_MODEL=<上游真实模型 id>`，桥会优先精确匹配 |
+| `404 not_found_error: model "…" is not in the current catalog` | 你指定了上游目录里**没有**的模型 id。桥不再悄悄换成别的模型（那会让"以为在用 A、实际在用 B"）。看 `GET /v1/models?all=1` 确认真实 id；目录可能滞后时设 `WORKBUDDY_SKIP_MODEL_PREFLIGHT=1` 放行给上游裁决 |
+| **会话按 200K 规划上下文**（自动压缩来得比预期早） | Claude Code 对**它不认识的模型 id** 一律按 200K 假设窗口（它不读 `/v1/models`）。v2.1.193+ 用 `CLAUDE_CODE_MAX_CONTEXT_TOKENS` 覆盖：「一键接入」已经把它写进 `~/.claude/settings.json`（值 = 该模型的上下文上限；dsh 面板里按模型设的值优先，但会被模型上限收敛）。老版本 Claude Code 认这个变量，只能改用模型名加 `[1m]` 后缀（桥已支持，会剥掉后缀再匹配） |
+| 工具失败了，模型却像没事一样继续 | 旧版桥不传 `tool_result.is_error`，模型以为工具成功了。v1.19.2 起失败标记会带进上下文 |
 
 ### dsh 里发图片，模型像没看见（"读不了图"）
 

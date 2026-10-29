@@ -484,6 +484,9 @@ verifyWritten(...) → {"ok":true}（自检通过）
     - **Claude Code：本机没装**（PATH 里没有 `claude`，`~/.claude` 目录也不存在）
       → 面板标 `e2e: false` / 「未检测到该客户端」**是正确的**，不是偷懒。
       要做真机走查，得先装上。
+      （2026-10-29 更新：已有真机反馈 —— Claude Code v2.1.312 直连本桥，
+      暴露了「模型名带 `[1m]` 后缀被静默路由到别的模型」与「按 200K 规划上下文」
+      两个问题，已在 1.19.2 修掉；接入侧补上 `CLAUDE_CODE_MAX_CONTEXT_TOKENS`。）
     - **opencode：装的是桌面版**（`%LOCALAPPDATA%\Programs\@opencode-aidesktop\OpenCode.exe`），
       CLI 不在 PATH 里 → 无头环境驱动不了 GUI，所以"它是否接受这份配置"仍**没法端到端验**。
     - **顺手查出并修掉一个真 bug**：它的配置叫 `opencode.jsonc`（官方同时认 `.json` 与

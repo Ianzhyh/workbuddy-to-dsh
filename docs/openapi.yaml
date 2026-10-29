@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: WorkBuddy 本地 API 桥
-  version: 1.19.1
+  version: 1.19.2
   description: |
     把本机 WorkBuddy 桌面端已登录的模型能力，经本地回环桥暴露为
     OpenAI 兼容与 Anthropic 兼容两套接口。仅监听 127.0.0.1。
@@ -53,7 +53,11 @@ components:
       type: object
       required: [model, messages]
       properties:
-        model: { type: string }
+        model:
+          type: string
+          description: |
+            上游真实模型 id。客户端加的 `[1m]` 等后缀会被剥掉再匹配；
+            目录里没有的名字明确报 404（`WORKBUDDY_STRICT_MODEL=0` 可退回默认模型）。
         system: {}
         messages:
           type: array
@@ -65,6 +69,11 @@ components:
         temperature: { type: number }
         top_p: { type: number }
         stop_sequences: { type: array, items: { type: string } }
+        thinking:
+          type: object
+          description: |
+            扩展思考开关。桥按 `budget_tokens` 折算成上游 `reasoning_effort`
+            （只对实测过档位的模型生效）；响应侧不返回 thinking 块（没有上游签名）。
     VideoRequest:
       type: object
       additionalProperties: false
@@ -489,7 +498,16 @@ paths:
   /v1/messages:
     post:
       summary: Anthropic Messages 兼容（Claude Code 直连）
-      description: system 顶层字段、tool_use / tool_result 块数组均按 Anthropic 规范翻译；上游拉黑 Claude Code 固定 system 模板的问题已在出站层最小改写。当 `tools` 含 `web_search_20250305` 时，桥改为调用 WorkBuddy 原生搜索，返回非流式 Anthropic 消息（`server_tool_use` + `web_search_tool_result` + 可选 text citations），不转发 DeepSeek；`stream:true` 会得到明确 400。
+      description: system 顶层字段、tool_use / tool_result 块数组均按 Anthropic 规范翻译；上游拉黑 Claude Code 固定 system 模板的问题已在出站层最小改写。当 `tools` 含 `web_search_20250305` 时，桥改为调用 WorkBuddy 原生搜索，返回非流式 Anthropic 消息（`server_tool_use` + `web_search_tool_result` + 可选 text citations），不转发 DeepSeek；`stream:true` 会得到明确 400。模型名会先剥掉客户端后缀（`[1m]` 等）再匹配上游目录；目录里没有的名字明确报 404（`WORKBUDDY_STRICT_MODEL=0` 可退回默认模型）。
+      parameters:
+        - in: header
+          name: anthropic-version
+          schema: { type: string }
+          description: 收下但不使用（协议版本不参与路由）。
+        - in: header
+          name: anthropic-beta
+          schema: { type: string }
+          description: 收下但不使用（beta 特性不参与路由；`thinking` 以请求体字段为准）。
       requestBody:
         required: true
         content:
@@ -498,6 +516,7 @@ paths:
       responses:
         '200': { description: 非流式返回 Anthropic Message；stream=true 返回 SSE 事件序列 }
         '400': { description: 上游拒绝（含审计模板类，见 TROUBLESHOOTING） }
+        '404': { description: 请求的模型 id 不在上游目录里（`not_found_error`） }
         '413': { description: 请求体超限 }
   /v1/messages/count_tokens:
     post:
@@ -527,7 +546,7 @@ paths:
           description: all=1 返回完整目录并刷新缓存
       responses:
         '200':
-          description: 目录。每个模型除 `context_window` / `max_output_tokens` / `supports_images` / `supports_reasoning` 外，还提供客户端别名 `context_length` / `max_input_tokens` / `max_tokens`、`capabilities{vision,tools,reasoning}` 与 `architecture.input_modalities`，值同源。
+          description: 目录。每个模型除 `context_window` / `max_output_tokens` / `supports_images` / `supports_reasoning` 外，还提供 `context_window_default`（官方默认档）、`context_window_options`（可选档位）、`context_window_max`（模型上限），以及客户端别名 `context_length` / `max_input_tokens` / `max_tokens`、`capabilities{vision,tools,reasoning}` 与 `architecture.input_modalities`，值同源。
           content:
             application/json:
               schema:

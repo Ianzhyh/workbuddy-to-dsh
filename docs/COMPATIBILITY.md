@@ -15,7 +15,7 @@
 
 | 客户端 | 协议 | 状态 |
 |---|---|---|
-| Claude Code | Anthropic Messages | ✅ 流式 / tool_use / 多轮 tool_result 实测 |
+| Claude Code | Anthropic Messages | ✅ 流式 / tool_use / 多轮 tool_result 实测；上下文窗口用 `CLAUDE_CODE_MAX_CONTEXT_TOKENS` 覆盖（它不读 `/v1/models`）；`thinking` 开关映射成上游思考档位（思考内容不返回） |
 | opencode | OpenAI Chat | ✅ 用底层 AI SDK 实测生成 / 工具 / 流式；桌面版接入需人工点一次 |
 | Codex | OpenAI Responses | ⚪ 协议层按解析器源码对齐 + 单测；未在 Codex 内实跑 |
 | Cherry Studio | OpenAI Chat / Responses | ⚪ 协议兼容；思考分片问题已在 1.15.0 做桥侧清洗，待客户端复测 |

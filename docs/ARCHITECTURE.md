@@ -367,13 +367,27 @@ chat/completions。两者在**请求结构、响应结构、流式事件格式**
    OpenAI 的 `'required'`——上游只认字符串，而且没有「指定某一个函数」的表达。
    语义上略有损失（不再限定是哪个函数），但保留了「必须调用工具」这个关键约束。
 2. **模型名**：Claude Code 发 `claude-sonnet-4-…`，上游没有这些 id。解析顺序是
-   ① 精确命中上游目录就原样用（允许用 `WORKBUDDY_ANTHROPIC_MODEL` 指定真实模型）；
-   ② 含 `haiku`/`flash` 等「小快」字样的走 fast 模型；③ 其余走默认模型。
+   ① 剥掉客户端后缀（`[1m]` 等）后精确命中上游目录就原样用（用户指定的，
+   就是它）；② **客户端原生别名**（`claude-*` / `gpt-*` / `codex-*`，封闭白名单，
+   不能靠"长得像"——`flash` 恰恰是真实模型名的一部分）映射到默认或小快模型；
+   ③ 其它名字**原样交给上游裁决** —— 目录已知时由 `preflightModelError` 明确报
+   404（与 OpenAI 路径同一套判据，逃生门 `WORKBUDDY_SKIP_MODEL_PREFLIGHT=1`），
+   目录还冷着就直接转发上游，既不静默换模型，也不因为上游抖动就让请求失败。
    默认取 `glm-5.3` 而非桥的通用默认 `deepseek-v4.1-flash`，因为 Claude Code 是
    Agent、全程依赖工具调用，而 `glm-5.3` 是实测 tool_calls 最稳的一个。
 3. **`input_tokens`**：Anthropic 在 `message_start` 里就报 input_tokens，而上游只在
-   流的**最后一帧**给 usage。所以开头先用 `请求字节数 / 4` 粗估，真实值在
-   `message_delta` 里补正。给 0 会让 Claude Code 的上下文占用显示失真。
+   流的**最后一帧**给 usage。所以开头先用**字符级估算**（ASCII 约 4 字符/token、
+   CJK 约 1 字/token、图片按常数 1200 计）顶一下，真实值在 `message_delta` 里
+   补正。给 0 会让 Claude Code 的上下文占用显示失真。
+4. **`thinking`**：Claude Code 会带 `thinking: {type:'enabled', budget_tokens:N}`，
+   而上游只认 `reasoning_effort`。桥按预算折算成档位（≤2k→low、≤8k→medium、
+   ≤24k→high、≤64k→xhigh、>64k→max）并**只对实测过档位的模型**下发。
+   响应侧**不**伪造 Anthropic 的 `thinking` 块 —— 那需要上游签名，伪造会被
+   Claude Code 判为非法块；思考内容因此不返回给客户端，但档位确实生效。
+5. **内容块**：Claude Code 会回传 `mcp_tool_use`、`web_search_tool_result` 这类
+   块，桥没有对应上游能力，但**不能静默丢**（丢了模型就凭空失忆）：降级成带
+   标签的文本。`tool_result.is_error` 也要透传 —— 工具失败被当成成功，模型会
+   基于错误结果继续推理。
 
 ### 流式事件为什么必须严格配对
 
@@ -383,7 +397,8 @@ Anthropic 的流比 OpenAI 严格得多：每个内容块必须有
 并中断会话。
 
 实现上文本块与工具块**共用一个索引空间**：文本先来就占 0、工具接着占 1，反之
-亦然；开新块前必须先 `closeOpen()` 把上一个关掉。
+亦然；**工具块之间不互相关闭**（两个工具的调用可以同时处于打开状态），只有文本块
+独占。
 
 ### 上游没有的能力：明确 501
 

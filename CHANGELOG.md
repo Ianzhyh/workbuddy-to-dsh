@@ -17,6 +17,37 @@
 
 只支持最近 2 个 minor 版本。
 
+## [1.19.2] - 2026-10-29
+
+### Fixed
+
+- **Claude Code 加 `[1m]` 后缀被静默路由到别的模型**（[#18](https://github.com/Ianzhyh/workbuddy-to-dsh/issues/18)）：
+  桥的 Anthropic 层此前只有「精确命中目录」与「名字带 flash/haiku 就走小快模型」两档，
+  `deepseek-v4.1-flash[1m]` 落进第二档被换成 `glm-5.3-flash`。现在先剥客户端后缀
+  再匹配目录；客户端原生别名（`claude-*` / `gpt-*` / `codex-*`）照旧映射（兼容不变）。
+- **目录里没有的模型名被静默换成默认模型**：Anthropic / Responses 路径默认**明确报
+  404**（`not_found_error`），不再"以为在用 A、实际在用 B"；逃生门沿用
+  `WORKBUDDY_SKIP_MODEL_PREFLIGHT=1`（放行给上游裁决）。目录冷启动时不再静默改写：
+  未知 id 原样转发给上游，由上游裁决。
+- **Claude Code 按 200K 规划上下文**（[#18](https://github.com/Ianzhyh/workbuddy-to-dsh/issues/18)）：
+  它对不认识的模型 id 一律按 200K 假设窗口（不读 `/v1/models`）。「一键接入」现在写
+  `env.CLAUDE_CODE_MAX_CONTEXT_TOKENS`（= 模型上限），dsh 面板里按模型设的上下文窗口
+  也会落到这一行（按模型上限收敛）。
+- **工具失败被当成成功**：`tool_result.is_error` 现在透传给模型（原先工具报错被
+  当成功结果，模型会以为文件已经改好）。
+- **MCP / 服务端工具块静默消失**：`mcp_tool_use`、`web_search_tool_result` 这类块
+  降级成带标签的文本，不再让模型凭空失忆。
+- **`thinking` 开关被整段丢弃**：Claude Code 的扩展思考现在按 `budget_tokens` 折算成
+  上游 `reasoning_effort`（只对实测过档位的模型生效）。
+- **`max_tokens` 不按模型上限收敛**：超上限时收敛到该模型的输出上限。
+- **「验证接入」对 Claude Code 只验 OpenAI 路径**：现在额外验一次 Anthropic 路径
+  （`/v1/messages/count_tokens`，本地估算、不打上游、不耗额度）。
+
+### Changed
+
+- Claude Code 接入额外写 `env.ANTHROPIC_DEFAULT_HAIKU_MODEL`（后台任务模型），
+  手动接入片段补 `ANTHROPIC_MODEL` 与 `CLAUDE_CODE_MAX_CONTEXT_TOKENS`。
+
 ## [1.19.1] - 2026-10-29
 
 ### Added
