@@ -59,7 +59,7 @@ process.env.DASHBOARD_AUTO_START_BRIDGE = '0';
 process.env.DASHBOARD_PORT = process.env.DASHBOARD_PORT || '0';
 process.env.WORKBUDDY_PORT = process.env.WORKBUDDY_PORT || '0';
 
-const { stopBridgeAndWait } = await import('../../dashboard/server.mjs');
+const { stopBridgeAndWait, pickAccountFailoverTarget } = await import('../../dashboard/server.mjs');
 
 /**
  * 起一个**独立子进程**占住某个端口，返回 {port, child, waitClose}。
@@ -257,6 +257,24 @@ test('停桥：端口上是真桥时仍能正常停掉（别为了安全把功�
  *
  * 契约：桥回 401 时仍然要能把它停掉（它确实是我们自己的进程）。
  */
+
+test('限流自动切号：Web 控制台按账号列表挑下一个可用账号', () => {
+  const accounts = [
+    { name: 'a.info', active: true, usable: true, userId: 'u1' },
+    { name: 'b.info', usable: false },
+    { name: 'c.info', usable: true, hidden: true },
+    { name: 'd.info', usable: true, userId: 'u4' },
+  ];
+  assert.equal(pickAccountFailoverTarget(accounts, 'u1')?.name, 'd.info',
+    '跳过不可用 / 隐藏的账号，选下一个可用项');
+  assert.equal(pickAccountFailoverTarget([{ name: 'a.info', active: true, usable: true }], 'u1'), null,
+    '只有一个账号时没有可切换目标');
+  assert.equal(pickAccountFailoverTarget([
+    { name: 'a.info', active: true, usable: true },
+    { name: 'b.info', usable: true },
+    { name: 'c.info', usable: true },
+  ], 'u1')?.name, 'b.info', '按列表顺序循环');
+});
 
 test('停桥：桥回 401（令牌不一致）时仍应能停掉它 —— 401 不等于"不是桥"', { timeout: 30_000 }, async () => {
   const child = spawn(process.execPath, [join(HERE, '_auth401Holder.mjs')],

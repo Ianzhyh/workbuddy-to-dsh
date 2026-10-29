@@ -266,6 +266,10 @@ npm run release:check      # = vendor:check + 单测 + 独立分发演练（发�
 > 被上游 429 达到 N 次时会切到下一个本机可用账号（会切换钱包，控制台按需拉起完成切换）。
 > 只在本机已配置的自有账号间切换，不导出凭据、不做公网中转；可能触发上游风控，
 > 是否开启与后果由使用者自行判断。
+>
+> 纯 Web 控制台用户（不用 dsh 插件）：在项目 `.env` 里设
+> `WORKBUDDY_ACCOUNT_FAILOVER_AFTER=3`，控制台会执行同样的切换（仅桌面来源的账号）。
+> 两种方式不要同时开。
 
 `projectRoot` 的探测顺序：配置 → `WORKBUDDY_ROOT` 环境变量 → 插件目录的上一级
 （插件放在仓库里时）→ `node_modules` 上溯三级 → `~/workbuddy-to-dsh` → `E:\workbuddy-to-dsh`。

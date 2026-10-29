@@ -529,6 +529,15 @@ export const config = {
      * 轮询天然保活，只有页面/数据请求都停了才会计时。
      */
     idleExitMs: numEnv('DASHBOARD_IDLE_EXIT_MS', 0, { min: 0 }),
+    /**
+     * Web 控制台侧的限流自动切号（0 = 关闭，默认）。
+     *
+     * 同一账号同一模型在 10 分钟内被上游最终 429 达到 N 次后，控制台会按「账号」
+     * 页的顺序切到下一个可用桌面账号（写 .state.json 并重启桥）。仅对桌面来源
+     * 生效；会切换钱包，默认关闭，只在显式配置时启用。dsh 插件用户应改用插件
+     * 配置 `accountFailoverAfter`，不要两边同时开。
+     */
+    accountFailoverAfter: numEnv('WORKBUDDY_ACCOUNT_FAILOVER_AFTER', 0, { min: 0 }),
   },
   workbuddy: {
     /*

@@ -57,6 +57,7 @@ export const CONFIG_SCHEMA = Object.freeze({
     note: '凭据存储',
   },
   WORKBUDDY_CREDENTIAL_FAILOVER: { kind: 'enum', values: ['off', 'same-account', 'any'], fallback: 'same-account', lowercase: true, note: '凭据接管策略' },
+  WORKBUDDY_ACCOUNT_FAILOVER_AFTER: { kind: 'number', min: 0, max: Infinity, integer: true, fallback: 0, note: 'Web 控制台限流自动切号阈值' },
   WORKBUDDY_LOGIN_REGION: { kind: 'enum', values: ['cn', 'global'], fallback: 'cn', lowercase: true, note: '登录区域' },
   /*
    * 模型默认视图规模：`curated` / `all` / 正整数（`8`）。

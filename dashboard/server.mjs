@@ -842,6 +842,91 @@ async function applyAccountPinCorrection(pin) {
 }
 
 /**
+ * 切换桌面账号：停桥 → 写 `.state.json` → 清体检/积分缓存 → 用目标文件重启桥。
+ * 面板「切换账号」与限流自动切号共用这一条路径，避免两套规则漂移。
+ */
+async function switchDesktopAccount(file) {
+  const listed = await listAccountFiles();
+  const hit = listed.accounts.find((a) => a.name === file);
+  if (!hit) throw new Error(`未知账号：${file}`);
+  if (!hit.usable) throw new Error(`该账号当前不可用：${hit.error || '无法解开凭据'}`);
+  const wasRunning = (await bridgeHealth()).running;
+  if (wasRunning) await stopBridgeAndWait();
+  writeState({
+    authFile: hit.path,
+    authFileDesktopUid: listed.desktopUid || null,
+    authFilePinnedAt: new Date().toISOString(),
+  });
+  clearProbeResults();
+  invalidateQuotaCache();
+  const started = await startBridgeAndWait({ authFile: hit.path, followUid: listed.desktopUid || '' });
+  return {
+    account: { name: hit.name, account: hit.account, domain: hit.domain },
+    restarted: started.started === true,
+    health: started.health || null,
+    warning: started.warning || started.error || null,
+  };
+}
+
+/** 从账号列表挑下一个可切换账号（纯函数，导出给单测）。 */
+export function pickAccountFailoverTarget(accounts, currentUid = '') {
+  const usable = (Array.isArray(accounts) ? accounts : [])
+    .filter((a) => a && a.usable === true && a.hidden !== true);
+  if (usable.length < 2) return null;
+  const current = usable.find((a) => a.active === true)
+    || (currentUid ? usable.find((a) => String(a.userId || a.account || '') === String(currentUid)) : null);
+  const start = current ? usable.indexOf(current) : -1;
+  for (let i = 1; i <= usable.length; i += 1) {
+    const cand = usable[(start + i + usable.length) % usable.length];
+    if (!current || cand.name !== current.name) return cand;
+  }
+  return null;
+}
+
+/**
+ * Web 控制台的限流自动切号（`.env` 显式开启，默认关闭）。
+ *
+ * 只处理桌面来源：桥的 `/health.rateLimit` 给出当前账号同一模型最近 10 分钟
+ * 的最终 429 次数；达到阈值后按「账号」页顺序切到下一个可用账号。插件来源
+ * 不在本功能范围（dsh 插件侧有自己的同名 opt-in）。
+ */
+const ACCOUNT_FAILOVER_AFTER = config.dashboard.accountFailoverAfter;
+let accountFailoverBusy = false;
+let lastAccountFailoverAt = 0;
+
+async function maybeAutoSwitchAccount() {
+  if (!ACCOUNT_FAILOVER_AFTER || accountFailoverBusy || Date.now() - lastAccountFailoverAt < 60_000) return;
+  accountFailoverBusy = true;
+  try {
+    const health = await bridgeHealth();
+    if (!health.running || !health.ok) return;
+    const limit = health.body?.rateLimit;
+    if (!limit || Number(limit.count) < ACCOUNT_FAILOVER_AFTER) return;
+    if (health.body?.auth?.source !== 'desktop') return;
+    lastAccountFailoverAt = Date.now();
+    const listed = await listAccounts();
+    const target = pickAccountFailoverTarget(listed.accounts, health.body?.auth?.userId || '');
+    if (!target) {
+      console.warn(`账号自动切换跳过：没有其它可用账号（${limit.model || '?'} 已限流 ${limit.count} 次）`);
+      return;
+    }
+    await switchDesktopAccount(target.name);
+    console.log(`上游限流 ${limit.count} 次（${limit.model || '?'}），已自动切换账号 -> ${target.name}`);
+  } catch (error) {
+    console.warn(`账号自动切换失败：${error?.message || error}`);
+  } finally {
+    accountFailoverBusy = false;
+  }
+}
+
+function startAccountFailoverWatchdog() {
+  if (!ACCOUNT_FAILOVER_AFTER) return;
+  const timer = setInterval(() => { void maybeAutoSwitchAccount(); }, 10_000);
+  timer.unref?.();
+  console.log(`限流自动切号已开启：同一模型 10 分钟内 ${ACCOUNT_FAILOVER_AFTER} 次 429 后切换桌面账号`);
+}
+
+/**
  * 停桥并等端口真正释放，避免重启时撞上 TIME_WAIT。
  *
  * 等待循环走**异步探测**（{@link probePortPid}）：早期版本在这里调同步的
@@ -1867,35 +1952,8 @@ const server = createServer(async (req, res) => {
          * （旧插件/旧页面还在跑）它可能传来同一账号里被合并掉的那份快照文件名 ——
          * 那也是一份真实存在的登录文件，切过去同样有效，不该报"未知账号"。
          */
-        const listed = await listAccountFiles();
-        const hit = listed.accounts.find((a) => a.name === file);
-        if (!hit) throw new Error(`未知账号：${file}`);
-        if (!hit.usable) throw new Error(`该账号当前不可用：${hit.error || '无法解开凭据'}`);
-
-        const wasRunning = (await bridgeHealth()).running;
-        if (wasRunning) await stopBridgeAndWait();
-        /*
-         * 记住"切换那一刻桌面端是哪个账号"：以后桌面端换号时，桥据此判断
-         * 是用户主动钉住的快照还是桌面端已经换了人（见 reconcileAccountPin）。
-         */
-        writeState({
-          authFile: hit.path,
-          authFileDesktopUid: listed.desktopUid || null,
-          authFilePinnedAt: new Date().toISOString(),
-        });
-        // 体检结论只对被测时的那个账号成立：换账号后旧结论不能再作为新账号的
-        // 事实展示（模型 id 往往两个账号都有，混用会直接误导）
-        clearProbeResults();
-        invalidateQuotaCache(); // 换了账号，余额是另一个账号的
-        const started = await startBridgeAndWait({ authFile: hit.path, followUid: listed.desktopUid || '' });
-
-        sendJson(res, 200, {
-          switched: true,
-          account: { name: hit.name, account: hit.account, domain: hit.domain },
-          restarted: started.started === true,
-          health: started.health || null,
-          warning: started.warning || started.error || null,
-        });
+        const result = await switchDesktopAccount(file);
+        sendJson(res, 200, { switched: true, ...result });
       } catch (err) {
         if (err.code === 'BODY_TOO_LARGE') return bodyTooLarge(req, res);
         sendJson(res, 400, { switched: false, error: err.message });
@@ -2136,6 +2194,7 @@ function isMainModule() {
 /** 启动控制台服务（进程入口调用；测试 import 时不执行）。 */
 function startConsoleServer() {
   startIdleExitWatchdog();
+  startAccountFailoverWatchdog();
   server.listen(config.dashboard.port, config.dashboard.host, async () => {
     console.log(`WorkBuddy 控制台  ->  ${config.dashboard.url}`);
     console.log(`登录文件          ->  ${effectiveAuthFile()}`);
