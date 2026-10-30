@@ -933,6 +933,17 @@ function contextWindowForModel(model) {
 }
 
 /**
+ * 模型**真实上限**（`maxInputTokens`）—— 客户端显式要 1M 时用它，而不是默认档。
+ *
+ * 显式覆盖（`WORKBUDDY_CONTEXT_WINDOW`）照旧优先，但不会超过模型上限。
+ */
+function maxContextWindowForModel(model) {
+  const max = Number(model?.context) || 0;
+  const wanted = CONTEXT_WINDOW_OVERRIDE || max;
+  return max && wanted > max ? max : wanted;
+}
+
+/**
  * 同一模型在 `/v2/.../models` 与 `/v3/config` 里各有一份描述。
  *
  * 两个端点字段并不等价：`/v3/config` 带官方选择器用的 `reasoning.supportedEfforts`
@@ -5546,6 +5557,23 @@ const ANTHROPIC_FAST_MODEL = process.env.WORKBUDDY_ANTHROPIC_FAST_MODEL || 'glm-
  *      仍是那个逃生门），目录还冷着就直接转发上游 —— 既不静默换模型，也不因为
  *      上游抖动就让请求失败。
  */
+/**
+ * Anthropic 的 1M 长上下文 beta 头（`anthropic-beta: context-1m-2025-08-07`）。
+ *
+ * Claude Code 显式要 1M 时会带上它；桥据此在 `/v1/models` 里按**模型真实上限**
+ * 声明窗口，而不是官方默认档（多数模型 300K）—— 否则自动压缩提前触发。
+ * 这个口径来自 @liugangnhm 的 PR #19（issue #18 的报告者）。
+ */
+const LONG_CONTEXT_BETA = 'context-1m-2025-08-07';
+
+/** 请求头里是否带了 1M 长上下文 beta（逗号分隔、大小写不敏感）。 */
+function wantsLongContext(req) {
+  const raw = req && req.headers ? req.headers['anthropic-beta'] : '';
+  const text = Array.isArray(raw) ? raw.join(',') : String(raw || '');
+  if (!text) return false;
+  return text.split(',').some((part) => part.trim().toLowerCase() === LONG_CONTEXT_BETA);
+}
+
 /** 客户端可能给模型名加的后缀（Claude Code 的 `[1m]` 等）：只认**尾部**标签。 */
 const CLIENT_MODEL_SUFFIX_RE = /\[[a-z0-9]{1,8}\]\s*$/i;
 function stripClientModelSuffix(name) {
@@ -10467,6 +10495,8 @@ async function handleRequest(req, res) {
       // refresh=1：强制重取上游目录。失败**不清空旧缓存**——宁可给一份标了
       // 年纪的目录，也别让页面突然空白；staleMs 就是那个「年纪」。
       const wantRefresh = url.searchParams.get('refresh') === '1';
+      // Claude Code 显式要 1M 时按模型真实上限声明窗口（其余客户端行为不变）
+      const longContext = wantsLongContext(req);
       let staleMs = null;
       if (wantRefresh) {
         const startedAt = Date.now();
@@ -10547,7 +10577,8 @@ async function handleRequest(req, res) {
           && Array.isArray(efforts) && efforts.includes(m.defaultReasoningEffort)
           ? m.defaultReasoningEffort
           : '';
-        const contextWindow = contextWindowForModel(m);
+        // 客户端显式要 1M（beta 头）→ 按真实上限声明；否则维持官方默认档
+        const contextWindow = longContext ? maxContextWindowForModel(m) : contextWindowForModel(m);
         return {
           id: m.id,
           object: 'model',

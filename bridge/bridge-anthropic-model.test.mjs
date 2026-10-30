@@ -31,7 +31,13 @@ const BRIDGE = join(HERE, '..', 'bridge', 'workbuddy-bridge.mjs');
 const TOKEN = 'test-token-anthropic-model';
 
 const CATALOG = [
-  { id: 'deepseek-v4.1-flash', maxInputTokens: 1000000, maxOutputTokens: 128000 },
+  {
+    id: 'deepseek-v4.1-flash',
+    maxInputTokens: 1000000,
+    maxOutputTokens: 128000,
+    // 官方默认档 300K、真实上限 1M —— 两者的差正是"客户端要 1M 却被按 300K 规划"的来源
+    contextWindow: { defaultLength: 300000, supportedLengths: [300000, 600000, 1000000] },
+  },
   { id: 'glm-5.3', maxInputTokens: 1000000, maxOutputTokens: 48000 },
   { id: 'glm-5.3-flash', maxInputTokens: 1000000, maxOutputTokens: 4096 },
 ];
@@ -256,8 +262,22 @@ test('max_tokens 超过模型上限：按该模型能力收敛（上游会直接
   assert.equal(lastUpstreamBody?.max_tokens, 128000, '应收敛到模型的输出上限');
 });
 
-test('usage 补 cache 字段：Claude Code 的上下文占用条会读它们', async () => {
-  const res = await post({
+test('/v1/models：默认报官方默认档；带 context-1m beta 头时报模型真实上限', async () => {
+  const models = async (headers = {}) => {
+    const res = await fetch(`${BASE}/v1/models?all=1`, { headers: { 'x-api-key': TOKEN, ...headers } });
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    return body.data.find((m) => m.id === 'deepseek-v4.1-flash');
+  };
+  const plain = await models();
+  assert.equal(plain.context_window, 300000, '默认口径不变（官方默认档 300K）');
+  const beta = await models({ 'anthropic-beta': 'interleaved-thinking-2025-05-14, CONTEXT-1M-2025-08-07' });
+  assert.equal(beta.context_window, 1000000, '客户端显式要 1M 时按模型真实上限声明');
+  const unrelated = await models({ 'anthropic-beta': 'some-unknown-beta-2026' });
+  assert.equal(unrelated.context_window, 300000, '无关的 beta 头不能顺带放大窗口');
+});
+
+test('usage 补 cache 字段：Claude Code 的上下文占用条会读它们', async () => {  const res = await post({
     model: 'deepseek-v4.1-flash',
     max_tokens: 64,
     messages: [{ role: 'user', content: 'hi' }],
