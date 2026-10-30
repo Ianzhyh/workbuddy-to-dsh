@@ -1,5 +1,21 @@
 # WorkBuddy Local API Bridge
 
+[![dsh.so risk](https://cdn.dsh.so/badge/workbuddy-to-dsh.svg)](https://www.dsh.so/artifact/workbuddy-to-dsh/?ref=badge)
+[![dsh.so install · dsh 0.2.1-rc.3](https://cdn.dsh.so/badge/install/workbuddy-to-dsh@0.2.1-rc.3.svg)](https://www.dsh.so/artifact/workbuddy-to-dsh/?ref=badge-install)
+[![dshfind](https://dshfind.com/api/badge/Ianzhyh/workbuddy-to-dsh?lang=en)](https://dshfind.com/en/plugins/Ianzhyh/workbuddy-to-dsh?ref=badge)
+
+[![GitHub release](https://img.shields.io/github/v/release/Ianzhyh/workbuddy-to-dsh?style=flat-square)](https://github.com/Ianzhyh/workbuddy-to-dsh/releases)
+[![GitHub stars](https://img.shields.io/github/stars/Ianzhyh/workbuddy-to-dsh?style=flat-square&logo=github)](https://github.com/Ianzhyh/workbuddy-to-dsh/stargazers)
+[![GitHub forks](https://img.shields.io/github/forks/Ianzhyh/workbuddy-to-dsh?style=flat-square&logo=github)](https://github.com/Ianzhyh/workbuddy-to-dsh/forks)
+[![License: MIT](https://img.shields.io/github/license/Ianzhyh/workbuddy-to-dsh?style=flat-square)](https://github.com/Ianzhyh/workbuddy-to-dsh/blob/main/LICENSE)
+[![Node.js >=18](https://img.shields.io/badge/node-%3E%3D18-339933?style=flat-square&logo=node.js&logoColor=white)](https://github.com/Ianzhyh/workbuddy-to-dsh/blob/main/package.json)
+[![Platform](https://img.shields.io/badge/platform-Windows%20verified%20%C2%B7%20macOS%2FLinux%20experimental-0078D6?style=flat-square)](#quick-start-windows)
+[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen?style=flat-square)](https://github.com/Ianzhyh/workbuddy-to-dsh/pulls)
+
+[![OpenAI-compatible](https://img.shields.io/badge/OpenAI-compatible-412991?style=flat-square&logo=openai&logoColor=white)](https://github.com/Ianzhyh/workbuddy-to-dsh/blob/main/README.en.md)
+[![Anthropic-compatible](https://img.shields.io/badge/Anthropic-compatible-D97757?style=flat-square)](https://github.com/Ianzhyh/workbuddy-to-dsh/blob/main/README.en.md)
+[![Responses API](https://img.shields.io/badge/Responses%20API-compatible-10A37F?style=flat-square)](https://github.com/Ianzhyh/workbuddy-to-dsh/blob/main/README.en.md)
+
 Expose WorkBuddy's model capabilities (DeepSeek / GLM / Kimi / MiniMax …) through a
 local bridge as **OpenAI-compatible**, **Anthropic-compatible** and **OpenAI Responses**
 APIs — so **Claude Code**, **Codex**, **opencode**, **Cursor**, **Trae**,
