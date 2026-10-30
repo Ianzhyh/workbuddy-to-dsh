@@ -277,9 +277,23 @@ function writeAtomic(path, text) {
  * 抽出来是因为"动用户配置"现在有两个入口（接入 / 切模式），两处都得先备份；
  * 各写一份迟早会漏掉其中一条路。
  */
+/**
+ * 备份文件名。**不能静默覆盖**：同一秒内连续两次 apply 会生成同名备份，
+ * 第二次把第一次的原文件覆盖成"已接入"的内容；撤销按 manifest 里的旧路径
+ * 恢复时，拿回的就是被污染的副本。重名时加序号。
+ */
+function backupPath(root, clientId, sourcePath) {
+  const dir = join(root, clientId);
+  mkdirSync(dir, { recursive: true });
+  const name = basename(sourcePath);
+  const prefix = stamp();
+  let dest = join(dir, `${prefix}-${name}`);
+  for (let n = 2; existsSync(dest); n += 1) dest = join(dir, `${prefix}-${n}-${name}`);
+  return dest;
+}
+
 function backupFile(path, root, clientId) {
-  mkdirSync(join(root, clientId), { recursive: true });
-  const dest = join(root, clientId, `${stamp()}-${basename(path)}`);
+  const dest = backupPath(root, clientId, path);
   copyFileSync(path, dest);
   return dest;
 }
@@ -1983,13 +1997,24 @@ function applyClientLocked(id, ctx, opts = {}) {
     let catBackup = null;
     try {
       if (existed) {
-        mkdirSync(join(root, client.id), { recursive: true });
-        catBackup = join(root, client.id, `${stamp()}-${basename(catPath)}`);
+        catBackup = backupPath(root, client.id, catPath);
         copyFileSync(catPath, catBackup);
       }
       writeAtomic(catPath, r.catalog.text);
     } catch (e) {
-      return { ok: false, error: `模型目录写入失败：${e.message}（配置文件未改动，可直接重试）` };
+      /*
+       * config.toml **已经写过了**（第 2 步），不能再报"配置文件未改动"。
+       * 必须回滚，否则留下一个指向缺失目录的配置，而且没写 manifest，
+       * 用户连"撤销"都点不了。
+       */
+      let rollback = '';
+      try {
+        if (backup) { copyFileSync(backup, path); rollback = '（已恢复原配置）'; }
+        else { rmSync(path, { force: true }); rollback = '（已删除本次新建的配置）'; }
+      } catch (rollbackError) {
+        rollback = `（回滚失败：${rollbackError.message}；可从备份 ${backup || '（无）'} 恢复）`;
+      }
+      return { ok: false, error: `模型目录写入失败：${e.message}${rollback}；修复后可直接重试` };
     }
     catalogWritten = {
       path: catPath, existed, backup: catBackup,
