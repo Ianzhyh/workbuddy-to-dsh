@@ -1,4 +1,4 @@
-# WorkBuddy 本地 API 桥
+<h1 align="center">WorkBuddy 本地 API 桥</h1>
 
 <p align="center">
   <a href="https://www.dsh.so/artifact/workbuddy-to-dsh/?ref=badge"><img height="20" src="https://cdn.dsh.so/badge/workbuddy-to-dsh.svg" alt="dsh.so risk: low"></a>
