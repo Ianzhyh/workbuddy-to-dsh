@@ -181,7 +181,7 @@ dsh plugin --profile desktop add github:Ianzhyh/workbuddy-to-dsh
 
 # 方式二：release 附件（tgz 安装包，无构建、无需 allowBuilds 授权）
 #   从 GitHub Releases 下载 dsh-plugin-workbuddy-<版本>.tgz 后：
-dsh plugin --profile desktop add ./dsh-plugin-workbuddy-1.19.3.tgz
+dsh plugin --profile desktop add ./dsh-plugin-workbuddy-1.20.0.tgz
 
 # 方式三：从源码（插件在 dsh-plugin/ 子目录，接第 1 步的 git clone）
 dsh plugin --profile desktop add workbuddy-to-dsh/dsh-plugin
@@ -343,7 +343,7 @@ npm run connect undo codex      :: 撤销
 | 客户端 | 写什么 | 在客户端里怎么切 |
 |---|---|---|
 | opencode | provider 下的**模型表**（`models`） | TUI 里直接选 |
-| Claude Code | **`modelPicker`** 列出勾选的模型（替换掉内置列表） | `/model` 选择器 |
+| Claude Code | **`modelPicker`** 列出勾选的模型（**只有一个也写**，替换掉内置列表） | `/model` 选择器 |
 | Codex | **模型目录文件**（`model_catalog_json`） | `-m <模型>` 或模型选择器 |
 
 > Codex 的目录是**合并**的：`model_catalog_json` 已经指向别人的目录时（cc-switch 就是
@@ -458,7 +458,9 @@ node tools\connect.mjs apply codex --model glm-5.3
 **Claude Code 的上下文窗口怎么开。** 它对**不认识的模型 id** 一律按 200K 假设窗口
 （它不读 `/v1/models`），所以「一键接入」会额外写一行
 `env.CLAUDE_CODE_MAX_CONTEXT_TOKENS=<该模型的上限>`（v2.1.193+ 认这个变量）；
-dsh 面板里按模型设的上下文窗口也会落到这一行。老版本 Claude Code 认不了这个变量，
+dsh 面板里按模型设的上下文窗口也会落到这一行。多模型接入时取所选模型的**最小**上限
+（`/model` 切到小窗口模型后不会虚报）；**目录冷启动、上限未知时不写**这一行 ——
+写任何数字都是猜。老版本 Claude Code 认不了这个变量，
 可以给模型名加 `[1m]` 后缀（桥会剥掉后缀再匹配）。
 
 **已知限制：知识库 / RAG 用不了。** 上游只提供对话模型，没有任何 embedding 模型，

@@ -159,6 +159,7 @@ const need = [
   'package/vendor/dashboard/public/index.html',
   'package/vendor/dashboard/public/style.css',
   'package/vendor/lib/dsh.mjs',
+  'package/vendor/lib/failover.mjs',
 ];
 const byName = new Map(files.map((f) => [f.name, f]));
 const missing = need.filter((n) => !byName.has(n));
@@ -182,6 +183,7 @@ const mirrors = [
   ['package/vendor/bridge/miora-image.mjs', 'bridge/miora-image.mjs'],
   ['package/vendor/bridge/miora-media-core.mjs', 'bridge/miora-media-core.mjs'],
   ['package/vendor/bridge/promotions.mjs', 'bridge/promotions.mjs'],
+  ['package/vendor/lib/failover.mjs', 'lib/failover.mjs'],
 ];
 for (const [inPkg, inRepo] of mirrors) {
   const f = byName.get(inPkg);

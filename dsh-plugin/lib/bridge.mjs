@@ -559,7 +559,16 @@ export class BridgeSupervisor {
    * @returns {Promise<{ok: boolean, started: boolean, reused: boolean, state: string, health?: object, error?: string}>}
    */
   async ensure({ restart = false, signal, readyTimeoutMs = 30000, authFile } = {}) {
-    if (this.pendingEnsure) return this.pendingEnsure;
+    if (this.pendingEnsure) {
+      /*
+       * 在途的 ensure() 如果没有 restart，它可能只是「复用已有桥」—— 直接
+       * 返回它会让调用方以为「已经按新配置重启了」，实际桥根本没动。
+       * 等它结束后再补一次真正的重启。
+       */
+      if (!restart) return this.pendingEnsure;
+      await this.pendingEnsure.catch(() => {});
+      return this.ensure({ restart: true, signal, readyTimeoutMs, authFile });
+    }
     this.pendingEnsure = this.#ensure({ restart, signal, readyTimeoutMs, authFile })
       .finally(() => { this.pendingEnsure = null; });
     return this.pendingEnsure;

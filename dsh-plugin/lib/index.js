@@ -31,11 +31,12 @@ import {
 import { spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { homedir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { BridgeClient, BridgeSupervisor, BRIDGE_SCRIPT_REL } from './bridge.mjs';
 import { ConsoleSupervisor } from './console.mjs';
+import { failoverSignal, pickAccountFailoverTarget } from '../vendor/lib/failover.mjs';
 import { WorkBuddyAdapter } from './adapter.mjs';
 import { toDirectory, pickDefaultModel } from './models.mjs';
 import { createTools } from './tools.mjs';
@@ -232,10 +233,30 @@ export function writeModelPrefs(prefs) {
 /**
  * 运行期数据目录。不要放安装目录：pnpm 换 tgz/重装会整个换掉，账号钉住、
  * 账本、本地令牌都会丢。默认 `~/.workbuddy-bridge`；`WORKBUDDY_DATA_DIR` 可覆盖。
+ *
+ * 与 `config.mjs` 的分工：那边在 import 时把项目根 `.env` 合进 `process.env`；
+ * 插件不这么做（`.env` 里可能有 `WORKBUDDY_CREDENTIAL_KEY` 这类密钥，不该进
+ * dsh 进程环境）。`apply()` 会把 `.env` 的**非机密副本**放进 `projectEnvView`，
+ * 这里同时查两处 —— 于是「插件认 `.env` 里的数据目录」与「密钥不扩散」都成立。
+ *
+ * 相对路径按项目根解析：`WORKBUDDY_DATA_DIR=./data` 在控制台（cwd=项目根）与
+ * 插件里的含义必须一致；dsh 的 cwd 不一定是项目根，所以不能交给调用方 cwd。
  */
+let projectEnvView = {};
+let activeProjectRoot = '';
+function resolveDataPath(value) {
+  const text = typeof value === 'string' ? value.trim() : '';
+  if (!text) return '';
+  return isAbsolute(text) ? text : resolve(activeProjectRoot || process.cwd(), text);
+}
+function lookupProjectEnv(key) {
+  const fromProcess = process.env[key];
+  if (fromProcess !== undefined && fromProcess !== '') return fromProcess;
+  return projectEnvView[key];
+}
 function runtimeDataDir() {
-  const explicit = process.env.WORKBUDDY_DATA_DIR;
-  if (typeof explicit === 'string' && explicit.trim()) return explicit.trim();
+  const explicit = lookupProjectEnv('WORKBUDDY_DATA_DIR');
+  if (typeof explicit === 'string' && explicit.trim()) return resolveDataPath(explicit);
   return join(homedir(), '.workbuddy-bridge');
 }
 
@@ -244,8 +265,8 @@ function runtimeDataDir() {
  * 数据目录（只复制，不删除，保留回滚余地）。
  */
 function stateFilePath(projectRoot) {
-  const explicit = process.env.WORKBUDDY_STATE_FILE;
-  if (explicit) return explicit;
+  const explicit = lookupProjectEnv('WORKBUDDY_STATE_FILE');
+  if (explicit) return resolveDataPath(explicit);
   const target = join(runtimeDataDir(), 'state.json');
   // 新版数据目录优先；还没迁移过就读旧安装目录（只读，不复制）。
   if (existsSync(target)) return target;
@@ -285,10 +306,23 @@ function readBridgeAccountState(projectRoot) {
  * 凭据，但也没有理由让同机其它用户读到。
  */
 const LEGACY_BRIDGE_TOKEN_PATH = join(PLUGIN_DIR, '.bridge-token');
-const BRIDGE_TOKEN_PATH = join(runtimeDataDir(), 'bridge-token');
-const bridgeTokenFilePath = () => (existsSync(BRIDGE_TOKEN_PATH)
-  ? BRIDGE_TOKEN_PATH
-  : (existsSync(LEGACY_BRIDGE_TOKEN_PATH) ? LEGACY_BRIDGE_TOKEN_PATH : BRIDGE_TOKEN_PATH));
+/**
+ * 令牌路径**每次现算**：`apply()` 从项目根 `.env` 读到的 `WORKBUDDY_DATA_DIR`
+ * 要能影响它。写成模块级常量会在 import 那一刻定死（那时还没读 `.env`），
+ * 结果插件与会话/控制台各用一份令牌文件。
+ */
+const bridgeTokenPath = () => join(runtimeDataDir(), 'bridge-token');
+const bridgeTokenFilePath = () => {
+  const primary = bridgeTokenPath();
+  if (existsSync(primary)) return primary;
+  /*
+   * 旧路径兜底只对**默认数据目录**生效：升级不该让用户重填密钥。用户显式
+   * 指定了 `WORKBUDDY_DATA_DIR` 时应视为有意隔离（便携部署 / 测试 / 多实例），
+   * 不能跨目录借一把旧令牌 —— 那会让"换目录"看起来没生效。
+   */
+  if (lookupProjectEnv('WORKBUDDY_DATA_DIR')) return primary;
+  return existsSync(LEGACY_BRIDGE_TOKEN_PATH) ? LEGACY_BRIDGE_TOKEN_PATH : primary;
+};
 
 /** 读取已持久化的令牌；没有 / 读不通都返回 ''。旧路径只读兜底，不复制。 */
 function readBridgeToken() {
@@ -324,10 +358,25 @@ function resolveLocalToken(rawToken) {
   }
   const token = randomBytes(24).toString('base64url');
   try {
-    mkdirSync(dirname(BRIDGE_TOKEN_PATH), { recursive: true });
-    writeFileSync(BRIDGE_TOKEN_PATH, `${token}\n`, { mode: 0o600 });
+    const target = bridgeTokenPath();
+    mkdirSync(dirname(target), { recursive: true });
+    /*
+     * `wx`：与 `config.mjs` 同款。控制台和插件可能同时首次启动，普通覆盖写会
+     * 让两边各拿一把令牌（先起的桥对另一方 401）。抢输的进程回读赢家的值。
+     */
+    writeFileSync(target, `${token}\n`, { mode: 0o600, flag: 'wx' });
     bridgeTokenHardenResult = hardenBridgeTokenFile();
-  } catch { /* 只读介质：本次运行用这个值，下次会换新的（用户需重填密钥） */ }
+    return token;
+  } catch (error) {
+    if (error?.code === 'EEXIST') {
+      const stored = readBridgeToken();
+      if (stored) {
+        bridgeTokenHardenResult = hardenBridgeTokenFile();
+        return stored;
+      }
+    }
+    /* 只读介质：本次运行用这个值，下次会换新的（用户需重填密钥） */
+  }
   return token;
 }
 
@@ -495,22 +544,11 @@ function asMs(value, fallback) {
 }
 
 /**
- * 从控制台账号列表挑下一个可切换账号（纯函数，导出给单测）。
- * 跳过不可用 / 隐藏 / 当前账号；按列表顺序循环。
+ * 从控制台账号列表挑下一个可切换账号 —— 实现见 `vendor/lib/failover.mjs`
+ * （与 Web 控制台共用一份，避免两边规则漂移）。这里重新导出是给单测用的。
  */
-export function pickAccountFailoverTarget(accounts, currentUid = '') {
-  const usable = (Array.isArray(accounts) ? accounts : [])
-    .filter((a) => a && a.usable === true && a.hidden !== true);
-  if (usable.length < 2) return null;
-  const current = usable.find((a) => a.active === true)
-    || (currentUid ? usable.find((a) => String(a.userId || a.account || '') === String(currentUid)) : null);
-  const start = current ? usable.indexOf(current) : -1;
-  for (let i = 1; i <= usable.length; i += 1) {
-    const cand = usable[(start + i + usable.length) % usable.length];
-    if (!current || cand.name !== current.name) return cand;
-  }
-  return null;
-}
+export { pickAccountFailoverTarget };
+
 
 function asBool(value, fallback) {
   if (value === undefined || value === null) return fallback;
@@ -637,16 +675,44 @@ export function readProjectEnv(projectRoot) {
     for (const rawLine of readFileSync(file, 'utf8').split(/\r?\n/)) {
       const line = rawLine.trim();
       if (!line || line.startsWith('#')) continue;
-      const eq = line.indexOf('=');
+      // 与 config.mjs 同规则：容忍 shell 风格的 `export KEY=VALUE`。不剥掉的话
+      // 键名会变成 "export KEY"，配置**静默失效**且没有任何提示。
+      const body = line.replace(/^export\s+/u, '');
+      const eq = body.indexOf('=');
       if (eq <= 0) continue;
-      const key = line.slice(0, eq).trim();
-      let value = line.slice(eq + 1).trim();
+      const key = body.slice(0, eq).trim();
+      let value = body.slice(eq + 1).trim();
       if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
         value = value.slice(1, -1);
       }
       out[key] = value;
     }
   } catch { /* .env 不可读就当作没有 */ }
+  return out;
+}
+
+/**
+ * `.env` 里**只给子进程**的机密变量。
+ *
+ * 这些值必须真的到达桥（否则有密钥的用户会发现桥"解不开凭据"），但**不能**
+ * 写进 dsh 进程的 `process.env`：那会让整个宿主（以及它拉起的每个进程）
+ * 都拿到密钥，且可能被诊断/快照顺手带出去。所以只在这里显式收集、只注入
+ * 桥与控制台子进程，永不进日志、不进 snapshot。
+ */
+export const BRIDGE_SECRET_ENV = Object.freeze([
+  'WORKBUDDY_CREDENTIAL_KEY',
+  // 客户端凭据：每把 key 都是一个独立调用方（独立限流桶 + 账本归因）
+  'WORKBUDDY_CLIENT_KEYS',
+  // api-key 凭据来源（桥直接读 process.env.CODEBUDDY_API_KEY）
+  'CODEBUDDY_API_KEY',
+]);
+
+export function collectBridgeSecretEnv(projectEnv = {}, env = process.env) {
+  const out = {};
+  for (const key of BRIDGE_SECRET_ENV) {
+    const value = projectEnv[key] ?? env[key];
+    if (value !== undefined && value !== '') out[key] = String(value);
+  }
   return out;
 }
 
@@ -661,6 +727,7 @@ export const BRIDGE_ENV_PASSTHROUGH = Object.freeze([
   'WORKBUDDY_DATA_DIR',
   // 插件登录身份
   'WORKBUDDY_PLUGIN_IDENTITY',
+  'WORKBUDDY_PLUGIN_APP_VERSION',
   'WORKBUDDY_PLUGIN_APP_VERSION_CN',
   'WORKBUDDY_PLUGIN_APP_VERSION_GLOBAL',
   'WORKBUDDY_CREDENTIAL_FAILOVER',
@@ -678,6 +745,19 @@ export const BRIDGE_ENV_PASSTHROUGH = Object.freeze([
   'WORKBUDDY_SKIP_MODEL_PREFLIGHT',
   'WORKBUDDY_CONTEXT_WINDOW',
   'WORKBUDDY_SHAPE',
+  // 协议边界开关（关掉 = 退回原样透传；用户在 .env 写了就必须真的到桥）
+  'WORKBUDDY_SSE_NORMALIZE',
+  'WORKBUDDY_REPAIR_TOOL_HISTORY',
+  'WORKBUDDY_SANITIZE_ASSISTANT_HISTORY',
+  'WORKBUDDY_FORWARD_REASONING',
+  'WORKBUDDY_CONVERSATION_ID_BODY',
+  // 运行期文件（账本 / 媒体 / 额度历史 / 默认模型）
+  'WORKBUDDY_AUTH_DIR',
+  'WORKBUDDY_USAGE_FILE',
+  'WORKBUDDY_MEDIA_STORE',
+  'WORKBUDDY_MEDIA_STORE_FILE',
+  'WORKBUDDY_QUOTA_HISTORY_FILE',
+  'WORKBUDDY_MODELS_DEFAULT_FILE',
   // 超时、连接池、重试
   'WORKBUDDY_TIMEOUT_MS',
   'WORKBUDDY_FIRST_BYTE_TIMEOUT_MS',
@@ -696,6 +776,9 @@ export const BRIDGE_ENV_PASSTHROUGH = Object.freeze([
   'WORKBUDDY_RATE_LIMIT_RPM',
   'WORKBUDDY_RATE_LIMIT_MIN_INTERVAL_MS',
   'WORKBUDDY_RATE_LIMIT_MODE',
+  'WORKBUDDY_RATE_LIMIT_WINDOW_MS',
+  // 目录抓取失败后的负缓存时长（毫秒，默认 30s）
+  'WORKBUDDY_CATALOG_RETRY_MS',
   // 默认视图给几个模型（curated / all / N）。插件拉起的桥必须跟控制台同口径，
   // 否则「插件起的桥只回 3 个、控制台起的回全部」——同一台机器两种行为。
   'WORKBUDDY_MODELS_DEFAULT',
@@ -709,6 +792,10 @@ export const BRIDGE_ENV_PASSTHROUGH = Object.freeze([
   'WORKBUDDY_SEARCH_VERSION',
   'WORKBUDDY_SEARCH_TIMEOUT_MS',
   'WORKBUDDY_SEARCH_MAX_RESULTS',
+  // 计费网关覆盖（企业代理 / 自建网关）
+  'WORKBUDDY_BILLING_BASE',
+  // api-key 凭据来源的端点（密钥本身走 BRIDGE_SECRET_ENV）
+  'CODEBUDDY_ENDPOINT',
   // 视频生成（Miora）
   'WORKBUDDY_MIORA_BASE',
 ]);
@@ -780,19 +867,32 @@ export function clientGraphSummary(clientModules, packageName = PLUGIN_PACKAGE_N
  * @param {object} rawConfig patch 里给的 config
  */
 export function apply(ctx, rawConfig = {}) {
+  /*
+   * 先定位项目根、读 `.env`，再解析配置：`WORKBUDDY_DATA_DIR` 决定运行期数据
+   * 目录（状态 / 令牌 / 账本），而 `resolveConfig()` 会读或**创建**本地令牌 ——
+   * 顺序反了就会把令牌写到默认目录，和用户 `.env` 指的数据目录分家。
+   *
+   * `.env` 只合并进插件自己的视图（`projectEnvView`），**不写 `process.env`**：
+   * 里面有 `WORKBUDDY_CREDENTIAL_KEY` 这类密钥，不能让整个 dsh 宿主与它拉起的
+   * 每个进程都拿到；密钥只经 `collectBridgeSecretEnv()` 注入桥/控制台子进程。
+   */
+  const projectRoot = detectProjectRoot(String(rawConfig?.projectRoot || ''));
+  const projectEnv = readProjectEnv(projectRoot);
+  projectEnvView = projectEnv;
+  activeProjectRoot = projectRoot;
   const config = resolveConfig(rawConfig);
   const log = (...args) => { if (config.log) ctx.logger?.info?.('[workbuddy]', ...args); };
 
-  const projectRoot = detectProjectRoot(config.projectRoot);
   const dshPaths = resolveDshPaths();
 
-  // 项目根 `.env` 补默认值：优先级 = 插件 config（显式）> .env > 进程环境变量 > 内置默认。
+  // 项目根 `.env` 补默认值：优先级 = 插件 config（显式）> **进程环境变量 > .env** > 内置默认。
+  // 与 config.mjs 的 loadDotEnv 同规则（它也不覆盖已存在的环境变量）—— 两边顺序
+  // 相反时，同一台机器上「插件拉起的桥」与「控制台拉起的桥」会选不同端口/令牌。
   // 只在用户**没有显式**在 config 里写这一项时才补，避免覆盖用户意图。
   const explicit = new Set(Object.keys(rawConfig || {}));
-  const projectEnv = readProjectEnv(projectRoot);
   const reconcile = (key, envName, coerce) => {
     if (explicit.has(key)) return;
-    const raw = projectEnv[envName] ?? process.env[envName];
+    const raw = process.env[envName] ?? projectEnv[envName];
     if (raw === undefined || raw === '') return;
     config[key] = coerce ? coerce(raw, config[key]) : String(raw);
   };
@@ -808,13 +908,19 @@ export function apply(ctx, rawConfig = {}) {
   reconcile('consolePort', 'DASHBOARD_PORT', (raw, fallback) => Number(raw) || fallback);
   // 手动启动控制台也读同一个 DASHBOARD_IDLE_EXIT_MS（0 = 常驻）
   reconcile('consoleIdleExitMs', 'DASHBOARD_IDLE_EXIT_MS', (raw, fallback) => asMs(raw, fallback));
-  if (!explicit.has('autoCheckin') && (projectEnv.WORKBUDDY_AUTO_CHECKIN ?? process.env.WORKBUDDY_AUTO_CHECKIN) !== undefined) {
-    config.autoCheckin = asBool(projectEnv.WORKBUDDY_AUTO_CHECKIN ?? process.env.WORKBUDDY_AUTO_CHECKIN, true);
+  if (!explicit.has('autoCheckin') && (process.env.WORKBUDDY_AUTO_CHECKIN ?? projectEnv.WORKBUDDY_AUTO_CHECKIN) !== undefined) {
+    config.autoCheckin = asBool(process.env.WORKBUDDY_AUTO_CHECKIN ?? projectEnv.WORKBUDDY_AUTO_CHECKIN, true);
   }
   reconcile('autoWebSearch', 'WORKBUDDY_AUTO_WEB_SEARCH', (raw, fallback) => asBool(raw, fallback));
 
   // 桥的上游身份/超时/11128/预校验等逃生门：`.env` 里写了必须真的到桥。
   const bridgeExtraEnv = collectBridgeExtraEnv(projectEnv, process.env);
+  /*
+   * 密钥只注入子进程（桥 / 插件拉起的控制台），不进 dsh 的 process.env，
+   * 也不进任何日志或 snapshot。控制台切号后要能重起同一个桥，所以它也需要。
+   */
+  const bridgeSecretEnv = collectBridgeSecretEnv(projectEnv, process.env);
+  const childBaseEnv = { ...bridgeExtraEnv, ...bridgeSecretEnv };
 
   /*
    * 与控制台共用账号选择：
@@ -838,7 +944,7 @@ export function apply(ctx, rawConfig = {}) {
     timeoutMs: 8000,
     // 插件 config / .env / 进程环境三处的凭据来源设置都注入桥，启动方之间不漂移。
     env: {
-      ...bridgeExtraEnv,
+      ...childBaseEnv,
       WORKBUDDY_DATA_DIR: runtimeDataDir(),
       ...(config.credentialSource ? { WORKBUDDY_CREDENTIAL_SOURCE: config.credentialSource } : {}),
       ...(config.credentialStore ? { WORKBUDDY_CREDENTIAL_STORE: config.credentialStore } : {}),
@@ -879,7 +985,28 @@ export function apply(ctx, rawConfig = {}) {
     return changed;
   };
 
-  /** 控制台（数据界面）：默认按需拉起（首次取数 / console 命令），闲置自动退出。 */
+  /**
+   * 桥的 `/health` 是否正在服务我们期望的登录文件。
+   *
+   * 跟随桌面换号时 `authFile` 是当前生效文件、`authFilePinned` 是钉住的那份，
+   * 两者任一匹配都算 —— 与 `BridgeSupervisor.#ensure` 的判据保持一致。
+   */
+  const authFileMatchesHealth = (health, desired) => {
+    const norm = (p) => String(p || '').replace(/\\/g, '/').toLowerCase();
+    const want = norm(desired);
+    if (!want) return true;
+    return norm(health?.authFile) === want || norm(health?.authFilePinned) === want;
+  };
+
+  /**
+   * 控制台（数据界面）：默认按需拉起（首次取数 / console 命令），闲置自动退出。
+   *
+   * **必须把插件的桥配置一起交给它**：控制台是独立进程，自己读 `config.mjs`。
+   * 插件配置里改过的桥端口 / 令牌 / 登录文件 / 数据目录不会自动出现在 `.env`
+   * 里 —— 不注入就会出现「插件连 9900，控制台起来却按 8790 拉桥」，切号时
+   * 停错进程、或者另起一个桥撞端口。控制台自己的 DASHBOARD_* 仍由
+   * ConsoleSupervisor 注入（且优先级更高）。
+   */
   const consoleSupervisor = new ConsoleSupervisor({
     projectRoot: projectRoot || process.cwd(),
     host: config.consoleHost,
@@ -887,6 +1014,18 @@ export function apply(ctx, rawConfig = {}) {
     autoStart: config.consoleAutoStart,
     idleExitMs: config.consoleIdleExitMs,
     nodePath: config.nodePath || undefined,
+    env: {
+      ...childBaseEnv,
+      WORKBUDDY_HOST: config.bridgeHost,
+      WORKBUDDY_PORT: String(config.bridgePort),
+      WORKBUDDY_LOCAL_TOKEN: config.localToken,
+      WORKBUDDY_DATA_DIR: runtimeDataDir(),
+      ...(config.authFile ? { WORKBUDDY_AUTH_FILE: config.authFile } : {}),
+      ...(config.credentialSource ? { WORKBUDDY_CREDENTIAL_SOURCE: config.credentialSource } : {}),
+      ...(config.credentialStore ? { WORKBUDDY_CREDENTIAL_STORE: config.credentialStore } : {}),
+      ...(config.credentialDir ? { WORKBUDDY_CREDENTIAL_DIR: config.credentialDir } : {}),
+      ...(config.loginRegion ? { WORKBUDDY_LOGIN_REGION: config.loginRegion } : {}),
+    },
     onLog: (line) => log(line),
   });
 
@@ -1043,16 +1182,28 @@ export function apply(ctx, rawConfig = {}) {
       if (!config.autoStart) return client;
       if (state.readyPromise) return state.readyPromise;
       // 桥挂了要重新拉起时，先读一次面板最新选择（切过账号后不能用旧快照）
-      syncBridgeAccountConfig();
+      if (syncBridgeAccountConfig()) state.bridgeAliveAt = 0;
       const now = Date.now();
       if (now - (state.bridgeAliveAt || 0) < config.bridgeAliveTtlMs) return client;
       const probe = await supervisor.probe();
+      let restart = false;
       if (probe.state === 'running') {
-        state.bridgeAliveAt = now;
-        return client;
+        /*
+         * 桥活着但还在服务**别的登录文件**：面板切号只重启了桥并写了
+         * `.state.json`，插件进程里的 supervisor 要到下一次 ensure 才会
+         * 跟着改。不在这里重启，用户会在面板上看到"已切到 B"，对话却仍
+         * 扣 A 的额度。
+         */
+        if (supervisor.authFile && !authFileMatchesHealth(probe.health, supervisor.authFile)) {
+          restart = true;
+          log(`桥仍在服务旧账号（${probe.health?.authFile || '未知'}），按当前选择重启`);
+        } else {
+          state.bridgeAliveAt = now;
+          return client;
+        }
       }
       state.readyPromise = (async () => {
-        const result = await supervisor.ensure({ readyTimeoutMs: config.autoStartTimeoutMs });
+        const result = await supervisor.ensure({ restart, readyTimeoutMs: config.autoStartTimeoutMs });
         state.lastEnsure = { at: Date.now(), ...result };
         if (!result.ok) throw new Error(result.error || '桥不可用');
         adapter.invalidate();
@@ -1570,8 +1721,9 @@ export function apply(ctx, rawConfig = {}) {
         build: consoleProbe.build || '',
         expectedBuild: consoleProbe.expectedBuild || '',
         staleBuild: consoleProbe.staleBuild === true,
-        /** true = 这个实例是插件拉起的（插件有权停它） */
-        managed: consoleSupervisor.spawnedPid !== null,
+        /** true = 这个实例是插件拉起的（插件有权停它）。进程退出会清掉归属，
+         *  所以还要确认端口上确实在跑，避免把"起过但已退出"报成可管理。 */
+        managed: consoleSupervisor.spawnedPid !== null && consoleProbe.state === 'running',
         autoStart: config.consoleAutoStart,
       },
       config: {
@@ -2130,8 +2282,8 @@ export function apply(ctx, rawConfig = {}) {
     autoSwitchBusy = true;
     try {
       const health = await client.health(AbortSignal.timeout(4000)).catch(() => null);
-      const limit = health?.rateLimit;
-      if (!limit || Number(limit.count) < config.accountFailoverAfter) return;
+      const signal = failoverSignal(health, config.accountFailoverAfter);
+      if (!signal) return;
       // 无论这次是否切成功都至少隔 60 秒再试，避免无可用账号时每 10 秒解一遍账号列表
       lastAutoSwitchAt = Date.now();
       const ensured = await consoleSupervisor.ensure({});
@@ -2143,7 +2295,7 @@ export function apply(ctx, rawConfig = {}) {
         .then((r) => r.json()).catch(() => null);
       const target = pickAccountFailoverTarget(listed?.accounts, health?.auth?.userId || '');
       if (!target) {
-        log(`自动切号跳过：没有其它可用账号（${limit.model || '?'} 已限流 ${limit.count} 次）`);
+        log(`自动切号跳过：没有其它可用账号（${signal.model || '?'} 已限流 ${signal.count} 次）`);
         return;
       }
       const res = await fetch(`${consoleSupervisor.url}/api/account/switch`, {
@@ -2161,7 +2313,7 @@ export function apply(ctx, rawConfig = {}) {
       // 否则下一次 ensureReady 会按旧 authFile 把桥又重启回去。
       syncBridgeAccountConfig();
       adapter.invalidate();
-      log(`上游限流 ${limit.count} 次（${limit.model || '?'}），已自动切换账号 -> ${target.name}`);
+      log(`上游限流 ${signal.count} 次（${signal.model || '?'}），已自动切换账号 -> ${target.name}`);
     } catch (error) {
       log('自动切号异常', error);
     } finally {

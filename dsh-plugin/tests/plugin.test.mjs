@@ -8,13 +8,14 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { locateProviderBlock, stripProviderBlock, cleanFile, detectInFile } from '../lib/legacy.mjs';
 import {
   resolveConfig, detectProjectRoot, apply, readProjectEnv, DEFAULTS,
-  collectBridgeExtraEnv, BRIDGE_ENV_PASSTHROUGH, pickAccountFailoverTarget,
+  collectBridgeExtraEnv, collectBridgeSecretEnv, BRIDGE_ENV_PASSTHROUGH, BRIDGE_SECRET_ENV,
+  pickAccountFailoverTarget,
 } from '../lib/index.js';
 import { BridgeSupervisor, bridgeBuildHash } from '../lib/bridge.mjs';
 
@@ -1431,4 +1432,206 @@ test('图片：插件必须把完整 ref 交给 dsh，否则图会被静默降�
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+/*
+ * ── 配置同源（1.20.0）───────────────────────────────────────────────────
+ *
+ * 插件与控制台是**两个进程**，各自读配置。它们必须落在同一个数据目录、
+ * 同一套桥参数上；否则切号会去停"另一个桥"，或者桥的开关写了不生效。
+ */
+
+/** 临时把几个环境变量摘掉，跑完恢复 —— 用例结束后不留污染。 */
+function withoutEnv(keys, fn) {
+  const saved = new Map(keys.map((k) => [k, process.env[k]]));
+  for (const k of keys) delete process.env[k];
+  try {
+    return fn();
+  } finally {
+    for (const [k, v] of saved) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  }
+}
+
+test('readProjectEnv 容忍 shell 风格的 `export KEY=VALUE`（与 config.mjs 同规则）', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'wb-env-export-'));
+  try {
+    writeFileSync(join(dir, '.env'), [
+      'export WORKBUDDY_PORT=8899',
+      'export WORKBUDDY_SSE_NORMALIZE=0',
+      'WORKBUDDY_KEEPALIVE_MS=15000',
+      '',
+    ].join('\n'), 'utf8');
+    const parsed = readProjectEnv(dir);
+    assert.equal(parsed.WORKBUDDY_PORT, '8899');
+    assert.equal(parsed.WORKBUDDY_SSE_NORMALIZE, '0');
+    assert.equal(parsed.WORKBUDDY_KEEPALIVE_MS, '15000');
+    assert.equal(parsed['export WORKBUDDY_PORT'], undefined, '不能把 "export " 当成键名的一部分');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('.env 的 WORKBUDDY_DATA_DIR / WORKBUDDY_STATE_FILE：state、令牌、子进程 env 三者同源', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'wb-env-datadir-'));
+  try {
+    mkdirSync(join(dir, 'bridge'), { recursive: true });
+    writeFileSync(join(dir, 'bridge', 'workbuddy-bridge.mjs'), '// stub\n', 'utf8');
+    const pinned = join(dir, 'auth', 'pinned.info');
+    mkdirSync(join(dir, 'run'), { recursive: true });
+    writeFileSync(join(dir, 'run', 'state.json'), JSON.stringify({
+      authFile: pinned,
+      authFileDesktopUid: 'uid-pinned',
+    }), 'utf8');
+    writeFileSync(join(dir, '.env'), [
+      'export WORKBUDDY_DATA_DIR=./data',
+      'WORKBUDDY_STATE_FILE=./run/state.json',
+      'WORKBUDDY_CREDENTIAL_KEY=from-env-file',
+      '',
+    ].join('\n'), 'utf8');
+
+    withoutEnv(['WORKBUDDY_DATA_DIR', 'WORKBUDDY_STATE_FILE', 'WORKBUDDY_LOCAL_TOKEN', 'WORKBUDDY_CREDENTIAL_KEY'], () => {
+      const { ctx } = fakeCtx();
+      const result = apply(ctx, {
+        projectRoot: dir, autoStart: false, consoleAutoStart: false,
+        tools: false, commands: false, routes: false, migrateLegacy: false,
+      });
+      const dataDir = resolve(dir, 'data');
+      assert.equal(result.supervisor.env.WORKBUDDY_DATA_DIR, dataDir,
+        '桥子进程必须拿到 .env 指的数据目录（绝对路径）');
+      assert.equal(result.consoleSupervisor.env.WORKBUDDY_DATA_DIR, dataDir,
+        '插件拉起的控制台必须用同一个数据目录');
+      assert.ok(existsSync(join(dataDir, 'bridge-token')),
+        '本地令牌应当生成在 .env 指的数据目录里（而不是默认的 ~/.workbuddy-bridge）');
+      assert.equal(result.supervisor.authFile, pinned,
+        '插件必须读 .env 指定的 .state.json，跟随控制台写下的账号钉住');
+      assert.equal(result.supervisor.followAuthFile, 'auto');
+      assert.equal(result.supervisor.followUid, 'uid-pinned');
+      assert.equal(result.supervisor.env.WORKBUDDY_CREDENTIAL_KEY, 'from-env-file',
+        '密钥要真的到达桥子进程');
+      assert.equal(process.env.WORKBUDDY_CREDENTIAL_KEY, undefined,
+        '密钥绝不能进 dsh 进程自身的环境');
+    });
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('插件拉起的控制台继承桥配置（端口 / 令牌 / 凭据来源 / 密钥）', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'wb-console-env-'));
+  try {
+    mkdirSync(join(dir, 'bridge'), { recursive: true });
+    writeFileSync(join(dir, 'bridge', 'workbuddy-bridge.mjs'), '// stub\n', 'utf8');
+    writeFileSync(join(dir, '.env'), 'WORKBUDDY_CREDENTIAL_KEY=secret-from-env\n', 'utf8');
+    withoutEnv(['WORKBUDDY_CREDENTIAL_KEY'], () => {
+      const { ctx } = fakeCtx();
+      const result = apply(ctx, {
+        projectRoot: dir, bridgeHost: '127.0.0.1', bridgePort: 9911,
+        localToken: 'tok-patch', credentialSource: 'desktop', credentialStore: 'file',
+        credentialDir: join(dir, 'creds'),
+        autoStart: false, consoleAutoStart: false,
+        tools: false, commands: false, routes: false, migrateLegacy: false,
+      });
+      const env = result.consoleSupervisor.env;
+      assert.equal(env.WORKBUDDY_HOST, '127.0.0.1');
+      assert.equal(env.WORKBUDDY_PORT, '9911', '控制台必须连插件配置的桥端口');
+      assert.equal(env.WORKBUDDY_LOCAL_TOKEN, 'tok-patch', '控制台必须用同一把本地令牌');
+      assert.equal(env.WORKBUDDY_CREDENTIAL_SOURCE, 'desktop');
+      assert.equal(env.WORKBUDDY_CREDENTIAL_STORE, 'file');
+      assert.equal(env.WORKBUDDY_CREDENTIAL_DIR, join(dir, 'creds'));
+      assert.equal(env.WORKBUDDY_CREDENTIAL_KEY, 'secret-from-env',
+        '控制台切号后要能重起同一个桥，因此也需要密钥');
+    });
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('桥的环境变量清单：.env 开关真的透传，密钥单独收集且不进普通清单', () => {
+  const projectEnv = {
+    WORKBUDDY_SSE_NORMALIZE: '1',
+    WORKBUDDY_REPAIR_TOOL_HISTORY: '0',
+    WORKBUDDY_FORWARD_REASONING: '1',
+    WORKBUDDY_MEDIA_STORE: 'files',
+    WORKBUDDY_CLIENT_KEYS: 'key-a,key-b',
+    WORKBUDDY_CREDENTIAL_KEY: 'secret-key',
+    CODEBUDDY_API_KEY: 'upstream-key',
+  };
+  const extra = collectBridgeExtraEnv(projectEnv, {});
+  for (const key of ['WORKBUDDY_SSE_NORMALIZE', 'WORKBUDDY_REPAIR_TOOL_HISTORY', 'WORKBUDDY_FORWARD_REASONING', 'WORKBUDDY_MEDIA_STORE']) {
+    assert.equal(extra[key], projectEnv[key], `${key} 必须透传给桥`);
+  }
+  for (const key of BRIDGE_SECRET_ENV) {
+    assert.equal(extra[key], undefined, `${key} 是密钥，不能出现在普通透传清单里`);
+  }
+  const secret = collectBridgeSecretEnv(projectEnv, {});
+  assert.equal(secret.WORKBUDDY_CREDENTIAL_KEY, 'secret-key');
+  assert.equal(secret.WORKBUDDY_CLIENT_KEYS, 'key-a,key-b');
+  assert.equal(secret.CODEBUDDY_API_KEY, 'upstream-key');
+});
+
+test('桥源码里读取的每个 WORKBUDDY_*/CODEBUDDY_* 都在透传 / 密钥 / 受管清单里（防再漏）', () => {
+  const bridgeSrc = readFileSync(join(PLUGIN_ROOT, '..', 'bridge', 'workbuddy-bridge.mjs'), 'utf8');
+  const used = new Set([...bridgeSrc.matchAll(/process\.env\.((?:WORKBUDDY|CODEBUDDY)_[A-Z0-9_]+)/g)].map((m) => m[1]));
+  const passthrough = new Set(BRIDGE_ENV_PASSTHROUGH);
+  const secret = new Set(BRIDGE_SECRET_ENV);
+  /*
+   * 插件自己**显式注入**的受管键（值由插件计算，不走 .env 透传）：
+   * 端口/令牌/登录文件/凭据来源/数据目录/开关。
+   */
+  const managed = new Set([
+    'WORKBUDDY_HOST', 'WORKBUDDY_PORT', 'WORKBUDDY_LOCAL_TOKEN',
+    'WORKBUDDY_AUTH_FILE', 'WORKBUDDY_AUTH_FILE_FOLLOW', 'WORKBUDDY_AUTH_FOLLOW_UID',
+    'WORKBUDDY_CREDENTIAL_SOURCE', 'WORKBUDDY_CREDENTIAL_STORE', 'WORKBUDDY_CREDENTIAL_DIR',
+    'WORKBUDDY_LOGIN_REGION', 'WORKBUDDY_AUTO_CHECKIN', 'WORKBUDDY_LOG',
+  ]);
+  const missing = [...used].filter((k) => !passthrough.has(k) && !secret.has(k) && !managed.has(k)).sort();
+  assert.deepEqual(missing, [],
+    `这些桥开关用户写在 .env 里也不会到达桥：${missing.join(', ')}`);
+});
+
+test('ensure({restart:true}) 遇到在途 ensure 时，必须等它结束后真的重启（不能假成功）', async () => {
+  /*
+   * 真实场景：身份轮询的 ensure() 正在慢慢探测/拉起桥，用户同时点了「重启桥」。
+   * 原实现 `if (pendingEnsure) return pendingEnsure` 会让重启请求直接复用那次
+   * 「不重启」的结果 —— 调用方以为重启了，桥其实没动。
+   */
+  const dir = mkdtempSync(join(tmpdir(), 'wb-ensure-restart-'));
+  const scriptPath = join(dir, 'bridge.mjs');
+  writeFileSync(scriptPath, '// restart test\nexport const marker = 1;\n');
+  const started = [];
+  let releaseStart;
+  const gate = new Promise((r) => { releaseStart = r; });
+  const sup = new BridgeSupervisor({
+    host: '127.0.0.1', port: 1, token: 't', projectRoot: dir, scriptPath,
+    logPath: join(dir, 'bridge.log'),
+  });
+  let probeCalls = 0;
+  sup.probe = async () => {
+    probeCalls += 1;
+    // 第一次（在途 ensure 进来时）桥没跑；之后都在跑
+    return probeCalls === 1
+      ? { state: 'stopped', error: 'not running' }
+      : {
+        state: 'running',
+        health: { ok: true, pid: 2222, build: bridgeBuildHash(scriptPath) },
+        staleBuild: false,
+        bridgeBuild: bridgeBuildHash(scriptPath),
+        expectedBuild: bridgeBuildHash(scriptPath),
+      };
+  };
+  sup.start = async () => {
+    started.push('start');
+    await gate; // 卡住第一次拉起，制造"在途"窗口
+    return { ok: true, pid: 2222 };
+  };
+  sup.stop = async () => { started.push('stop'); return { ok: true, stopped: true }; };
+  try {
+    const first = sup.ensure({ readyTimeoutMs: 1000 });
+    // 等第一次真正进入 start（在途已建立）
+    for (let i = 0; i < 50 && !started.includes('start'); i += 1) await new Promise((r) => setTimeout(r, 5));
+    assert.ok(started.includes('start'), '第一次 ensure 应当已经走到 start');
+    const restart = sup.ensure({ restart: true, readyTimeoutMs: 1000 });
+    releaseStart();
+    const [a, b] = await Promise.all([first, restart]);
+    assert.equal(a.ok, true);
+    assert.equal(b.ok, true, '重启请求必须拿到真实重启后的结果');
+    assert.deepEqual(started, ['start', 'stop', 'start'], '顺序必须是：首次拉起 → 停旧 → 再拉起');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });

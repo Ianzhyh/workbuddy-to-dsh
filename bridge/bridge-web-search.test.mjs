@@ -222,6 +222,9 @@ test('workbuddy search：/v1/messages 的 web_search_20250305 返回 dsh 可解�
   assert.equal(resultBlock.content.length, 2);
   assert.equal(resultBlock.content[0].url, 'https://alpha.example/a');
   assert.equal(body.usage.server_tool_use.web_search_requests, 1);
+  assert.equal(body.usage.cache_creation_input_tokens, 0,
+    'Claude Code 会读这两个 cache 字段；缺字段时部分客户端当 undefined 参与运算');
+  assert.equal(body.usage.cache_read_input_tokens, 0);
   const text = body.content.find((b) => b.type === 'text');
   assert.ok(text, '必须带 text citations（dsh provider 从 cited_text 取 snippet）');
   assert.equal(text.citations[0].cited_text, 'alpha snippet');

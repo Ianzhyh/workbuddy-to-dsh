@@ -100,6 +100,31 @@ function routesFor(variant) {
    * 所以它本来就该被 ASCII 化掉，不该进「漏翻」判定。
    */
   routes['/workbuddy/status'] = asciiData({ ...FIXTURES.status, checkin: { status, auto: { auto: true } } });
+  /*
+   * 第二遍把控制台置为「未运行」：这样「控制台未运行 / 启动控制台 / 一键接入时
+   * 需要控制台」那一整组分支都会被渲染并扫到。只跑「运行中」一套桩时，
+   * 这些文案永远不进检查。
+   */
+  if (!checked) {
+    routes['/workbuddy/status'].console = {
+      ...(routes['/workbuddy/status'].console || {}),
+      state: 'stopped',
+      error: '',
+      managed: false,
+    };
+  }
+  /*
+   * 切号：真实控制台的响应形状。i18n 用例会点一次「切换」——成功提示是
+   * 拼接串（`已切换到 X。桥已重启…`），只写前缀词条是翻不掉的。
+   */
+  routes['/workbuddy/console-api/account/switch'] = {
+    ok: true,
+    switched: true,
+    restarted: true,
+    account: { name: 'workbuddy-desktop-ai.info' },
+    health: { auth: { userId: 'uid-fixture-0002' } },
+    warning: null,
+  };
   routes['/workbuddy/checkin'] = {
     ok: true, status,
     auto: { auto: true, lastAt: Date.now() - 3600_000, lastResult: 'ok', lastError: null, lastSource: 'manual' },
@@ -371,6 +396,52 @@ async function runPass(variant, port, cdpPort) {
         if (dzh.length) { leftovers.push([`${name} › 详情抽屉`, dzh]); fail(`「${name}」展开详情抽屉后仍有 ${dzh.length} 条中文`); }
       }
     }
+    /*
+     * ── 账号切号 / 控制台启停：拼接串必须翻 ─────────────────────────────
+     *
+     * 这两处提示是源码里拼出来的（`'已切换到 ' + name + '。桥已重启…'`、
+     * `'控制台已就绪：' + url`），词条表里只有片段，整串查不到 —— 必须点一次
+     * 让它真的渲染出来扫，否则这类"半中文"永远不进验收。
+     */
+    await q(`(() => { const b = document.querySelectorAll('.wb-tab')[1]; if (b) b.click(); })()`);
+    await sleep(650);
+    await q(`window.confirm = () => true`);
+    const clickedSwitch = await q(`(() => {
+      const btn = [...document.querySelectorAll('#root .wb-btn')].find((x) => /^(Switch|切换)$/.test(x.textContent.trim()));
+      if (!btn) return false;
+      btn.click(); return true;
+    })()`);
+    if (!clickedSwitch) {
+      fail('账号页找不到「切换」按钮 —— 切号提示的翻译分支没被覆盖');
+    } else {
+      await sleep(1400);
+      const zh = await q(COLLECT_ZH);
+      if (zh.length) {
+        leftovers.push(['账号 › 切号提示', zh]);
+        fail(`切号提示仍有 ${zh.length} 条中文：${zh.slice(0, 3).join(' | ')}`);
+      } else pass('英文模式下切号提示（拼接串）无残留中文');
+    }
+
+    if (variant === 'unchecked') {
+      await q(`(() => { const b = document.querySelectorAll('.wb-tab')[0]; if (b) b.click(); })()`);
+      await sleep(600);
+      const clickedConsole = await q(`(() => {
+        const btn = [...document.querySelectorAll('#root .wb-btn')].find((x) => /^(Start console|启动控制台)$/.test(x.textContent.trim()));
+        if (!btn) return false;
+        btn.click(); return true;
+      })()`);
+      if (!clickedConsole) {
+        fail('概览页找不到「Start console」按钮 —— 控制台启停提示没被覆盖');
+      } else {
+        await sleep(900);
+        const zh = await q(COLLECT_ZH);
+        if (zh.length) {
+          leftovers.push(['概览 › 控制台启动提示', zh]);
+          fail(`控制台启动提示仍有 ${zh.length} 条中文：${zh.slice(0, 3).join(' | ')}`);
+        } else pass('英文模式下控制台启动提示无残留中文');
+      }
+    }
+
     // ── 数据位回归：英文模式不能改写数据 ───────────────────────────────
     await q(`(() => { const b = document.querySelectorAll('.wb-tab')[3]; if (b) b.click(); })()`);
     await sleep(450);

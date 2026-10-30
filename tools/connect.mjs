@@ -245,7 +245,7 @@ async function main() {
       if (r.verify) {
         console.log(r.verify.ok ? '静态自检通过：配置里的键都在。' : `静态自检未通过：${r.verify.reason || ''}`);
       }
-      const auth = await verifyAgainstBridge(client, { baseUrl: context.baseUrlOpenAI, tokenOverride: context.token });
+      const auth = await verifyAgainstBridge(client, { baseUrl: context.baseUrlOpenAI, tokenOverride: context.token, model: context.model });
       console.log(auth.ok
         ? `端到端验证通过：拿配置里的令牌连上了桥（${auth.models} 个模型）。`
         : `端到端验证没通过：${auth.reason || ''}`);
@@ -286,7 +286,7 @@ async function main() {
     const written = verifyWritten(client, context);
     if (!written.ok) { console.error(`静态自检未通过：${written.reason || ''}`); process.exit(1); }
     console.log('静态自检通过：配置里的键都在。');
-    const auth = await verifyAgainstBridge(client, { baseUrl: context.baseUrlOpenAI, tokenOverride: context.token });
+    const auth = await verifyAgainstBridge(client, { baseUrl: context.baseUrlOpenAI, tokenOverride: context.token, model: context.model });
     if (!auth.ok) { console.error(`端到端验证没通过：${auth.reason || ''}`); process.exit(2); }
     console.log(`端到端验证通过：拿配置里的令牌连上了桥（${auth.models} 个模型）。`);
     return;

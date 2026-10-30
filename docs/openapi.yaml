@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: WorkBuddy 本地 API 桥
-  version: 1.19.3
+  version: 1.20.0
   description: |
     把本机 WorkBuddy 桌面端已登录的模型能力，经本地回环桥暴露为
     OpenAI 兼容与 Anthropic 兼容两套接口。仅监听 127.0.0.1。
@@ -57,7 +57,7 @@ components:
           type: string
           description: |
             上游真实模型 id。客户端加的 `[1m]` 等后缀会被剥掉再匹配；
-            目录里没有的名字明确报 404（`WORKBUDDY_STRICT_MODEL=0` 可退回默认模型）。
+            目录里没有的名字明确报 404；`WORKBUDDY_SKIP_MODEL_PREFLIGHT=1` 可关闭这层预校验（目录未知时本来就会放行）。
         system: {}
         messages:
           type: array
@@ -498,7 +498,7 @@ paths:
   /v1/messages:
     post:
       summary: Anthropic Messages 兼容（Claude Code 直连）
-      description: system 顶层字段、tool_use / tool_result 块数组均按 Anthropic 规范翻译；上游拉黑 Claude Code 固定 system 模板的问题已在出站层最小改写。当 `tools` 含 `web_search_20250305` 时，桥改为调用 WorkBuddy 原生搜索，返回非流式 Anthropic 消息（`server_tool_use` + `web_search_tool_result` + 可选 text citations），不转发 DeepSeek；`stream:true` 会得到明确 400。模型名会先剥掉客户端后缀（`[1m]` 等）再匹配上游目录；目录里没有的名字明确报 404（`WORKBUDDY_STRICT_MODEL=0` 可退回默认模型）。
+      description: system 顶层字段、tool_use / tool_result 块数组均按 Anthropic 规范翻译；上游拉黑 Claude Code 固定 system 模板的问题已在出站层最小改写。当 `tools` 含 `web_search_20250305` 时，桥改为调用 WorkBuddy 原生搜索，返回非流式 Anthropic 消息（`server_tool_use` + `web_search_tool_result` + 可选 text citations），不转发 DeepSeek；`stream:true` 会得到明确 400。模型名会先剥掉客户端后缀（`[1m]` 等）再匹配上游目录；目录里没有的名字明确报 404；`WORKBUDDY_SKIP_MODEL_PREFLIGHT=1` 可关闭这层预校验（目录未知时本来就会放行）。
       parameters:
         - in: header
           name: anthropic-version
@@ -521,7 +521,7 @@ paths:
   /v1/messages/count_tokens:
     post:
       summary: 估算输入 token（Anthropic 规范同形）
-      description: 纯本地估算，不打上游、不记账。区分 ASCII（约 4 字符/token）与非 ASCII（CJK 约按字计）。
+      description: 纯本地估算，不打上游、不记账。区分 ASCII（约 4 字符/token）与非 ASCII（CJK 约按字计）。`model` 会按 `/v1/messages` 同一套规则解析（剥客户端后缀、认别名、目录预校验）——目录已知时未知模型返回 404，目录未知时放行（判不了就交给上游）。
       requestBody:
         required: true
         content:
@@ -536,6 +536,8 @@ paths:
                 type: object
                 properties:
                   input_tokens: { type: integer }
+        '400': { description: `model` 不是字符串（`invalid_request_error`） }
+        '404': { description: 目录已知时模型不在目录里（`not_found_error`） }
   /v1/models:
     get:
       summary: 模型目录（双端点合并）
@@ -544,6 +546,10 @@ paths:
           name: all
           schema: { type: string }
           description: all=1 返回完整目录并刷新缓存
+        - in: header
+          name: anthropic-beta
+          schema: { type: string }
+          description: 含 `context-1m-2025-08-07` 时，`context_window` 报模型真实上限（而不是官方默认档，通常 300K）；无关 beta 头不影响口径。Claude Code 不读这个端点，它靠 `CLAUDE_CODE_MAX_CONTEXT_TOKENS`（由「一键接入」写入）设置窗口。
       responses:
         '200':
           description: 目录。每个模型除 `context_window` / `max_output_tokens` / `supports_images` / `supports_reasoning` 外，还提供 `context_window_default`（官方默认档）、`context_window_options`（可选档位）、`context_window_max`（模型上限），以及客户端别名 `context_length` / `max_input_tokens` / `max_tokens`、`capabilities{vision,tools,reasoning}` 与 `architecture.input_modalities`，值同源。

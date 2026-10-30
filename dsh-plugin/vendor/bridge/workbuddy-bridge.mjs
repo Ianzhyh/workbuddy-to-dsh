@@ -862,11 +862,16 @@ function effortsFor(id) {
 function effortForThinkingBudget(model, budget) {
   const supported = REASONING_EFFORTS_BY_MODEL[model];
   if (!Array.isArray(supported) || !supported.length) return '';
-  const wanted = budget <= 0 ? 'medium'
-    : budget <= 2000 ? 'low'
-      : budget <= 8000 ? 'medium'
-        : budget <= 24000 ? 'high'
-          : budget <= 64000 ? 'xhigh' : 'max';
+  /*
+   * 没给预算 / 预算 <= 0 **不等于** medium：Claude Code 的 `thinking.type:
+   * "adaptive"` 与手工构造的请求都可能不带 `budget_tokens`，猜一个档位
+   * 会让上游多开思考（更慢、更贵），而客户端并没有要求。
+   */
+  if (!Number.isFinite(budget) || budget <= 0) return '';
+  const wanted = budget <= 2000 ? 'low'
+    : budget <= 8000 ? 'medium'
+      : budget <= 24000 ? 'high'
+        : budget <= 64000 ? 'xhigh' : 'max';
   const ladder = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
   const target = ladder.indexOf(wanted);
   let best = '';
@@ -2326,9 +2331,39 @@ function parseCredentialKey(raw) {
   return scryptSync(text, 'workbuddy-credential-store-v1', 32);
 }
 
+/**
+ * 凭据目录里有没有已加密的凭据（用来判断「密钥丢了」是不是致命）。
+ * 只看文件名，不解密；读不到目录按"没有"处理（首次运行）。
+ */
+function hasEncryptedCredentials() {
+  try { return readdirSync(CREDENTIAL_DIR).some((f) => f.endsWith('.cred')); }
+  catch { return false; }
+}
+
+/**
+ * 排它地写密钥文件（`wx`）。多个进程同时首次启动时只有一个能创建成功，
+ * 输家回读赢家写下的值 —— 否则两个进程各生成一把密钥，先写入的凭据
+ * 从此再也解不开（`writeFileAtomic` 是覆盖写，挡不住这种竞争）。
+ */
+function writeCredentialKeyExclusive(file, content) {
+  try {
+    writeFileSync(file, content, { mode: 0o600, flag: 'wx' });
+    return { created: true };
+  } catch (error) {
+    if (error?.code === 'EEXIST') return { created: false };
+    throw error;
+  }
+}
+
 /** 取/建字段密钥；失败**不静默明文**，由调用方回退到 memory。 */
 async function loadOrCreateCredentialKey() {
-  if (credentialKey) return credentialKey;
+  /*
+   * 环境变量密钥是常量来源，可以安全短路。**其余来源不能**：早先这里对所有
+   * 来源都 `if (credentialKey) return credentialKey`，于是下面的 stat 比对
+   * 永远走不到 —— store.key 轮换后桥会一直用旧密钥，新写入的凭据下次启动
+   * 就解不开了。
+   */
+  if (credentialKey && credentialKeySource === 'env') return credentialKey;
   if (credentialKeyPending) return credentialKeyPending;
   credentialKeyPending = (async () => {
     ensureCredentialDir();
@@ -2360,8 +2395,29 @@ async function loadOrCreateCredentialKey() {
         credentialKeyPrint = print;
         return key;
       }
+      /*
+       * store.key 不见了、但目录里还有 `.cred`：**绝不能**静默生成新密钥。
+       * 新密钥能正常工作，旧凭据却永远解不开，用户只会看到"登录过期"，
+       * 完全不知道根因（下一条就静默覆盖了旧文件）。明确报错，让人把
+       * store.key 找回来或显式设置 WORKBUDDY_CREDENTIAL_KEY。
+       */
+      if (hasEncryptedCredentials()) {
+        throw new Error(`credential key file is missing (${file}) while encrypted credentials exist; `
+          + 'restore store.key or set WORKBUDDY_CREDENTIAL_KEY (refusing to create a new key that would orphan them)');
+      }
       const key = randomBytes(32);
-      writeFileAtomic(file, key.toString('hex'), 0o600);
+      const created = writeCredentialKeyExclusive(file, key.toString('hex'));
+      if (!created.created) {
+        // 另一个进程刚建好：用它的，否则两边的凭据互相解不开
+        const blob = readFileSync(file, 'utf8').trim();
+        const winner = parseCredentialKey(blob);
+        if (!winner || winner.length !== 32) throw new Error('credential key file is malformed');
+        credentialKey = winner;
+        credentialKeySource = 'file';
+        const st = statSync(file);
+        credentialKeyPrint = `${st.mtimeMs}:${st.size}`;
+        return winner;
+      }
       credentialKey = key;
       credentialKeySource = 'file';
       const st = statSync(file);
@@ -2381,6 +2437,9 @@ async function loadOrCreateCredentialKey() {
       credentialKeyPrint = print;
       credentialKeySource = 'dpapi';
       return credentialKey;
+    }
+    if (hasEncryptedCredentials()) {
+      throw new Error(`DPAPI key file is missing (${file}) while encrypted credentials exist; refusing to create a new key`);
     }
     const key = randomBytes(32);
     const blob = await dpapiProtect(key);
@@ -2570,6 +2629,32 @@ function pluginAuthFromCredential(cred) {
   };
 }
 
+/**
+ * 目录里**最近写入且能解开**的凭据（跳过 excludeFile）。
+ * 解不开的（换过密钥/文件损坏）直接略过，不要因为它们挡住可用账号。
+ */
+async function newestReadableCredential(excludeFile = '') {
+  let files;
+  try { files = readdirSync(CREDENTIAL_DIR).filter((f) => f.endsWith('.cred')); }
+  catch { return null; }
+  const candidates = [];
+  for (const name of files) {
+    const file = join(CREDENTIAL_DIR, name);
+    if (file === excludeFile) continue;
+    try { candidates.push({ file, mtimeMs: statSync(file).mtimeMs }); }
+    catch { /* 刚被删掉 */ }
+  }
+  candidates.sort((a, b) => b.mtimeMs - a.mtimeMs);
+  for (const cand of candidates) {
+    try {
+      const st = statSync(cand.file);
+      const cred = await openCredential(readFileSync(cand.file, 'utf8'));
+      return { file: cand.file, cred, st };
+    } catch { /* 解不开：试下一个 */ }
+  }
+  return null;
+}
+
 /** 取 active 插件凭据（热路径，按文件 mtime 缓存解密结果）。 */
 async function readPluginAuth() {
   if (credentialStoreMode() === 'memory') {
@@ -2578,28 +2663,44 @@ async function readPluginAuth() {
     if (!cred) throw new Error('no plugin credential; sign in first (POST /v1/auth/device)');
     return pluginAuthFromCredential(cred);
   }
-  let uid = readActiveUid();
-  let file = uid ? credentialFileFor(uid) : '';
-  if (!file || !existsSync(file)) {
-    // active 指针丢失：挑最近写入的那个，并修好指针
-    let files;
-    try { files = readdirSync(CREDENTIAL_DIR).filter((f) => f.endsWith('.cred')); }
-    catch { files = []; }
-    if (!files.length) throw new Error('no plugin credential; sign in first (POST /v1/auth/device)');
-    const newest = files.map((f) => ({ f, mtimeMs: statSync(join(CREDENTIAL_DIR, f)).mtimeMs }))
-      .sort((a, b) => b.mtimeMs - a.mtimeMs)[0].f;
-    file = join(CREDENTIAL_DIR, newest);
-    uid = '';
+  const uid = readActiveUid();
+  const requested = uid ? credentialFileFor(uid) : '';
+  let picked = null;
+  let failure = '';
+  if (!requested || !existsSync(requested)) {
+    failure = 'active credential file is missing';
+  } else {
+    const st = statSync(requested);
+    if (pluginAuthCache.auth && pluginAuthCache.file === requested
+      && pluginAuthCache.mtimeMs === st.mtimeMs && pluginAuthCache.size === st.size) {
+      return pluginAuthCache.auth;
+    }
+    try {
+      picked = { file: requested, cred: await openCredential(readFileSync(requested, 'utf8')), st };
+    } catch (error) {
+      failure = `active credential unreadable: ${error.message}`;
+    }
   }
-  const st = statSync(file);
-  if (pluginAuthCache.auth && pluginAuthCache.file === file
-    && pluginAuthCache.mtimeMs === st.mtimeMs && pluginAuthCache.size === st.size) {
-    return pluginAuthCache.auth;
+  /*
+   * active.json 指向的那份不见了 / 解不开：回退到最近**可读**的凭据并修好指针。
+   * 否则用户明明还有可用账号，每次请求却都报"读不出凭据"（换过密钥或文件
+   * 损坏时最常见）。一个都读不出才报错。
+   */
+  if (!picked) {
+    const alt = await newestReadableCredential(requested);
+    if (!alt) {
+      throw new Error(failure && requested && existsSync(requested)
+        ? `no readable plugin credential (${failure})`
+        : 'no plugin credential; sign in first (POST /v1/auth/device)');
+    }
+    log('active credential unavailable; falling back to another one', shortError(failure, 140));
+    picked = alt;
+    try { writeActiveUid(picked.cred.uid); } catch { /* 只影响下次选择 */ }
   }
-  const cred = await openCredential(readFileSync(file, 'utf8'));
-  const auth = pluginAuthFromCredential(cred);
-  pluginAuthCache = { file, uid: cred.uid, mtimeMs: st.mtimeMs, size: st.size, auth };
-  if (!uid) { try { writeActiveUid(cred.uid); } catch { /* 只影响下次选择 */ } }
+  const auth = pluginAuthFromCredential(picked.cred);
+  pluginAuthCache = {
+    file: picked.file, uid: picked.cred.uid, mtimeMs: picked.st.mtimeMs, size: picked.st.size, auth,
+  };
   return auth;
 }
 
@@ -4672,6 +4773,13 @@ function anthropicSearchMessage(model, search, query) {
     usage: {
       input_tokens: 0,
       output_tokens: 0,
+      /*
+       * Claude Code 读这两个字段算上下文占用；native search 走的是本地桥的
+       * 搜索分支、没有 prompt cache，但**字段不能缺**（缺字段时部分客户端
+       * 会当成 undefined 参与运算）。
+       */
+      cache_creation_input_tokens: 0,
+      cache_read_input_tokens: 0,
       server_tool_use: { web_search_requests: 1 },
     },
   };
@@ -4971,37 +5079,65 @@ async function acquireRateSlot(clientSignal, scope = 'local') {
 /**
  * 上游限流统计（runtime only，不进账本/日志）。
  *
- * 按「账号 + 模型」记最近 10 分钟被上游 429 的次数，供插件侧 opt-in 的
+ * 按「账号 + 模型」记最近 10 分钟被上游 429 的次数，供插件/控制台 opt-in 的
  * 自动切号判断使用。只有**最终返回给客户端的 429** 才计数（桥内等待重试
  * 成功的不算），所以它反映的是用户真正看到的失败次数。
+ *
+ * 用**时间戳数组**而不是 `{count, lastAt}`：后者只要相邻两次 429 间隔不超过
+ * 窗口，`count` 就一直累加 —— 稀疏的偶发限流攒到阈值同样会触发切号，
+ * 而"最近 10 分钟到底几次"根本不是它算的东西。
+ *
+ * `WORKBUDDY_RATE_LIMIT_WINDOW_MS` 只给测试/高级调优用。
  */
-const RATE_LIMIT_STATS_WINDOW_MS = 10 * 60_000;
-const rateLimitStats = new Map(); // `${source}:${uid}\0${model}` -> { count, lastAt }
-function noteUpstream429(auth, model) {
-  const key = `${auth?.source || ''}:${auth?.uid || auth?.userId || ''}\0${model || ''}`;
-  const now = Date.now();
-  const prev = rateLimitStats.get(key);
-  const rec = prev && now - prev.lastAt <= RATE_LIMIT_STATS_WINDOW_MS ? prev : { count: 0, lastAt: 0 };
-  rec.count += 1;
-  rec.lastAt = now;
-  rateLimitStats.set(key, rec);
+const RATE_LIMIT_STATS_WINDOW_MS = numEnv('WORKBUDDY_RATE_LIMIT_WINDOW_MS', 10 * 60_000, { min: 1000, integer: true });
+/** 每个 key 最多留多少个时间戳：超过阈值早已该切号，不需要无限增长。 */
+const RATE_LIMIT_STATS_MAX = 200;
+/** `${source}:${uid}\0${model}` -> number[]（429 发生时刻，升序） */
+const rateLimitStats = new Map();
+/** 上一次统计所属的账号身份；变化时清空（切回旧账号不应被旧计数立刻踢走）。 */
+let rateLimitIdentity = '';
+
+const rateLimitKey = (auth, model) => `${auth?.source || ''}:${auth?.uid || auth?.userId || ''}\0${model || ''}`;
+const pruneRateLimitList = (list, now) => list.filter((at) => now - at < RATE_LIMIT_STATS_WINDOW_MS && at <= now);
+
+function noteUpstream429(auth, model, now = Date.now()) {
+  const key = rateLimitKey(auth, model);
+  const list = pruneRateLimitList(rateLimitStats.get(key) || [], now);
+  list.push(now);
+  if (list.length > RATE_LIMIT_STATS_MAX) list.splice(0, list.length - RATE_LIMIT_STATS_MAX);
+  rateLimitStats.set(key, list);
   if (rateLimitStats.size > 300) {
-    for (const [k, v] of rateLimitStats) {
-      if (now - v.lastAt > RATE_LIMIT_STATS_WINDOW_MS) rateLimitStats.delete(k);
+    for (const [k, times] of rateLimitStats) {
+      const kept = pruneRateLimitList(times, now);
+      if (kept.length) rateLimitStats.set(k, kept);
+      else rateLimitStats.delete(k);
     }
   }
 }
+
 function rateLimitSummary(auth) {
-  const prefix = `${auth?.source || ''}:${auth?.uid || auth?.userId || ''}\0`;
+  const source = auth?.source || '';
+  const uid = auth?.uid || auth?.userId || '';
+  const prefix = `${source}:${uid}\0`;
+  const identity = `${source}:${uid}`;
   const now = Date.now();
+  /*
+   * 账号/来源变化：旧账号的计数对新账号没有意义，而且切回旧账号时不该被
+   * 一段陈年历史立刻再踢走一次。只在**真有身份**（uid 非空）时切换并清空；
+   * 未登录时的空身份不参与。
+   */
+  if (uid && rateLimitIdentity && rateLimitIdentity !== identity) rateLimitStats.clear();
+  if (uid) rateLimitIdentity = identity;
   const models = [];
   let top = { count: 0, model: '', lastAt: 0 };
-  for (const [key, rec] of rateLimitStats) {
+  for (const [key, times] of rateLimitStats) {
     if (!key.startsWith(prefix)) continue;
-    if (now - rec.lastAt > RATE_LIMIT_STATS_WINDOW_MS) { rateLimitStats.delete(key); continue; }
+    const kept = pruneRateLimitList(times, now);
+    if (!kept.length) { rateLimitStats.delete(key); continue; }
+    if (kept.length !== times.length) rateLimitStats.set(key, kept);
     const model = key.slice(prefix.length);
-    models.push({ model, count: rec.count, lastAt: new Date(rec.lastAt).toISOString() });
-    if (rec.count > top.count) top = { count: rec.count, model, lastAt: rec.lastAt };
+    models.push({ model, count: kept.length, lastAt: new Date(kept[kept.length - 1]).toISOString() });
+    if (kept.length > top.count) top = { count: kept.length, model, lastAt: kept[kept.length - 1] };
   }
   models.sort((a, b) => b.count - a.count);
   return {
@@ -5570,7 +5706,7 @@ const LONG_CONTEXT_BETA = 'context-1m-2025-08-07';
  *     `mini` / `nano` / `small` / `fast` 的走小快模型（**刻意不匹配 `codex`**：
  *     `gpt-5.1-codex` 是它的主力模型，不能降级）。
  */
-const ANTHROPIC_ALIAS_MAIN_RE = /^(?:claude|opus|sonnet|fable|opusplan|default)(?:[-_. ].*)?$/i;
+const ANTHROPIC_ALIAS_MAIN_RE = /^(?:claude|opus|sonnet|haiku|fable|opusplan|default)(?:[-_. ].*)?$/i;
 const ANTHROPIC_ALIAS_FAST_RE = /haiku/i;
 const RESPONSES_ALIAS_MAIN_RE = /^(?:gpt|chatgpt|o[0-9]|codex)(?:[-_. ].*)?$/i;
 const RESPONSES_ALIAS_FAST_RE = /mini|nano|small|fast/i;
@@ -5935,7 +6071,13 @@ function anthropicToOpenAIMessages(body) {
           type: 'function',
           function: { name: block.name || '', arguments: JSON.stringify(block.input ?? {}) },
         });
-      } else if (block.type === 'tool_result') {
+      } else if (block.type === 'tool_result' || block.type === 'mcp_tool_result') {
+        /*
+         * 真实 MCP 结果块的块名是 `mcp_tool_result`（与 `mcp_tool_use` 配对），
+         * 形状与 `tool_result` 相同。原先只认 `tool_result`，于是它落进
+         * `anthropicUnsupportedBlockText`：被截断成 500 字、丢了 `is_error`，
+         * 工具的完整输出（大文件、构建日志）模型根本看不到。
+         */
         toolResults.push({
           role: 'tool',
           tool_call_id: block.tool_use_id || '',
@@ -6023,7 +6165,7 @@ function anthropicToolChoiceToOpenAI(tc) {
 }
 
 /** 聚合后的 OpenAI 响应 → Anthropic message 对象（非流式）。 */
-function openAIToAnthropicMessage(agg, model) {
+function openAIToAnthropicMessage(agg, model, estInputTokens = 0) {
   const choice = (agg.choices || [])[0] || {};
   const msg = choice.message || {};
   const content = [];
@@ -6040,6 +6182,13 @@ function openAIToAnthropicMessage(agg, model) {
       input: safeJsonParse(tc.function?.arguments),
     });
   }
+  /*
+   * 上游**没给 usage** 时不能报 0：Claude Code 会用这两个数字算上下文占用与
+   * 自动压缩阈值，0 会让它以为这一轮什么都没吃（实际可能几万 token）。
+   * 用本地估算兜底 —— 与 count_tokens 同一套口径，量级正确即可。
+   */
+  const estOutput = estimateStructuredTokens(msg.content || '')
+    + (msg.tool_calls || []).reduce((sum, tc) => sum + estimateStructuredTokens(tc?.function?.arguments || ''), 0);
 
   return {
     id: `msg_${String(agg.id || trace()).replace(/[^A-Za-z0-9]/g, '').slice(0, 40)}`,
@@ -6050,8 +6199,8 @@ function openAIToAnthropicMessage(agg, model) {
     stop_reason: anthropicStopReason(choice.finish_reason, content.some((b) => b.type === 'tool_use')),
     stop_sequence: null,
     usage: {
-      input_tokens: Number(agg.usage?.prompt_tokens) || 0,
-      output_tokens: Number(agg.usage?.completion_tokens) || 0,
+      input_tokens: Number(agg.usage?.prompt_tokens) || estInputTokens || 0,
+      output_tokens: Number(agg.usage?.completion_tokens) || estOutput,
       // 上游没有 prompt caching 语义，但 Claude Code 会读这两个字段算上下文占用；
       // 给 0 比**缺字段**更兼容（缺字段时部分客户端会当成 undefined 而报错）。
       cache_creation_input_tokens: 0,
@@ -8557,10 +8706,18 @@ function catalogPathsFor() {
 }
 
 const CATALOG_TTL_MS = 5 * 60 * 1000;
+/**
+ * 目录抓取失败后的负缓存时长。冷目录（还没有任何缓存）时，每个 `/v1/models`
+ * 请求原本都会重新打两个上游端点（各 8 秒超时）—— 上游故障期间客户端会被
+ * 一路拖到超时。失败后先安静一会儿再重试；`refresh=1`（用户手动刷新）无视它。
+ */
+const CATALOG_RETRY_MS = numEnv('WORKBUDDY_CATALOG_RETRY_MS', 30_000, { min: 0, integer: true });
 // `upstreamModelCount` 初值必须是 0：冷启动时一个模型都没看过，此时任何请求都
 // 该放行。它同时也是「模型预校验能不能启用」的唯一开关（见 preflightModelError）。
 let catalogCache = { at: 0, models: [], shape: null, upstreamModelCount: 0, account: '', source: '' };
 let catalogRefreshing = null;
+/** 目录连续失败后的下次重试时刻（负缓存）。0 = 立即可试。 */
+let catalogNextRetryAt = 0;
 /**
  * 目录代次：换号 / 换来源时 +1。
  *
@@ -8578,6 +8735,8 @@ let catalogGeneration = 0;
 function invalidateCatalogCache() {
   catalogGeneration += 1;
   catalogCache = { at: 0, models: [], shape: null, upstreamModelCount: 0, account: '', source: '' };
+  /* 换了账号/来源：上一次账号的失败不能继续挡住新账号的首次抓取。 */
+  catalogNextRetryAt = 0;
   refreshCatalog({ force: true }).catch(() => {});
 }
 
@@ -8591,8 +8750,16 @@ function invalidateCatalogCache() {
  * 作废都算 false）。手动刷新目录（`/v1/models?refresh=1`）要靠它判断
  * 「是不是白刷了一次」，以便如实告诉用户「刷新失败，仍显示旧缓存」。
  */
-function refreshCatalog({ force = false } = {}) {
+function refreshCatalog({ force = false, bypassNegative = false } = {}) {
   if (catalogRefreshing && !force) return catalogRefreshing;
+  /*
+   * 负缓存：冷目录 + 上游刚失败过 → 不要再打一轮（客户端会被 2×8 秒拖死）。
+   * 手动刷新（`?refresh=1`，bypassNegative）与换号（force）必须无视它，
+   * 否则用户点了"刷新"却什么都没发生。
+   */
+  if (!force && !bypassNegative && !catalogCache.models.length && Date.now() < catalogNextRetryAt) {
+    return Promise.resolve({ ok: false, at: catalogCache.at, retryAt: catalogNextRetryAt });
+  }
   const generation = catalogGeneration;
   const promise = fetchCatalog(generation)
     .then((r) => ({ ok: r.upstreamOk && !r.stale, at: catalogCache.at }))
@@ -8632,8 +8799,8 @@ async function upstreamCatalog() {
       }
     } catch { /* 凭据读不出来：沿用缓存，调用方会另行报鉴权错误 */ }
   }
-  if (!catalogCache.models.length) await refreshCatalog();
-  else if (Date.now() - catalogCache.at > CATALOG_TTL_MS) refreshCatalog();
+  if (!catalogCache.models.length && Date.now() >= catalogNextRetryAt) await refreshCatalog();
+  else if (catalogCache.models.length && Date.now() - catalogCache.at > CATALOG_TTL_MS) refreshCatalog();
   return catalogCache.models;
 }
 
@@ -9014,6 +9181,11 @@ async function fetchCatalog(generation = catalogGeneration) {
        * 30 秒（下次请求就会再试），并在日志里说清楚。
        */
       const nextAt = upstreamOk ? Date.now() : Date.now() - CATALOG_TTL_MS + 30_000;
+      /*
+       * 负缓存只在**这次真的没拿到上游目录**时启用；成功一次就清掉。
+       * 否则冷启动 + 上游故障期间，每个请求都重新打两个上游端点。
+       */
+      catalogNextRetryAt = upstreamOk ? 0 : Date.now() + CATALOG_RETRY_MS;
       if (!upstreamOk && catalogCache.models.length > 0) {
         catalogCache = { ...catalogCache, at: nextAt };
         log('catalog refresh got no upstream models; keeping previous catalog, retry in 30s');
@@ -9105,9 +9277,16 @@ async function fetchCatalog(generation = catalogGeneration) {
       };
       }
     } else if (hardError) {
+      catalogNextRetryAt = Date.now() + CATALOG_RETRY_MS;
       log('catalog refresh failed; keeping cached catalog');
+    } else {
+      catalogNextRetryAt = Date.now() + CATALOG_RETRY_MS;
     }
-  } catch (e) { log('catalog fetch failed', e.message); hardError = true; }
+  } catch (e) {
+    log('catalog fetch failed', e.message);
+    hardError = true;
+    catalogNextRetryAt = Date.now() + CATALOG_RETRY_MS;
+  }
   // 至少一个目录端点成功就算刷新成功；另一个端点的 5xx 只记在 shape.sources。
   return { models: catalogCache.models, upstreamOk };
 }
@@ -10247,7 +10426,12 @@ async function handleRequest(req, res) {
       }
       // 这里**绝不能等上游**：控制台的探测超时是 4 秒，冷缓存时抓目录要好几秒，
       // 一旦超时就会被误判成「桥未运行」。有缓存立刻答，没有或过期都只触发后台刷新。
-      if (!catalogCache.models.length || Date.now() - catalogCache.at > CATALOG_TTL_MS) refreshCatalog();
+      if (!catalogCache.models.length) {
+        // 冷目录 + 刚失败过：别让每次健康探测都再打一轮上游（负缓存）。
+        if (Date.now() >= catalogNextRetryAt) refreshCatalog();
+      } else if (Date.now() - catalogCache.at > CATALOG_TTL_MS) {
+        refreshCatalog();
+      }
       const catalog = catalogCache.models;
       return json(res, 200, {
         ok: true,
@@ -10499,7 +10683,8 @@ async function handleRequest(req, res) {
       let staleMs = null;
       if (wantRefresh) {
         const startedAt = Date.now();
-        const r = await refreshCatalog();
+        // 手动刷新是明确的用户动作：无视负缓存，否则"点了没反应"。
+        const r = await refreshCatalog({ bypassNegative: true });
         if (!r.ok) {
           // 只有缓存**确实比本次刷新更旧**才叫「旧缓存」。若本次刷新已经更新过
           // 缓存（例如冷启动只拿到部分目录），说「0 秒前的缓存」是误导。
@@ -11423,6 +11608,26 @@ async function handleRequest(req, res) {
       let body;
       try { body = JSON.parse(raw); }
       catch { return json(res, 400, { type: 'error', error: { type: 'invalid_request_error', message: 'invalid JSON body' } }); }
+      /*
+       * 与 `/v1/messages` 同一套模型判据：先剥客户端后缀、认别名，再做目录预校验。
+       * 目录已知时未知模型回 404 —— 否则「验证接入」拿 count_tokens 打一次会
+       * 得到 200，把"配置里的模型根本不存在"报成"路由与令牌可用"（假阳性）。
+       * 目录未知（冷启动 / 上游不可达）时预校验自动放行，不阻断上下文显示。
+       */
+      if (body?.model !== undefined && body.model !== null && typeof body.model !== 'string') {
+        return json(res, 400, {
+          type: 'error',
+          error: { type: 'invalid_request_error', message: 'workbuddy-bridge: model must be a string' },
+        });
+      }
+      const requested = typeof body?.model === 'string' ? body.model.trim() : '';
+      if (requested) {
+        const model = resolveAnthropicModel(requested);
+        const bad = preflightModelError(model);
+        if (bad) {
+          return json(res, 404, { type: 'error', error: { type: 'not_found_error', message: bad } });
+        }
+      }
       return json(res, 200, { input_tokens: estimateRequestTokens(body) });
     }
 
@@ -11515,6 +11720,17 @@ async function handleRequest(req, res) {
       // Anthropic 的 `stream` 缺省是 false（与 OpenAI 相反）
       const wantStream = body.stream === true;
       /*
+       * 非字符串 model（数组 / 数字 / 对象）直接 400 —— 与 OpenAI 路径一致。
+       * 原先 `typeof body.model === 'string' ? ... : ''` 会把它当成"没给"，
+       * 静默使用默认模型：用户传错了参数，却在跑另一个模型。native search 分支
+       * 在更上面（它不走模型），所以放在这里不会影响那条路径。
+       */
+      if (body.model !== undefined && body.model !== null && typeof body.model !== 'string') {
+        const message = 'workbuddy-bridge: model must be a string';
+        recordRequest({ model: '', stream: wantStream, ms: 0, ok: false, status: 400, code: null, error: message });
+        return json(res, 400, { type: 'error', error: { type: 'invalid_request_error', message } });
+      }
+      /*
        * 模型名解析（与 Responses 共用 `resolveRequestedModel`）：剥后缀 → 目录精确命中
        * → 客户端别名 → 未知 id 明确报错。**不再静默换成别的模型**（issue #18）。
        */
@@ -11572,6 +11788,9 @@ async function handleRequest(req, res) {
       if (outCap > 0 && Number(oai.max_tokens) > outCap) {
         log('clamped max_tokens to model limit (anthropic)', `${oai.max_tokens} -> ${outCap}`);
         oai.max_tokens = outCap;
+      } else if (!outCap && Number(oai.max_tokens) > 0) {
+        // 目录里没有这个模型的上限：不能收敛，但要让排查的人知道"为什么没收敛"。
+        log('max_tokens not clamped: model output limit unknown (anthropic)', `${model} ${oai.max_tokens}`);
       }
 
       const toolError = toolNameError(tools);
@@ -11702,7 +11921,7 @@ async function handleRequest(req, res) {
           ...usageOf(aggregated.usage),
           ...fallbackInfo,
         });
-        return json(res, 200, openAIToAnthropicMessage(aggregated, model));
+        return json(res, 200, openAIToAnthropicMessage(aggregated, model, estimateRequestTokens(body)));
       } catch (e) {
         if (handleUpstreamTimeout(res, 'anthropic', e)) {
           recordRequest({
@@ -11759,6 +11978,14 @@ async function handleRequest(req, res) {
       }
 
       const wantStream = body.stream === true;
+      /* 同 Anthropic 侧：非字符串 model 明确 400，不能静默回默认模型。 */
+      if (body.model !== undefined && body.model !== null && typeof body.model !== 'string') {
+        const message = 'workbuddy-bridge: model must be a string';
+        recordRequest({ model: '', stream: wantStream, ms: 0, ok: false, status: 400, code: null, error: message });
+        return json(res, 400, {
+          error: { type: 'invalid_request_error', code: 'invalid_request', message },
+        });
+      }
       /* 同 Anthropic 侧：模型 id 进请求头前先过长度与字符集（否则会 500）。 */
       const requestedName = typeof body.model === 'string' ? body.model : '';
       if (requestedName.length > MAX_MODEL_ID_LEN) {

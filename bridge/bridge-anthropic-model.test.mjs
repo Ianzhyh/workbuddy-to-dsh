@@ -46,6 +46,8 @@ let lastUpstreamBody = null;
 let chatHits = 0;
 /** 目录桩：可变，用来模拟「上游没给目录」（冷目录）。 */
 let catalogModels = CATALOG;
+/** 模拟「上游没回 usage」：非流式响应必须用本地估算兜底，不能报 0。 */
+let omitUsage = false;
 
 const upstream = createServer((req, res) => {
   const chunks = [];
@@ -61,7 +63,11 @@ const upstream = createServer((req, res) => {
     catch { lastUpstreamBody = null; }
     res.writeHead(200, { 'Content-Type': 'text/event-stream' });
     res.write('data: {"choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":""}]}\n\n');
-    res.write('data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":11,"completion_tokens":7,"total_tokens":18}}\n\n');
+    if (!omitUsage) {
+      res.write('data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":11,"completion_tokens":7,"total_tokens":18}}\n\n');
+    } else {
+      res.write('data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n');
+    }
     res.end('data: [DONE]\n\n');
   });
 });
@@ -323,4 +329,111 @@ test('目录冷（上游没给目录）：未知模型名原样转发，不静�
     catalogModels = CATALOG;
     await fetch(`${BASE}/v1/models?refresh=1`, { headers: { authorization: `Bearer ${TOKEN}` } });
   }
+});
+
+// ── 1.20.0：别名矩阵 / 真实 MCP 结果块 / thinking 边界 / 入参类型 ─────────
+
+test('裸 haiku 与 haiku-4-5 也是别名 → 映射到 fast 模型', async () => {
+  for (const name of ['haiku', 'haiku-4-5']) {
+    chatHits = 0;
+    lastUpstreamBody = null;
+    const res = await post({
+      model: name,
+      max_tokens: 64,
+      messages: [{ role: 'user', content: 'hi' }],
+    });
+    assert.equal(res.status, 200, `${name} 应当被识别为客户端别名`);
+    assert.equal(lastUpstreamBody?.model, 'glm-5.3-flash',
+      `${name} 是 Claude Code 的小快模型别名，必须走 fast 模型（原先既不命中别名也不走 fast）`);
+  }
+});
+
+test('真实 MCP 结果块（mcp_tool_result）：转成 tool 消息，长内容不截断、is_error 透传', async () => {
+  chatHits = 0;
+  lastUpstreamBody = null;
+  const long = 'MCP-OUTPUT-' + 'x'.repeat(2000);
+  const res = await post({
+    model: 'deepseek-v4.1-flash',
+    max_tokens: 64,
+    messages: [{
+      role: 'assistant',
+      content: [{ type: 'mcp_tool_use', id: 'toolu_mcp_2', name: 'read_file', input: { path: 'a.txt' } }],
+    }, {
+      role: 'user',
+      content: [{
+        type: 'mcp_tool_result',
+        tool_use_id: 'toolu_mcp_2',
+        is_error: true,
+        content: [{ type: 'text', text: long }],
+      }],
+    }],
+  });
+  assert.equal(res.status, 200);
+  const toolMsg = (lastUpstreamBody?.messages || []).find((m) => m.role === 'tool');
+  assert.ok(toolMsg, 'mcp_tool_result 必须转成 tool 消息（原先落进"不认识的内容块"被截断成 500 字文本）');
+  assert.equal(toolMsg.tool_call_id, 'toolu_mcp_2');
+  const content = typeof toolMsg.content === 'string' ? toolMsg.content : JSON.stringify(toolMsg.content);
+  assert.match(content, /tool_error/, 'is_error 必须透传');
+  assert.match(content, /MCP-OUTPUT-/, '内容要保留');
+  assert.ok(content.length > 2000, `工具结果不能被截断（实际 ${content.length} 字符）`);
+});
+
+test('thinking 的预算边界：缺失 / 0 / 负数 → 不下发 reasoning_effort', async () => {
+  for (const thinking of [
+    { type: 'enabled' },
+    { type: 'enabled', budget_tokens: 0 },
+    { type: 'enabled', budget_tokens: -5 },
+  ]) {
+    chatHits = 0;
+    lastUpstreamBody = null;
+    const res = await post({
+      model: 'glm-5.3-flash',
+      max_tokens: 64,
+      thinking,
+      messages: [{ role: 'user', content: 'hi' }],
+    });
+    assert.equal(res.status, 200, JSON.stringify(thinking));
+    assert.equal(lastUpstreamBody?.reasoning_effort, undefined,
+      `${JSON.stringify(thinking)} 不该猜一个档位（原先 budget<=0 会被当成 medium）`);
+  }
+});
+
+test('Anthropic / Responses：非字符串 model 明确 400（不能静默用默认模型）', async () => {
+  for (const model of [[], 123, { id: 'x' }]) {
+    const res = await post({ model, max_tokens: 64, messages: [{ role: 'user', content: 'hi' }] });
+    assert.equal(res.status, 400, `Anthropic 收到 ${JSON.stringify(model)} 应当 400`);
+  }
+  for (const model of [[], 123, { id: 'x' }]) {
+    const res = await fetch(`${BASE}/v1/responses`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${TOKEN}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ model, input: 'hi' }),
+    });
+    assert.equal(res.status, 400, `Responses 收到 ${JSON.stringify(model)} 应当 400`);
+  }
+});
+
+test('count_tokens：未知模型 404（验证接入不再假阳性），别名照常 200', async () => {
+  const count = (body) => post(body, '/v1/messages/count_tokens');
+  const unknown = await count({ model: 'totally-unknown-model', messages: [] });
+  assert.equal(unknown.status, 404, '目录已知时未知模型必须 404，否则"验证接入"永远显示通过');
+  const alias = await count({ model: 'haiku', messages: [] });
+  assert.equal(alias.status, 200, '别名要能解析到真实模型，不能误判未知');
+  const bad = await count({ model: [], messages: [] });
+  assert.equal(bad.status, 400, '非字符串 model 与 /v1/messages 同判据');
+});
+
+test('非流式响应：上游缺 usage 时用本地估算兜底（不能报 0）', async () => {
+  omitUsage = true;
+  try {
+    const res = await post({
+      model: 'deepseek-v4.1-flash',
+      max_tokens: 64,
+      messages: [{ role: 'user', content: 'hello world, please answer' }],
+    });
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.ok(body?.usage?.input_tokens > 0, '输入 token 不能是 0（Claude Code 会据此算上下文占用）');
+    assert.ok(body?.usage?.output_tokens > 0, '输出 token 也不能是 0');
+  } finally { omitUsage = false; }
 });

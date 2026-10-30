@@ -1882,6 +1882,16 @@ body.dark .wb-root,
       [/^思考：$/, 'Thinking:'],
       [/^思考：([\s\S]+)$/, 'Thinking: $1'],
       [/^上游报错：([\s\S]+)$/, 'Upstream error: $1'],
+      /*
+       * 账号切换 / 控制台启停：成功提示是**拼接串**（固定文案 + 账号名 +
+       * 动态后缀），整串在词条表里查不到。只写前缀词条（'已切换到 '）不够 ——
+       * `translateText` 先查整串，查不到直接原样返回，不会做子串替换。
+       */
+      [/^已切换到 (.+?)。桥已重启，两边同步。积分已更新。$/, 'Switched to $1. The bridge restarted; both sides are in sync. Credits updated.'],
+      [/^已切换到 (.+?)。桥已重启，两边同步。（积分正在后台刷新，稍后自动显示新账号的值。）$/, 'Switched to $1. The bridge restarted; both sides are in sync. (credits are refreshing in the background; the new account\'s values will appear automatically.)'],
+      [/^切换失败：([\s\S]*)$/, 'Switch failed: $1'],
+      [/^控制台已就绪：([\s\S]*)$/, 'Console ready: $1'],
+      [/^控制台启动失败：([\s\S]+)$/, 'Failed to start the console: $1'],
       /* 凭据异常提示：前缀 + 桥侧原始原因（动态串，整串查词条查不到） */
       [/^桥在跑，但读不出登录凭据：([\s\S]+)$/, 'The bridge is running but cannot read the login credentials: $1'],
       [/^插件凭据读取失败：([\s\S]+)$/, 'Could not read plugin credential: $1'],
@@ -2158,7 +2168,19 @@ body.dark .wb-root,
        *   `10时：1 次` 会变成 `10时：1 calls`（只翻尾巴）。
        *   所以它必须夹在「专属规则」与「通用单位规则」**中间**。
        */
-      [/^(.+)：(.+)$/, (m, a, b) => translateText(a) + ': ' + translateText(b)],
+      /*
+       * 冒号规则：词条表里大量前缀是**带冒号**的键（`'切换失败：'`、
+       * `'积分：'`、`'控制台：'`）。按冒号切开后直接查 `a` 永远查不到，
+       * 于是所有「前缀：值」都只翻后半段（半中文）。先拿 `a + '：'` 查
+       * 整条前缀，查不到再退回"翻译 a + 英文冒号"。
+       */
+      [/^(.+)：(.+)$/, (m, a, b) => {
+        const headKey = a + '：';
+        const head = Object.prototype.hasOwnProperty.call(I18N_EN, headKey)
+          ? I18N_EN[headKey]
+          : translateText(a) + ': ';
+        return head + translateText(b);
+      }],
       [/^(.+) 次$/, '$1 calls'],
       [/^(.+) 积分$/, '$1 credit'],
     ];

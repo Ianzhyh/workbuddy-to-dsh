@@ -1436,8 +1436,8 @@ const I18N_EN = {
   '令牌文件的权限没能收紧：': 'Could not tighten the token file\'s permissions: ',
   '静态自检通过：配置里的键都在。': 'Static check passed: all expected keys are present.',
   '静态自检未通过：': 'Static check failed: ',
-  '端到端验证通过：拿配置里的令牌连上了桥。': 'End-to-end check passed: the token from the config file reaches the bridge.',
-  '端到端验证没通过：': 'End-to-end check failed: ',
+  '路由与令牌验证通过：配置里的令牌能连上桥，客户端要走的协议路径有响应。': 'Route and token check passed: the configured token reaches the bridge and the protocol path responds.',
+  '路由与令牌验证没通过：': 'Route and token check failed: ',
   // 读取失败 / 重试（这块以前只会永远显示「正在读取接入状态…」）
   '重新读取': 'Reload',
   '重试': 'Retry',
@@ -1485,13 +1485,13 @@ const I18N_EN = {
   '验证接入': 'Verify',
   '正在验证…': 'checking…',
   '没有得到静态自检的结论。': 'No static-check result was returned.',
-  '只做了静态自检，没做端到端验证（桥没在跑？）。':
-    'Only the static check ran; the end-to-end check was skipped (is the bridge running?).',
-  '静态自检没过，没有做端到端验证。': 'The static check failed, so the end-to-end check was skipped.',
+  '只做了静态自检，没做路由与令牌验证（桥没在跑？）。':
+    'Only the static check ran; the route/token check was skipped (is the bridge running?).',
+  '静态自检没过，没有做路由与令牌验证。': 'The static check failed, so the route/token check was skipped.',
   '验证请求没能完成（接口没响应或返回了错误）。':
     'The verification request did not complete (no response, or an error came back).',
-  '「验证接入」会重新读一遍配置文件，并拿里面的令牌真打一次桥 —— 静态读回只能证明文件里写对了，证明不了这个令牌现在还能用。':
-    '"Verify" re-reads the config file and uses the token inside it to call the bridge for real — a static read-back only proves the file looks right, not that the token still works.',
+  '「验证接入」会重新读一遍配置文件，并拿里面的令牌真打一次桥 —— 这证明令牌与协议路由可用，但不等同于上游一定接受配置里的模型（目录未知时无法预判）。':
+    '"Verify" re-reads the config file and uses the token inside it to call the bridge for real — this proves the token and protocol route work, but it does not prove the upstream accepts the configured model (unknowable while the catalog is cold).',
   '标了「本机未实测」的客户端：写入逻辑有往返单测，但本机没装它，所以「它是否认这份配置」没法替你保证。':
     'Clients marked "not verified locally": the write logic has round-trip tests, but this machine does not have that client installed, so there is no way to promise the client accepts this config.',
   '桥未运行：写入照样能做，但写完的「验证」一定失败。先点上方「启动桥服务」。':
@@ -8085,12 +8085,12 @@ function connectVerifyLines(r) {
   }
   if (r.auth) {
     out.push(r.auth.ok
-      ? '端到端验证通过：拿配置里的令牌连上了桥。'
-      : { prefix: '端到端验证没通过：', data: r.auth.reason || '' });
+      ? '路由与令牌验证通过：配置里的令牌能连上桥，客户端要走的协议路径有响应。'
+      : { prefix: '路由与令牌验证没通过：', data: r.auth.reason || '' });
   } else if (written && written.ok) {
-    out.push('只做了静态自检，没做端到端验证（桥没在跑？）。');
+    out.push('只做了静态自检，没做路由与令牌验证（桥没在跑？）。');
   } else {
-    out.push('静态自检没过，没有做端到端验证。');
+    out.push('静态自检没过，没有做路由与令牌验证。');
   }
   return out;
 }
@@ -8271,8 +8271,8 @@ function connectResultLines(action, r) {
   }
   if (r.auth) {
     out.push(r.auth.ok
-      ? t('端到端验证通过：拿配置里的令牌连上了桥。')
-      : line(t('端到端验证没通过：'), r.auth.reason));
+      ? t('路由与令牌验证通过：配置里的令牌能连上桥，客户端要走的协议路径有响应。')
+      : line(t('路由与令牌验证没通过：'), r.auth.reason));
   }
   if (r.warning) out.push(r.warning);
   /*
@@ -8322,8 +8322,8 @@ function connectModeLines(mode, r) {
   }
   if (r.auth) {
     out.push(r.auth.ok
-      ? t('端到端验证通过：拿配置里的令牌连上了桥。')
-      : line(t('端到端验证没通过：'), r.auth.reason));
+      ? t('路由与令牌验证通过：配置里的令牌能连上桥，客户端要走的协议路径有响应。')
+      : line(t('路由与令牌验证没通过：'), r.auth.reason));
   }
   out.push(t('重启该客户端后生效。'));
   return out;
@@ -8919,7 +8919,7 @@ function connectBlock() {
   how.append(clientEl('p', 'clientcard-note',
     '每个客户端可以接多个模型：勾选的那批会写进客户端，其中一个作为主模型（默认为该客户端打开时用的那个）。opencode 的模型表、Claude Code 的 /model 选择器、Codex 的模型目录，各按自己认的写法落盘。'));
   how.append(clientEl('p', 'clientcard-note',
-    '「验证接入」会重新读一遍配置文件，并拿里面的令牌真打一次桥 —— 静态读回只能证明文件里写对了，证明不了这个令牌现在还能用。'));
+    '「验证接入」会重新读一遍配置文件，并拿里面的令牌真打一次桥 —— 这证明令牌与协议路由可用，但不等同于上游一定接受配置里的模型（目录未知时无法预判）。'));
   how.append(clientEl('p', 'clientcard-note',
     '标了「本机未实测」的客户端：写入逻辑有往返单测，但本机没装它，所以「它是否认这份配置」没法替你保证。'));
   if (lastConnect && lastConnect.backupDir) {

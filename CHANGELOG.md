@@ -17,6 +17,82 @@
 
 只支持最近 2 个 minor 版本。
 
+## [1.20.0] - 2026-10-30
+
+两条线的一轮缺陷审计：**dsh 插件 / Web 控制台** 与 **Claude Code 接入**。共同主题是
+「配置只有一个真源、切号只有一个实现、失败不再假成功、未知的东西不猜」。
+
+### Added
+
+- **共享的限流切号判定**（`lib/failover.mjs`）：控制台与 dsh 插件原先各有一份
+  `pickAccountFailoverTarget`，规则已经漂移过（插件不校验凭据来源，插件登录账号被
+  429 时也会去切桌面账号）。现在两边用同一份实现；选目标时以桥 `/health.auth.userId`
+  为准（`active` 只兜底），并跳过**同一账号的其它登录快照**（切过去还是同一个钱包）。
+- **控制台继承插件拉起的桥配置**：插件启动控制台时注入 `WORKBUDDY_HOST/PORT/
+  LOCAL_TOKEN/DATA_DIR/AUTH_FILE/CREDENTIAL_*`（以及只进子进程的密钥），不再出现
+  「插件连 A 端口、控制台按 B 端口另起一个桥」。
+- `WORKBUDDY_RATE_LIMIT_WINDOW_MS`（429 统计滑动窗口，默认 10 分钟）与
+  `WORKBUDDY_CATALOG_RETRY_MS`（目录抓取失败后的负缓存，默认 30 秒）；插件透传清单
+  补齐 `WORKBUDDY_SSE_NORMALIZE` / `REPAIR_TOOL_HISTORY` / `FORWARD_REASONING` /
+  `MEDIA_STORE` / `AUTH_DIR` 等桥已支持的开关。`WORKBUDDY_CREDENTIAL_KEY` /
+  `WORKBUDDY_CLIENT_KEYS` / `CODEBUDDY_API_KEY` 单独作为密钥只注入桥与控制台子进程，
+  **不进 dsh 进程环境、不写日志**。
+
+### Fixed
+
+- **切号失败被报成成功**：`switchDesktopAccount` 现在先写 state（写不进去就不动桥）→
+  停桥 → 起桥 → 核对健康里的账号；任一步失败都回滚 state 并按旧账号恢复，返回
+  `switched:false`，路由回 500。原先无论结果如何都回 `switched:true`，面板会显示
+  「已切换」而实际还在旧账号（最坏是桥停着）。插件 failover、控制台 failover 与面板
+  都改为检查真实结果。
+- **切号 / 重启桥并发交错**：控制台新增进程内生命周期队列，切号、`/api/bridge/*`、
+  账号钉住校正、启动恢复共用同一把锁；闲置退出在生命周期操作期间不触发。
+- **插件忽略 `.env` 的 `WORKBUDDY_DATA_DIR` / `WORKBUDDY_STATE_FILE`**：现在与
+  `config.mjs` 同源（`process.env` 优先于 `.env`，相对路径按项目根解析），本地令牌
+  也生成在 `.env` 指的数据目录；显式数据目录不再借用安装目录的旧令牌。
+- **首次创建本地令牌的竞争**：控制台与插件同时首次启动时用排它创建（`wx`），
+  抢输的一方回读赢家写下的值，避免两边各拿一把令牌导致 401。
+- **`.env` 的 `export KEY=VALUE` 写法**：插件解析器现在与 `config.mjs` 一样剥掉
+  `export ` 前缀。
+- **控制台闲置 / 进程归属**：`consoleIdleExitMs: 0` 现在真的常驻（始终注入
+  `DASHBOARD_IDLE_EXIT_MS`）；子进程退出后清空 `spawnedPid`；旧控制台没有
+  `/api/version` 时按端口监听者确认归属，无法确认就拒绝 kill；被 403 拒绝的跨站
+  请求不再刷新活动时间（不能靠外部请求保活）。
+- **`ensure({restart:true})` 被在途请求降级**：等前一次 ensure 结束后再真正重启，
+  不再"报成功但桥没动"。
+- **桥的 429 统计无限累计**：改为时间戳滑动窗口（窗口外的旧 429 自动过期），账号/
+  来源变化时清空；`noteUpstream429` 支持假时钟。
+- **凭据密钥轮换与丢失**：`store.key` 变了会重新读取（原先进程内缓存永不刷新）；
+  多个进程同时首次建钥只产生一把；`store.key` 丢失但目录里还有 `.cred` 时**拒绝**
+  静默生成新钥（那会让旧凭据永久解不开）；`active.json` 指向的凭据解不开时回退到
+  最近一个可读凭据并修好指针。
+- **冷目录把上游打爆**：目录端点持续失败时记负缓存，`/v1/models` 与 `/health` 在
+  窗口内不再重复请求上游；`?refresh=1` 与换号仍然立即重试。
+- **Claude Code 的假上下文窗口**：目录冷启动（桥没起 / 上游不可达）时不再把 128000
+  的兜底占位当模型上限写进 `CLAUDE_CODE_MAX_CONTEXT_TOKENS`；多模型接入取所选模型
+  **最小的已知上限**，任一模型上限未知则整行不写。
+- **升级后撤销 / 切回原生会残留新键**：`restore` 现在会合并旧记录（首次原值优先），
+  旧版本没记的键按「当前值是否等于我们会写的值」判断是旧版本写的（记 `null`，撤销
+  删除）还是用户自己的（记原值）；旧记录缺 `model_catalog_json` 时撤销也会兜底删除。
+- **真实 MCP 结果块 `mcp_tool_result` 没映射**：现在与 `tool_result` 同一路径转成
+  tool 消息（保留完整内容、不截断 500 字，`is_error` 透传）。
+- **裸 `haiku` / `haiku-4-5` 不被识别为别名**：现在与 `claude-haiku-*` 一样走 fast
+  模型。
+- **「验证接入」假阳性**：`count_tokens` 现在解析模型（剥后缀 / 别名）并在目录已知时
+  对未知模型回 404；验证请求发送**配置里的真实模型**而不是硬编码的
+  `claude-sonnet-4-5`；界面文案改为「路由与令牌验证」，明确它不证明上游接受该模型。
+- **`modelPicker`**：只有一个模型也写（否则内置 Sonnet/Opus 选中后会被桥映射到别的
+  模型）；从多模型缩到 1 个时会覆盖成新列表，不再粘住旧选择。
+- **`thinking` 缺预算 / 预算 ≤ 0 被猜成 medium**：现在不下发 `reasoning_effort`。
+- **Anthropic / Responses 的非字符串 `model`**：明确 400（原先静默使用默认模型，
+  与 OpenAI 路径不一致）。
+- **非流式响应上游缺 `usage` 时报 0**：用本地估算兜底；原生搜索的 usage 补
+  `cache_creation_input_tokens` / `cache_read_input_tokens`。
+- 文档修正：`docs/openapi.yaml` 移除不存在的 `WORKBUDDY_STRICT_MODEL`；
+  `docs/TROUBLESHOOTING.md` 修 PowerShell 变量语法、补手动接入的三个环境变量、
+  把「老版本认这个变量」改为「不认」，并说明目录冷启动不写窗口；`/v1/models`
+  补 1M beta 头说明。
+
 ## [1.19.3] - 2026-10-29
 
 ### Fixed

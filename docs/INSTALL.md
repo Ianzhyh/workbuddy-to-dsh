@@ -81,8 +81,9 @@ dsh plugin --profile desktop add github:Ianzhyh/workbuddy-to-dsh
 ```
 
 > 路线 C / D 装的是**仓库根包**：桥、控制台、共享库在根目录各有一份，
-> `dsh-plugin/vendor/` 不再重复打包（省约 1.7MB）；vendor 只用于路线 A / B
-> 的单文件夹分发。
+> `dsh-plugin/vendor/` 不整目录重复打包（省约 1.7MB）；只有插件宿主入口静态
+> import 的 `vendor/lib/failover.mjs`（共享的限流切号判定）会随根包带上。
+> 完整 vendor 只用于路线 A / B 的单文件夹分发。
 
 ### 路线 D：npm 包名（发布后可用）
 

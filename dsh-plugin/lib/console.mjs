@@ -395,8 +395,14 @@ export class ConsoleSupervisor {
       DASHBOARD_AUTO_START_BRIDGE: process.env.DASHBOARD_AUTO_START_BRIDGE ?? '0',
       // 关键：不要让 dsh 每次启动都弹一个浏览器窗口
       DASHBOARD_OPEN_BROWSER: '0',
-      // 插件拉起的控制台默认闲置退出，不用时把 80+MB 内存还回来；0 = 常驻
-      ...(this.idleExitMs > 0 ? { DASHBOARD_IDLE_EXIT_MS: String(this.idleExitMs) } : {}),
+      /*
+       * 闲置退出**始终注入**（包括 0 = 常驻）。
+       *
+       * 原先只在 > 0 时注入，于是显式配 `consoleIdleExitMs: 0` 时变量缺席，
+       * 控制台的 config.mjs 会去读项目根 `.env` —— 那里若写着一个非零值，
+       * 「显式关掉」就被 `.env` 反向覆盖了。配置的优先级必须由调用方决定。
+       */
+      DASHBOARD_IDLE_EXIT_MS: String(this.idleExitMs),
       ...this.env,
       /*
        * 监听地址必须与 supervisor 探测的地址一致。插件配置里的 consolePort
@@ -423,6 +429,19 @@ export class ConsoleSupervisor {
       child.on('error', (error) => {
         this.lastStartError = String(error?.message || error);
         this.onLog(`console spawn error: ${this.lastStartError}`);
+      });
+      /*
+       * 进程退出就清掉归属。闲置退出、崩溃、用户手动关都会走这里。
+       * 不清的话 `spawnedPid` 会一直留着一个已被系统回收的 PID ——
+       * 面板会把它显示成"可管理的控制台"，`stop()` 也可能去杀一个
+       * 刚好复用该 PID 的无关进程。
+       */
+      child.once('exit', (code, signal) => {
+        if (this.spawnedPid === child.pid) {
+          this.spawnedPid = null;
+          this.onLog(`console exited pid=${child.pid} code=${code ?? ''} signal=${signal || ''}`);
+        }
+        this.cache = { at: 0, state: null, error: '' };
       });
       return { ok: true, pid: child.pid ?? null, reused: false };
     } catch (error) {
@@ -466,8 +485,23 @@ export class ConsoleSupervisor {
       };
     }
     const version = await this.fetchVersion();
-    const livePid = Number(version?.pid) || 0;
-    if (livePid && livePid !== pid) {
+    /*
+     * 老控制台没有 `/api/version`，拿不到自报 pid —— 退回按端口查监听者。
+     * `probe()` 已经确认端口上跑的是我们的页面，所以查到的是**当前真正在服务**
+     * 的进程，而不是可能已被系统回收的 `spawnedPid`。
+     *
+     * 两条路都拿不到 pid 就**拒绝**：宁可报「无法确认」，也不按记忆里的 PID
+     * 去杀一个可能已经复用了该 PID 的无关进程。
+     */
+    const livePid = Number(version?.pid) || findPortPid(this.port) || 0;
+    if (!livePid) {
+      return {
+        ok: false,
+        stopped: false,
+        error: '无法确认端口上的控制台进程（旧版本控制台不提供 pid），插件不会去停它；请手动关闭',
+      };
+    }
+    if (livePid !== pid) {
       this.spawnedPid = null;
       return { ok: false, stopped: false, error: `控制台已是另一个实例（pid ${livePid}），插件不会去停它` };
     }

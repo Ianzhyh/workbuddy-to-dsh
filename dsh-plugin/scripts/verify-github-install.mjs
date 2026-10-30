@@ -96,12 +96,25 @@ try {
   check(junk.length === 0, '根包不包含日志 / 备份 / 测试文件', junk.length ? junk.join(', ') : '干净');
   /*
    * GitHub 直装用的是**仓库根包**，projectRoot 解析到安装目录本身（下面第 4 步
-   * 会验证）；`dsh-plugin/vendor/` 在这个形态里永远轮不到，却是 1.7MB 的逐字节
-   * 重复副本。子包 tgz（第 5 步）仍然需要 vendor，那里单独校验。
+   * 会验证）。`dsh-plugin/vendor/` 是 1.7MB 的逐字节重复副本，绝大多数文件在
+   * 这个形态里永远轮不到，所以根包不整目录携带它。
+   *
+   * **例外：共享的 failover 判定**。插件宿主入口（根包 `main`）静态 import
+   * `../vendor/lib/failover.mjs` —— 独立分发包里它必须来自 vendor，根包形态
+   * 下也只能从同一路径取，因此这一份必须进根包。npm 还会连带打进同目录树的
+   * 几个包级固定文件（LICENSE / NOTICE / .env.example / config.mjs），
+   * 合计几十 KB，可以接受；其余 vendor 文件仍然禁止。
    */
-  const vendored = rootPaths.filter((p) => p.startsWith('dsh-plugin/vendor/'));
-  check(vendored.length === 0, '根包不重复携带 dsh-plugin/vendor',
-    vendored.length ? `${vendored.length} 个文件` : '已排除（直装走根目录副本）');
+  const VENDOR_ALLOWED = new Set([
+    'dsh-plugin/vendor/lib/failover.mjs',
+    'dsh-plugin/vendor/LICENSE',
+    'dsh-plugin/vendor/NOTICE.md',
+    'dsh-plugin/vendor/.env.example',
+    'dsh-plugin/vendor/config.mjs',
+  ]);
+  const vendored = rootPaths.filter((p) => p.startsWith('dsh-plugin/vendor/') && !VENDOR_ALLOWED.has(p));
+  check(vendored.length === 0, '根包只携带共享 failover（不重复整份 vendor）',
+    vendored.length ? `${vendored.length} 个多余文件：${vendored.slice(0, 5).join(', ')}` : '仅 failover + 包级固定文件');
 
   // ── 2. 装进临时 profile 的 node_modules（真实安装路径）
   mkdirSync(profileDir, { recursive: true });
@@ -144,6 +157,7 @@ try {
     'dsh-plugin/lib/index.js',
     'dsh-plugin/lib/client.js',
     'dsh-plugin/lib/packageNames.mjs',
+    'dsh-plugin/vendor/lib/failover.mjs',
   ];
   const missing = required.filter((rel) => !existsSync(join(installedDir, rel)));
   check(missing.length === 0, '根包包含全部运行时文件', missing.length ? `缺少 ${missing.join(', ')}` : `${required.length} 项齐全`);
@@ -178,6 +192,7 @@ try {
     'vendor/bridge/promotions.mjs',
     'vendor/dashboard/server.mjs',
     'vendor/config.mjs',
+    'vendor/lib/failover.mjs',
   ];
   const notPacked = neededInTgz.filter((p) => !packedPaths.includes(p));
   check(notPacked.length === 0, '子包 tgz 包含全部运行时文件', notPacked.length ? `缺少 ${notPacked.join(', ')}` : `${neededInTgz.length} 项齐全`);

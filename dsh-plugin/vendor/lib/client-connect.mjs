@@ -696,18 +696,42 @@ export function readModelContextOverride(modelId) {
  * `CLAUDE_CODE_MAX_CONTEXT_TOKENS` 覆盖 —— 而它是**替换**那个假设值（不是取
  * min），所以写大了会虚报容量、上游被塞爆。因此这里给**模型真实上限**，
  * dsh 面板里按模型设的值只在不超过上限时采纳。
+ *
+ * ⚠️ 只有 `catalogById` 里**真有这个模型**才算"知道上限"。桥没起来 / 目录冷启动时
+ * `models` 里可能有一条 128000 的**兜底占位**（见 buildConnectBase），拿它当真实
+ * 上限就是把占位数当事实写进客户端配置。不知道就返回 0，让调用方不写这个键 ——
+ * Claude Code 退回它自己的 200K 假设，至少不是我们主动虚报。
  */
 export function claudeContextWindow(base, modelId) {
-  const meta = base?.catalogById?.get(modelId)
-    || (base?.models || []).find((m) => m.id === modelId)
-    || null;
-  const cap = meta ? Number(meta.contextMax) || Number(meta.context) || 0 : 0;
+  const meta = base?.catalogById?.get(modelId) || null;
+  if (!meta) return 0;
+  const cap = Number(meta.contextMax) || Number(meta.context) || 0;
+  if (!cap) return 0;
   const override = readModelContextOverride(modelId);
-  return cap ? Math.min(override || cap, cap) : override;
+  return Math.min(override || cap, cap);
+}
+
+/**
+ * 多模型时 Claude Code 的窗口取**所选模型里最小的已知上限**。
+ *
+ * `CLAUDE_CODE_MAX_CONTEXT_TOKENS` 是全局单值：按大模型写，用户切到小窗口模型
+ * 后 Claude Code 仍按大窗口规划 → 上游爆上下文。任一模型的 cap 未知时按 0
+ * （不写），因为取空集的最小值没有意义。
+ */
+function claudeSelectionWindow(base, models) {
+  if (!Array.isArray(models) || !models.length) return 0;
+  let min = Infinity;
+  for (const m of models) {
+    const w = claudeContextWindow(base, m.id);
+    if (w <= 0) return 0;
+    if (w < min) min = w;
+  }
+  return Number.isFinite(min) ? min : 0;
 }
 
 /** 段落合并：Claude Code 的 `~/.claude/settings.json`。 */
 function mergeClaude(text, ctx) {
+  const models = Array.isArray(ctx.models) ? ctx.models : [];
   const patch = {
     'env.ANTHROPIC_BASE_URL': ctx.baseUrlAnthropic,
     'env.ANTHROPIC_API_KEY': ctx.token,
@@ -725,17 +749,20 @@ function mergeClaude(text, ctx) {
    * 不写这一行，用户在面板里把模型调到 1M，Claude Code 仍按 200K 规划、
    * 自动压缩提前触发（issue #18）。
    *
-   * 取值用**模型上限**（`context_window_max` / `context_window_options` 的最大值），
-   * 不是桥报的默认档（多为 300K）—— 默认档是"官方 GUI 的压缩预算"，不是模型能
-   * 吃下的上限。dsh 面板里按模型设的值（`contextWindowByModel`）优先，但会被
-   * 上限收敛。
+   * 取值**只来自 `contextForClient`**（单一来源）：它保证窗口是目录里的真实上限
+   * （多模型取最小、受面板偏好覆盖但被上限收敛）。这里不再自己从 `ctx.models`
+   * 推 —— 那份列表里可能有 128000 的兜底占位，推出来的就是假窗口。
    */
-  const models = Array.isArray(ctx.models) ? ctx.models : [];
-  const primary = models.find((m) => m.id === ctx.model) || models[0] || null;
-  const cap = primary ? Number(primary.contextMax) || Number(primary.context) || 0 : 0;
-  const override = readModelContextOverride(ctx.model);
-  const window = ctx.contextWindow || (cap ? Math.min(override || cap, cap) : override);
+  const window = Number(ctx.contextWindow) || 0;
   if (window > 0) patch['env.CLAUDE_CODE_MAX_CONTEXT_TOKENS'] = String(window);
+  else if (ctx.contextWindowFallback !== undefined) {
+    /*
+     * 目录未知（冷启动）→ 不该继续留着旧版本写下的"1M"。把首次记录的原值还回去
+     * （null = 当初没有这个键，撤销时就该删掉）。否则客户端会一直按一个我们
+     * 无法验证的窗口规划上下文。
+     */
+    patch['env.CLAUDE_CODE_MAX_CONTEXT_TOKENS'] = ctx.contextWindowFallback;
+  }
   /*
    * 后台任务模型：Claude Code 的标题生成 / 文件摘要会发 haiku 类的请求，桥侧
    * 映射到 `ANTHROPIC_FAST_MODEL`。写进配置 = 用户看得见、也能自己改。
@@ -750,8 +777,11 @@ function mergeClaude(text, ctx) {
    * （桥的 Anthropic 层对不认识的 claude-* 一律回默认模型）。留着它们 =
    * 用户选「Sonnet」实际跑的是 glm-5.3 —— 界面在说假话。宁可只列出真实可用的那些。
    * 需要内置列表时点一次「撤销」，这行的原值会逐键还原。
+   *
+   * **只有一个模型也要写**（`>= 1`）：不写的话，Claude Code 的内置列表继续显示
+   * Sonnet/Opus，用户选中即被桥映射到别的模型 —— 与"界面对不上实际"是同一个问题。
    */
-  if (models.length >= 2) {
+  if (models.length >= 1) {
     patch.modelPicker = {
       options: models.map((m) => ({
         model: m.id,
@@ -816,7 +846,8 @@ function mergeByPaths(text, patch) {
     && original !== `${JSON.stringify(parsed.value, null, 2)}\n`;
 
   const changes = [];
-  const restore = { jsonPaths: {} };
+  /** `jsonPaths` 记原值；`planned` 记这次要写的值（旧 manifest 升级时判断"当前值是不是我们写的"）。 */
+  const restore = { jsonPaths: {}, planned: {} };
   /** 这次写入**凭空造出来**的中间容器（形如 `provider`），撤销时要一并清掉。 */
   const created = new Set();
   /** 因为中间层是用户数据（数组 / null 等）而**跳过**的键 —— 要如实报上去。 */
@@ -824,6 +855,7 @@ function mergeByPaths(text, patch) {
   for (const [path, value] of Object.entries(patch)) {
     const before = getPath(root, path);
     restore.jsonPaths[path] = before === undefined ? null : before;
+    restore.planned[path] = value;
     if (JSON.stringify(before) === JSON.stringify(value)) continue; // 幂等：没变就不报改动
     /*
      * 记下沿途缺失的容器。不记的话撤销只能删叶子（`provider.workbuddy`），
@@ -841,6 +873,7 @@ function mergeByPaths(text, patch) {
       // 中间层是用户自己的数据（数组 / null / 字符串…）：不覆盖，但也别装作写成功了
       skipped.push(path);
       delete restore.jsonPaths[path];
+      delete restore.planned[path];
       continue;
     }
     changes.push({ path, kind: 'value', from: before === undefined ? null : before, to: value });
@@ -853,6 +886,34 @@ function mergeByPaths(text, patch) {
     reformats,
     skipped,
   };
+}
+
+/**
+ * 合并旧 manifest 的 restore 与本次计划的 restore（JSON 客户端）。
+ *
+ * 规则（issue #18 后的审计）：
+ *   - 旧记录里有的键：**保留首次原值**（撤销要回到用户最初的样子）；
+ *   - 旧记录没有的键（旧版本没记）：当前文件里的值正好等于本次要写的值 ⇒
+ *     那就是旧版本我们写的，记 `null`（撤销删除）；否则是用户自己的值，照记。
+ *
+ * 必须在「无改动提前返回」之前做：老用户升级后第一次点「接入」时文件往往
+ * 已经是目标状态（changes 为空），但 restore 缺了新键 —— 不补记录，之后撤销
+ * 就会把旧版本写进去的值留下（例如 Claude Code 的后台任务模型）。
+ */
+function mergeJsonRestore(existingRestore, nextRestore) {
+  const oldPaths = (existingRestore && existingRestore.jsonPaths) || {};
+  const nextPaths = (nextRestore && nextRestore.jsonPaths) || {};
+  const planned = (nextRestore && nextRestore.planned) || {};
+  const jsonPaths = { ...nextPaths };
+  for (const [path, value] of Object.entries(nextPaths)) {
+    if (Object.prototype.hasOwnProperty.call(oldPaths, path)) {
+      jsonPaths[path] = oldPaths[path];
+    } else if (JSON.stringify(value) === JSON.stringify(planned[path])) {
+      jsonPaths[path] = null;
+    }
+  }
+  const created = [...new Set([...(existingRestore?.created || []), ...(nextRestore?.created || [])])];
+  return { ...nextRestore, jsonPaths, created };
 }
 
 function unmergeJson(text, restore) {
@@ -1339,6 +1400,28 @@ function planUnmerge(client, text, restore) {
 }
 
 /**
+ * 老记录的 `model_catalog_json` 兜底：旧版本只在"真的要写目录"时才记这个键，
+ * 于是撤销 / 切回原生时它会**留在文件里继续指向我们的目录** —— 客户端用回了
+ * 自己的 provider，模型选择器里却还列着桥的模型。
+ *
+ * 判据取"文件名只有我们用"（`workbuddy-model-catalog.json`）：当前值正好是它，
+ * 就说明这个键是我们加的，还原时删掉；别的值一律不碰（那是别人的目录）。
+ *
+ * 撤销与切回原生共用同一份逻辑 —— 原先只有后者有，于是"撤销"会留下悬空引用。
+ */
+function withCatalogRestoreFallback(client, text, restore) {
+  if (client.format !== 'toml') return restore;
+  const next = { ...(restore || {}) };
+  const top = { ...(next.topLevel || {}) };
+  if (!('model_catalog_json' in top)) {
+    const cur = tomlTopLevelValue(String(text || '').split('\n'), 'model_catalog_json');
+    if (cur === catalogFileName(client)) top.model_catalog_json = null;
+  }
+  next.topLevel = top;
+  return next;
+}
+
+/**
  * 算一份「要改成什么样」的计划，**不落盘**。
  *
  * 返回：`{ id, label, path, exists, installed, changes, preview, applied, error? }`
@@ -1354,11 +1437,23 @@ export function planClient(id, ctx, opts = {}) {
   const path = clientPath(client);
   const exists = existsSync(path);
   const text = readText(path);
-  const r = planWithCatalog(client, text, ctx);
-  if (r.error) return { id, label: client.label, path, exists, error: r.error };
-
   const applied = readManifest(client.id, root);
   const hasRecord = Boolean(applied && applied.path === path);
+  /*
+   * 与 applyClientLocked 同一判据：目录未知（冷启动）时，旧版本写下的窗口键
+   * 要还原成首次记录的原值 —— 预览必须显示"这次会删掉/还原它"，否则用户看到的
+   * 预览与实际写入不一致。
+   */
+  let planCtx = ctx;
+  if (client.id === 'claude' && hasRecord) {
+    const oldPaths = applied.restore?.jsonPaths || {};
+    if (Object.prototype.hasOwnProperty.call(oldPaths, 'env.CLAUDE_CODE_MAX_CONTEXT_TOKENS')
+      && !(Number(ctx.contextWindow) > 0)) {
+      planCtx = { ...ctx, contextWindowFallback: oldPaths['env.CLAUDE_CODE_MAX_CONTEXT_TOKENS'] };
+    }
+  }
+  const r = planWithCatalog(client, text, planCtx);
+  if (r.error) return { id, label: client.label, path, exists, error: r.error };
   /*
    * 模式以**文件本身**为准，不以我们记的账为准 —— 用户可能手工把配置改回去了，
    * 也可能在别的机器上接入过。记的账只用来判断"能不能一键切回来"。
@@ -1675,8 +1770,14 @@ export function contextForClient(base, clientId, chosen, selection) {
     model,
     models,
     anthropicFastModel: base.anthropicFastModel,
-    /** Claude Code 侧要写的上下文窗口（主模型的上限，受面板偏好覆盖）。 */
-    contextWindow: claudeContextWindow(base, model),
+    /**
+     * Claude Code 侧要写的上下文窗口。多模型取**最小已知上限**；任一模型的上限
+     * 未知（目录冷启动）则为 0 —— 调用方据此不写 `CLAUDE_CODE_MAX_CONTEXT_TOKENS`，
+     * 而不是把兜底占位当事实。
+     */
+    contextWindow: clientId === 'claude'
+      ? claudeSelectionWindow(base, models)
+      : claudeContextWindow(base, model),
     running: base.running,
   };
 }
@@ -1810,12 +1911,24 @@ function applyClientLocked(id, ctx, opts = {}) {
   const path = clientPath(client);
 
   const text = readText(path);
-  const r = planWithCatalog(client, text, ctx);
-  if (r.error) return { ok: false, error: r.error };
-  const ctx2 = r.ctx;
-
   const existing = readManifest(client.id, root);
   const keepRestore = existing && existing.path === path;
+  /*
+   * 目录未知（冷启动）时不再写窗口 —— 但旧版本写进去的那个键不能留着，
+   * 否则客户端会一直按一个我们无法验证的窗口规划上下文。把它还原成首次记录
+   * 的原值（null = 当初没有这个键，撤销时删掉）。
+   */
+  let planCtx = ctx;
+  if (client.id === 'claude' && keepRestore) {
+    const oldPaths = existing.restore?.jsonPaths || {};
+    if (Object.prototype.hasOwnProperty.call(oldPaths, 'env.CLAUDE_CODE_MAX_CONTEXT_TOKENS')
+      && !(Number(ctx.contextWindow) > 0)) {
+      planCtx = { ...ctx, contextWindowFallback: oldPaths['env.CLAUDE_CODE_MAX_CONTEXT_TOKENS'] };
+    }
+  }
+  const r = planWithCatalog(client, text, planCtx);
+  if (r.error) return { ok: false, error: r.error };
+  const ctx2 = r.ctx;
 
   /*
    * 「无需改动」要**连目录一起看**：`model_catalog_json` 早就写对时，
@@ -1823,6 +1936,19 @@ function applyClientLocked(id, ctx, opts = {}) {
    * 只看配置文件就提前返回，目录永远纠正不过来 —— 实测踩到过。
    */
   if (r.changes.length === 0 && !r.catalogNeedsWrite) {
+    /*
+     * 老 manifest 升级：文件已经是目标状态，但记录里缺了旧版本没记的新键。
+     * 这里补上（并把"旧版本我们写的值"判成 null），否则之后的撤销会把它们留下。
+     */
+    if (keepRestore && client.format !== 'toml' && r.restore) {
+      const merged = mergeJsonRestore(existing.restore, r.restore);
+      if (JSON.stringify(existing.restore || null) !== JSON.stringify(merged)) {
+        try {
+          mkdirSync(join(root, client.id), { recursive: true });
+          writeFileSync(manifestPath(client.id, root), `${JSON.stringify({ ...existing, restore: merged }, null, 2)}\n`, 'utf8');
+        } catch { /* 记录补写失败：不影响本次"无需改动"的结论，下次点接入再补 */ }
+      }
+    }
     return {
       ok: true, changed: false, id: client.id, label: client.label, path,
       changes: [], message: '已经是接入状态，无需改动',
@@ -1874,13 +2000,16 @@ function applyClientLocked(id, ctx, opts = {}) {
   // 3) 收紧权限（文件里现在有令牌了）
   const hardened = hardenTokenFile(path);
 
-  // 4) 撤销记录（保留首次的 restore）
+  // 4) 撤销记录（保留首次的 restore；JSON 客户端再把旧版本漏记的新键补进来）
+  const mergedRestore = keepRestore && client.format !== 'toml' && r.restore
+    ? mergeJsonRestore(existing.restore, r.restore)
+    : (keepRestore ? existing.restore : r.restore);
   const manifest = {
     client: client.id,
     path,
     at: new Date().toISOString(),
     backup,
-    restore: keepRestore ? existing.restore : r.restore,
+    restore: mergedRestore,
     format: client.format,
     /**
      * 这次写进去的**模型**。记下来是为了下一轮能认出"这就是用户选的"
@@ -2023,26 +2152,7 @@ function switchClientModeLocked(client, target, ctx = null, opts = {}) {
     };
   }
 
-  /*
-   * `model_catalog_json` 的兜底还原。
-   *
-   * 实测踩到（就在本机的真实记录里）：老版本写下的 `restore.topLevel` 里**没有**这个键
-   * —— 那时它只在"真的要写目录"时才进 topLevel，于是记录漏了它。照这份记录还原，
-   * 这个键会**留在文件里继续指向我们的目录**：客户端用回了自己的 provider，模型选择器
-   * 里却还列着桥的模型 —— 一个自相矛盾的状态，而且用户完全看不出哪里不对。
-   *
-   * 判据取"文件名只有我们用"（`workbuddy-model-catalog.json`）：当前值正好是它，
-   * 就说明这个键是我们加的，还原时删掉；别的值一律不碰（那是别人的目录）。
-   */
-  const restore = { ...(rec.restore || {}) };
-  if (client.format === 'toml') {
-    const top = { ...(restore.topLevel || {}) };
-    if (!('model_catalog_json' in top)) {
-      const cur = tomlTopLevelValue(text.split('\n'), 'model_catalog_json');
-      if (cur === catalogFileName(client)) top.model_catalog_json = null;
-    }
-    restore.topLevel = top;
-  }
+  const restore = withCatalogRestoreFallback(client, text, rec.restore || {});
 
   const r = planUnmerge(client, text, restore);
   if (r.error) return { ok: false, error: r.error };
@@ -2163,7 +2273,12 @@ function undoClientLocked(client, opts = {}) {
   const text = readText(path);
   if (text === null) return { ok: false, error: '配置文件不存在，无法撤销' };
 
-  const r = planUnmerge(client, text, manifest.restore || {});
+  /*
+   * 老记录里可能没有 `model_catalog_json`（旧版本只在真要写目录时才记）。
+   * 撤销同样要兜底，否则这个键会留下继续指向我们的目录文件。
+   */
+  const restore = withCatalogRestoreFallback(client, text, manifest.restore || {});
+  const r = planUnmerge(client, text, restore);
   if (r.error) return { ok: false, error: r.error };
   try {
     writeAtomic(path, r.text);
@@ -2236,6 +2351,20 @@ export function fileSize(path) {
   } catch {
     return null;
   }
+}
+
+/** 从**配置文件里**把模型读回来（用于验证时发真实模型，而不是一个硬编码别名）。 */
+function readModelFromConfig(client) {
+  const text = readText(clientPath(client));
+  if (text === null) return '';
+  if (client.format === 'toml') {
+    const raw = tomlTopLevelValue(text.split('\n'), 'model');
+    return raw ? String(raw).replace(/^workbuddy\//, '') : '';
+  }
+  const parsed = jsonParseSmart(text, clientPath(client));
+  if (!parsed.ok) return '';
+  if (client.id === 'claude') return String(getPath(parsed.value, 'env.ANTHROPIC_MODEL') || '');
+  return String(getPath(parsed.value, 'model') || '').replace(/^workbuddy\//, '');
 }
 
 /** 从**配置文件里**把令牌读回来（不是用内存里的值）。 */
@@ -2438,7 +2567,11 @@ export function resolveSelection(base, client, explicit) {
  * `baseUrl` 用 OpenAI 那条（`…/v1`）：三条协议里 `/v1/models` 都在这条路径下，
  * Anthropic 的 base 只是不带 `/v1` 而已，模型列表端点两者是同一条。
  *
- * @param {{ baseUrl?: string, tokenOverride?: string|null, timeoutMs?: number }} [opts]
+ * `model` 必须是**配置里真实的模型**：count_tokens 会按 `/v1/messages` 同一套
+ * 规则解析模型并做目录预校验（目录已知时未知模型 404）。硬编码一个
+ * `claude-sonnet-4-5` 永远 200，等于把"模型名写错了"报成"验证通过"。
+ *
+ * @param {{ baseUrl?: string, tokenOverride?: string|null, model?: string, timeoutMs?: number }} [opts]
  */
 export async function verifyAgainstBridge(client, opts = {}) {
   const { baseUrl, tokenOverride = null, timeoutMs = 5000 } = opts;
@@ -2466,6 +2599,7 @@ export async function verifyAgainstBridge(client, opts = {}) {
      */
     if (client?.id === 'claude') {
       const anthropicBase = String(baseUrl).replace(/\/+$/, '').replace(/\/v1$/, '');
+      const model = String(opts.model || readModelFromConfig(client) || 'claude-sonnet-4-5');
       const ac2 = new AbortController();
       const timer2 = setTimeout(() => ac2.abort(), timeoutMs);
       try {
@@ -2476,13 +2610,15 @@ export async function verifyAgainstBridge(client, opts = {}) {
             'content-type': 'application/json',
             'anthropic-version': '2023-06-01',
           },
-          body: JSON.stringify({ model: 'claude-sonnet-4-5', messages: [{ role: 'user', content: 'hi' }] }),
+          body: JSON.stringify({ model, messages: [{ role: 'user', content: 'hi' }] }),
           signal: ac2.signal,
         });
         if (!r2.ok) {
+          const detail = await r2.json().catch(() => null);
+          const why = detail?.error?.message ? `：${String(detail.error.message).slice(0, 200)}` : '';
           return {
             ok: false,
-            reason: `Anthropic 路径验证失败（HTTP ${r2.status}）—— Claude Code 走的是 /v1/messages`,
+            reason: `Anthropic 路径验证失败（HTTP ${r2.status}）${why} —— Claude Code 走的是 /v1/messages`,
           };
         }
       } catch (e) {

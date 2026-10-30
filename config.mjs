@@ -312,9 +312,29 @@ function resolveLocalToken() {
   const token = randomBytes(24).toString('base64url');
   try {
     mkdirSync(dirname(BRIDGE_TOKEN_PATH), { recursive: true });
-    writeFileSync(BRIDGE_TOKEN_PATH, `${token}\n`, { mode: 0o600 });
+    /*
+     * `wx`（排它创建）而不是普通覆盖写：控制台与 dsh 插件可能**同时**首次启动，
+     * 各自走到这里。没有它时两个进程会各生成一把令牌、后写者覆盖先写者 ——
+     * 先启动的桥立刻对另一方 401（用户看到的是"令牌不一致"，却不知道从哪来）。
+     * 抢输的一方回读赢家写下的值，双方从第一次起就用同一把。
+     */
+    writeFileSync(BRIDGE_TOKEN_PATH, `${token}\n`, { mode: 0o600, flag: 'wx' });
     tokenHardenResult = hardenTokenFile();
-  } catch { /* 只读介质：本次运行有效，下次会换新（用户需重填客户端密钥） */ }
+    localTokenCache = token;
+    return localTokenCache;
+  } catch (error) {
+    if (error?.code === 'EEXIST') {
+      try {
+        const stored = readFileSync(BRIDGE_TOKEN_PATH, 'utf8').trim();
+        if (/^[A-Za-z0-9._-]{16,}$/.test(stored)) {
+          tokenHardenResult = hardenTokenFile();
+          localTokenCache = stored;
+          return localTokenCache;
+        }
+      } catch { /* 回读失败：退回下面的一次性令牌 */ }
+    }
+    /* 只读介质：本次运行有效，下次会换新（用户需重填客户端密钥） */
+  }
   localTokenCache = token;
   return localTokenCache;
 }

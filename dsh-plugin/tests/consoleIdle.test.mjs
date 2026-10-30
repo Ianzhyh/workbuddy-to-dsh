@@ -135,3 +135,38 @@ test('控制台闲置：页面请求会保活，停止活动后仍会退出', { 
     rmSync(dataDir, { recursive: true, force: true });
   }
 });
+
+test('控制台闲置：被 403 拒绝的跨站请求不算活动（不能靠恶意请求保活）', { timeout: 30_000 }, async () => {
+  /*
+   * 任意网页都能让浏览器发几个跨站请求。若这些被拒的请求也刷新活动时间，
+   * 控制台就能被"外部网页"无限保活（白占 80+MB），而用户根本没在用。
+   * 活动计时必须在 origin 校验**通过之后**才更新。
+   */
+  const { child, url, dataDir, output } = await startConsole(1500);
+  try {
+    const deadline = Date.now() + 6000;
+    while (child.exitCode === null && Date.now() < deadline) {
+      try {
+        const res = await fetch(`${url}/api/overview`, {
+          method: 'POST',
+          headers: { origin: 'https://evil.example', 'content-type': 'text/plain' },
+          body: 'x',
+          signal: AbortSignal.timeout(1000),
+        });
+        assert.equal(res.status, 403, '跨站请求必须被拒');
+        await res.body?.cancel().catch(() => { /* 忽略 */ });
+      } catch (error) {
+        if (child.exitCode !== null) break;
+        throw error;
+      }
+      await sleep(400);
+    }
+    const result = await waitExit(child, 6000);
+    assert.equal(result.timedOut, false, `跨站请求把控制台保活了：\n${output()}`);
+    assert.equal(result.code, 0, `闲置退出应以 0 退出：\n${output()}`);
+  } finally {
+    try { child.kill(); } catch { /* 已退出 */ }
+    await sleep(100);
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});

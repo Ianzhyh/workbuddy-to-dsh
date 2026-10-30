@@ -58,7 +58,8 @@ import {
   verifyAgainstBridge,
   verifyWritten,
 } from '../lib/client-connect.mjs';
-import { effectiveAuthFile, readState, writeAccountAlias, writeAccountHidden, writeAccountOrder, writeState } from '../lib/state.mjs';
+import { effectiveAuthFile, readState, writeAccountAlias, writeAccountHidden, writeAccountOrder, writeState, writeStateStrict } from '../lib/state.mjs';
+import { failoverSignal, pickAccountFailoverTarget } from '../lib/failover.mjs';
 
 // ── 基础工具 ────────────────────────────────────────────────────────────
 
@@ -821,67 +822,158 @@ async function startBridgeAndWait(opts = {}) {
 async function applyAccountPinCorrection(pin) {
   if (!pin?.changed) return { applied: false, restarted: false, error: null };
   /*
-   * 钉住状态变了 = 桥可能换了账号。无论这次是否真的重启桥，积分缓存都必须
-   * 作废：否则页面会把上一个账号的余额继续显示在新账号下（issue #6）。
+   * 这条路径也会停/起桥 —— 必须与切号排同一队列，否则 GET /api/accounts 触发的
+   * 校正会和用户手动切号交错（一个停桥、另一个起桥，端口撞车）。
    */
-  invalidateQuotaCache();
-  const health = await bridgeHealth();
-  if (!health.running) return { applied: false, restarted: false, error: null };
-  /*
-   * 看**当前生效文件**：桥可能已经跟随桌面换号（authFile=桌面文件），
-   * 此时 authFilePinned 还是旧快照但桥早就不读它了。拿 pinned 判断会误重启
-   * 一个已经正确的桥；只有当前生效文件仍是旧钉住文件时才需要重启。
-   */
-  const running = health.body?.authFile || health.body?.authFilePinned;
-  if (pin.previousPin && normPath(running) !== normPath(pin.previousPin)) {
-    return { applied: false, restarted: false, error: null };
-  }
-  await stopBridgeAndWait();
-  const started = await startBridgeAndWait();
-  return { applied: true, restarted: started.started === true, error: started.error || started.warning || null };
+  return runBridgeLifecycle(async () => {
+    /*
+     * 钉住状态变了 = 桥可能换了账号。无论这次是否真的重启桥，积分缓存都必须
+     * 作废：否则页面会把上一个账号的余额继续显示在新账号下（issue #6）。
+     */
+    invalidateQuotaCache();
+    const health = await bridgeHealth();
+    if (!health.running) return { applied: false, restarted: false, error: null };
+    /*
+     * 看**当前生效文件**：桥可能已经跟随桌面换号（authFile=桌面文件），
+     * 此时 authFilePinned 还是旧快照但桥早就不读它了。拿 pinned 判断会误重启
+     * 一个已经正确的桥；只有当前生效文件仍是旧钉住文件时才需要重启。
+     */
+    const running = health.body?.authFile || health.body?.authFilePinned;
+    if (pin.previousPin && normPath(running) !== normPath(pin.previousPin)) {
+      return { applied: false, restarted: false, error: null };
+    }
+    await stopBridgeAndWait();
+    const started = await startBridgeAndWait();
+    return { applied: true, restarted: started.started === true, error: started.error || started.warning || null };
+  });
 }
 
 /**
- * 切换桌面账号：停桥 → 写 `.state.json` → 清体检/积分缓存 → 用目标文件重启桥。
- * 面板「切换账号」与限流自动切号共用这一条路径，避免两套规则漂移。
+ * 切换桌面账号：写 `.state.json` → 停桥 → 用目标文件起桥 → 校验账号。
+ *
+ * 面板「切换账号」、限流自动切号、插件 failover 共用这一条路径，避免多套规则漂移。
+ *
+ * **失败必须如实报告，并回到原状态**（issue #17 的后续审计）：
+ *   1. **先写期望态再停桥**：写不进去就根本不动桥。反过来的话，桥停了、状态
+ *      没落盘，重启后账号跳回去，而调用方以为切换成功了。
+ *   2. 停桥失败 → 回滚 state，返回 `switched:false`。
+ *   3. 新账号起不来 / 起来的账号与目标不一致 → 回滚 state，并按旧账号把桥恢复。
+ *      原先无论结果如何都回 `switched:true`，面板会显示"已切换"，实际还在旧账号
+ *      （甚至桥停着）。
+ *   4. 原本桥就没跑：失败后保持停止（不"顺手"用旧账号起一个用户没要求的桥）。
+ *
+ * `deps` 仅给单测注入用（真实调用一律用默认实现）。
  */
-async function switchDesktopAccount(file) {
-  const listed = await listAccountFiles();
-  const hit = listed.accounts.find((a) => a.name === file);
-  if (!hit) throw new Error(`未知账号：${file}`);
-  if (!hit.usable) throw new Error(`该账号当前不可用：${hit.error || '无法解开凭据'}`);
-  const wasRunning = (await bridgeHealth()).running;
-  if (wasRunning) await stopBridgeAndWait();
-  writeState({
-    authFile: hit.path,
-    authFileDesktopUid: listed.desktopUid || null,
-    authFilePinnedAt: new Date().toISOString(),
-  });
-  clearProbeResults();
-  invalidateQuotaCache();
-  const started = await startBridgeAndWait({ authFile: hit.path, followUid: listed.desktopUid || '' });
-  return {
-    account: { name: hit.name, account: hit.account, domain: hit.domain },
-    restarted: started.started === true,
-    health: started.health || null,
-    warning: started.warning || started.error || null,
+export async function switchDesktopAccount(file, deps = {}) {
+  const api = {
+    listAccountFiles,
+    bridgeHealth,
+    stopBridgeAndWait,
+    startBridgeAndWait,
+    readState,
+    writeState,
+    writeStateStrict,
+    clearProbeResults,
+    invalidateQuotaCache,
+    ...deps,
   };
+  return runBridgeLifecycle(async () => {
+    const listed = await api.listAccountFiles();
+    const hit = listed.accounts.find((a) => a.name === file);
+    if (!hit) throw new Error(`未知账号：${file}`);
+    if (!hit.usable) throw new Error(`该账号当前不可用：${hit.error || '无法解开凭据'}`);
+    const account = { name: hit.name, account: hit.account, domain: hit.domain };
+    const wasRunning = (await api.bridgeHealth()).running;
+
+    /* 回滚快照：三个键都要精确还原；原来没有的键用 null 删除。 */
+    const prev = api.readState();
+    const snapshot = {
+      authFile: prev.authFile ?? null,
+      authFileDesktopUid: prev.authFileDesktopUid ?? null,
+      authFilePinnedAt: prev.authFilePinnedAt ?? null,
+    };
+    const rollbackState = () => {
+      try { api.writeState(snapshot); } catch { /* 回滚写失败：保留旧缓存，尽力而为 */ }
+    };
+
+    try {
+      api.writeStateStrict({
+        authFile: hit.path,
+        authFileDesktopUid: listed.desktopUid || null,
+        authFilePinnedAt: new Date().toISOString(),
+      });
+    } catch (error) {
+      return {
+        switched: false,
+        restarted: false,
+        account,
+        error: `无法写入账号选择（${error?.message || error}），桥未改动`,
+      };
+    }
+
+    if (wasRunning) {
+      const stopped = await api.stopBridgeAndWait();
+      if (stopped.stopped !== true) {
+        rollbackState();
+        return {
+          switched: false,
+          restarted: false,
+          account,
+          error: `旧桥没能停下来：${stopped.warning || stopped.error || '未知原因'}`,
+        };
+      }
+    }
+    api.clearProbeResults();
+    api.invalidateQuotaCache();
+
+    const started = await api.startBridgeAndWait({ authFile: hit.path, followUid: listed.desktopUid || '' });
+    /*
+     * 只有**真的起来了**才去核对登录账号。启动失败时端口上可能还有旧桥在答
+     * （停桥没彻底生效），拿它的 userId 去比会得到"账号不一致"，把真正的
+     * 启动错误掩盖掉。
+     */
+    const health = started.health
+      || (started.started === true ? (await api.bridgeHealth()).body : null)
+      || null;
+    const actualUid = health?.auth?.userId ? String(health.auth.userId) : '';
+    const uidMismatch = started.started === true
+      && Boolean(hit.userId && actualUid && String(hit.userId) !== actualUid);
+    if (started.started !== true || uidMismatch) {
+      rollbackState();
+      let rollbackNote = '';
+      if (wasRunning) {
+        const restored = await api.startBridgeAndWait(snapshot.authFile
+          ? { authFile: snapshot.authFile, followUid: snapshot.authFileDesktopUid || '' }
+          : {});
+        rollbackNote = restored.started === true
+          ? '；已恢复原账号'
+          : `；原账号也未能恢复：${restored.error || restored.warning || '未知原因'}`;
+      }
+      return {
+        switched: false,
+        restarted: false,
+        rolledBack: true,
+        account,
+        error: `${uidMismatch
+          ? `桥登录的账号与目标不一致（目标 ${hit.userId}，实际 ${actualUid}）`
+          : (started.error || started.warning || '桥未能以新账号启动')}${rollbackNote}`,
+      };
+    }
+    return {
+      switched: true,
+      account,
+      restarted: true,
+      health,
+      warning: started.warning || null,
+    };
+  });
 }
 
-/** 从账号列表挑下一个可切换账号（纯函数，导出给单测）。 */
-export function pickAccountFailoverTarget(accounts, currentUid = '') {
-  const usable = (Array.isArray(accounts) ? accounts : [])
-    .filter((a) => a && a.usable === true && a.hidden !== true);
-  if (usable.length < 2) return null;
-  const current = usable.find((a) => a.active === true)
-    || (currentUid ? usable.find((a) => String(a.userId || a.account || '') === String(currentUid)) : null);
-  const start = current ? usable.indexOf(current) : -1;
-  for (let i = 1; i <= usable.length; i += 1) {
-    const cand = usable[(start + i + usable.length) % usable.length];
-    if (!current || cand.name !== current.name) return cand;
-  }
-  return null;
-}
+/**
+ * 从账号列表挑下一个可切换账号 —— 实现见 `lib/failover.mjs`（与 dsh 插件共用，
+ * 避免两份副本规则漂移）。这里重新导出是给自测用的。
+ */
+export { pickAccountFailoverTarget };
 
 /**
  * Web 控制台的限流自动切号（`.env` 显式开启，默认关闭）。
@@ -900,18 +992,21 @@ async function maybeAutoSwitchAccount() {
   try {
     const health = await bridgeHealth();
     if (!health.running || !health.ok) return;
-    const limit = health.body?.rateLimit;
-    if (!limit || Number(limit.count) < ACCOUNT_FAILOVER_AFTER) return;
-    if (health.body?.auth?.source !== 'desktop') return;
+    const signal = failoverSignal(health.body, ACCOUNT_FAILOVER_AFTER);
+    if (!signal) return;
     lastAccountFailoverAt = Date.now();
     const listed = await listAccounts();
     const target = pickAccountFailoverTarget(listed.accounts, health.body?.auth?.userId || '');
     if (!target) {
-      console.warn(`账号自动切换跳过：没有其它可用账号（${limit.model || '?'} 已限流 ${limit.count} 次）`);
+      console.warn(`账号自动切换跳过：没有其它可用账号（${signal.model || '?'} 已限流 ${signal.count} 次）`);
       return;
     }
-    await switchDesktopAccount(target.name);
-    console.log(`上游限流 ${limit.count} 次（${limit.model || '?'}），已自动切换账号 -> ${target.name}`);
+    const result = await switchDesktopAccount(target.name);
+    if (!result.switched) {
+      console.warn(`账号自动切换失败：${result.error || '未知原因'}`);
+      return;
+    }
+    console.log(`上游限流 ${signal.count} 次（${signal.model || '?'}），已自动切换账号 -> ${target.name}`);
   } catch (error) {
     console.warn(`账号自动切换失败：${error?.message || error}`);
   } finally {
@@ -972,6 +1067,34 @@ export async function stopBridgeAndWait(target) {
     }
   }
   return freed ? result : { ...result, warning: `进程未在超时内退出，端口 ${port} 可能仍被占用` };
+}
+
+/**
+ * 桥生命周期单锁（进程内 Promise 队列）。
+ *
+ * 停桥 / 起桥是**多步、非原子**的操作（停旧 → 起新 → 等就绪），两个并发调用
+ * 会交错：A 停、B 停、A 起、B 起 —— 端口撞车、状态错乱，最坏是"报告成功但
+ * 服务的是旧账号"。所有会改变桥进程的入口都必须排队：
+ *   /api/account/switch、/api/bridge/start|stop|restart、账号钉住校正、
+ *   限流自动切号。
+ *
+ * 锁只包住 stop/start/写 state，不在这里递归调用自己；任务抛错不影响后续任务
+ * （前一个失败时下一个照常执行，否则一次失败会把队列永久卡死）。
+ */
+let bridgeLifecycleTail = Promise.resolve();
+let bridgeLifecycleBusy = 0;
+function runBridgeLifecycle(task) {
+  bridgeLifecycleBusy += 1;
+  // 切号/重启期间算「有活动」：闲置看门狗不能在多步操作中途把控制台关掉。
+  if (IDLE_EXIT_MS) lastActivityAt = Date.now();
+  const run = bridgeLifecycleTail.then(task, task);
+  bridgeLifecycleTail = run
+    .finally(() => {
+      bridgeLifecycleBusy -= 1;
+      if (IDLE_EXIT_MS) lastActivityAt = Date.now();
+    })
+    .catch(() => {});
+  return run;
 }
 
 // ── 对话代理（流式原样透传） ────────────────────────────────────────────
@@ -1151,6 +1274,8 @@ function startIdleExitWatchdog() {
   const tick = Math.min(60_000, Math.max(1000, Math.floor(IDLE_EXIT_MS / 4)));
   const timer = setInterval(() => {
     if (activeRequests > 0) return;
+    // 切号 / 重启桥是多步操作：中途退出会让桥停在半路（甚至停着不再拉起）。
+    if (bridgeLifecycleBusy > 0) return;
     const idleFor = Date.now() - lastActivityAt;
     if (idleFor < IDLE_EXIT_MS) return;
     clearInterval(timer);
@@ -1170,7 +1295,6 @@ const server = createServer(async (req, res) => {
   res.once('close', release);
   const url = new URL(req.url, config.dashboard.url);
   const route = url.pathname;
-  touchConsoleActivity(route);
 
   try {
     // 跨站来源一律拒（DNS rebinding 的防线，见 originAllowed 的说明）。
@@ -1178,6 +1302,12 @@ const server = createServer(async (req, res) => {
     if (!originAllowed(req)) {
       return sendJson(res, 403, { ok: false, error: 'cross-origin request rejected (this console serves local clients only)' });
     }
+    /*
+     * 只有**通过来源校验**的请求才算活动。原先放在 origin 检查之前：任意网页
+     * 只要能让浏览器发几个被 403 的跨站请求，就能无限延后闲置退出
+     * （控制台白白常驻 80+MB，而用户根本没在用）。
+     */
+    touchConsoleActivity(route);
 
     /**
      * 写操作的准入检查：必须带 `x-workbuddy-panel: 1`。
@@ -1557,7 +1687,7 @@ const server = createServer(async (req, res) => {
        */
       if (result.changed) {
         result.auth = await verifyAgainstBridge(findClient(id), {
-          baseUrl: context.baseUrlOpenAI, tokenOverride: context.token,
+          baseUrl: context.baseUrlOpenAI, tokenOverride: context.token, model: context.model,
         });
       }
       sendJson(res, result.ok ? 200 : 400, result);
@@ -1611,7 +1741,7 @@ const server = createServer(async (req, res) => {
       const result = switchClientMode(id, 'bridge', context);
       if (result.ok && result.changed) {
         result.auth = await verifyAgainstBridge(findClient(id), {
-          baseUrl: context.baseUrlOpenAI, tokenOverride: context.token,
+          baseUrl: context.baseUrlOpenAI, tokenOverride: context.token, model: context.model,
         });
       }
       sendJson(res, result.ok ? 200 : 400, result);
@@ -1654,14 +1784,14 @@ const server = createServer(async (req, res) => {
       const context = contextForClient(base, id, chosen, selection);
       const written = verifyWritten(client, context);
       const auth = written.ok
-        ? await verifyAgainstBridge(client, { baseUrl: context.baseUrlOpenAI, tokenOverride: context.token })
+        ? await verifyAgainstBridge(client, { baseUrl: context.baseUrlOpenAI, tokenOverride: context.token, model: context.model })
         : null;
       sendJson(res, 200, { ok: written.ok && (auth?.ok ?? false), written, auth });
       return;
     }
 
     if (route === '/api/bridge/start' && req.method === 'POST') {
-      const result = await startBridgeAndWait();
+      const result = await runBridgeLifecycle(() => startBridgeAndWait());
       sendJson(res, result.started ? 200 : 400, result);
       return;
     }
@@ -1675,7 +1805,7 @@ const server = createServer(async (req, res) => {
       const onClientClose = () => { if (!res.writableEnded) ac.abort(); };
       res.on('close', onClientClose);
       try {
-        const result = await stopBridgeAndWait();
+        const result = await runBridgeLifecycle(() => stopBridgeAndWait());
         if (!ac.signal.aborted) sendJson(res, 200, result);
       } finally {
         res.off('close', onClientClose);
@@ -1684,10 +1814,13 @@ const server = createServer(async (req, res) => {
     }
 
     if (route === '/api/bridge/restart' && req.method === 'POST') {
-      const wasRunning = (await bridgeHealth()).running;
-      if (wasRunning) await stopBridgeAndWait();
-      const result = await startBridgeAndWait();
-      sendJson(res, result.started ? 200 : 400, { ...result, wasRunning });
+      const result = await runBridgeLifecycle(async () => {
+        const wasRunning = (await bridgeHealth()).running;
+        if (wasRunning) await stopBridgeAndWait();
+        const started = await startBridgeAndWait();
+        return { ...started, wasRunning };
+      });
+      sendJson(res, result.started ? 200 : 400, result);
       return;
     }
 
@@ -1959,9 +2092,12 @@ const server = createServer(async (req, res) => {
          * 用**未折叠**的登录文件列表校验：列表页已经一个账号一行，但版本错配时
          * （旧插件/旧页面还在跑）它可能传来同一账号里被合并掉的那份快照文件名 ——
          * 那也是一份真实存在的登录文件，切过去同样有效，不该报"未知账号"。
+         *
+         * 状态码跟着真实结果走：失败回 500 且 `switched:false`。原先无条件
+         * `switched:true` + 200，面板与插件都会把失败当成功（issue #17 审计）。
          */
         const result = await switchDesktopAccount(file);
-        sendJson(res, 200, { switched: true, ...result });
+        sendJson(res, result.switched ? 200 : 500, result);
       } catch (err) {
         if (err.code === 'BODY_TOO_LARGE') return bodyTooLarge(req, res);
         sendJson(res, 400, { switched: false, error: err.message });
@@ -2238,8 +2374,10 @@ function startConsoleServer() {
     /*
      * 桥若已在跑就直接复用；但从上一个版本升级后，端口上的进程是**旧代码**，
      * 必须按构建指纹重启一次（startBridgeAndWait 内部处理）。
+     * 走同一个生命周期队列：启动期间的 HTTP 请求（页面自动刷新）可能也触发
+     * 重启，两条路径不能交错。
      */
-    const result = await startBridgeAndWait();
+    const result = await runBridgeLifecycle(() => startBridgeAndWait());
     if (result.started) {
       console.log(`桥地址            ->  ${config.bridge.url}/v1（${result.reused ? '已在运行，复用' : '已就绪'}，PID ${result.pid}）`);
     } else {

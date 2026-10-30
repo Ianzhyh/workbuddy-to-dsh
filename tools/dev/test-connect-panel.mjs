@@ -381,7 +381,7 @@ try {
   await waitFor(cdp, `document.querySelectorAll('#clientsBox .connectresult').length >= 1`, 8000, '验证结果渲染').catch(() => {});
   const afterVerify = await rowsOf();
   const codexResults = ((afterVerify.find((r) => r.label === 'Codex') || {}).results || []).join(' | ');
-  if (codexResults.includes('静态自检通过') && codexResults.includes('端到端验证通过')) {
+  if (codexResults.includes('静态自检通过') && codexResults.includes('路由与令牌验证通过')) {
     pass(`Codex 验证结论渲染到位：${codexResults}`);
   } else {
     fail(`Codex 的验证结论没渲染出来：${JSON.stringify(codexResults)}`);
@@ -420,8 +420,8 @@ try {
   } else {
     fail(`验证失败没有如实渲染：${JSON.stringify(claudeBad)}`);
   }
-  if (claudeBad && claudeBad.text.includes('没有做端到端验证')) pass('静态自检没过时明说「没做端到端验证」');
-  else fail(`静态自检没过却没说明端到端没做：${JSON.stringify(claudeBad)}`);
+  if (claudeBad && claudeBad.text.includes('没有做路由与令牌验证')) pass('静态自检没过时明说「没做路由与令牌验证」');
+  else fail(`静态自检没过却没说明路由/令牌验证没做：${JSON.stringify(claudeBad)}`);
 
   // ── 4b. 验证没过 → 状态标签不能再挂绿色的「已接入」────────────────────
   const codexTag = await q(cdp, `(() => { const row = [...document.querySelectorAll('#clientsBox .connectrow')]

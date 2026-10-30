@@ -121,6 +121,22 @@ async function startBridge(env = {}, opts = {}) {
    */
   const attempts = 5;
   let lastError = null;
+  /*
+   * 继承宿主环境时先摘掉会改变桥行为的变量：开发者本机若有真实的
+   * WORKBUDDY_CREDENTIAL_KEY / CODEBUDDY_API_KEY / 限流窗口等，用例会
+   * 在本机红、CI 绿（或反过来）。每个用例都能通过 `env` 显式覆盖。
+   */
+  const inherited = { ...process.env };
+  for (const key of [
+    'CODEBUDDY_API_KEY',
+    'WORKBUDDY_CREDENTIAL_KEY',
+    'WORKBUDDY_CREDENTIAL_SOURCE',
+    'WORKBUDDY_CREDENTIAL_STORE',
+    'WORKBUDDY_ACCOUNT_FAILOVER_AFTER',
+    'WORKBUDDY_RATE_LIMIT_WINDOW_MS',
+    'WORKBUDDY_CATALOG_RETRY_MS',
+    'WORKBUDDY_429_WAITS',
+  ]) delete inherited[key];
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
     lastError = null;
     const port = pickBridgePort();
@@ -128,7 +144,7 @@ async function startBridge(env = {}, opts = {}) {
       cwd: dir, // 工作目录放在临时目录：账本/日志都落在里面
       stdio: ['ignore', 'pipe', 'pipe'],
       env: {
-        ...process.env,
+        ...inherited,
         WORKBUDDY_HOST: '127.0.0.1',
         WORKBUDDY_PORT: String(port),
         WORKBUDDY_LOCAL_TOKEN: TOKEN,
@@ -5787,5 +5803,92 @@ test('桥：单账号签到「没有活动」回 200 + noActivity（不是失败
     await bridge.stop();
     upstream.close();
     rmSync(authDir, { recursive: true, force: true });
+  }
+});
+
+test('限流统计：时间戳滑动窗口（窗口外的旧 429 不再计数）', { timeout: 90_000 }, async () => {
+  /*
+   * 旧实现是 `{count, lastAt}`：只要相邻两次 429 间隔不超过窗口，`count`
+   * 就一直累加 —— 稀疏的偶发限流攒到阈值同样会触发自动切号（切钱包）。
+   * 这里把窗口压到 1.2s：发一次 → 等它过期 → 再发一次，计数必须回到 1。
+   */
+  const upstream = await startStubUpstream(['stub-model'], {
+    chatSequence: [{ status: 429, type: 'application/json', raw: JSON.stringify({ code: 14003, msg: 'rate limited' }) }],
+  });
+  const bridge = await startBridge({
+    CODEBUDDY_ENDPOINT: upstream.base,
+    WORKBUDDY_RATE_LIMIT_WINDOW_MS: '1200',
+  }, { auth: READABLE_FAKE_AUTH });
+  try {
+    const chat = async () => {
+      const res = await fetch(bridge.baseUrl + '/v1/chat/completions', {
+        method: 'POST',
+        headers: { ...auth, 'content-type': 'application/json' },
+        body: JSON.stringify({ model: 'stub-model', messages: [{ role: 'user', content: 'hi' }] }),
+        signal: AbortSignal.timeout(15_000),
+      });
+      await res.text();
+      return res.status;
+    };
+    const health = async () => (await fetch(bridge.baseUrl + '/health', { headers: auth, signal: AbortSignal.timeout(8000) })).json();
+
+    assert.equal(await chat(), 429, '上游 429 应当原样返回给客户端');
+    let h = await health();
+    assert.equal(h.rateLimit?.count, 1);
+    assert.equal(h.rateLimit?.windowMs, 1200, '窗口要通过 /health 如实暴露');
+    assert.equal(h.rateLimit?.model, 'stub-model');
+
+    await new Promise((r) => setTimeout(r, 1500));
+    h = await health();
+    assert.equal(h.rateLimit?.count, 0, '窗口外的 429 必须过期，而不是永久累计');
+
+    assert.equal(await chat(), 429);
+    h = await health();
+    assert.equal(h.rateLimit?.count, 1, '窗口内没再发生时不能累计成 2');
+  } finally {
+    await bridge.stop();
+    await upstream.close();
+  }
+});
+
+test('冷目录负缓存：上游目录持续失败时，连发请求不重复打上游（refresh 仍可强制）', { timeout: 90_000 }, async () => {
+  let catalogHits = 0;
+  const upstream = createServer((req, res) => {
+    const path = new URL(req.url, 'http://127.0.0.1').pathname;
+    if (path === '/v3/config' || path === '/v2/enterprises/personal/models') {
+      catalogHits += 1;
+      res.writeHead(500, { 'content-type': 'application/json' });
+      return res.end('{"code":500,"msg":"boom"}');
+    }
+    res.writeHead(404, { 'content-type': 'application/json' });
+    res.end('{}');
+  });
+  await new Promise((r) => upstream.listen(0, '127.0.0.1', r));
+  const upstreamBase = `http://127.0.0.1:${upstream.address().port}`;
+  const bridge = await startBridge({
+    CODEBUDDY_ENDPOINT: upstreamBase,
+    WORKBUDDY_CATALOG_RETRY_MS: '60000',
+  }, { auth: READABLE_FAKE_AUTH });
+  try {
+    const first = await fetch(bridge.baseUrl + '/v1/models?all=1', { headers: auth, signal: AbortSignal.timeout(20_000) });
+    assert.equal(first.status, 200, '目录失败也要回兜底目录，而不是 5xx');
+    await first.text();
+    const afterFirst = catalogHits;
+    assert.ok(afterFirst >= 1, '第一次必须真的尝试过上游');
+
+    // 负缓存窗口内再来两次：不能再打上游
+    for (let i = 0; i < 2; i += 1) {
+      const res = await fetch(bridge.baseUrl + '/v1/models?all=1', { headers: auth, signal: AbortSignal.timeout(20_000) });
+      await res.text();
+    }
+    assert.equal(catalogHits, afterFirst, '负缓存窗口内重复请求不得再打上游目录');
+
+    // 手动刷新（?refresh=1）必须无视负缓存
+    const refresh = await fetch(bridge.baseUrl + '/v1/models?all=1&refresh=1', { headers: auth, signal: AbortSignal.timeout(20_000) });
+    await refresh.text();
+    assert.ok(catalogHits > afterFirst, '用户点「刷新」必须真的重试上游');
+  } finally {
+    await bridge.stop();
+    await new Promise((r) => upstream.close(r));
   }
 });
