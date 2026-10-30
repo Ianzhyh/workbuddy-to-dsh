@@ -97,7 +97,12 @@ export async function snapshotWorkBuddyWebSearch({ settings, credentials } = {})
     credential: null,
     summary: { baseURL: '', apiKeyRef: '', hadLiteralKey: false, provider: '' },
   };
-  if (!settings || typeof settings.get !== 'function') return snapshot;
+  /*
+   * 真实 dsh 的 settings 服务**没有 get(ns)**，只有 describe/update/replace。
+   * 原先强制要求 get，导致生产环境快照永远 ok:false —— "恢复原配置"不可达，
+   * 撤销只能走"按指纹删键"的兜底，可能误删用户自己的同名本机端点。
+   */
+  if (!settings || (typeof settings.get !== 'function' && typeof settings.describe !== 'function')) return snapshot;
   if (!settings.replace || typeof settings.replace !== 'function') return snapshot;
   if (!credentials || typeof credentials.resolve !== 'function'
     || typeof credentials.set !== 'function' || typeof credentials.unset !== 'function') {

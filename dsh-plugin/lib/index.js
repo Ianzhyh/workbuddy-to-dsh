@@ -1497,8 +1497,12 @@ export function apply(ctx, rawConfig = {}) {
      * replace。旧代码在这一步判 `typeof settings.get !== 'function'`，于是
      * 明明配置好了也永远显示“不可用”，面板只能退化成操作区里的一个按钮。
      */
-    const config = readWebSearchConfig(settings);
-    if (!settings || config.source === 'none') {
+    /*
+     * 注意别叫 `config`：那会遮蔽闭包里的插件配置，下面 `config.localToken`
+     * 就永远读到 undefined —— 令牌比对静默失效（面板显示 ready，搜索却 401）。
+     */
+    const searchConfig = readWebSearchConfig(settings);
+    if (!settings || searchConfig.source === 'none') {
       return {
         ...unavailable,
         ...deriveWebSearchReadiness({
@@ -1509,7 +1513,7 @@ export function apply(ctx, rawConfig = {}) {
         }),
       };
     }
-    if (config.error) {
+    if (searchConfig.error) {
       const base = { ...unavailable, available: true, reason: 'error', error: '读取 dsh 搜索配置失败' };
       return {
         ...base,
@@ -1521,7 +1525,7 @@ export function apply(ctx, rawConfig = {}) {
         }),
       };
     }
-    if (!config.available) {
+    if (!searchConfig.available) {
       const base = { ...unavailable, available: true, reason: 'namespace-missing' };
       return {
         ...base,
@@ -1534,8 +1538,8 @@ export function apply(ctx, rawConfig = {}) {
       };
     }
 
-    const section = config.section;
-    const webSection = config.webSection;
+    const section = searchConfig.section;
+    const webSection = searchConfig.webSection;
 
     const apiKeyRef = typeof section?.apiKeyEnv === 'string' ? section.apiKeyEnv : '';
     const literalKey = typeof section?.apiKey === 'string' && section.apiKey.length > 0;
@@ -1574,11 +1578,11 @@ export function apply(ctx, rawConfig = {}) {
     const managed = looksLikeManagedSearchConfig({ section, webSection, expectedBaseURL });
     // describe() 拿不到 user 层时 explicit 保持 null = 未知；自动接入会等下一轮，
     // 不会把“不知道”当成“用户没配过”。
-    const explicit = config.searchUser === null
+    const explicit = searchConfig.searchUser === null
       ? null
       : hasExplicitSearchOverride({
-        section: config.searchUser,
-        webSection: config.webUser || {},
+        section: searchConfig.searchUser,
+        webSection: searchConfig.webUser || {},
         expectedBaseURL,
       });
 

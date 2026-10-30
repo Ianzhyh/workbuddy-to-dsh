@@ -67,15 +67,23 @@ export function locateProviderBlock(text, provider = 'workbuddy') {
   const providersIndent = indentOf(lines[providersLine]);
 
   // 3) 找到 providers 下名为 provider 的键
+  /*
+   * 子键缩进以**第一个真实子键**为准，不能写死 `providersIndent + 2`：
+   * YAML 允许任意更深的缩进，手写配置常见 4 空格一级（`llm-pi-ai:` → 4 →
+   * `providers:` → 8 → `workbuddy:`）。写死 +2 会让这段旧路由永远定位不到，
+   * 插件随后与 llm-pi-ai 的同名 provider 撞车（DUPLICATE_ADAPTER）并被动降级。
+   */
   let start = -1;
+  let childIndent = -1;
   for (let i = providersLine + 1; i < lines.length; i += 1) {
     if (isBlankOrComment(lines[i])) continue;
     const indent = indentOf(lines[i]);
     if (indent <= providersIndent) break;
+    if (childIndent < 0) childIndent = indent;
     const name = keyName(lines[i]);
-    if (indent === providersIndent + 2 && name === provider) { start = i; break; }
-    // providers 下若出现平级的 inline 形式（providers: {...}）就放弃
-    if (indent === providersIndent + 2 && name === null) return null;
+    if (indent === childIndent && name === provider) { start = i; break; }
+    // providers 下若出现同级的 inline 形式（providers: {...}）就放弃
+    if (indent === childIndent && name === null) return null;
   }
   if (start === -1) return null;
 

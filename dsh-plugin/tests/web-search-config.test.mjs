@@ -314,6 +314,28 @@ test('可撤销：优先快照 user 层，不把 base/default 里的密钥固化
   assert.deepEqual(snapshot.webSection, {}, 'web 分节存在但无 user 覆盖时也要能恢复为空');
 });
 
+test('可撤销：真实 dsh 只有 describe（没有 get）也必须能拍快照', async () => {
+  const userLayer = { baseURL: 'https://api.deepseek.com/v1', apiKeyEnv: 'DEEPSEEK_API_KEY' };
+  const webLayer = { searchProvider: 'custom-provider' };
+  const settings = {
+    describe: () => [
+      { ns: 'web-search-deepseek', user: userLayer },
+      { ns: 'web', user: webLayer },
+    ],
+    // 真实 dsh 的 settings 服务没有 get(ns)
+    replace: async () => {},
+  };
+  const credentials = {
+    async resolve() { return undefined; },
+    async set() {},
+    async unset() {},
+  };
+  const snapshot = await snapshotWorkBuddyWebSearch({ settings, credentials });
+  assert.equal(snapshot.ok, true, 'describe + replace 就足够拍快照');
+  assert.deepEqual(snapshot.section, userLayer);
+  assert.deepEqual(snapshot.webSection, webLayer);
+});
+
 test('可撤销：分节不存在时不提供恢复（避免向未注册 namespace 写入）', async () => {
   const snapshot = await snapshotWorkBuddyWebSearch({
     settings: {

@@ -772,6 +772,7 @@ body.dark .wb-root,
     const I18N_EN = {
       // ── 通用 ──
       '刷新': 'Refresh',
+      '重试': 'Retry',
       '刷新中…': 'Refreshing…',
       '刷新状态': 'Refresh status',
       '复制': 'Copy',
@@ -2670,8 +2671,17 @@ body.dark .wb-root,
         setTimeout(() => URL.revokeObjectURL(url), 4000);
       } catch (e) { /* 下载被拦时至少不炸页面 */ }
     }
+    /**
+     * 复制到剪贴板。返回 Promise<boolean>：`writeText` 是异步的，同步 try/catch
+     * 只能接住"clipboard 不存在"，接不住权限拒绝；原先总是先显示"已复制"。
+     * rejection 在这里统一吞掉，调用方不需要再 catch。
+     */
     function copyText(text) {
-      try { navigator.clipboard.writeText(text); return true; } catch (e) { return false; }
+      try {
+        return Promise.resolve(navigator.clipboard.writeText(text)).then(() => true, () => false);
+      } catch {
+        return Promise.resolve(false);
+      }
     }
 
     // ─────────────────────────── 通用组件 ───────────────────────────
@@ -4368,7 +4378,7 @@ body.dark .wb-root,
               '请在浏览器打开下面的链接并完成授权（链接约 10 分钟内有效）。本页每 3.5 秒自动检查一次结果。'),
             h('a', { href: pending.url, target: '_blank', rel: 'noreferrer' }, pending.url),
             h('div', { className: 'wb-login-actions' },
-              h(Btn, { sm: true, onClick: () => { setCopied(copyText(pending.url)); } }, copied ? '已复制' : '复制链接'),
+              h(Btn, { sm: true, onClick: () => { copyText(pending.url).then((ok) => setCopied(ok)); } }, copied ? '已复制' : '复制链接'),
               h(Btn, { sm: true, disabled: busy === 'poll', onClick: pollOnce }, busy === 'poll' ? '检查中…' : '我已完成授权'),
               h(Btn, { sm: true, onClick: cancelLogin }, '取消')))
           : null,
@@ -4493,9 +4503,16 @@ body.dark .wb-root,
            * 切桌面账号会重启桥；如果来源还停在 plugin，这个桌面账号依旧不会生效
            * （插件 active 可能是另一个账号）。用户点的是"用这个桌面账号"，
            * 所以把来源一起切到 desktop，避免"切了但没生效"。
+           *
+           * 这一步的结果必须读：以前直接丢弃响应，来源被 env 锁定 / 桥刚重启
+           * 都会让切换失败，而页面照样显示"两边同步" —— 请求实际还在扣插件账号。
            */
+          let sourceFailure = null;
           if (forceDesktop) {
-            await postJson('/workbuddy/login/source', { source: 'desktop' });
+            const source = await postJson('/workbuddy/login/source', { source: 'desktop' });
+            if (source?.data?.ok !== true) {
+              sourceFailure = source?.data?.error || `HTTP ${source?.status ?? '?'}`;
+            }
             setPluginRefreshKey((k) => k + 1);
           }
           // 切换成功：立刻刷本面板 + 强制重读状态（status?quota=1 会带着新账号的
@@ -4506,8 +4523,13 @@ body.dark .wb-root,
           const quotaFresh = fresh && fresh.status === 200
             && fresh.data?.quotaAccount && fresh.data?.bridgeAccount
             && fresh.data.quotaAccount === fresh.data.bridgeAccount;
-          setMessage('已切换到 ' + (res.data?.account?.name || name) + '。桥已重启，两边同步。'
-            + (quotaFresh ? '积分已更新。' : '（积分正在后台刷新，稍后自动显示新账号的值。）'));
+          if (sourceFailure) {
+            setMessage('已把桌面登录文件切到 ' + (res.data?.account?.name || name)
+              + '，但凭据来源没能切回桌面端（' + sourceFailure + '）—— 请求可能仍走插件账号，请检查后重试。');
+          } else {
+            setMessage('已切换到 ' + (res.data?.account?.name || name) + '。桥已重启，两边同步。'
+              + (quotaFresh ? '积分已更新。' : '（积分正在后台刷新，稍后自动显示新账号的值。）'));
+          }
         } else {
           setMessage('切换失败：' + (res.data?.error || res.status));
         }
@@ -4870,9 +4892,11 @@ body.dark .wb-root,
       const quotaSnapshots = quotaHistory
         .filter((row) => Number(row?.t) >= windowStart)
         .sort((a, b) => Number(a.t) - Number(b.t));
+      // `balanceDelta` = 最早 − 最新 = **消耗**（正数）；展示成"余额变化"时符号要反过来。
       const balanceDelta = quotaSnapshots.length >= 2
         ? Number(quotaSnapshots[0].total) - Number(quotaSnapshots[quotaSnapshots.length - 1].total)
         : null;
+      const balanceChange = balanceDelta === null ? null : -balanceDelta;
       const ledgerCredit = Number(total.credit) || 0;
       const reconcileDiff = balanceDelta === null
         ? null
@@ -5080,7 +5104,7 @@ body.dark .wb-root,
               noteLine2 ? h('p', { className: 'wb-note' }, noteLine2) : null,
               h('p', { className: 'wb-note' },
                 '账实核对：余额变化 ',
-                balanceDelta === null ? '—' : (balanceDelta >= 0 ? '+' : '') + balanceDelta.toFixed(2),
+                balanceChange === null ? '—' : (balanceChange >= 0 ? '+' : '') + balanceChange.toFixed(2),
                 '，本地账本 ',
                 ledgerCredit.toFixed(2),
                 '，差额 ',
@@ -5409,8 +5433,18 @@ body.dark .wb-root,
       const [acctBusy, setAcctBusy] = useState(false);
       const [acctMsg, setAcctMsg] = useState('');
       const loadAccounts = useCallback(async () => {
-        const res = await getJson('/workbuddy/checkin/accounts');
-        setAcctData(res.data && res.data.ok === false ? { ok: false, error: res.data.error } : res.data);
+        /*
+         * getJson 在断连/超时会 **reject**。原先没有 catch：acctData 一直是
+         * null，卡片永久停在"正在读取本机账号…"，而重试按钮只在成功分支里。
+         */
+        try {
+          const res = await getJson('/workbuddy/checkin/accounts');
+          setAcctData(res.data && res.data.ok === false
+            ? { ok: false, error: res.data.error }
+            : (res.data || { ok: false, error: `HTTP ${res.status}` }));
+        } catch (e) {
+          setAcctData({ ok: false, error: String(e?.message || e) });
+        }
       }, []);
       useEffect(() => { loadAccounts(); }, [loadAccounts]);
       const claimAll = async () => {
@@ -5514,7 +5548,10 @@ body.dark .wb-root,
           // 首次加载必须有动画：空着一片会让人以为接口没响应
           if (!acctData) return h(Loading, { text: '正在读取本机账号…' });
           if (acctData.ok === false) {
-            return h(Alert, { bad: true }, '账号列表读取失败：' + (acctData.error || '未知'));
+            return h('div', { style: { display: 'flex', flexDirection: 'column', gap: '10px' } },
+              h(Alert, { bad: true }, '账号列表读取失败：' + (acctData.error || '未知')),
+              h('div', { className: 'wb-actions' },
+                h(Btn, { onClick: loadAccounts }, t('重试'))));
           }
           const rows = acctData.accounts || [];
           if (!rows.length) return h('p', { className: 'wb-note' }, '没有找到本机已登录的账号。');
@@ -5747,6 +5784,16 @@ body.dark .wb-root,
       const [message, setMessage] = useState('');
       // 每模型保存结果放在对应详情里，避免用户在页面底部操作却要看顶部 Alert。
       const [modelFeedback, setModelFeedback] = useState({ id: '', text: '', bad: false });
+      /*
+       * 体检表的筛选/排序 + 复制状态。**必须和其他 hook 一起声明在组件最前面**：
+       * 下面"控制台不可用"与"首次加载"各有一个提前 return；把这四个 useState
+       * 放在 return 之后，503/加载态与正常态切换时 hook 数量会变化，React 直接
+       * 抛 "Rendered fewer/more hooks than expected"，整块模型面板白屏。
+       */
+      const [probeFilter, setProbeFilter] = useState('all');
+      const [search, setSearch] = useState('');
+      const [sortBy, setSortBy] = useState('default');
+      const [copiedId, setCopiedId] = useState('');
       const models = data?.models || [];
       const unofficialCount = models.filter((m) => m.official === false).length;
       const results = probes?.results || {};
@@ -6226,7 +6273,13 @@ body.dark .wb-root,
         let aborted = '';
         for (let i = 0; i < targets.length; i += 1) {
           const m = targets[i];
-          const res = await postJson(CONSOLE_API + '/probe', { model: m.id });
+          /*
+           * 单模型体检在控制台侧最多要 20 秒，默认 20 秒的客户端超时会先到，
+           * 把一个还在跑的请求判成失败。给它和日志/搜索同一档长超时。
+           */
+          const res = await postJson(CONSOLE_API + '/probe', { model: m.id }, undefined, {
+            timeoutMs: LONG_REQUEST_TIMEOUT_MS,
+          });
           /*
            * 只有"真的拿到这个模型的体检结果"才落库。控制台停掉（503）/断连（502）/
            * 旧宿主（404）都不是"模型不可用"—— 旧实现把它们一律记成 ok:false，
@@ -6251,8 +6304,24 @@ body.dark .wb-root,
         }
         setWorking('');
         setProgress(null);
-        // 中断分支**在写库之前返回**：否则下面那句"体检完成：0/N"会把中止提示盖掉
-        if (aborted) { setMessage(aborted); return; }
+        // 中断分支**在写库之前返回**：否则下面那句"体检完成：0/N"会把中止提示盖掉。
+        // 但已经测完的结论不能一起丢 —— 先落库，再如实说明只存了前 N 个。
+        if (aborted) {
+          const done = Object.keys(batch).length;
+          if (done) {
+            const saved = await postJson(CONSOLE_API + '/probe-results', {
+              results: batch,
+              lastRun: { scope: scope === 'all' ? 'all' : 'checked', count: done },
+            });
+            reloadProbes();
+            setMessage(aborted + (saved.data?.saved
+              ? `（已保存前 ${done} 个结果）`
+              : '（已测结果保存失败）'));
+            return;
+          }
+          setMessage(aborted);
+          return;
+        }
         if (!Object.keys(batch).length) { setMessage('体检没有拿到任何结果，结论未写入。'); return; }
         const saved = await postJson(CONSOLE_API + '/probe-results', { results: batch, lastRun: { scope: scope === 'all' ? 'all' : 'checked', count: Object.keys(batch).length } });
         setMessage(saved.data?.saved
@@ -6310,10 +6379,6 @@ body.dark .wb-root,
           || (savedOutput > 0 && savedOutput !== outputCapOf(m));
       };
       const customTokenCount = models.filter(isTokenCustom).length;
-      const [probeFilter, setProbeFilter] = useState('all');
-      const [search, setSearch] = useState('');
-      const [sortBy, setSortBy] = useState('default');
-      const [copiedId, setCopiedId] = useState('');
       if (isInitialLoading(loading, data, error)) return h(Card, { title: '可用模型' }, h(Loading, { text: '正在读取桥的模型目录…' }));
       const filtered = (probeFilter === 'fail'
         ? models.filter((m) => resultOf(m.id)?.ok === false)
@@ -6988,7 +7053,15 @@ body.dark .wb-root,
                         m.description ? h('p', { className: 'wb-note', style: { margin: '8px 0 0' } }, m.description) : null),
                       h('div', { className: 'wb-actions wb-detail-actions' },
                         h(Btn, { onClick: () => onUseModel(m.id) }, '用这个模型对话 →'),
-                        h(Btn, { onClick: () => { copyText(m.id); setCopiedId(m.id); setTimeout(() => setCopiedId(''), 2000); } }, copiedId === m.id ? '已复制 ✓' : '复制 ID'),
+                        h(Btn, {
+                          onClick: () => {
+                            copyText(m.id).then((ok) => {
+                              if (!ok) return;
+                              setCopiedId(m.id);
+                              setTimeout(() => setCopiedId(''), 2000);
+                            });
+                          },
+                        }, copiedId === m.id ? '已复制 ✓' : '复制 ID'),
                         h(Btn, { onClick: () => setDetail('') }, '收起'))))));
               }
               return rows;

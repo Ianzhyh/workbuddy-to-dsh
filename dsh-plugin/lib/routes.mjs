@@ -558,6 +558,17 @@ export function createRouteTable(deps) {
                 count: 0, applied,
               });
             }
+            /*
+             * 空/截断的请求体不能落到「visible=[] → hideAll=true」：以前一次
+             * 没带字段的 POST 就会把 dsh 选择器清空（还广播 adapters-updated），
+             * 而接口自己回 200。这里要求明确的显示意图。
+             */
+            if (!hasVisibilityIntent) {
+              return sendJson(res, 400, {
+                ok: false,
+                error: 'visible / unset / hideAll 至少需要一个（空请求不会改动显示偏好）',
+              });
+            }
             const visible = Array.isArray(body?.visible) ? body.visible.map(String).filter(Boolean) : [];
             const hideAll = body?.hideAll === true || visible.length === 0;
             // 目录里不存在的 id 也照存：上游目录可能暂时没抓到，用户勾选的意图优先，

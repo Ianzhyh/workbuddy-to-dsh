@@ -233,6 +233,17 @@ test('stripProviderBlock 删除 workbuddy，保留其它 provider 与注释', ()
   assert.match(text, /llm-pi-ai:/);
 });
 
+test('locateProviderBlock 支持 4 空格缩进的 YAML（不能写死 +2）', () => {
+  const wide = `llm-pi-ai:\n    providers:\n        workbuddy:\n            displayName: WorkBuddy\n        other:\n            displayName: Other\n`;
+  const hit = locateProviderBlock(wide, 'workbuddy');
+  assert.ok(hit, '4 空格一级的 YAML 也必须能定位旧路由');
+  assert.match(wide.split('\n')[hit.start], /^\s{8}workbuddy:$/);
+  const { changed, text } = stripProviderBlock(wide, 'workbuddy');
+  assert.equal(changed, true);
+  assert.doesNotMatch(text, /workbuddy:/);
+  assert.match(text, /other:/);
+});
+
 test('stripProviderBlock 处理 patch 层（列表条目缩进）', () => {
   const { changed, text } = stripProviderBlock(PATCH, 'workbuddy');
   assert.equal(changed, true);
@@ -372,6 +383,62 @@ test('换账号后积分/签到缓存必须作废（回归：面板把 A 账号�
     await snapshot({});
     assert.equal(state.quotaCache.value, beforeNull.quota, '拿不到账号身份时不能清掉积分缓存');
     assert.equal(state.checkinCache.value, beforeNull.checkin, '拿不到账号身份时不能清掉签到缓存');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('web-search 就绪度必须核对真实令牌（回归：localToken 被同名变量遮蔽）', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'wb-search-status-'));
+  try {
+    const { ctx } = fakeCtx();
+    const baseGet = ctx.get.bind(ctx);
+    let expectedBaseURL = '';
+    const settings = {
+      describe: () => [
+        {
+          ns: 'web-search-deepseek',
+          value: { baseURL: expectedBaseURL, apiKeyEnv: 'WORKBUDDY_SEARCH_BRIDGE_KEY' },
+          user: { baseURL: expectedBaseURL, apiKeyEnv: 'WORKBUDDY_SEARCH_BRIDGE_KEY' },
+        },
+        {
+          ns: 'web',
+          value: { searchProvider: 'deepseek-official' },
+          user: { searchProvider: 'deepseek-official' },
+        },
+      ],
+      update: async () => {},
+      replace: async () => {},
+    };
+    const credentials = {
+      describe: async () => ({ configured: true }),
+      // 配置里存的还是旧令牌：真实搜索会 401，就绪度必须说"不 ready"
+      resolve: async () => ({ value: 'stale-token' }),
+      set: async () => {},
+      unset: async () => {},
+    };
+    ctx.get = (name) => {
+      if (name === 'settings') return settings;
+      if (name === 'credentials') return credentials;
+      return baseGet(name);
+    };
+    const result = apply(ctx, {
+      projectRoot: dir,
+      autoStart: false,
+      consoleAutoStart: false,
+      migrateLegacy: false,
+      localToken: 'real-token',
+    });
+    expectedBaseURL = `${result.supervisor.baseUrl}/v1`;
+    result.supervisor.probe = async () => ({ state: 'running', health: { auth: { userId: 'u1' } } });
+    result.consoleSupervisor.probe = async () => ({ state: 'stopped' });
+    result.client.quota = async () => ({ ok: true, total: 0, packages: [] });
+    result.client.checkin = async () => ({ ok: true, status: {} });
+    result.client.requests = async () => ({ requests: [] });
+
+    const snap = await result.snapshot({});
+    assert.equal(snap.webSearch.configured, true, '配置本身正确');
+    assert.equal(snap.webSearch.tokenMatches, false, '必须拿配置里的令牌与当前桥令牌比对');
+    assert.equal(snap.webSearch.ready, false, '令牌过期时不能显示 ready');
+    assert.equal(snap.webSearch.reason, 'token');
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
