@@ -1,20 +1,21 @@
 # WorkBuddy Local API Bridge
 
-[![dsh.so risk](https://cdn.dsh.so/badge/workbuddy-to-dsh.svg)](https://www.dsh.so/artifact/workbuddy-to-dsh/?ref=badge)
-[![dsh.so install · dsh 0.2.1-rc.3](https://cdn.dsh.so/badge/install/workbuddy-to-dsh@0.2.1-rc.3.svg)](https://www.dsh.so/artifact/workbuddy-to-dsh/?ref=badge-install)
-[![dshfind](https://dshfind.com/api/badge/Ianzhyh/workbuddy-to-dsh?lang=en)](https://dshfind.com/en/plugins/Ianzhyh/workbuddy-to-dsh?ref=badge)
-
-[![GitHub release](https://img.shields.io/github/v/release/Ianzhyh/workbuddy-to-dsh?style=flat-square)](https://github.com/Ianzhyh/workbuddy-to-dsh/releases)
-[![GitHub stars](https://img.shields.io/github/stars/Ianzhyh/workbuddy-to-dsh?style=flat-square&logo=github)](https://github.com/Ianzhyh/workbuddy-to-dsh/stargazers)
-[![GitHub forks](https://img.shields.io/github/forks/Ianzhyh/workbuddy-to-dsh?style=flat-square&logo=github)](https://github.com/Ianzhyh/workbuddy-to-dsh/forks)
-[![License: MIT](https://img.shields.io/github/license/Ianzhyh/workbuddy-to-dsh?style=flat-square)](https://github.com/Ianzhyh/workbuddy-to-dsh/blob/main/LICENSE)
-[![Node.js >=18](https://img.shields.io/badge/node-%3E%3D18-339933?style=flat-square&logo=node.js&logoColor=white)](https://github.com/Ianzhyh/workbuddy-to-dsh/blob/main/package.json)
-[![Platform](https://img.shields.io/badge/platform-Windows%20verified%20%C2%B7%20macOS%2FLinux%20experimental-0078D6?style=flat-square)](#quick-start-windows)
-[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen?style=flat-square)](https://github.com/Ianzhyh/workbuddy-to-dsh/pulls)
-
-[![OpenAI-compatible](https://img.shields.io/badge/OpenAI-compatible-412991?style=flat-square&logo=openai&logoColor=white)](https://github.com/Ianzhyh/workbuddy-to-dsh/blob/main/README.en.md)
-[![Anthropic-compatible](https://img.shields.io/badge/Anthropic-compatible-D97757?style=flat-square)](https://github.com/Ianzhyh/workbuddy-to-dsh/blob/main/README.en.md)
-[![Responses API](https://img.shields.io/badge/Responses%20API-compatible-10A37F?style=flat-square)](https://github.com/Ianzhyh/workbuddy-to-dsh/blob/main/README.en.md)
+<p align="center">
+  <a href="https://www.dsh.so/artifact/workbuddy-to-dsh/?ref=badge"><img height="20" src="https://cdn.dsh.so/badge/workbuddy-to-dsh.svg" alt="dsh.so risk: low"></a>
+  <a href="https://www.dsh.so/artifact/workbuddy-to-dsh/?ref=badge-install"><img height="20" src="https://cdn.dsh.so/badge/install/workbuddy-to-dsh@0.2.1-rc.3.svg" alt="dsh.so install verified (L5) on dsh 0.2.1-rc.3"></a>
+  <a href="https://dshfind.com/en/plugins/Ianzhyh/workbuddy-to-dsh?ref=badge"><img height="20" src="https://dshfind.com/api/badge/Ianzhyh/workbuddy-to-dsh?lang=en" alt="dshfind listing"></a>
+  <br>
+  <a href="https://github.com/Ianzhyh/workbuddy-to-dsh/releases"><img height="20" src="https://img.shields.io/github/release/Ianzhyh/workbuddy-to-dsh?style=flat" alt="GitHub release"></a>
+  <a href="https://github.com/Ianzhyh/workbuddy-to-dsh/stargazers"><img height="20" src="https://img.shields.io/github/stars/Ianzhyh/workbuddy-to-dsh?style=flat&amp;logo=github" alt="GitHub stars"></a>
+  <a href="https://github.com/Ianzhyh/workbuddy-to-dsh/forks"><img height="20" src="https://img.shields.io/github/forks/Ianzhyh/workbuddy-to-dsh?style=flat&amp;logo=github" alt="GitHub forks"></a>
+  <a href="https://github.com/Ianzhyh/workbuddy-to-dsh/blob/main/LICENSE"><img height="20" src="https://img.shields.io/github/license/Ianzhyh/workbuddy-to-dsh?style=flat" alt="MIT license"></a>
+  <a href="https://github.com/Ianzhyh/workbuddy-to-dsh/blob/main/package.json"><img height="20" src="https://img.shields.io/badge/node-%3E%3D18-339933?style=flat&amp;logo=node.js&amp;logoColor=white" alt="Node.js 18+"></a>
+  <a href="https://github.com/Ianzhyh/workbuddy-to-dsh/blob/main/README.en.md#quick-start-windows"><img height="20" src="https://img.shields.io/badge/platform-Windows%20verified-0078D6?style=flat&amp;logo=windows&amp;logoColor=white" alt="Windows verified"></a>
+  <br>
+  <a href="https://github.com/Ianzhyh/workbuddy-to-dsh/blob/main/README.en.md"><img height="20" src="https://img.shields.io/badge/OpenAI-compatible-412991?style=flat&amp;logo=openai&amp;logoColor=white" alt="OpenAI compatible"></a>
+  <a href="https://github.com/Ianzhyh/workbuddy-to-dsh/blob/main/README.en.md"><img height="20" src="https://img.shields.io/badge/Anthropic-compatible-D97757?style=flat" alt="Anthropic compatible"></a>
+  <a href="https://github.com/Ianzhyh/workbuddy-to-dsh/blob/main/README.en.md"><img height="20" src="https://img.shields.io/badge/Responses%20API-compatible-10A37F?style=flat" alt="Responses API compatible"></a>
+</p>
 
 Expose WorkBuddy's model capabilities (DeepSeek / GLM / Kimi / MiniMax …) through a
 local bridge as **OpenAI-compatible**, **Anthropic-compatible** and **OpenAI Responses**
