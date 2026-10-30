@@ -2329,6 +2329,22 @@ export function apply(ctx, rawConfig = {}) {
   }
 
   if (config.autoStart) {
+    /*
+     * 定时器与 disposer 必须**同步**注册：懒启动 ensure 最长等 30 秒，若插件在
+     * 那段时间被卸载，旧实现会把 `ctx.effect` 注册到一个已经销毁的 scope 上，
+     * 2 秒轮询永久泄漏（还会从已卸载的实例里拉起桥）。
+     */
+    let identityWatchDisposed = false;
+    const identityTimer = setInterval(() => {
+      if (!identityWatchDisposed) pollBridgeIdentity();
+    }, 2000);
+    identityTimer.unref?.();
+    if (typeof ctx.effect === 'function') {
+      ctx.effect(() => () => {
+        identityWatchDisposed = true;
+        clearInterval(identityTimer);
+      }, 'workbuddy.identity-watch');
+    }
     void (async () => {
       try {
         syncBridgeAccountConfig();
@@ -2350,16 +2366,8 @@ export function apply(ctx, rawConfig = {}) {
       } catch (error) {
         log('自动启动桥失败', error);
       }
-      /*
-       * 无论这一次桥是否就绪都开始监听：登录/换号可能稍后发生。
-       * 2 秒是本机 /v1/identity 的成本（只 stat + 解码 token，不抓目录）。
-       */
-      const timer = setInterval(pollBridgeIdentity, 2000);
-      timer.unref?.();
-      if (typeof ctx.effect === 'function') {
-        ctx.effect(() => () => clearInterval(timer), 'workbuddy.identity-watch');
-      }
-      pollBridgeIdentity();
+      // 无论这一次桥是否就绪都补一次：登录/换号可能稍后发生
+      if (!identityWatchDisposed) pollBridgeIdentity();
     })();
   }
   if (config.consoleAutoStart) {

@@ -73,6 +73,22 @@ test('控制台 /api/accounts 必须带面板头（无 Origin 的跨站请求挡
     });
     assert.equal(panel.status, 200, '控制台页面（带面板头）必须照常可用');
     await panel.text();
+
+    /*
+     * 登录端点的超限请求体必须回明确的 413（而不是 200 + 连接被重置）。
+     * readBody 超限时只 pause；调用方要回 413 再 resume 把剩余字节读掉。
+     */
+    const huge = await fetch(base + '/api/login/start', {
+      method: 'POST',
+      headers: { 'x-workbuddy-panel': '1', 'content-type': 'application/json' },
+      body: JSON.stringify({ pad: 'x'.repeat(600 * 1024) }),
+      signal: AbortSignal.timeout(15_000),
+    });
+    assert.equal(huge.status, 413, '超限的登录请求体必须回 413');
+    await huge.text();
+    const after = await fetch(base + '/api/version', { signal: AbortSignal.timeout(5000) });
+    assert.equal(after.status, 200, '413 之后控制台连接仍必须可用');
+    await after.text();
   } finally {
     child.kill();
     await new Promise((resolve) => {

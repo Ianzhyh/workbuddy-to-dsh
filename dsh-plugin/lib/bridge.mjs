@@ -500,6 +500,12 @@ export class BridgeSupervisor {
         staleBuild: diff.stale,
       };
     } catch (error) {
+      /*
+       * 调用方主动取消不是"桥没运行"：把 AbortError 映射成 stopped 会让 stop()
+       * 在 SIGTERM 后第一次探测就误报"已停止"，ensure() 也可能因此跳过 stop
+       * 直接复用旧进程。单独给一个状态，让调用方如实中止。
+       */
+      if (signal?.aborted) return { state: 'aborted', error: 'probe aborted by caller' };
       if (error?.status === 401) {
         /*
          * 令牌不一致。最常见的原因是**升级**：插件与桥现在共用
@@ -576,6 +582,9 @@ export class BridgeSupervisor {
 
   async #ensure({ restart, signal, readyTimeoutMs, authFile }) {
     let status = await this.probe(signal);
+    if (status.state === 'aborted') {
+      return { ok: false, started: false, reused: false, state: 'aborted', error: status.error };
+    }
     let restartReason = '';
     if (status.state === 'running' && !restart) {
       /*
@@ -646,6 +655,9 @@ export class BridgeSupervisor {
       if (signal?.aborted) return { ok: false, started: true, reused: false, state: 'starting', error: 'aborted' };
       await sleep(250);
       status = await this.probe(signal);
+      if (status.state === 'aborted') {
+        return { ok: false, started: true, reused: false, state: 'aborted', error: status.error };
+      }
       if (status.state === 'running') {
         return { ok: true, started: true, reused: false, state: 'running', health: status.health };
       }
@@ -737,6 +749,7 @@ export class BridgeSupervisor {
   /** 停掉桥：只停 /health 报出的那个 pid（本机回环，不会误伤别的服务）。 */
   async stop(signal) {
     const status = await this.probe(signal);
+    if (status.state === 'aborted') return { ok: false, stopped: false, error: status.error };
     if (status.state === 'stopped') return { ok: true, stopped: false, reason: 'bridge was not running' };
     /*
      * 未登录 / 凭据异常时桥仍然是我们的进程：503 body 现在带 pid，可以正常停止。
@@ -754,7 +767,10 @@ export class BridgeSupervisor {
     const deadline = Date.now() + 8000;
     while (Date.now() < deadline) {
       await sleep(200);
-      if ((await this.probe(signal)).state === 'stopped') {
+      if (signal?.aborted) return { ok: false, stopped: false, error: 'stop aborted by caller' };
+      const nowState = (await this.probe(signal)).state;
+      if (nowState === 'aborted') return { ok: false, stopped: false, error: 'stop aborted by caller' };
+      if (nowState === 'stopped') {
         if (this.spawnedPid === pid) this.spawnedPid = null;
         return { ok: true, stopped: true, pid };
       }

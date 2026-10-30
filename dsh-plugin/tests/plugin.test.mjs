@@ -150,6 +150,32 @@ test('数据面的方法 / 权限矩阵：只读路由拒绝写方法，写路�
   assert.equal(revert.body.summary.baseURL, 'https://api.deepseek.com/v1');
 });
 
+test('BridgeSupervisor：调用方 abort 不能被误报成桥已停止', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'wb-sup-abort-'));
+  try {
+    const sup = new BridgeSupervisor({
+      projectRoot: dir,
+      scriptPath: join(dir, 'nope.mjs'),
+      logPath: join(dir, 'nope.log'),
+      host: '127.0.0.1',
+      port: 1,
+      token: 't',
+    });
+    sup.client.health = async () => {
+      const err = new Error('This operation was aborted');
+      err.name = 'AbortError';
+      throw err;
+    };
+    const ac = new AbortController();
+    ac.abort();
+    const probe = await sup.probe(ac.signal);
+    assert.equal(probe.state, 'aborted', '取消不能映射成 stopped');
+    const ensured = await sup.ensure({ signal: ac.signal });
+    assert.equal(ensured.ok, false);
+    assert.equal(ensured.state, 'aborted', 'ensure 不能在取消后继续拉起/复用桥');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 test('readLog 只读日志尾部：大文件不吃满内存、截断的半行被丢掉', () => {
   const dir = mkdtempSync(join(tmpdir(), 'wb-log-'));
   try {

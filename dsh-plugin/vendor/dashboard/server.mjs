@@ -2022,6 +2022,7 @@ const server = createServer(async (req, res) => {
         );
         sendJson(res, 200, { ok: true, ...started });
       } catch (err) {
+        if (err.code === 'BODY_TOO_LARGE') return bodyTooLarge(req, res);
         sendJson(res, 200, { ok: false, error: String(err?.message || err) });
       }
       return;
@@ -2035,6 +2036,7 @@ const server = createServer(async (req, res) => {
         if (result?.status === 'ready') invalidateQuotaCache();
         sendJson(res, 200, result);
       } catch (err) {
+        if (err.code === 'BODY_TOO_LARGE') return bodyTooLarge(req, res);
         sendJson(res, 200, { ok: false, error: String(err?.message || err) });
       }
       return;
@@ -2045,6 +2047,7 @@ const server = createServer(async (req, res) => {
         const body = JSON.parse(await readBody(req));
         sendJson(res, 200, { ok: true, ...(await bridgeDeviceCancel(String(body?.state || ''))) });
       } catch (err) {
+        if (err.code === 'BODY_TOO_LARGE') return bodyTooLarge(req, res);
         sendJson(res, 200, { ok: false, error: String(err?.message || err) });
       }
       return;
@@ -2058,6 +2061,7 @@ const server = createServer(async (req, res) => {
         invalidateQuotaCache();
         sendJson(res, 200, { ok: true, ...result });
       } catch (err) {
+        if (err.code === 'BODY_TOO_LARGE') return bodyTooLarge(req, res);
         sendJson(res, 200, { ok: false, error: String(err?.message || err) });
       }
       return;
@@ -2071,6 +2075,7 @@ const server = createServer(async (req, res) => {
         invalidateQuotaCache();
         sendJson(res, 200, { ok: true, ...result });
       } catch (err) {
+        if (err.code === 'BODY_TOO_LARGE') return bodyTooLarge(req, res);
         sendJson(res, 200, { ok: false, error: String(err?.message || err) });
       }
       return;
@@ -2083,6 +2088,7 @@ const server = createServer(async (req, res) => {
         invalidateQuotaCache();
         sendJson(res, 200, { ok: true, ...result });
       } catch (err) {
+        if (err.code === 'BODY_TOO_LARGE') return bodyTooLarge(req, res);
         sendJson(res, 200, { ok: false, error: String(err?.message || err) });
       }
       return;
