@@ -749,6 +749,22 @@ docs/                      架构、配置、排错、安全、接入链路审�
 
 ---
 
+## 致谢
+
+这一版的很多修正来自使用者的真实反馈 —— 他们不只报现象，还把根因定位到具体代码行。
+
+| 贡献者 | 贡献 |
+|---|---|
+| [@JokesLin](https://github.com/JokesLin) | macOS 上 `CFBundleExecutable` 探测失效（#13）；控制台常驻内存与发布包体积（#14） |
+| [@liugangnhm](https://github.com/liugangnhm) | Claude Code 直连的模型名误路由与 200K 上下文（#18）、PR #19 的 1M beta 头思路 |
+| [@wflc](https://github.com/wflc) | Docker / NAS 部署下插件登录凭据每次都要重登（#16） |
+| [@GodGavin](https://github.com/GodGavin) | 限流后自动切换账号（#17） |
+| [@lenychang520](https://github.com/lenychang520) | PR #2：compact 崩溃修复 |
+
+> GitHub 的 Contributors 列表只统计**已合并**的 PR，所以这里用文字署名；被采纳但未合并的思路同样算数。
+
+---
+
 ## 故障排查
 
 | 现象 | 常见原因 |

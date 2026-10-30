@@ -681,6 +681,14 @@ npm run publish:npm
 
 ---
 
+## 致谢
+
+这一版的多项修正来自使用者的真实反馈（macOS 客户端探测、Docker / NAS 上的凭据持久化、
+Claude Code 直连的模型名与上下文窗口、限流后自动切号）。完整名单见仓库根
+[`README.md` 的「致谢」](https://github.com/Ianzhyh/workbuddy-to-dsh#致谢)。
+
+---
+
 ## 许可
 
 MIT，与本仓库其余部分一致。与腾讯、WorkBuddy、CodeBuddy、DeepSeek 均无关联。
