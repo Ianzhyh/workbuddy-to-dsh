@@ -196,6 +196,24 @@ test('active 凭据解不开：回退到最近可读凭据并修好 active.json'
   } finally { await bridge.stop(); rmSync(bridge.dir, { recursive: true, force: true }); }
 });
 
+test('source=plugin 且凭据暂时解不开：不得静默降级到桌面账号', { timeout: 60_000 }, async () => {
+  const uidA = 'uid-temporarily-unreadable';
+  const bridge = await startWithCredentials({
+    // 文件在、但当前 store.key（KEY_A）解不开：这是"暂时读不出"，不是"不存在"
+    keys: [[uidA, KEY_B]],
+    active: uidA,
+    source: 'plugin',
+  });
+  try {
+    const src = await json(`${bridge.baseUrl}/v1/auth/source`);
+    assert.equal(src.status, 200);
+    assert.equal(src.body.configured, 'plugin',
+      '凭据存在但读不出时不能把已保存的 source=plugin 改成 auto');
+    assert.notEqual(src.body.effective?.source, 'desktop',
+      '不得悄悄改用桌面账号（那是另一个钱包）');
+  } finally { await bridge.stop(); rmSync(bridge.dir, { recursive: true, force: true }); }
+});
+
 test('store.key 轮换：桥必须重新读取密钥，不能一直用进程里的旧钥', { timeout: 60_000 }, async () => {
   const uidA = 'uid-rotated';
   const bridge = await startWithCredentials({

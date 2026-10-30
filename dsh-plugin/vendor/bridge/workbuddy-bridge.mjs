@@ -1733,9 +1733,17 @@ async function fetchKeyPayloadFrom(exe) {
  * 解开信封。所以按登录文件里信封的 keyId 逐个候选试，命中即用；一个都不
  * 匹配时退回第一个能取到密钥的，让 openAuthField 给出准确的 keyId 报错。
  */
-async function atRestKey() {
-  if (atRestKeyCache) return atRestKeyCache;
-  if (atRestKeyPending) return atRestKeyPending;
+async function atRestKey(wantKeyId = wantedKeyId) {
+  /*
+   * `wantKeyId` 必须参与缓存判定。原先只要缓存非空就直接返回，而
+   * `fileAccountUid()`（桌面换号检测）打开的是**另一个**登录文件、可能由另一
+   * 个 build 加密 —— 拿钉住文件的密钥去解它必然失败，换号检测因此静默失效。
+   */
+  if (atRestKeyPending) {
+    const pendingKey = await atRestKeyPending;
+    if (!wantKeyId || atRestKeyId(pendingKey) === wantKeyId) return pendingKey;
+  }
+  if (atRestKeyCache && (!wantKeyId || atRestKeyId(atRestKeyCache) === wantKeyId)) return atRestKeyCache;
   atRestKeyPending = (async () => {
     let candidates = workBuddyExeCandidates().filter((p) => existsSync(p));
     // 廉价层全 miss 才动 PowerShell 兜底（系统信号：进程 + 注册表）
@@ -1758,7 +1766,7 @@ async function atRestKey() {
       }
       // The app hashes the base64 STRING, not its decoded bytes.
       const key = createHash('sha256').update(secret, 'utf8').digest();
-      if (!wantedKeyId || atRestKeyId(key) === wantedKeyId) {
+      if (!wantKeyId || atRestKeyId(key) === wantKeyId) {
         atRestKeyCache = key;
         atRestUsedExe = exe;
         return key;
@@ -1792,7 +1800,9 @@ async function openAuthField(value, label) {
   if (typeof value === 'string') return value; // pre-5.6 plaintext, or a refreshed value
   if (!isEncryptedField(value)) return '';
   const envelope = JSON.parse(Buffer.from(value.envelope, 'base64').toString('utf8'));
-  const key = await atRestKey();
+  // 以**这份信封自己的 keyId** 取密钥：机器上并存两个 build 时，跟随文件
+  // 可能不是钉住文件那个 build 写的。
+  const key = await atRestKey(envelope.keyId);
   const expected = createHash('sha256').update(key).digest('hex').slice(0, 16);
   if (envelope.keyId !== expected) {
     throw new Error(`${label} was sealed under key ${envelope.keyId}, not ${expected};`
@@ -2211,6 +2221,13 @@ let credentialLockTail = Promise.resolve();
 
 const credentialStoreMode = () => (credentialStoreFallback ? 'memory' : CREDENTIAL_STORE_MODE);
 const credentialFileFor = (uid) => join(CREDENTIAL_DIR, `${createHash('sha256').update(String(uid), 'utf8').digest('hex').slice(0, 24)}.cred`);
+
+/** 凭据目录里有没有凭据**文件**（只 stat 名称，不解密）。 */
+function hasPluginCredentialFiles() {
+  if (credentialStoreMode() === 'memory') return memoryCredentials.size > 0;
+  try { return readdirSync(CREDENTIAL_DIR).some((f) => f.endsWith('.cred')); }
+  catch { return false; }
+}
 const credentialActiveFile = () => join(CREDENTIAL_DIR, 'active.json');
 const credentialSourceFile = () => join(CREDENTIAL_DIR, 'source.json');
 const VALID_SOURCES = new Set(['auto', 'desktop', 'plugin', 'api-key']);
@@ -2232,9 +2249,13 @@ async function effectiveSource() {
    * 上次选了 plugin，但凭据已经不存在（memory 模式重启 / 被手动删掉）：
    * 继续按 plugin 只会让每个请求都报"没有插件凭据"。回到 auto，桌面端可用时照常服务；
    * 诊断里仍能看到 source.json 的内容，不会假装没发生过。
+   *
+   * 判据必须是「**没有凭据文件**」，不能是「这次没读出可用的凭据」：DPAPI /
+   * 磁盘抖动会让 `.cred` 暂时解不开，那种情况下降级 = 悄悄改用桌面账号的钱包，
+   * 与用户显式选择的 plugin 相悖。读不出时宁可如实报错，让用户决定是否切回。
    */
-  if (stored === 'plugin' && (await readAllPluginCredentials()).length === 0) {
-    log('stored source=plugin but no readable plugin credential; falling back to auto');
+  if (stored === 'plugin' && !hasPluginCredentialFiles()) {
+    log('stored source=plugin but no plugin credential; falling back to auto');
     stored = '';
   }
   credentialSourcePreference = stored;
@@ -2491,24 +2512,68 @@ async function openCredential(text) {
   return cred;
 }
 
+/**
+ * 进程还活着吗（锁的持有者判断）。signal 0 不发送任何信号，只探测存在性；
+ * Windows 上也支持。EPERM = 进程存在但没权限，同样算"活着"。
+ */
+function processAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try { process.kill(pid, 0); return true; } catch (e) { return e?.code === 'EPERM'; }
+}
+
 /** 跨进程刷新锁：同一凭据目录只允许一个刷新/写入者。 */
 async function acquireCredentialLock() {
   ensureCredentialDir();
   const file = credentialLockFile();
+  /*
+   * 锁内容形如 `<pid>:<random>`。两件事都靠它：
+   *   1. 释放时**只删自己的锁** —— 持有超过 15 秒（DPAPI 冷启动最长 20 秒）
+   *      时旧实现会被等待者按"过期"清掉并重建；原持有者随后无条件 unlink，
+   *      删掉的是**新持有者**的锁，互斥从此失效。
+   *   2. 判"崩溃遗留"先看 pid 是否还活着：活着的慢持有者不能被抢；死进程
+   *      的锁可以立刻清掉，不必等 15 秒。
+   */
+  const token = `${process.pid}:${randomBytes(8).toString('hex')}`;
   const deadline = Date.now() + 8000;
   for (;;) {
     try {
       const fd = openSync(file, 'wx');
-      try { writeFileSync(fd, String(process.pid)); } finally { closeSync(fd); }
-      return () => { try { unlinkSync(file); } catch { /* 已被清理 */ } };
+      try { writeFileSync(fd, token); } finally { closeSync(fd); }
+      return () => {
+        try {
+          if (readFileSync(file, 'utf8').trim() === token) unlinkSync(file);
+        } catch { /* 已被清理 / 已被新持有者接管 */ }
+      };
     } catch (e) {
-      const code = /** @type {{ code?: string, mtimeMs?: number }} */ (e).code;
+      const code = /** @type {{ code?: string }} */ (e).code;
       if (code !== 'EEXIST') throw e;
-      try {
-        const st = statSync(file);
-        if (Date.now() - st.mtimeMs > 15000) { unlinkSync(file); continue; } // 崩溃遗留
-      } catch { /* 锁刚被释放 */ }
-      if (Date.now() > deadline) throw new Error('credential store is locked by another process', { cause: e });
+      let holder = '';
+      try { holder = readFileSync(file, 'utf8').trim(); } catch { /* 锁刚被释放 */ }
+      const holderPid = Number(String(holder).split(':')[0]);
+      let stale = false;
+      if (Number.isInteger(holderPid) && holderPid > 0) {
+        stale = !processAlive(holderPid);
+        /*
+         * 硬上限：正常临界区最长 ~20 秒（DPAPI）。一个"活着"的 pid 十分钟还
+         * 攥着锁，更可能是 pid 被系统回收后复用给了无关进程 —— 不能让一份
+         * 遗留锁永久挡住凭据写入。
+         */
+        if (!stale) {
+          try { stale = Date.now() - statSync(file).mtimeMs > 10 * 60_000; } catch { /* 刚释放 */ }
+        }
+      } else {
+        // 旧格式 / 内容损坏：退回 mtime 判据
+        try {
+          const st = statSync(file);
+          stale = Date.now() - st.mtimeMs > 15000;
+        } catch { /* 锁刚被释放 */ }
+      }
+      if (stale) { try { unlinkSync(file); } catch { /* 别人先清了 */ } continue; }
+      if (Date.now() > deadline) {
+        const error = /** @type {Error & { code?: string }} */ (new Error('credential store is locked by another process'));
+        error.code = 'CREDENTIAL_LOCK_TIMEOUT';
+        throw error;
+      }
       await sleep(60);
     }
   }
@@ -2557,6 +2622,12 @@ async function savePluginCredential(cred) {
       return { stored: credentialStoreMode() };
     });
   } catch (e) {
+    /*
+     * **锁竞争不是"存储不可用"**：把它设成 credentialStoreFallback 会让整个
+     * 进程永久切到 memory 模式 —— 磁盘上已有的凭据从此不可见，直到重启。
+     * 刷新路径会保留内存里的新令牌、下次再落盘；登录路径应如实失败。
+     */
+    if (e?.code === 'CREDENTIAL_LOCK_TIMEOUT') throw e;
     credentialStoreFallback = String(e?.message || e);
     memoryCredentials.set(uid, record);
     memoryActiveUid = uid;
@@ -2616,6 +2687,8 @@ function pluginAuthFromCredential(cred) {
   return {
     source: 'plugin',
     uid: cred.uid,
+    // 刷新路径会把 auth 原样存回凭据；昵称必须带过去，否则第一次刷新就被抹成空
+    nickname: cred.nickname || '',
     access: cred.accessToken,
     refresh: cred.refreshToken || '',
     expiresAt: Number(cred.expiresAtMs) || 0,
@@ -2845,8 +2918,15 @@ async function resolveCredentialAlternative(auth) {
   if (auth.source === 'desktop') {
     const creds = await readAllPluginCredentials();
     if (!creds.length) return null;
+    /*
+     * `readAllPluginCredentials()` 返回的是解密后的原始记录，**没有** `active`
+     * 字段（active 只在 listPluginCredentials 的对外形状里）。原先查 `c.active`
+     * 永远 undefined，any 模式会落到 creds[0]（目录顺序）—— 401 接管时可能
+     * 换到用户没选的那个钱包。active 必须从 active.json 读。
+     */
+    const activeUid = readActiveUid();
     const match = CREDENTIAL_FAILOVER === 'any'
-      ? (creds.find((c) => c.uid === auth.userId) || creds.find((c) => c.active) || creds[0])
+      ? (creds.find((c) => c.uid === auth.userId) || creds.find((c) => c.uid === activeUid) || creds[0])
       : creds.find((c) => c.uid === auth.userId);
     return match ? pluginAuthFromCredential(match) : null;
   }
@@ -3254,7 +3334,9 @@ async function doRefreshAuth(auth) {
       source: 'desktop',
       access: body.data.accessToken,
       refresh: body.data.refreshToken || auth.refresh,
-      expiresAt: now + Number(body.data.expiresIn || 0) * 1000,
+      // 上游偶尔不回 expiresIn：按 JWT exp 兜底，否则有效期=now，下一次读取
+      // 会丢弃这个新令牌、拿旧令牌再刷一次（每请求一刷）。
+      expiresAt: expiryFromToken(body.data.accessToken, body.data.expiresIn),
       refreshExpiresAt: now + Number(body.data.refreshExpiresIn || 0) * 1000,
       userId: auth.userId,
       enterpriseId: auth.enterpriseId,
@@ -4091,6 +4173,7 @@ async function handleMediaSubmit(req, res, { submit, kind, label, prefix, defaul
         `${prefix}_PAYLOAD_TOO_LARGE`,
       );
     }
+    if (isClientAbortError(e)) return; // 客户端已断开：不回响应、不记失败
     throw e;
   }
   let body;
@@ -4323,6 +4406,7 @@ async function handleOpenAIImagesGenerations(req, res) {
       return rejectTooLarge(req, res, 'openai', `image request body too large (limit ${MAX_BODY_BYTES} bytes)`,
         'IMAGE_PAYLOAD_TOO_LARGE');
     }
+    if (isClientAbortError(e)) return; // 客户端已断开：不回响应、不记失败
     throw e;
   }
   let body;
@@ -4502,7 +4586,12 @@ function buildSearchHeaders(auth, conversationId) {
 
 /** 一次搜索请求；401/403 时刷新/接管凭据后重试一次（与 chat 路径一致）。 */
 async function searchUpstream(auth, requestBody, conversationId, clientSignal) {
-  const endpoint = `${searchBaseFor(auth)}${SEARCH_PATH}`;
+  /*
+   * 端点必须**按每次 attempt 的凭据**重算：401/403 后可能换到另一个来源/区域的
+   * 账号（国内 copilot.tencent.com vs 国际 www.workbuddy.ai）。用第一次的
+   * endpoint 会把新区域令牌发到旧区域搜索网关，必然再次 401。
+   */
+  const endpointFor = (a) => `${searchBaseFor(a)}${SEARCH_PATH}`;
   /*
    * 整个搜索（含 401 刷新、换凭据、5xx 重试）共享一个预算。原先每个 attempt
    * 各算一次 20s，最坏会把一次搜索拖到 ~80s；dsh 早就放弃了，桥却还在扣额度。
@@ -4526,7 +4615,7 @@ async function searchUpstream(auth, requestBody, conversationId, clientSignal) {
     const timeoutSignal = AbortSignal.timeout(remaining);
     const signal = combineAbortSignals([clientSignal, timeoutSignal]);
     try {
-      const res = await fetch(endpoint, {
+      const res = await fetch(endpointFor(a), {
         method: 'POST',
         // 与 WorkBuddy 客户端一致：允许网关做同站重定向（例如区域入口跳转）。
         redirect: 'follow',
@@ -4597,7 +4686,7 @@ async function searchUpstream(auth, requestBody, conversationId, clientSignal) {
     }
     result = await attempt(currentAuth);
   }
-  return { ...result, endpoint };
+  return { ...result, endpoint: endpointFor(currentAuth) };
 }
 
 /**
@@ -5188,6 +5277,11 @@ async function callUpstream(bodyString, model, conversationId, clientSignal, { s
       /*
        * ① 复用的空闲连接被上游掐断（服务器先关）→ 换新连接重试一次。
        *    新连接必然不是 reused；首次连接就失败属于真故障，不重试。
+       *
+       * 注意：这里仍会对**首次连接**上的 reset 重试。这是被验收用例钉住的
+       * 产品行为（`传输层瞬时失败重试后必须救回完整响应`）：网关抖动时宁可
+       * 多试一次，也不要把整轮对话直接 500。代价是极端情况下上游可能已受理，
+       * 存在重复计费风险；改变它需要同时调整那条用例与文档。
        */
       if (/ECONNRESET|socket hang up|EPIPE/i.test(msg)) {
         log('stale keep-alive socket, retrying once on a fresh connection');
@@ -5411,7 +5505,8 @@ async function callUpstreamWithChannelFallback(payload, model, conversationId, c
     log('upstream rejected conversation_id body field; disabling body injection for this process');
     payloadForUpstream = payload;
     attempt = await readFailure(
-      await callUpstream(JSON.stringify(payloadForUpstream), model, conversationId, clientSignal),
+      // 同一逻辑请求的兼容性重试：限流许可不能重复占（与 11128 兜底一致）
+      await callUpstream(JSON.stringify(payloadForUpstream), model, conversationId, clientSignal, { skipRateLimit: true }),
     );
   }
   if (!is11128Response(attempt.res, attempt.parsed)) return attempt;
@@ -5488,7 +5583,15 @@ function handleUpstreamTimeout(res, protocol, error) {
 // ── SSE parsing and aggregation (non-streaming clients only) ─────────────
 function mergeToolCallDelta(acc, deltas) {
   for (const d of deltas || []) {
-    const idx = d.index ?? acc.length;
+    /*
+     * 上游偶尔省略 `index`。旧写法把每个分片都当成新调用（`acc.length`），
+     * 一次调用会被拆成 N 个截断的 tool_call。无 index 时按"同一调用的分片"
+     * 处理；只有带新 id 且与上一槽不同，才认为开始了下一次调用。
+     */
+    const last = acc.length ? acc[acc.length - 1] : null;
+    const idx = Number.isInteger(d.index)
+      ? d.index
+      : (d.id && last?.id && d.id !== last.id ? acc.length : Math.max(0, acc.length - 1));
     acc[idx] ??= { id: undefined, type: 'function', function: { name: '', arguments: '' } };
     const slot = acc[idx];
     if (d.id) slot.id = d.id;
@@ -6772,7 +6875,8 @@ function responsesToOpenAIMessages(body) {
         type: 'function',
         function: {
           name: flattenToolName(ns, typeof item.name === 'string' ? item.name : ''),
-          arguments: typeof item.arguments === 'string'
+          // 回放空参数时也要合法 JSON；上游同样不接受 ""
+          arguments: (typeof item.arguments === 'string' && item.arguments.trim())
             ? item.arguments
             : JSON.stringify(item.arguments ?? {}),
         },
@@ -7413,7 +7517,8 @@ function openAIToResponsesOutput(message, routes = null) {
       call_id: callId,
       name: emitName,
       ...(namespace ? { namespace } : {}),
-      arguments: args,
+      // 无参函数调用必须给合法 JSON：空串会让 Codex 解析失败（custom/tool_search 不走这里）
+      arguments: args.trim() ? args : '{}',
     });
   }
   // 空回答也要给一条 message：output 是空数组时 Codex 会当成「没有任何输出」，
@@ -7771,7 +7876,8 @@ async function relayResponsesStream(up, res, model, routes = null, options = {})
       call_id: slot.callId,
       name: emitName,
       ...(namespace ? { namespace } : {}),
-      arguments: slot.arguments,
+      // 无参函数调用的 arguments 必须是合法 JSON，空串会让 Codex 解析失败
+      arguments: String(slot.arguments || '').trim() ? slot.arguments : '{}',
     };
     send('response.output_item.done', { output_index: slot.outputIndex, item });
     output[slot.outputIndex] = item;
@@ -8177,6 +8283,9 @@ function recordRequest(entry) {
       entry = { ...entry, ...classifyFailure(entry) };
     }
     const file = usageFile();
+    // 账本目录可能还不存在（首次运行/自定义 WORKBUDDY_USAGE_FILE）：不先建目录，
+    // appendFileSync 会 ENOENT，而这里 catch 掉就变成"内存有、磁盘没有"。
+    mkdirSync(dirname(file), { recursive: true });
     syncUsageMirror(file);
 
     const line = JSON.stringify({ t: Date.now(), ...entry });
@@ -8214,6 +8323,7 @@ function recordRequest(entry) {
 /** 清空账本：文件与进程内副本一起重置（DELETE /v1/usage）。 */
 function resetUsageLedger() {
   const file = usageFile();
+  mkdirSync(dirname(file), { recursive: true });
   writeFileSync(file, '');
   usageLines = [];
   usageBytes = 0;
@@ -8975,7 +9085,12 @@ async function fetchCatalog(generation = catalogGeneration) {
           shape.sources[path] = `no models (HTTP ${res.status})`;
           continue;
         }
-        upstreamOk = true;
+        /*
+         * **空数组不算成功**。`models: []` 是"这个端点这次没给模型"，不是
+         * "目录就是空的"：把它记成成功，下面的保留逻辑就会被绕过，一份完整的
+         * 旧目录会被 FEATURED 的 2-3 条顶掉、还要等满 TTL 才恢复。
+         */
+        if (list.length) upstreamOk = true;
         shape.sources[path] = list.length;
         if (path === '/v3/config') {
           productModels = list;
@@ -9187,7 +9302,12 @@ async function fetchCatalog(generation = catalogGeneration) {
        */
       catalogNextRetryAt = upstreamOk ? 0 : Date.now() + CATALOG_RETRY_MS;
       if (!upstreamOk && catalogCache.models.length > 0) {
-        catalogCache = { ...catalogCache, at: nextAt };
+        /*
+         * 保留旧目录继续服务，但把 `upstreamModelCount` 归零：这一轮**没有**
+         * 从上游确认过目录，模型预校验应退回"判不了就原样转发"，而不是拿
+         * 30 秒前的旧结论把未知模型打成 404。
+         */
+        catalogCache = { ...catalogCache, at: nextAt, upstreamModelCount: 0 };
         log('catalog refresh got no upstream models; keeping previous catalog, retry in 30s');
       } else {
       catalogCache = {
@@ -9892,6 +10012,17 @@ const MAX_BODY_BYTES = numEnv('WORKBUDDY_MAX_BODY_BYTES', 32 * 1024 * 1024, { mi
  * 抛出的错误带上 `code = 'BODY_TOO_LARGE'`：调用方要据此回**明确的 413**，
  * 而不是和「JSON 解析失败」共用同一个 400。
  */
+/**
+ * 客户端在上传途中断开（点停止 / 网络断 / 超时取消）。
+ *
+ * 这类错误**不能向调用方抛**：socket 已经没了，写响应没有意义；更重要的是它
+ * 会从「没有 await 的异步 handler」里逃成 unhandled rejection，把整个桥进程
+ * 带走（实测：取消一次 /v1/images 上传，进程 exit 1）。「没收到完整请求」也
+ * 没有上游副作用，不该进失败账本。
+ */
+const isClientAbortError = (e) => e?.code === 'ECONNRESET' || e?.code === 'EPIPE'
+  || /aborted|socket hang up/i.test(String(e?.message || ''));
+
 const readBody = (req, limit = MAX_BODY_BYTES) => new Promise((resolve, reject) => {
   let size = 0;
   let done = false;
@@ -10282,6 +10413,11 @@ async function handleRequest(req, res) {
      */
     const managementRequest = url.pathname.startsWith('/v1/auth/')
       || (url.pathname === '/v1/usage' && req.method === 'DELETE')
+      /*
+       * 「客户端一键拉取给哪些模型」是持久化设置，会改变所有客户端（含 dsh）
+       * 看到的目录 —— 不是聊天能力。client key 只应聊天/列模型，不能改它。
+       */
+      || (url.pathname === '/v1/models/default' && req.method === 'POST')
       /*
        * 多账号签到同样是管理面：`/accounts` 会列出本机**所有**已登录账号的
        * 昵称与 uid，`/all` 会对每个账号各发一次领取请求。client key 是
@@ -10851,7 +10987,12 @@ async function handleRequest(req, res) {
           source: auth.source,
           // 账实核对：最近 7 天的余额快照 + 采集间隔。页面用首尾快照对比
           // 本地账本；不足两条时显示“—”，不拿单点冒充变化。
-          history: readQuotaHistory(7),
+          /*
+           * 快照按账号分别记录。混着返回时，面板的"账实核对"会拿 A 账号最早
+           * 的快照减 B 账号最新的快照 —— 两个钱包相减，差额毫无意义。
+           */
+          history: readQuotaHistory(7).filter((row) => !row.account
+            || row.account === (auth.userId || auth.uid || '')),
           snapshotIntervalMs: QUOTA_SNAPSHOT_INTERVAL_MS,
         });
       } catch (e) {
@@ -10885,11 +11026,11 @@ async function handleRequest(req, res) {
      * 只读登录文件、只做签到 —— **不参与模型请求路由**（红线：单账号供给）。
      */
     if (url.pathname === '/v1/checkin/accounts') {
-      return handleCheckinAccounts(req, res, false);
+      return await handleCheckinAccounts(req, res, false);
     }
     if (url.pathname === '/v1/checkin/all') {
       if (req.method !== 'POST') return json(res, 405, { ok: false, error: 'method not allowed' });
-      return handleCheckinAccounts(req, res, true);
+      return await handleCheckinAccounts(req, res, true);
     }
 
     if (url.pathname === '/v1/checkin') {
@@ -10925,23 +11066,28 @@ async function handleRequest(req, res) {
     }
 
     // ── Miora 媒体生成（计费能力，提交是异步的）─────────────────────────
+    /*
+     * 这些 handler 必须 await：不 await 的异步 handler 一旦 reject（客户端中途
+     * 断开的 readBody、上游/磁盘意外错误），rejection 会绕过本函数的 try/catch
+     * 变成 unhandled rejection —— Node 默认直接退出整个桥进程。
+     */
     if (url.pathname === '/v1/videos' && req.method === 'POST') {
-      return handleVideoSubmit(req, res);
+      return await handleVideoSubmit(req, res);
     }
     if (url.pathname.startsWith('/v1/videos/') && req.method === 'GET') {
-      return handleVideoLookup(req, res, url.pathname, url);
+      return await handleVideoLookup(req, res, url.pathname, url);
     }
     if (url.pathname === '/v1/images/generations' && req.method === 'POST') {
-      return handleOpenAIImagesGenerations(req, res);
+      return await handleOpenAIImagesGenerations(req, res);
     }
     if (url.pathname === '/v1/images' && req.method === 'POST') {
-      return handleImageGenerate(req, res);
+      return await handleImageGenerate(req, res);
     }
     if (url.pathname === '/v1/images/edits' && req.method === 'POST') {
-      return handleImageEdit(req, res);
+      return await handleImageEdit(req, res);
     }
     if (url.pathname.startsWith('/v1/images/') && url.pathname !== '/v1/images/edits' && req.method === 'GET') {
-      return handleImageLookup(req, res, url.pathname, url);
+      return await handleImageLookup(req, res, url.pathname, url);
     }
 
     // ── WorkBuddy 原生网页搜索（不经过 DeepSeek）────────────────────────
@@ -12325,6 +12471,7 @@ async function handleRequest(req, res) {
     return json(res, 404, { error: { message: `no route for ${req.method} ${url.pathname}` } });
   } catch (e) {
     log('handler error', e.stack || e.message);
+    if (res.destroyed || res.writableEnded) return; // 对端已断开：写不出去
     if (!res.headersSent) return json(res, 500, { error: { message: e.message } });
     try { res.end(); } catch {}
   }

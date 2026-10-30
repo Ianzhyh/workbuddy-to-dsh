@@ -298,7 +298,7 @@ async function startStubUpstream(models = ['stub-model'], opts = {}) {
       return res.end(JSON.stringify({
         code: 0,
         data: {
-          models: models.map((id) => ({
+          models: (opts.emptyModels ? [] : models).map((id) => ({
             id,
             maxInputTokens: 128000,
             maxOutputTokens: 4096,
@@ -326,7 +326,11 @@ async function startStubUpstream(models = ['stub-model'], opts = {}) {
         res.writeHead(200, { 'content-type': 'application/json' });
         res.end(JSON.stringify({
           code: 0,
-          data: { accessToken: `refreshed-${n}`, refreshToken: `rotated-${n}`, expiresIn: 3600, refreshExpiresIn: 86400 },
+          data: {
+            accessToken: `refreshed-${n}`,
+            refreshToken: `rotated-${n}`,
+            ...(opts.refreshOmitExpiresIn ? {} : { expiresIn: 3600, refreshExpiresIn: 86400 }),
+          },
         }));
       }, opts.refreshDelayMs ?? 200);
       return;
@@ -405,6 +409,7 @@ async function startStubUpstream(models = ['stub-model'], opts = {}) {
   return {
     base: `http://127.0.0.1:${srv.address().port}`,
     seen,
+    opts,
     get refreshCalls() { return refreshCalls; },
     close: async () => { openStubs.delete(close); await close(); },
   };
@@ -1073,6 +1078,25 @@ test('/v1/models：对齐官方 GUI 清单，并直取 supportedEfforts / contex
     const mem = byId.get('memory-model');
     assert.equal(mem.official, false, '产品目录里但不在会话 agent 清单里的模型不算官方可选');
   } finally { await bridge.stop(); upstream.close(); }
+});
+
+test('目录：上游返回空数组时不能顶掉已有目录（否则模型只剩精选几条）', { timeout: 60_000 }, async () => {
+  const stub = await startStubUpstream(['stub-model']);
+  const bridge = await startBridge({ CODEBUDDY_ENDPOINT: stub.base }, { auth: READABLE_FAKE_AUTH });
+  try {
+    const first = await (await fetch(`${bridge.baseUrl}/v1/models?all=1&refresh=1`, { headers: auth })).json();
+    assert.ok(first.data.some((m) => m.id === 'stub-model'), '第一次刷新应拿到上游目录');
+
+    // 上游这次两个端点都回 200 + models: []（区域故障/灰度期会出现）
+    stub.opts.emptyModels = true;
+    const second = await (await fetch(`${bridge.baseUrl}/v1/models?all=1&refresh=1`, { headers: auth })).json();
+    assert.ok(second.data.some((m) => m.id === 'stub-model'),
+      '空数组是"这次没给"，不能当成成功并顶掉已有目录');
+  } finally {
+    await bridge.stop();
+    try { await stub.close(); } catch { /* 忽略 */ }
+    rmSync(bridge.dir, { recursive: true, force: true });
+  }
 });
 
 test('目录：v3 成功后 v2 的单端点 401 不得触发刷新/换号（否则目录永远建不起来）', { timeout: 90_000 }, async () => {
@@ -2744,6 +2768,16 @@ test('桥：客户端凭据分层 —— key 鉴权、账本归因、独立限�
       assert.equal(res.status, 403, `${method} ${path} 不应接受 client key`);
       await res.text();
     }
+    // 改「客户端一键拉取给哪些模型」是持久化设置，不属于"聊天"能力。
+    const setDefault = await fetch(bridge.baseUrl + '/v1/models/default', {
+      method: 'POST',
+      headers: { authorization: 'Bearer key-bbb', 'content-type': 'application/json' },
+      body: JSON.stringify({ value: 'curated' }),
+      signal: AbortSignal.timeout(10000),
+    });
+    assert.equal(setDefault.status, 403, 'client key 不能改桥的默认模型视图');
+    await setDefault.text();
+
     const localSource = await mgmt('/v1/auth/source', 'GET', TOKEN);
     assert.equal(localSource.status, 200, 'LOCAL_TOKEN 仍必须能访问管理面');
     await localSource.text();
@@ -3025,6 +3059,46 @@ test('桥：令牌过期瞬间的 5 个并发请求只刷新一次', { timeout: 
     await new Promise((r) => setTimeout(r, 300));
 
     assert.equal(stub.refreshCalls, 1, `5 个并发请求只该刷新一次，实际 ${stub.refreshCalls} 次`);
+  } finally {
+    await bridge.stop();
+    try { await stub.close(); } catch { /* 忽略 */ }
+    rmSync(bridge.dir, { recursive: true, force: true });
+  }
+});
+
+/**
+ * 刷新响应**缺 expiresIn** 时也必须记住新令牌。
+ *
+ * 上游偶尔只回 accessToken、不回 expiresIn。旧实现把有效期算成 `now`，
+ * `readStoredAuth` 下一秒就判定它已过期、回去读文件里的旧令牌 —— 于是每个
+ * 请求都重新刷新一次（还会消耗/轮换 refreshToken），却仍然用旧令牌打上游。
+ */
+test('桥：刷新响应缺 expiresIn 时不能每请求重复刷新', { timeout: 30_000 }, async () => {
+  const stub = await startStubUpstream(['stub-model'], { refreshOmitExpiresIn: true, refreshDelayMs: 0 });
+  const nearExpiry = {
+    auth: {
+      accessToken: fakeJwt('same-sub'),
+      refreshToken: 'fake-refresh-token',
+      domain: 'example.invalid',
+      expiresAt: Date.now() + 60_000, // < 5 分钟 skew → 请求前会先刷新
+    },
+  };
+  const bridge = await startBridge({ CODEBUDDY_ENDPOINT: stub.base }, { auth: nearExpiry });
+  try {
+    const one = () => fetch(`${bridge.baseUrl}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { ...auth, 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'stub-model', messages: [{ role: 'user', content: 'hi' }] }),
+    }).then((r) => r.text());
+    const first = await one();
+    assert.ok(first.includes('"content"'), `第一次请求应成功；实际：${first.slice(0, 160)}`);
+    const second = await one();
+    assert.ok(second.includes('"content"'), `第二次请求应成功；实际：${second.slice(0, 160)}`);
+    assert.equal(stub.refreshCalls, 1,
+      `刷新响应的有效期必须被记住，不能每个请求都刷；实际刷新 ${stub.refreshCalls} 次`);
+    const seenAuth = stub.seen.map((s) => String(s.headers.authorization || ''));
+    assert.ok(seenAuth.every((h) => h === 'Bearer refreshed-1'),
+      `两次请求都应使用刷新后的令牌；实际 ${JSON.stringify(seenAuth)}`);
   } finally {
     await bridge.stop();
     try { await stub.close(); } catch { /* 忽略 */ }

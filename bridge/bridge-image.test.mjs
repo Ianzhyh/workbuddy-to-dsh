@@ -6,7 +6,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { createServer } from 'node:http';
+import { createServer, request as httpRequest } from 'node:http';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -475,6 +475,31 @@ test('OpenAI Images：同一个 Idempotency-Key 只提交一次，第二次标�
   assert.equal(second.headers.get('x-workbuddy-idempotent-replay'), '1',
     '第二次命中幂等缓存时必须如实标记');
   assert.equal(submitCalls.length, before + 1, '重复请求不能再次提交上游（会重复扣积分）');
+});
+
+test('客户端中途断开上传不能打死桥进程', { timeout: 30_000 }, async () => {
+  /*
+   * 上传进行到一半客户端取消（用户点停止 / 网络断）：readBody 会以 socket 错误
+   * reject。这个 Rejection 必须被 media handler/dispatcher 接住 —— 逃出去就是
+   * unhandled rejection，Node 默认直接退出整个桥进程。
+   */
+  await new Promise((resolve) => {
+    const req = httpRequest({
+      hostname: '127.0.0.1',
+      port,
+      path: '/v1/images',
+      method: 'POST',
+      headers: { ...headers, 'content-length': '60000' },
+    }, (res) => { res.resume(); resolve(); });
+    req.on('error', () => resolve());
+    req.write('{"prompt":"aborted upload"');
+    setTimeout(() => { req.destroy(); resolve(); }, 200);
+  });
+  await new Promise((r) => setTimeout(r, 500));
+  assert.equal(child.exitCode, null, `客户端断开不应让桥退出：\n${logs.slice(-800)}`);
+  const health = await fetch(`${base}/health`, { headers, signal: AbortSignal.timeout(3000) });
+  assert.equal(health.status, 200, '桥必须仍然可用');
+  await health.text();
 });
 
 test('OpenAI Images：n>1 / stream / 未知字段在本地 400，不提交上游', async () => {
