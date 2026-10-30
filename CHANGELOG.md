@@ -21,7 +21,7 @@
 
 ### Fixed
 
-- **`anthropic-beta: context-1m-2025-08-07` 被忽略**（由 @liugangnhm 的 PR #19 提供）：
+- **`anthropic-beta: context-1m-2025-08-07` 被忽略**（由 @liugangnhm 的 PR #19 提供，PR 已并入）：
   客户端显式要 1M 时，`/v1/models` 仍只报官方默认档（多数模型 300K），自动压缩提前触发。
   现在带这条 beta 头时按模型真实上限（`maxInputTokens`）对外声明；不带时行为不变。
 
