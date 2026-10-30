@@ -21,19 +21,21 @@
 
 ### Fixed
 
-- **客户端显式要 1M 时，`/v1/models` 仍只报官方默认档**（思路来自 @liugangnhm 的 PR #19）：
-  Claude Code 带 `anthropic-beta: context-1m-2025-08-07` 时，桥按**模型真实上限**
-  声明窗口（多数模型 1M），而不是官方默认档（300K）—— 否则自动压缩提前触发。
-  不带这个头时行为完全不变（其它客户端零影响）。
+- **`anthropic-beta: context-1m-2025-08-07` 被忽略**（由 @liugangnhm 的 PR #19 提供）：
+  客户端显式要 1M 时，`/v1/models` 仍只报官方默认档（多数模型 300K），自动压缩提前触发。
+  现在带这条 beta 头时按模型真实上限（`maxInputTokens`）对外声明；不带时行为不变。
 
 ## [1.19.2] - 2026-10-29
 
 ### Fixed
 
-- **Claude Code 加 `[1m]` 后缀被静默路由到别的模型**（[#18](https://github.com/Ianzhyh/workbuddy-to-dsh/issues/18)）：
-  桥的 Anthropic 层此前只有「精确命中目录」与「名字带 flash/haiku 就走小快模型」两档，
-  `deepseek-v4.1-flash[1m]` 落进第二档被换成 `glm-5.3-flash`。现在先剥客户端后缀
-  再匹配目录；客户端原生别名（`claude-*` / `gpt-*` / `codex-*`）照旧映射（兼容不变）。
+- **Claude Code 里带 `[1m]` 后缀的模型会被静默换成 `glm-5.3-flash`**（由 @liugangnhm 的
+  PR #19 提供，[#18](https://github.com/Ianzhyh/workbuddy-to-dsh/issues/18)）：
+  Claude Code 只认识带 `[1m]` 后缀（或目录声明 1M）的模型名，其它名字一律按 200K 规划会话，
+  于是用户按它的提示改成 `deepseek-v4.1-flash[1m]`。桥把后缀当成模型 id 的一部分，
+  精确匹配落空后撞上 `/haiku|flash|mini|small|fast/` 的「小快模型」正则 ——
+  请求实际发给了 `glm-5.3-flash`，而客户端界面仍显示 deepseek。现在解析模型名时
+  先剥掉后缀再匹配；`claude-haiku-*[1m]` 这类仍照旧走 fast 模型。
 - **目录里没有的模型名被静默换成默认模型**：Anthropic / Responses 路径默认**明确报
   404**（`not_found_error`），不再"以为在用 A、实际在用 B"；逃生门沿用
   `WORKBUDDY_SKIP_MODEL_PREFLIGHT=1`（放行给上游裁决）。目录冷启动时不再静默改写：
@@ -56,7 +58,6 @@
 
 - Claude Code 接入额外写 `env.ANTHROPIC_DEFAULT_HAIKU_MODEL`（后台任务模型），
   手动接入片段补 `ANTHROPIC_MODEL` 与 `CLAUDE_CODE_MAX_CONTEXT_TOKENS`。
-
 ## [1.19.1] - 2026-10-29
 
 ### Added
