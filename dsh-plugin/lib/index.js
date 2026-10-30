@@ -2295,7 +2295,10 @@ export function apply(ctx, rawConfig = {}) {
         log(`自动切号跳过：控制台未就绪（${ensured.error}）`);
         return;
       }
-      const listed = await fetch(`${consoleSupervisor.url}/api/accounts`, { signal: AbortSignal.timeout(10_000) })
+      const listed = await fetch(`${consoleSupervisor.url}/api/accounts`, {
+        headers: { 'x-workbuddy-panel': '1' },
+        signal: AbortSignal.timeout(10_000),
+      })
         .then((r) => r.json()).catch(() => null);
       const target = pickAccountFailoverTarget(listed?.accounts, health?.auth?.userId || '');
       if (!target) {

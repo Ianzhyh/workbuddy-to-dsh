@@ -2385,6 +2385,12 @@ body.dark .wb-root,
       const alive = useRef(true);
       const retryTimer = useRef(null);
       /**
+       * 当前生效的请求路径。切换统计范围（7→30 天）时 effect 会重跑，但
+       * **旧路径的在途请求/重试定时器**仍可能晚到；只靠 alive 挡不住 ——
+       * 新 effect 已经把 alive 重新置 true。晚到的旧响应会把新范围的数据盖掉。
+       */
+      const activePath = useRef(path);
+      /**
        * 在途去重：轮询间隔比接口响应还短时（桥慢 / 目录刷新），旧实现会让
        * 多个请求叠着飞，晚到的旧响应还可能盖掉新响应。同一时刻只允许一次；
        * 在途时的手动/定时刷新直接跳过，等这一次回来再按下一个周期走。
@@ -2404,8 +2410,9 @@ body.dark .wb-root,
        * 用户以为自己只是"重试了一次"。
        */
       const retryCount = useRef(0);
-      const scheduleRetry = () => {
+      const scheduleRetry = (forPath = activePath.current) => {
         if (!alive.current || retryTimer.current) return;
+        if (forPath !== activePath.current) return; // 旧路径的重试不能排进新范围
         if (retryCount.current >= 3) return;
         const delay = 4000 * (2 ** retryCount.current);
         retryCount.current += 1;
@@ -2417,27 +2424,33 @@ body.dark .wb-root,
           return;
         }
         inFlight.current = true;
+        const forPath = path;
         try {
           const { status, data } = await getJson(overridePath || path);
-          if (!alive.current) return;
+          if (!alive.current || forPath !== activePath.current) return;
           const failed = status >= 400 || data?.ok === false;
           const message = failed
             ? (status === 404 ? '插件还没就绪（HTTP 404），正在自动重试…' : String(data?.error || `HTTP ${status}`))
             : '';
           setState({ data: failed && status === 404 ? null : data, status, error: message, loading: false });
           if (!failed) { retryCount.current = 0; return; }
-          scheduleRetry();
+          scheduleRetry(forPath);
         } catch (error) {
-          if (alive.current) setState({ data: null, status: 0, error: requestErrorMessage(error), loading: false });
-          scheduleRetry();
+          if (alive.current && forPath === activePath.current) {
+            setState({ data: null, status: 0, error: requestErrorMessage(error), loading: false });
+          }
+          scheduleRetry(forPath);
         } finally {
           inFlight.current = false;
+          // 即使发起请求的是旧路径，也要把新路径排队的那次补发掉
           const next = pendingReload.current;
           pendingReload.current = null;
           if (next && alive.current) next();
         }
       }, [path]);
       useEffect(() => {
+        activePath.current = path;
+        retryCount.current = 0;
         alive.current = true;
         // enabled=false：**完全不请求**，同时把 loading 复位为 false ——
         // 否则调用方的"首帧加载态"判断（loading && !data）会永远成立，
@@ -4263,6 +4276,16 @@ body.dark .wb-root,
           if (d.status === 'pending') return;
           if (d.ok === false || res.status >= 400) {
             setMessage('登录未完成：' + (d.error || ('HTTP ' + res.status)));
+            /*
+             * 400/404 是**终态**（state 过期/未知）：继续每 3.5 秒打同一个
+             * 死 state 只会让按钮永远禁用。网络错误（status 0）仍保留重试。
+             */
+            if (res.status === 400 || res.status === 404) {
+              pendingRef.current = null;
+              setPending(null);
+              setBusy('');
+              setMessage('登录请求已失效（可能已超时），请重新发起登录。');
+            }
           }
         } finally {
           pollInFlight.current = false;
@@ -4275,6 +4298,22 @@ body.dark .wb-root,
         // 3.5s > 桥侧 3s 的最小轮询间隔；一次只发一个请求。
         const timer = setInterval(() => { pollOnce(); }, 3500);
         return () => clearInterval(timer);
+      }, [pending && pending.state]);
+
+      useEffect(() => {
+        if (!pending) return undefined;
+        /*
+         * 设备码登录 10 分钟过期（桥侧 state TTL）。上游一直不给出终态时，
+         * 没有这道看门狗就会永久每 3.5 秒轮询一次，且「开始登录」一直禁用。
+         */
+        const timer = setTimeout(() => {
+          if (pendingRef.current?.state !== pending.state) return;
+          pendingRef.current = null;
+          setPending(null);
+          setBusy('');
+          setMessage('登录等待超时（10 分钟），请重新发起登录。');
+        }, 10 * 60_000);
+        return () => clearTimeout(timer);
       }, [pending && pending.state]);
 
       const cancelLogin = async () => {

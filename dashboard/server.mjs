@@ -1337,7 +1337,12 @@ const server = createServer(async (req, res) => {
      * `-H "x-workbuddy-panel: 1"`。控制台页面走 `api()` 封装，**每个请求都带**这个头，
      * 所以界面不受影响。
      */
-    const PANEL_ONLY_GET = new Set(['/api/connect', '/api/clients', '/api/diagnose']);
+    /*
+     * `/api/accounts` 读的是本机账号列表（uid/路径），且钉住状态过期时会
+     * **写 .state.json 并重启桥** —— 属于"会真的干活"的读接口。无 Origin 的
+     * 浏览器请求（`<img>`）带不上自定义头，必须和 diagnose 一样挡在这里。
+     */
+    const PANEL_ONLY_GET = new Set(['/api/connect', '/api/clients', '/api/diagnose', '/api/accounts']);
     const needsPanel = !isRead
       || PANEL_ONLY_GET.has(route)
       || (route === '/api/models' && url.searchParams.get('refresh') === '1');

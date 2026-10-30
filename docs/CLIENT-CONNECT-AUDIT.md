@@ -184,6 +184,7 @@ POST /api/bridge/stop      无头 → 403      ← 写操作照旧
 
 - `/api/diagnose` —— 跑一轮诊断（探测桥、读配置、可能起子进程）；
 - `/api/models?refresh=1` —— 强制桥去上游重取目录；
+- `/api/accounts` —— 读账号列表，钉住状态过期时会写 `.state.json` 并重启桥；
 - `/api/bridge/log?lines=2000` —— 读 2000 行日志。
 
 一个恶意页面可以反复触发它们（放大 / 资源消耗）。**读不到响应**（没有 CORS 头），
