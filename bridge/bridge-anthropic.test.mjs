@@ -89,6 +89,15 @@ const upstream = createServer((req, res) => {
     try { lastUpstreamBody = JSON.parse(Buffer.concat(chunks).toString('utf8')); }
     catch { lastUpstreamBody = null; }
 
+    if (scenario.kind === 'noUsage') {
+      // 上游只回内容/终止，不回 usage —— 桥必须用本地估算补上
+      res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+      res.write(sse(dText('estimated output text')));
+      res.write(sse({ id: 'c1', model: 'm', choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] }));
+      res.write('data: [DONE]\n\n');
+      return res.end();
+    }
+
     if (scenario.kind === 'error401') {
       res.writeHead(401, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ msg: 'upstream says no', code: 40101 }));
@@ -427,6 +436,18 @@ test('正常流不受影响：message_start → … → message_delta → messag
   assert.ok(!kinds.includes('error'), `正常流不该有 error 事件：${kinds.join(', ')}`);
   assertBlockProtocol(events);
   assert.equal(events.find((e) => e.event === 'message_delta').data.delta.stop_reason, 'end_turn');
+});
+
+test('上游不回 usage 时，流式 message_delta 必须用本地估算兜底（不能报 0）', async () => {
+  await waitReady();
+  scenario = { kind: 'noUsage' };
+  const res = await post({ model: 'm', max_tokens: 64, stream: true, messages: [{ role: 'user', content: 'hi' }] });
+  const events = parseSse(await res.text());
+  const delta = events.find((e) => e.event === 'message_delta');
+  assert.ok(delta, '缺 message_delta');
+  assert.ok(Number(delta.data.usage.input_tokens) > 0, 'input_tokens 不能是 0');
+  assert.ok(Number(delta.data.usage.output_tokens) > 0,
+    `output_tokens 不能是 0（实际 ${delta.data.usage.output_tokens}）—— Claude Code 的上下文占用会失真`);
 });
 
 /*

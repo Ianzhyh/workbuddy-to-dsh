@@ -6424,6 +6424,9 @@ async function relayAnthropicStream(up, res, model, estInputTokens) {
   let finishReason = null;
   let usage = null;
   let streamError = null;
+  /** 上游没回 usage 时的本地估算：累计正文与工具参数。 */
+  let outText = '';
+  let outArgs = '';
   /** 是否见过 `[DONE]`：与 finish_reason 一起作为"这一轮真的跑完了"的信号。 */
   let sawDone = false;
   const reader = up.body.getReader();
@@ -6474,6 +6477,7 @@ async function relayAnthropicStream(up, res, model, estInputTokens) {
               content_block: { type: 'text', text: '' },
             });
           }
+          outText += d.content;
           write('content_block_delta', {
             type: 'content_block_delta',
             index: textBlock.index,
@@ -6542,6 +6546,7 @@ async function relayAnthropicStream(up, res, model, estInputTokens) {
           if (tc.function?.name) slot.name += tc.function.name;
           if (typeof tc.function?.arguments === 'string' && tc.function.arguments) {
             flushTool(slot); // 参数开始来了 → 名字必然已收齐，这时才发 start
+            outArgs += tc.function.arguments;
             write('content_block_delta', {
               type: 'content_block_delta',
               index: slot.blockIndex,
@@ -6557,6 +6562,21 @@ async function relayAnthropicStream(up, res, model, estInputTokens) {
   }
 
   closeAll();
+
+  /*
+   * usage 缺失/不完整时的兜底：Codex/Claude Code 用 input/output_tokens 算
+   * 上下文占用与自动压缩阈值，报 0 会让它们以为这一轮什么都没吃。
+   * message_start 已给 input 估算；这里补齐 output（正文 + 工具参数）。
+   */
+  const estOutput = estimateStructuredTokens(outText) + estimateStructuredTokens(outArgs);
+  const inputTokens = Number(usage?.prompt_tokens) || estInputTokens || 0;
+  const outputTokens = Number(usage?.completion_tokens) || estOutput;
+  usage = {
+    ...(usage || {}),
+    prompt_tokens: inputTokens,
+    completion_tokens: outputTokens,
+    total_tokens: Number(usage?.total_tokens) || inputTokens + outputTokens,
+  };
 
   /*
    * 干净半关（上游正常收尾、但既没有 finish_reason 也没有 [DONE]）与"连接被掐"
@@ -7448,9 +7468,14 @@ function responsesErrorCode(status, message, parsedCode) {
  * `completion_tokens_details.reasoning_tokens`），这里做一次映射；
  * 上游没给就补 0（Codex 这几个子字段是非 Option 的，缺了会解析失败）。
  */
-function responsesUsage(u) {
-  const input = Number(u?.prompt_tokens) || 0;
-  const output = Number(u?.completion_tokens) || 0;
+function responsesUsage(u, fallback = {}) {
+  /*
+   * 上游偶尔不回 usage（或流被截断导致 usage 帧丢失）。Codex/Claude Code 用
+   * 这两个数字算上下文占用与自动压缩阈值，报 0 会让它们以为这一轮什么都没吃。
+   * 拿本地估算兜底 —— 与 count_tokens 同一套口径，量级正确即可。
+   */
+  const input = Number(u?.prompt_tokens) || Number(fallback.input) || 0;
+  const output = Number(u?.completion_tokens) || Number(fallback.output) || 0;
   const total = Number(u?.total_tokens) || input + output;
   const cached = Number(u?.prompt_tokens_details?.cached_tokens) || 0;
   const reasoning = Number(u?.completion_tokens_details?.reasoning_tokens) || 0;
@@ -7555,10 +7580,15 @@ const responsesTextOf = (output) => output
   .join('');
 
 /** 聚合结果 → 完整的 Responses 对象（非流式）。 */
-function openAIToResponsesResponse(agg, model, routes = null) {
+function openAIToResponsesResponse(agg, model, routes = null, estInputTokens = 0) {
   const choice = (agg.choices || [])[0] || {};
-  const output = openAIToResponsesOutput(choice.message, routes);
+  const message = choice.message || {};
+  const output = openAIToResponsesOutput(message, routes);
   const truncated = choice.finish_reason === 'length';
+  const estOutput = estimateStructuredTokens(typeof message.content === 'string' ? message.content : '')
+    + (message.tool_calls || []).reduce(
+      (sum, tc) => sum + estimateStructuredTokens(tc?.function?.arguments || ''), 0,
+    );
   return {
     id: responsesId('resp'),
     object: 'response',
@@ -7571,7 +7601,7 @@ function openAIToResponsesResponse(agg, model, routes = null) {
     parallel_tool_calls: true,
     tool_choice: 'auto',
     tools: [],
-    usage: responsesUsage(agg.usage),
+    usage: responsesUsage(agg.usage, { input: estInputTokens, output: estOutput }),
     error: null,
     // 同流式那条：`incomplete` 的 reason 只能是 `interrupted`（见 relayResponsesStream
     // 里那段说明）。`end_turn` 两边一致地给。
@@ -7913,6 +7943,10 @@ async function relayResponsesStream(up, res, model, routes = null, options = {})
   let usage = null;
   let streamError = null;
   let sawReasoning = false;
+  /** 上游没回 usage 时的本地估算：累计正文与工具参数。 */
+  let outText = '';
+  let outArgs = '';
+  const estInputTokens = Number(options.estInputTokens) || 0;
   /** 是否见过 `[DONE]`：与 finish_reason 一起作为"这一轮真的跑完了"的信号。 */
   let sawDone = false;
   const reader = up.body.getReader();
@@ -7983,6 +8017,7 @@ async function relayResponsesStream(up, res, model, routes = null, options = {})
             });
           }
           textSlot.text += d.content;
+          outText += d.content;
           send('response.output_text.delta', {
             item_id: textSlot.id, output_index: textSlot.outputIndex, content_index: 0, delta: d.content,
           });
@@ -8045,6 +8080,7 @@ async function relayResponsesStream(up, res, model, routes = null, options = {})
             const deferred = !slot.started && hasOpenEarlierTool(slot);
             if (!deferred) flushTool(slot);
             slot.arguments += tc.function.arguments;
+            outArgs += tc.function.arguments;
             /*
              * custom（freeform）工具的参数是 JSON 外壳（`{"input":…}`），
              * 逐片转发出去只会让客户端看到乱码般的 JSON 片段 —— 它要的是
@@ -8073,6 +8109,18 @@ async function relayResponsesStream(up, res, model, routes = null, options = {})
   closeReasoning();
   closeText();
   for (const s of toolSlots.values()) if (!s.closed) { s.closed = true; closeTool(s); }
+
+  /*
+   * usage 缺失时的兜底：input 用请求估算，output 用本轮累计的正文 + 工具参数
+   * 估算。Codex 的 usage 字段是必填，报 0 会让自动压缩永不触发。
+   */
+  const estOutput = estimateStructuredTokens(outText) + estimateStructuredTokens(outArgs);
+  const usageForEnvelope = () => responsesUsage(usage, { input: estInputTokens, output: estOutput });
+  const accountingUsage = usage || {
+    prompt_tokens: estInputTokens,
+    completion_tokens: estOutput,
+    total_tokens: estInputTokens + estOutput,
+  };
 
   if (sawReasoning && !forwardReasoning) {
     log('responses: upstream sent reasoning_content; it is not forwarded '
@@ -8112,7 +8160,7 @@ async function relayResponsesStream(up, res, model, routes = null, options = {})
         ...envelope('failed'),
         output: finalOutput,
         output_text: responsesTextOf(finalOutput),
-        usage: responsesUsage(usage),
+        usage: usageForEnvelope(),
         error: {
           type: 'upstream_error',
           code: 'server_error',
@@ -8121,7 +8169,7 @@ async function relayResponsesStream(up, res, model, routes = null, options = {})
       },
     });
     res.end();
-    return { finishReason, usage, streamError };
+    return { finishReason, usage: accountingUsage, streamError };
   }
 
   /*
@@ -8149,13 +8197,13 @@ async function relayResponsesStream(up, res, model, routes = null, options = {})
       ...envelope(truncated ? 'incomplete' : 'completed'),
       output: finalOutput,
       output_text: responsesTextOf(finalOutput),
-      usage: responsesUsage(usage),
+      usage: usageForEnvelope(),
       end_turn: !truncated,
       ...(truncated ? { incomplete_details: { reason: 'interrupted' } } : {}),
     },
   });
   res.end();
-  return { finishReason, usage, streamError };
+  return { finishReason, usage: accountingUsage, streamError };
 }
 
 // ── Usage accounting (local only) ────────────────────────────────────────
@@ -12417,6 +12465,7 @@ async function handleRequest(req, res) {
           }
           const r = await relayResponsesStream(up, res, model, routes, {
             forwardReasoning: wantsReasoning,
+            estInputTokens: estimateRequestTokens(body),
           });
           if (r.streamError && !ac.signal.aborted) {
             recordRequest({ model, stream: true, ms: Date.now() - startedAt, ok: false, status: 0, code: null, error: r.streamError.message, ...fallbackInfo });
@@ -12457,7 +12506,7 @@ async function handleRequest(req, res) {
           ...usageOf(aggregated.usage),
           ...fallbackInfo,
         });
-        return json(res, 200, openAIToResponsesResponse(aggregated, model, routes));
+        return json(res, 200, openAIToResponsesResponse(aggregated, model, routes, estimateRequestTokens(body)));
       } catch (e) {
         if (handleUpstreamTimeout(res, 'responses', e)) {
           recordRequest({

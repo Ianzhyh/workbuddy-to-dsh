@@ -139,6 +139,15 @@ const upstream = createServer((req, res) => {
       return;
     }
 
+    if (scenario.kind === 'noUsage') {
+      // 上游只回内容/终止，不回 usage（响应头已在上方统一写好）
+      res.write(sse({ id: 'c1', model: 'm', choices: [{ index: 0, delta: { content: 'estimated output text' } }] }));
+      res.write(sse({ id: 'c1', model: 'm', choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] }));
+      res.write('data: [DONE]\n\n');
+      res.end();
+      return;
+    }
+
     if (scenario.kind === 'noTrailingNewline') {
       /*
        * 尾帧不带换行就 end()：上游/代理正常 close，但最后一帧没有 `\n`。
@@ -1591,6 +1600,30 @@ test('工具被文本收尾后换 index 的新调用：必须照常成为独立 
     .filter((e) => e.event === 'response.output_item.done')
     .map((e) => e.data.output_index);
   assert.equal(new Set(idxs).size, idxs.length, `output_index 重复：${JSON.stringify(idxs)}`);
+});
+
+test('上游不回 usage 时，流式与非流式都必须用本地估算兜底（不能报 0）', async () => {
+  await waitReady();
+  scenario = { kind: 'noUsage' };
+  const streamed = await post({
+    model: 'gpt-5.1-codex', stream: true,
+    input: [{ type: 'message', role: 'user', content: 'estimate me' }],
+  });
+  const events = parseSse(streamed.text);
+  const completed = events.find((e) => e.event === 'response.completed');
+  assert.ok(completed, '缺 response.completed');
+  assert.ok(Number(completed.data.response.usage.input_tokens) > 0, 'input_tokens 不能是 0');
+  assert.ok(Number(completed.data.response.usage.output_tokens) > 0,
+    `output_tokens 不能是 0（实际 ${completed.data.response.usage.output_tokens}）`);
+
+  scenario = { kind: 'noUsage' };
+  const plain = await post({
+    model: 'gpt-5.1-codex', stream: false,
+    input: [{ type: 'message', role: 'user', content: 'estimate me' }],
+  });
+  const body = JSON.parse(plain.text);
+  assert.ok(Number(body.usage?.input_tokens) > 0, '非流式 input_tokens 不能是 0');
+  assert.ok(Number(body.usage?.output_tokens) > 0, '非流式 output_tokens 不能是 0');
 });
 
 test('尾帧没有换行也必须被解析（usage / finish 不能丢）', async () => {
