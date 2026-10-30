@@ -1209,15 +1209,21 @@ function catalogInstructions(templateEntry, model) {
  *     三件事：`tools` 之外还有一层需要 `tool_search` 检索的 MCP 工具、
  *     freeform 的 `input` 参数形状、回合纪律。
  */
-function makeCatalogEntry(template, model) {
-  const window = Number(model.context) || 128000;
+function makeCatalogEntry(template, model, prev = null) {
+  /*
+   * 目录冷启动时 `resolveModelSelection` 只能给占位元数据（128000/8192）。
+   * 那是"不知道"，不是事实：绝不能拿它覆盖目录里已有的真实上限
+   * （1M 上下文 / 48K 输出会被降级成 128K/8K）。`metadataUnknown` 标记来自
+   * 占位对象；有旧条目时优先沿用旧值，没有时保留模板值。
+   */
+  const unknown = model.metadataUnknown === true;
+  const window = unknown ? 0 : (Number(model.context) || 128000);
   const entry = {
     ...template,
     slug: model.id,
     display_name: model.name || model.id,
     description: `${model.name || model.id} — ${CATALOG_OWN_MARK}`,
-    context_window: window,
-    max_context_window: window,
+    ...(window > 0 ? { context_window: window, max_context_window: window } : {}),
     use_responses_lite: false,
     /*
      * ⚠️ `supports_search_tool` 我们**声明 false**，但必须说清它的真实作用边界 ——
@@ -1266,11 +1272,25 @@ function makeCatalogEntry(template, model) {
    * `truncation_policy` 也要跟着调 —— 它是 Codex 自己的输出截断策略，
    * 留在模板那个小值（10000）上会让回答远早于上游上限就被砍断。
    */
-  const maxOut = Number(model.maxOutput) || 0;
+  const maxOut = unknown ? 0 : (Number(model.maxOutput) || 0);
   if (maxOut > 0) {
     entry.max_output_tokens = maxOut;
     if (entry.truncation_policy && typeof entry.truncation_policy === 'object') {
       entry.truncation_policy = { ...entry.truncation_policy, limit: maxOut };
+    }
+  }
+  if (unknown && prev) {
+    const prevWindow = Number(prev.context_window) || 0;
+    if (prevWindow > 0) {
+      entry.context_window = prevWindow;
+      entry.max_context_window = Number(prev.max_context_window) || prevWindow;
+    }
+    const prevMaxOut = Number(prev.max_output_tokens) || 0;
+    if (prevMaxOut > 0) {
+      entry.max_output_tokens = prevMaxOut;
+      if (entry.truncation_policy && typeof entry.truncation_policy === 'object') {
+        entry.truncation_policy = { ...entry.truncation_policy, limit: prevMaxOut };
+      }
     }
   }
 
@@ -1308,8 +1328,8 @@ export function planModelCatalog(client, ctx = {}) {
   for (const m of picked) {
     if (!m || !m.id) continue;
     if (foreign.some((x) => x.slug === m.id)) continue;                    // 同名条目是别人的 → 不抢
-    const entry = makeCatalogEntry(src.template, m);
     const prev = src.models.find((x) => isOwnCatalogEntry(x) && x.slug === m.id);
+    const entry = makeCatalogEntry(src.template, m, prev);
     /*
      * **重算结果与现有条目一字不差 → 什么都不用动。**
      *
@@ -1629,7 +1649,13 @@ export async function buildConnectBase() {
     .filter(Boolean);
   const list = models.length
     ? models
-    : [{ id: config.bridge.responsesModel, name: config.bridge.responsesModel, context: 128000, maxOutput: 8192 }];
+    : [{
+      id: config.bridge.responsesModel,
+      name: config.bridge.responsesModel,
+      context: 128000,
+      maxOutput: 8192,
+      metadataUnknown: true,
+    }];
   /*
    * 目录为空（桥没起 / 上游挂了）→ 用**上次成功抓到的**兜底校验，并标注它已过期。
    * 只补 `catalogIds`（校验用），**不动** `catalogById` / `models` ——
@@ -1756,7 +1782,7 @@ export function resolveModelSelection(base, ids) {
     seen.add(id);
     const meta = base.catalogById?.get(id)
       || (base.models || []).find((m) => m.id === id)
-      || { id, name: id, context: 128000, maxOutput: 8192 };
+      || { id, name: id, context: 128000, maxOutput: 8192, metadataUnknown: true };
     out.push(meta);
   }
   return out;
@@ -1774,7 +1800,7 @@ export function contextForClient(base, clientId, chosen, selection) {
   const model = chosen || defaultModelFor(base, clientId);
   if (!models.some((m) => m.id === model)) {
     const meta = base.catalogById?.get(model)
-      || { id: model, name: model, context: 128000, maxOutput: 8192 };
+      || { id: model, name: model, context: 128000, maxOutput: 8192, metadataUnknown: true };
     models = [...models, meta];
   }
   return {
@@ -1864,7 +1890,11 @@ const LOCK_STALE_MS = 30_000;
 
 function acquireLock(root, clientId) {
   const dir = join(root, clientId);
-  mkdirSync(dir, { recursive: true });
+  try {
+    mkdirSync(dir, { recursive: true });
+  } catch (e) {
+    return { ok: false, reason: `备份目录不可用：${e.message}` };
+  }
   const lock = join(dir, '.lock');
   try {
     if (Date.now() - statSync(lock).mtimeMs > LOCK_STALE_MS) rmSync(lock, { force: true });
@@ -1907,8 +1937,13 @@ function withClientLock(root, clientId, fn) {
 export function applyClient(id, ctx, opts = {}) {
   const client = findClient(id);
   if (!client) return { ok: false, error: `不认识的客户端：${id}` };
-  return withClientLock(resolveBackupRoot(opts.backupRoot), client.id,
-    () => applyClientLocked(id, ctx, opts));
+  try {
+    return withClientLock(resolveBackupRoot(opts.backupRoot), client.id,
+      () => applyClientLocked(id, ctx, opts));
+  } catch (e) {
+    // 备份/锁/磁盘异常也要走结构化结果：控制台只回 500 会丢掉真正原因
+    return { ok: false, error: `接入失败：${e?.message || e}` };
+  }
 }
 
 /**
@@ -2283,8 +2318,12 @@ export function verifyWritten(client, ctx) {
 export function undoClient(id, opts = {}) {
   const client = findClient(id);
   if (!client) return { ok: false, error: `不认识的客户端：${id}` };
-  return withClientLock(resolveBackupRoot(opts.backupRoot), client.id,
-    () => undoClientLocked(client, opts));
+  try {
+    return withClientLock(resolveBackupRoot(opts.backupRoot), client.id,
+      () => undoClientLocked(client, opts));
+  } catch (e) {
+    return { ok: false, error: `撤销失败：${e?.message || e}` };
+  }
 }
 
 function undoClientLocked(client, opts = {}) {
