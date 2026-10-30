@@ -5555,11 +5555,68 @@ const MODEL_1M_SUFFIX_RE = /\[1m\]$/i;
 /** Anthropic 的 1M 长上下文 beta 头值（`anthropic-beta: context-1m-2025-08-07`）。 */
 const LONG_CONTEXT_BETA = 'context-1m-2025-08-07';
 
+/**
+ * 客户端原生模型名（别名）—— **封闭白名单**，不能靠"长得像"。
+ *
+ * PR #19 修掉了「`[1m]` 后缀落进 flash 正则」这一条，但判定本身仍是
+ * `/haiku|flash|mini|small|fast/i`：而 `flash` 恰恰是 WorkBuddy 真实模型名
+ * 的一部分（`deepseek-v4.1-flash` / `glm-5.3-flash`）—— 目录冷启动时
+ * 合法的 id 依然会被当成"小快别名"换掉（issue #18 的第二条路径）。
+ *
+ * 现在只有**客户端真会发的那些名字**才算别名：
+ *   - Anthropic 侧（Claude Code）：`claude-*` / `sonnet` / `opus` / `fable` /
+ *     `opusplan` / `default`；名字里带 `haiku` 的走小快模型；
+ *   - Responses 侧（Codex）：`gpt-*` / `o1…` / `codex-*`；名字里带
+ *     `mini` / `nano` / `small` / `fast` 的走小快模型（**刻意不匹配 `codex`**：
+ *     `gpt-5.1-codex` 是它的主力模型，不能降级）。
+ */
+const ANTHROPIC_ALIAS_MAIN_RE = /^(?:claude|opus|sonnet|fable|opusplan|default)(?:[-_. ].*)?$/i;
+const ANTHROPIC_ALIAS_FAST_RE = /haiku/i;
+const RESPONSES_ALIAS_MAIN_RE = /^(?:gpt|chatgpt|o[0-9]|codex)(?:[-_. ].*)?$/i;
+const RESPONSES_ALIAS_FAST_RE = /mini|nano|small|fast/i;
+
+function classifyClientAlias(id, protocol) {
+  if (protocol === 'responses') {
+    if (RESPONSES_ALIAS_MAIN_RE.test(id) && RESPONSES_ALIAS_FAST_RE.test(id)) return 'fast';
+    if (RESPONSES_ALIAS_MAIN_RE.test(id)) return 'main';
+    return '';
+  }
+  if (ANTHROPIC_ALIAS_MAIN_RE.test(id) && ANTHROPIC_ALIAS_FAST_RE.test(id)) return 'fast';
+  if (ANTHROPIC_ALIAS_MAIN_RE.test(id)) return 'main';
+  return '';
+}
+
+/**
+ * 解析请求里的模型名（两条协议共用机制，别名表分开）。
+ *
+ * 判定顺序：
+ *   1. 剥掉客户端后缀（`[1m]` 等，PR #19）；
+ *   2. 精确命中目录（或 FEATURED 的精选 id）→ 原样用（用户指定的就是它）；
+ *   3. **客户端原生别名** → 映射到默认 / 小快模型（兼容，不是偷换模型）；
+ *   4. 其它名字 → **原样交给上游裁决**：目录已知时由预校验明确报 404
+ *      （`preflightModelError`，与 OpenAI 路径同一套判据），目录还冷着时直接
+ *      转发上游 —— 既不静默换模型，也不因为上游抖动就让请求失败。
+ */
+function resolveRequestedModel(requested, { defaultModel, fastModel, protocol }) {
+  const raw = typeof requested === 'string' ? requested.trim() : '';
+  const id = raw.replace(MODEL_1M_SUFFIX_RE, '').trim();
+  if (!id) return defaultModel;
+  const known = (m) => m && m.id === id;
+  if (catalogCache.models.some(known) || FEATURED.some(known)) return id;
+  const alias = classifyClientAlias(id, protocol);
+  if (alias === 'fast') return fastModel || defaultModel;
+  if (alias === 'main') return defaultModel;
+  log(`${protocol}: unknown model id; forwarding as-is`, id);
+  return id;
+}
+
+/** Anthropic 侧（Claude Code 直连）。 */
 function resolveAnthropicModel(requested) {
-  const name = typeof requested === 'string' ? requested.trim().replace(MODEL_1M_SUFFIX_RE, '') : '';
-  if (name && catalogCache.models.some((m) => m.id === name)) return name;
-  if (name && /haiku|flash|mini|small|fast/i.test(name)) return ANTHROPIC_FAST_MODEL;
-  return ANTHROPIC_MODEL;
+  return resolveRequestedModel(requested, {
+    defaultModel: ANTHROPIC_MODEL,
+    fastModel: ANTHROPIC_FAST_MODEL,
+    protocol: 'anthropic',
+  });
 }
 
 /**
@@ -5572,14 +5629,13 @@ function resolveAnthropicModel(requested) {
  * `anthropic-beta` 既可以是一条头里逗号分隔，也可以重复多条 —— 两种都要认；
  * beta 名大小写不敏感。
  */
-/**
- * Responses 侧的模型名解析（PR #19 只动了 Anthropic 侧，这里先保持原语义）。
- */
+/** Responses 侧（Codex 直连）。 */
 function resolveResponsesModel(requested) {
-  const name = typeof requested === 'string' ? requested : '';
-  if (name && catalogCache.models.some((m) => m.id === name)) return name;
-  if (name && /mini|nano|small|fast|flash|haiku/i.test(name)) return RESPONSES_FAST_MODEL;
-  return RESPONSES_MODEL;
+  return resolveRequestedModel(requested, {
+    defaultModel: RESPONSES_MODEL,
+    fastModel: RESPONSES_FAST_MODEL,
+    protocol: 'responses',
+  });
 }
 
 function hasLongContextBeta(req) {

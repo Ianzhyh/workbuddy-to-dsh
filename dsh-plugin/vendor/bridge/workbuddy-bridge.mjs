@@ -933,9 +933,9 @@ function contextWindowForModel(model) {
 }
 
 /**
- * 模型**真实上限**（`maxInputTokens`）—— 客户端显式要 1M 时用它，而不是默认档。
+ * 模型真实上限（`maxInputTokens`）—— 客户端显式要 1M 时用它，而不是默认档。
  *
- * 显式覆盖（`WORKBUDDY_CONTEXT_WINDOW`）照旧优先，但不会超过模型上限。
+ * 显式覆盖也照旧生效（用户钉的预算优先），但不会超过模型上限。
  */
 function maxContextWindowForModel(model) {
   const max = Number(model?.context) || 0;
@@ -5539,56 +5539,29 @@ const usageOf = (u) => ({
 const ANTHROPIC_MODEL = process.env.WORKBUDDY_ANTHROPIC_MODEL || 'glm-5.3';
 const ANTHROPIC_FAST_MODEL = process.env.WORKBUDDY_ANTHROPIC_FAST_MODEL || 'glm-5.3-flash';
 
-/*
- * ── 请求里的模型名 → 实际出站的模型（Anthropic / Responses 共用机制，别名表分开）──
- *
- * 为什么不能只做「精确匹配 + 小快正则」两档（issue #18）：
- *   ① Claude Code 会给模型名加后缀（`deepseek-v4.1-flash[1m]` = "按 1M 上下文用"），
- *      精确匹配必然失败 → 落进「小快正则」→ **静默换成另一个模型**（用户毫不知情）。
- *   ② 目录冷启动时（桥刚起、还没抓过上游目录）任何名字都匹配不上 → 同样被静默改写。
- *
- * 现在的判定顺序：
- *   1. 剥掉客户端后缀；
- *   2. 精确命中目录（或 FEATURED 的精选 id）→ 原样用（用户指定的就是它）；
- *   3. **客户端原生别名**（claude-* / gpt-* / codex-* …）→ 映射到默认/小快模型 ——
- *      这是兼容（各客户端就会发这些名字），不是"偷偷换模型"；
- *   4. 其它名字 → **原样交给上游裁决**：目录已知时由预校验明确报 404
- *      （`preflightModelError`，与 OpenAI 路径同一套判据；`WORKBUDDY_SKIP_MODEL_PREFLIGHT=1`
- *      仍是那个逃生门），目录还冷着就直接转发上游 —— 既不静默换模型，也不因为
- *      上游抖动就让请求失败。
- */
 /**
- * Anthropic 的 1M 长上下文 beta 头（`anthropic-beta: context-1m-2025-08-07`）。
+ * Claude Code 的 `[1m]` 模型名后缀（`deepseek-v4.1-flash[1m]`）。
  *
- * Claude Code 显式要 1M 时会带上它；桥据此在 `/v1/models` 里按**模型真实上限**
- * 声明窗口，而不是官方默认档（多数模型 300K）—— 否则自动压缩提前触发。
- * 这个口径来自 @liugangnhm 的 PR #19（issue #18 的报告者）。
+ * 它**不是**上游模型 id 的一部分，而是客户端的开关：Claude Code 对不认识的
+ * 模型名一律按 200K 规划会话（自动压缩、用量分母），只有名字带 `[1m]` 时才承认
+ * 1M 上下文（二进制里的判断是 `/\[1m\]/i`）。客户端会在提示里让用户加这个后缀。
+ *
+ * ⚠️ 所以必须在匹配**之前**剥掉：不剥的话精确匹配落空，再撞上下面那条
+ * 「名字里有 flash 就算小快模型」的正则 —— 实测 `deepseek-v4.1-flash[1m]`
+ * 被静默路由成 `glm-5.3-flash`，客户端界面仍显示 deepseek。
  */
+const MODEL_1M_SUFFIX_RE = /\[1m\]$/i;
+
+/** Anthropic 的 1M 长上下文 beta 头值（`anthropic-beta: context-1m-2025-08-07`）。 */
 const LONG_CONTEXT_BETA = 'context-1m-2025-08-07';
-
-/** 请求头里是否带了 1M 长上下文 beta（逗号分隔、大小写不敏感）。 */
-function wantsLongContext(req) {
-  const raw = req && req.headers ? req.headers['anthropic-beta'] : '';
-  const text = Array.isArray(raw) ? raw.join(',') : String(raw || '');
-  if (!text) return false;
-  return text.split(',').some((part) => part.trim().toLowerCase() === LONG_CONTEXT_BETA);
-}
-
-/** 客户端可能给模型名加的后缀（Claude Code 的 `[1m]` 等）：只认**尾部**标签。 */
-const CLIENT_MODEL_SUFFIX_RE = /\[[a-z0-9]{1,8}\]\s*$/i;
-function stripClientModelSuffix(name) {
-  const text = typeof name === 'string' ? name.trim() : '';
-  if (!text) return '';
-  const hit = text.match(CLIENT_MODEL_SUFFIX_RE);
-  return hit && hit.index > 0 ? text.slice(0, hit.index).trim() : text;
-}
 
 /**
  * 客户端原生模型名（别名）—— **封闭白名单**，不能靠"长得像"。
  *
- * 旧实现用 `/haiku|flash|mini|small|fast/i` 猜"客户端在要小快模型"，而 `flash`
- * 恰恰是 WorkBuddy 真实模型名的一部分（`deepseek-v4.1-flash` / `glm-5.3-flash`）：
- * 于是 `deepseek-v4.1-flash[1m]` 落进这一档被换成 `glm-5.3-flash`（issue #18）。
+ * PR #19 修掉了「`[1m]` 后缀落进 flash 正则」这一条，但判定本身仍是
+ * `/haiku|flash|mini|small|fast/i`：而 `flash` 恰恰是 WorkBuddy 真实模型名
+ * 的一部分（`deepseek-v4.1-flash` / `glm-5.3-flash`）—— 目录冷启动时
+ * 合法的 id 依然会被当成"小快别名"换掉（issue #18 的第二条路径）。
  *
  * 现在只有**客户端真会发的那些名字**才算别名：
  *   - Anthropic 侧（Claude Code）：`claude-*` / `sonnet` / `opus` / `fable` /
@@ -5614,33 +5587,61 @@ function classifyClientAlias(id, protocol) {
 }
 
 /**
- * 解析请求里的模型名。
+ * 解析请求里的模型名（两条协议共用机制，别名表分开）。
  *
  * 判定顺序：
- *   1. 剥掉客户端后缀（`[1m]` 等）；
+ *   1. 剥掉客户端后缀（`[1m]` 等，PR #19）；
  *   2. 精确命中目录（或 FEATURED 的精选 id）→ 原样用（用户指定的就是它）；
  *   3. **客户端原生别名** → 映射到默认 / 小快模型（兼容，不是偷换模型）；
  *   4. 其它名字 → **原样交给上游裁决**：目录已知时由预校验明确报 404
  *      （`preflightModelError`，与 OpenAI 路径同一套判据），目录还冷着时直接
  *      转发上游 —— 既不静默换模型，也不因为上游抖动就让请求失败。
- *
- * 小快模型用**配置值**（`WORKBUDDY_ANTHROPIC_FAST_MODEL` /
- * `WORKBUDDY_RESPONSES_FAST_MODEL`），不按目录替换：配置值不在目录里时预校验
- * 会明确报 404 —— 响亮地坏，好过静默地跑别的模型。
  */
 function resolveRequestedModel(requested, { defaultModel, fastModel, protocol }) {
   const raw = typeof requested === 'string' ? requested.trim() : '';
-  const id = stripClientModelSuffix(raw);
-  if (!id) return { id: defaultModel, requested: raw, alias: true };
+  const id = raw.replace(MODEL_1M_SUFFIX_RE, '').trim();
+  if (!id) return defaultModel;
   const known = (m) => m && m.id === id;
-  if (catalogCache.models.some(known) || FEATURED.some(known)) {
-    return { id, requested: raw, alias: false };
-  }
+  if (catalogCache.models.some(known) || FEATURED.some(known)) return id;
   const alias = classifyClientAlias(id, protocol);
-  if (alias === 'fast') return { id: fastModel || defaultModel, requested: raw, alias: true };
-  if (alias === 'main') return { id: defaultModel, requested: raw, alias: true };
+  if (alias === 'fast') return fastModel || defaultModel;
+  if (alias === 'main') return defaultModel;
   log(`${protocol}: unknown model id; forwarding as-is`, id);
-  return { id, requested: raw, alias: false };
+  return id;
+}
+
+/** Anthropic 侧（Claude Code 直连）。 */
+function resolveAnthropicModel(requested) {
+  return resolveRequestedModel(requested, {
+    defaultModel: ANTHROPIC_MODEL,
+    fastModel: ANTHROPIC_FAST_MODEL,
+    protocol: 'anthropic',
+  });
+}
+
+/**
+ * 客户端是否带了 Anthropic 的 1M 长上下文 beta 头（`context-1m-2025-08-07`）。
+ *
+ * Claude Code 在模型支持 `supports_1m_beta`、或换了别的客户端时会把这条头发过来；
+ * 桥原本完全忽略 `anthropic-beta`，于是 `/v1/models` 只能报默认档（300K），
+ * 客户端即使显式要 1M 也拿不到。
+ *
+ * `anthropic-beta` 既可以是一条头里逗号分隔，也可以重复多条 —— 两种都要认；
+ * beta 名大小写不敏感。
+ */
+/** Responses 侧（Codex 直连）。 */
+function resolveResponsesModel(requested) {
+  return resolveRequestedModel(requested, {
+    defaultModel: RESPONSES_MODEL,
+    fastModel: RESPONSES_FAST_MODEL,
+    protocol: 'responses',
+  });
+}
+
+function hasLongContextBeta(req) {
+  const raw = req?.headers?.['anthropic-beta'];
+  const list = Array.isArray(raw) ? raw : (typeof raw === 'string' ? [raw] : []);
+  return list.some((v) => String(v).split(',').some((b) => b.trim().toLowerCase() === LONG_CONTEXT_BETA));
 }
 
 /**
@@ -10495,8 +10496,6 @@ async function handleRequest(req, res) {
       // refresh=1：强制重取上游目录。失败**不清空旧缓存**——宁可给一份标了
       // 年纪的目录，也别让页面突然空白；staleMs 就是那个「年纪」。
       const wantRefresh = url.searchParams.get('refresh') === '1';
-      // Claude Code 显式要 1M 时按模型真实上限声明窗口（其余客户端行为不变）
-      const longContext = wantsLongContext(req);
       let staleMs = null;
       if (wantRefresh) {
         const startedAt = Date.now();
@@ -10543,6 +10542,16 @@ async function handleRequest(req, res) {
         );
       }
 
+      /*
+       * 客户端显式要 1M（`anthropic-beta: context-1m-2025-08-07`）时，目录里
+       * 报的是该模型**真实上限**而不是官方默认档（多数是 300K）。
+       *
+       * 为什么需要：Claude Code 只在模型"已识别 + 开了 1M"时才按 1M 规划会话，
+       * 而它的识别依据之一就是目录里的窗口。原先桥完全忽略 `anthropic-beta`，
+       * 于是即使客户端点名要 1M，拿到的仍是 300K —— 自动压缩提前触发。
+       * 只在有 beta 头时才换，默认视图的行为保持不变。
+       */
+      const longContext = hasLongContextBeta(req);
       // 促销是否生效按“现在”算，而不是目录抓取那一刻：夜间免费/折扣在
       // 23:00、08:00 切换时，只要客户端重新拉目录就能看到新价格。
       const promoNow = new Date();
@@ -10577,7 +10586,6 @@ async function handleRequest(req, res) {
           && Array.isArray(efforts) && efforts.includes(m.defaultReasoningEffort)
           ? m.defaultReasoningEffort
           : '';
-        // 客户端显式要 1M（beta 头）→ 按真实上限声明；否则维持官方默认档
         const contextWindow = longContext ? maxContextWindowForModel(m) : contextWindowForModel(m);
         return {
           id: m.id,
@@ -11534,11 +11542,7 @@ async function handleRequest(req, res) {
         });
         return json(res, 400, { type: 'error', error: { type: 'invalid_request_error', message } });
       }
-      const model = resolveRequestedModel(body.model, {
-        defaultModel: ANTHROPIC_MODEL,
-        fastModel: ANTHROPIC_FAST_MODEL,
-        protocol: 'anthropic',
-      }).id;
+      const model = resolveAnthropicModel(body.model);
       const messages = anthropicToOpenAIMessages(body);
       const tools = anthropicToolsToOpenAIMessages(body.tools);
       const toolChoice = anthropicToolChoiceToOpenAI(body.tool_choice);
@@ -11779,11 +11783,7 @@ async function handleRequest(req, res) {
           error: { type: 'invalid_request_error', code: 'invalid_request', message },
         });
       }
-      const model = resolveRequestedModel(body.model, {
-        defaultModel: RESPONSES_MODEL,
-        fastModel: RESPONSES_FAST_MODEL,
-        protocol: 'responses',
-      }).id;
+      const model = resolveResponsesModel(body.model);
       const messages = responsesToOpenAIMessages(body);
       /*
        * 工具可能出现在三个地方：
