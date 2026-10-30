@@ -139,6 +139,22 @@ const upstream = createServer((req, res) => {
       return;
     }
 
+    if (scenario.kind === 'noTrailingNewline') {
+      /*
+       * 尾帧不带换行就 end()：上游/代理正常 close，但最后一帧没有 `\n`。
+       * 旧实现只解析 `split('\n')` 出来的完整行，尾帧被留在 buffer 里丢掉。
+       */
+      res.write(sse({ id: 'c1', model: 'm', choices: [{ index: 0, delta: { content: 'done' } }] }));
+      res.write('data: ' + JSON.stringify({
+        id: 'c1',
+        model: 'm',
+        choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
+        usage: { prompt_tokens: 7, completion_tokens: 3, total_tokens: 10 },
+      }));
+      res.end();
+      return;
+    }
+
     if (scenario.kind === 'text') {
       res.write(sse({ id: 'c1', model: 'm', choices: [{ index: 0, delta: { role: 'assistant', content: 'Hel' } }] }));
       res.write(sse({ id: 'c1', model: 'm', choices: [{ index: 0, delta: { content: 'lo ' } }] }));
@@ -247,6 +263,17 @@ const upstream = createServer((req, res) => {
       res.write(sse({ id: 'c1', model: 'm', choices: [{ index: 0, delta: { content: '中间插一句' } }] }));
       res.write(sse({ id: 'c1', model: 'm', choices: [{ index: 0, delta: { tool_calls: [{ index: 1, id: 'call_2', function: { name: 'second_tool' } }] } }] }));
       res.write(sse({ id: 'c1', model: 'm', choices: [{ index: 0, delta: { tool_calls: [{ index: 1, function: { arguments: '{"b":2}' } }] } }] }));
+    } else if (scenario.kind === 'parallelToolCalls') {
+      /*
+       * 并行工具调用**交错**下发：B 在 A 参数还没结束时出现，A 的尾片
+       * 又在 B 之后回来。Codex 要求 output item 顺序递增且不重叠 —— 桥必须
+       * 把 B 攒到 A 的 done 之后再 announce。
+       */
+      res.write(sse({ id: 'c1', model: 'm', choices: [{ index: 0, delta: { tool_calls: [{ index: 0, id: 'call_a', function: { name: 'first_tool' } }] } }] }));
+      res.write(sse({ id: 'c1', model: 'm', choices: [{ index: 0, delta: { tool_calls: [{ index: 0, function: { arguments: '{"a":' } }] } }] }));
+      res.write(sse({ id: 'c1', model: 'm', choices: [{ index: 0, delta: { tool_calls: [{ index: 1, id: 'call_b', function: { name: 'second_tool' } }] } }] }));
+      res.write(sse({ id: 'c1', model: 'm', choices: [{ index: 0, delta: { tool_calls: [{ index: 1, function: { arguments: '{"b":2}' } }] } }] }));
+      res.write(sse({ id: 'c1', model: 'm', choices: [{ index: 0, delta: { tool_calls: [{ index: 0, function: { arguments: '1}' } }] } }] }));
     }
     res.write(sse({
       id: 'c1',
@@ -1560,6 +1587,57 @@ test('工具被文本收尾后换 index 的新调用：必须照常成为独立 
   assert.deepEqual(names, ['first_tool', 'second_tool'],
     `换 index 的新工具调用丢了。实际交付：${JSON.stringify(names)}`);
   // output_index 必须互不重复且递增（Codex 按它拼 item）
+  const idxs = events
+    .filter((e) => e.event === 'response.output_item.done')
+    .map((e) => e.data.output_index);
+  assert.equal(new Set(idxs).size, idxs.length, `output_index 重复：${JSON.stringify(idxs)}`);
+});
+
+test('尾帧没有换行也必须被解析（usage / finish 不能丢）', async () => {
+  await waitReady();
+  scenario = { kind: 'noTrailingNewline' };
+  const { status, text } = await post({
+    model: 'gpt-5.1-codex', stream: true,
+    input: [{ type: 'message', role: 'user', content: 'finish without newline' }],
+  });
+  assert.equal(status, 200);
+  const events = parseSse(text);
+  const completed = events.find((e) => e.event === 'response.completed');
+  assert.ok(completed, `无换行尾帧被当成半关/失败。实际事件：${events.map((e) => e.event).join(', ')}`);
+  assert.ok(!events.some((e) => e.event === 'response.failed'), '完成流不能报 failed');
+  const u = completed.data.response.usage;
+  assert.equal(u.input_tokens, 7, '尾帧里的 usage 不能丢');
+  assert.equal(u.output_tokens, 3);
+});
+
+test('并行工具调用交错下发：item 必须按序且互不重叠，参数不丢', async () => {
+  await waitReady();
+  scenario = { kind: 'parallelToolCalls' };
+  const { status, text } = await post({
+    model: 'gpt-5.1-codex', stream: true,
+    input: [{ type: 'message', role: 'user', content: 'run both' }],
+  });
+  assert.equal(status, 200);
+  const events = parseSse(text);
+  const added = events
+    .map((e, i) => ({ e, i }))
+    .filter(({ e }) => e.event === 'response.output_item.added' && e.data.item?.type === 'function_call')
+    .map(({ e, i }) => ({ name: e.data.item.name, at: i, id: e.data.item.id }));
+  const done = events
+    .map((e, i) => ({ e, i }))
+    .filter(({ e }) => e.event === 'response.output_item.done' && e.data.item?.type === 'function_call')
+    .map(({ e, i }) => ({ name: e.data.item.name, at: i, id: e.data.item.id, args: e.data.item.arguments }));
+  assert.deepEqual(added.map((x) => x.name), ['first_tool', 'second_tool'], '两个调用都必须交付');
+  assert.deepEqual(done.map((x) => x.name), ['first_tool', 'second_tool'], 'done 顺序必须与创建顺序一致');
+
+  // 每个 item 的 added 早于自己的 done；B 的 added 必须晚于 A 的 done
+  assert.ok(added[0].at < done[0].at, 'first_tool 的 added 必须先于 done');
+  assert.ok(done[0].at < added[1].at,
+    'second_tool 在 first_tool 收尾前被 announce —— Codex 会看到两个同时打开的 item');
+  assert.ok(added[1].at < done[1].at, 'second_tool 的 added 必须先于 done');
+
+  assert.deepEqual(JSON.parse(done[0].args), { a: 1 }, '并行交错时 first_tool 的尾片不能丢');
+  assert.deepEqual(JSON.parse(done[1].args), { b: 2 });
   const idxs = events
     .filter((e) => e.event === 'response.output_item.done')
     .map((e) => e.data.output_index);

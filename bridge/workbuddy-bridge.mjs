@@ -6435,8 +6435,20 @@ async function relayAnthropicStream(up, res, model, estInputTokens) {
       // 背压：上一轮写满了就先等客户端排空，再向上游拉下一块
       if (backpressured) { await waitDrain(res); backpressured = false; }
       const { done, value } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
+      if (!done) {
+        buffer += decoder.decode(value, { stream: true });
+      } else {
+        // 冲掉解码器里可能残留的多字节字符
+        buffer += decoder.decode();
+        if (!buffer.trim()) break;
+        /*
+         * 上游/代理可能在最后一帧（finish_reason / usage / [DONE]）之后
+         * **不发换行**就正常 close。原实现把这份 `buffer` 留着不解析，
+         * 于是要么丢 usage，要么把已经完成的回答判成"流中断"。
+         * 补一个换行，让它走下面同一套解析。
+         */
+        buffer += '\n';
+      }
       const lines = buffer.split('\n');
       buffer = lines.pop() ?? '';
       for (const line of lines) {
@@ -7648,8 +7660,23 @@ async function relayResponsesStream(up, res, model, routes = null, options = {})
   let outputIndex = -1;
   const output = [];          // 按顺序攒完整 item，最后一次给 response.completed
   let textSlot = null;        // 打开中的 message 项
-  const toolSlots = new Map(); // 上游 tool_calls 的 index → slot
-  let pendingTool = null;     // 已分配索引但还没发 output_item.added 的工具块
+  const toolSlots = new Map(); // 上游 tool_calls 的 index → slot（Map 保持创建顺序）
+
+  /**
+   * 这个工具块之前还有未收尾的工具块吗？
+   *
+   * Codex 按**顺序递增且互不重叠**的 output_index 解析 item。上游可能把并行
+   * 调用（index 0 / 1）交错下发：后一个块不能在前一个 `output_item.done`
+   * 之前 announce，否则会出现两个同时打开的 item。此时后来的块只累积参数、
+   * 不发 delta，等前面的块收尾后由统一收尾循环按顺序补发。
+   */
+  const hasOpenEarlierTool = (slot) => {
+    for (const s of toolSlots.values()) {
+      if (s === slot) return false;
+      if (!s.closed) return true;
+    }
+    return false;
+  };
 
   /**
    * 上游的思维链要不要转给 Codex（`WORKBUDDY_FORWARD_REASONING=1`）。
@@ -7769,7 +7796,6 @@ async function relayResponsesStream(up, res, model, routes = null, options = {})
   const flushTool = (slot) => {
     if (!slot || slot.started) return;
     slot.started = true;
-    pendingTool = null;
     /*
      * `tool_search` 不发 `output_item.added`：它的 item 形状里 `arguments` 是
      * **对象**（见 closeTool），参数分片过程中拼不出合法形状。它也没有 delta
@@ -7897,8 +7923,20 @@ async function relayResponsesStream(up, res, model, routes = null, options = {})
     for (;;) {
       if (backpressured) { await waitDrain(res); backpressured = false; }
       const { done, value } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
+      if (!done) {
+        buffer += decoder.decode(value, { stream: true });
+      } else {
+        // 冲掉解码器里可能残留的多字节字符
+        buffer += decoder.decode();
+        if (!buffer.trim()) break;
+        /*
+         * 上游/代理可能在最后一帧（finish_reason / usage / [DONE]）之后
+         * **不发换行**就正常 close。原实现把这份 `buffer` 留着不解析，
+         * 于是要么丢 usage，要么把已经完成的回答判成"流中断"。
+         * 补一个换行，让它走下面同一套解析。
+         */
+        buffer += '\n';
+      }
       const lines = buffer.split('\n');
       buffer = lines.pop() ?? '';
       for (const line of lines) {
@@ -7968,7 +8006,8 @@ async function relayResponsesStream(up, res, model, routes = null, options = {})
               closed: false,
             };
             toolSlots.set(upIdx, slot);
-            pendingTool = slot; // 先不发 added，等名字收齐
+            // 先不发 added：名字可能分片到达；且前面若有未收尾的工具块，
+            // 现在宣告会让两个 item 同时打开（见 hasOpenEarlierTool）。
           }
           /*
            * ⚠️ **已收尾的块绝不能再接受 delta。**
@@ -7998,7 +8037,13 @@ async function relayResponsesStream(up, res, model, routes = null, options = {})
           // 会让后续分片全被丢掉）
           if (tc.function?.name) slot.name += tc.function.name;
           if (typeof tc.function?.arguments === 'string' && tc.function.arguments) {
-            flushTool(slot);
+            /*
+             * 前面还有未收尾的工具块时**不 announce、也不发 delta**：只累积
+             * 参数，等前一个 done 之后由收尾循环按 output_index 顺序补发。
+             * 否则 Codex 会看到两个同时 active 的 output item。
+             */
+            const deferred = !slot.started && hasOpenEarlierTool(slot);
+            if (!deferred) flushTool(slot);
             slot.arguments += tc.function.arguments;
             /*
              * custom（freeform）工具的参数是 JSON 外壳（`{"input":…}`），
@@ -8008,7 +8053,7 @@ async function relayResponsesStream(up, res, model, routes = null, options = {})
              * `tool_search` 同理：它的 `arguments` 在 Codex 侧必须是**对象**，
              * 分片拼不出合法形状，也只在收尾给一次 `output_item.done`。
              */
-            if (!customTools.has(slot.name) && slot.name !== TOOL_SEARCH_NAME) {
+            if (!deferred && !customTools.has(slot.name) && slot.name !== TOOL_SEARCH_NAME) {
               send('response.function_call_arguments.delta', {
                 item_id: slot.id, output_index: slot.outputIndex, delta: tc.function.arguments,
               });
@@ -8022,8 +8067,9 @@ async function relayResponsesStream(up, res, model, routes = null, options = {})
     log('responses stream interrupted', e.message);
   }
 
-  // 收尾：先补发漏掉的工具块，再关文本块，顺序不能反；reasoning 项最先关
-  if (pendingTool && !pendingTool.started) flushTool(pendingTool);
+  // 收尾：先关 reasoning 与文本，再按创建顺序逐个补发/收尾工具块。
+  // 工具块的 added 必须在它自己的 done 之前、且不能早于前一个块的 done；
+  // Map 的插入顺序就是 output_index 顺序，逐个 closeTool 天然满足。
   closeReasoning();
   closeText();
   for (const s of toolSlots.values()) if (!s.closed) { s.closed = true; closeTool(s); }
@@ -8498,12 +8544,22 @@ function summarizeUsage(days = 7, opts = {}) {
   // 小时桶只在显式要求时才算：7/30 天视图用不到，白算 24 个桶没意义。
   const wantHours = opts.hours === true;
 
-  // 小时视图把窗口**对齐到整点**（从当前整点往前推 23 小时，共 24 个整点桶）。
-  // 若沿用 `now - 24h` 的滚动窗口，最旧那个桶只会统计到半截，图上合计就和
-  // 面板的 total 对不上了——「图上的每个数字都能在面板里对上」是硬要求。
-  // 不用小时桶时（wantHours=false）走原来的滚动窗口，既有语义完全不变。
+  /*
+   * 两种视图都要**对齐桶边界**，否则最旧的桶只统计半截，图上的合计与 total
+   * 对不上（「图上的每个数字都能在面板里对上」是硬要求）：
+   *   - 小时视图：当前整点往前推 23 小时，共 24 个整点桶；
+   *   - 天视图：本地零点往前推 days-1 天。原先用 `now - days*24h`，只要当前
+   *     时间过了零点，窗口就会多出"前天"的半截（days=7 实际 8 个桶），
+   *     days=1 时更明显：total 含昨天尾巴，图上只有今天。
+   */
   const hourAnchor = (() => { const a = new Date(); a.setMinutes(0, 0, 0); return a.getTime(); })();
-  const since = wantHours ? hourAnchor - 23 * 3600000 : Date.now() - days * 86400000;
+  const dayAnchor = (() => {
+    const a = new Date();
+    a.setHours(0, 0, 0, 0);
+    a.setDate(a.getDate() - (Math.max(1, Math.min(Number(days) || 7, 90)) - 1));
+    return a.getTime();
+  })();
+  const since = wantHours ? hourAnchor - 23 * 3600000 : dayAnchor;
 
   const rows = readUsageRows();
 
@@ -8601,8 +8657,13 @@ function summarizeUsage(days = 7, opts = {}) {
       fm.failed += 1;
       fm.byKind[failureKind] = (fm.byKind[failureKind] || 0) + 1;
       failureByModel.set(failModel, fm);
-      const existingModel = byModel.get(failModel);
-      if (existingModel) existingModel.failed = (existingModel.failed || 0) + 1;
+      /*
+       * 失败计数先记在 failureByModel，循环结束后再并进"有成功调用的模型"。
+       * 不能在这里按 byModel 是否已有桶累加：账本顺序不保证先成功后失败，
+       * 失败早于成功的模型会显示 0 failed（成功率虚高）。也不能为只有失败的
+       * 模型新建桶 —— `models[]` 的契约是"成功模型排行"，失败模型另有
+       * `failureByModel`（媒体/搜索也不该混进这张表）。
+       */
       const failDay = ensureDay(r.t);
       failDay.failed = (failDay.failed || 0) + 1;
       const failHour = ensureHour(r.t);
@@ -8761,6 +8822,12 @@ function summarizeUsage(days = 7, opts = {}) {
       };
       hours.push({ ...h, byModel: [...h.byModel.values()].sort((a, b) => b.credit - a.credit) });
     }
+  }
+
+  // 把失败计数并进对应的成功模型桶（与账本行序无关）
+  for (const [model, fm] of failureByModel) {
+    const hit = byModel.get(model);
+    if (hit) hit.failed = fm.failed;
   }
 
   return {

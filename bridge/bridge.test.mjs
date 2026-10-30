@@ -1139,6 +1139,41 @@ test('目录：v3 成功后 v2 的单端点 401 不得触发刷新/换号（否�
   } finally { await bridge.stop(); upstream.close(); }
 });
 
+test('用量：days 窗口按本地零点对齐（不能多算半截"昨天"）', { timeout: 60_000 }, async () => {
+  const bridge = await startBridge({}, { auth: READABLE_FAKE_AUTH });
+  try {
+    const now = Date.now();
+    const startOfToday = (() => { const d = new Date(); d.setHours(0, 0, 0, 0); return d.getTime(); })();
+    const yesterdayLate = startOfToday - 30 * 60 * 1000; // 昨天 23:30
+    const todayEarly = Math.min(startOfToday + 1000, now);
+    const row = (t, model, ok = true) => JSON.stringify({
+      t, model, ok, promptTokens: 1, completionTokens: 1, ms: 5, status: ok ? 200 : 500,
+      ...(ok ? {} : { error: 'boom' }),
+    });
+    writeFileSync(join(bridge.dir, 'usage.jsonl'), [
+      row(yesterdayLate, 'yesterday-model'),
+      // 失败行在成功行之前：旧实现会把它丢掉，模型 failed 显示 0
+      row(todayEarly, 'today-model', false),
+      row(todayEarly + 1, 'today-model'),
+    ].join('\n') + '\n');
+
+    const usage = await (await fetch(`${bridge.baseUrl}/v1/usage?days=1`, { headers: auth })).json();
+    assert.equal(usage.total.calls, 1, 'days=1 只能统计今天，昨天 23:30 的尾巴不能算进来');
+    assert.equal(usage.days.length, 1, `days=1 只能有一个日桶，实际 ${JSON.stringify(usage.days.map((d) => d.day))}`);
+    assert.equal(usage.days[0].calls, 1);
+    const todayModel = usage.models.find((m) => m.model === 'today-model');
+    assert.equal(todayModel.calls, 1);
+    assert.equal(todayModel.failed, 1, '失败早于成功时也必须计数（否则成功率虚高）');
+    const d = new Date(todayEarly);
+    const p = (n) => String(n).padStart(2, '0');
+    assert.equal(usage.days[0].day, `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`,
+      '桶必须是本地日期');
+  } finally {
+    await bridge.stop();
+    rmSync(bridge.dir, { recursive: true, force: true });
+  }
+});
+
 test('账本：体检请求要标 probe，面板不再把它算进“最近失败”待办', { timeout: 90_000 }, async () => {
   const upstream = await startStubUpstream(['stub-model']);
   const bridge = await startBridge({ CODEBUDDY_ENDPOINT: upstream.base }, { auth: READABLE_FAKE_AUTH });
