@@ -157,7 +157,7 @@ body.dark .wb-root,
   color-scheme: dark;
 }
 .wb-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;flex-wrap:wrap}
-.wb-lang{appearance:none;flex:none;border:.5px solid var(--dsw-alias-border-l2,light-dark(#0000001f,#ffffff2e));background:var(--dsw-alias-bg-module-platform,light-dark(#ffffff,#202226));color:var(--dsw-alias-label-primary,light-dark(#0f1115,#f9fafb));border-radius:8px;padding:4px 9px;font:inherit;font-size:12px;font-weight:600;line-height:16px;min-width:34px;cursor:pointer;transition:all var(--wb-anim-fast)}
+.wb-lang{appearance:none;flex:none;border:.5px solid var(--dsw-alias-border-l2,light-dark(#0000001f,#ffffff2e));background:var(--dsw-alias-bg-module-platform,light-dark(#ffffff,#202226));color:var(--dsw-alias-label-primary,light-dark(#0f1115,#f9fafb));border-radius:8px;padding:4px 9px;font:inherit;font-size:12px;font-weight:600;line-height:16px;min-width:34px;cursor:pointer;transition:background-color var(--wb-anim-fast),border-color var(--wb-anim-fast),color var(--wb-anim-fast),box-shadow var(--wb-anim-fast),opacity var(--wb-anim-fast),transform var(--wb-anim-fast)}
 .wb-lang:hover{background:var(--dsw-alias-interactive-bg-hover,light-dark(#2631480f,#ffffff14))}
 .wb-lang:focus-visible{outline:2px solid var(--dsw-alias-brand-primary,#6366f1);outline-offset:1px}
 .wb-title{margin:0;font-size:15px;font-weight:600;letter-spacing:-0.01em}
@@ -263,7 +263,7 @@ body.dark .wb-root,
 .wb-actions{display:flex;flex-wrap:wrap;gap:8px;align-items:center;min-width:0}
 .wb-actions.split{justify-content:space-between}
 .wb-actions-group{display:flex;align-items:center;flex-wrap:wrap;gap:8px}
-.wb-btn{appearance:none;border:.5px solid var(--dsw-alias-border-l1,light-dark(#00000014,#ffffff1a));border-radius:9px;padding:6px 12px;font:inherit;font-size:12.5px;font-weight:600;cursor:pointer;background:var(--dsw-alias-interactive-bg-hover,light-dark(#2631480f,#ffffff14));color:inherit;text-decoration:none;display:inline-block;flex:none;transition:all var(--wb-anim-fast)}
+.wb-btn{appearance:none;border:.5px solid var(--dsw-alias-border-l1,light-dark(#00000014,#ffffff1a));border-radius:9px;padding:6px 12px;font:inherit;font-size:12.5px;font-weight:600;cursor:pointer;background:var(--dsw-alias-interactive-bg-hover,light-dark(#2631480f,#ffffff14));color:inherit;text-decoration:none;display:inline-block;flex:none;transition:background-color var(--wb-anim-fast),border-color var(--wb-anim-fast),color var(--wb-anim-fast),box-shadow var(--wb-anim-fast),opacity var(--wb-anim-fast),transform var(--wb-anim-fast)}
 .wb-btn:hover{background:var(--dsw-alias-interactive-bg-active,light-dark(#2631481a,#ffffff24));border-color:var(--dsw-alias-border-l2,light-dark(#00000028,#ffffff33))}
 .wb-btn:active:not(:disabled){transform:scale(0.97)}
 .wb-btn:focus-visible{outline:2px solid var(--dsw-alias-brand-primary,#6366f1);outline-offset:1px}
@@ -279,6 +279,15 @@ body.dark .wb-root,
 .wb-table th{color:var(--dsw-alias-label-tertiary,light-dark(#81858c,#adb2b8));font-weight:500;white-space:nowrap;position:sticky;top:0;z-index:2;background:var(--dsw-alias-bg-module-platform,light-dark(#ffffff,#202226));box-shadow:0 1px 0 var(--dsw-alias-border-l1,light-dark(#0000000a,#ffffff0f))}
 .wb-table td.num{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
 .wb-table td.wrap{overflow-wrap:anywhere;word-break:break-word;min-width:160px;max-width:340px}
+/*
+ * 最近请求表：模型列允许省略（失败请求可能根本没有 model），结果列拆成
+ * 「状态 + 归因」两行并 nowrap —— 原先 8 列挤在一个自动表格里，错误文案会
+ * 折成三行，整行高度被撑高，扫读时间线就断了。
+ */
+.wb-req-table th:nth-child(2),.wb-req-table td:nth-child(2){max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.wb-req-table td.wb-req-result{white-space:nowrap;min-width:122px}
+.wb-req-table .wb-req-kind{display:block;margin-top:2px;font-size:10.5px;line-height:15px;color:var(--dsw-alias-label-tertiary,light-dark(#81858c,#adb2b8))}
+.wb-req-table .wb-req-result.click{cursor:pointer}
 /* 操作列（按钮）：永不换行 */
 .wb-table td.wb-actions-col,.wb-table th.wb-actions-col{white-space:nowrap;width:1%;text-align:right}
 .wb-table td.wb-actions-col>.wb-btn+.wb-btn{margin-left:6px}
@@ -414,12 +423,21 @@ body.dark .wb-root,
 .wb-model-probe-updated{margin:4px 0 0;font-size:11px}
 @media (max-width:560px){.wb-models-card{padding:14px}.wb-model-hero-side{justify-content:space-between;gap:12px}.wb-model-stats{gap:14px}.wb-model-search{flex:1 1 150px}.wb-model-sort{flex:0 0 104px;width:104px}.wb-model-filter .wb-segmented-wrap{max-width:100%;overflow-x:auto}.wb-detail-section-head{flex-direction:column}.wb-model-detail-id{max-width:100%}.wb-token-field .wb-token-row{grid-template-columns:minmax(0,1fr) auto}.wb-token-field .wb-token-label{grid-column:1;grid-row:1}.wb-token-field .wb-token-control{grid-column:1/-1;grid-row:2}.wb-token-field .wb-token-value{grid-column:2;grid-row:1}.wb-token-field .wb-token-input{width:104px}}
 /* 促销徽章 */
-.wb-badge{display:inline-block;margin-left:6px;padding:0 6px;border-radius:6px;font-size:10.5px;line-height:16px;background:light-dark(#00000010,#ffffff1f);border:.5px solid transparent;white-space:nowrap;vertical-align:middle;transition:all var(--wb-anim-fast)}
+.wb-badge{display:inline-block;margin-left:6px;padding:0 6px;border-radius:6px;font-size:10.5px;line-height:16px;background:light-dark(#00000010,#ffffff1f);border:.5px solid transparent;white-space:nowrap;vertical-align:middle;transition:background-color var(--wb-anim-fast),border-color var(--wb-anim-fast),color var(--wb-anim-fast),box-shadow var(--wb-anim-fast),opacity var(--wb-anim-fast),transform var(--wb-anim-fast)}
 /* 账号：每账号一行 */
 /* 账号：每账号一个卡片块（原来是「下划线分隔的行」，和模型卡不统一，也读不出边界） */
 .wb-account{padding:12px;margin-bottom:8px;border-radius:10px;background:var(--dsw-alias-interactive-bg-hover,light-dark(#2631480f,#ffffff14));border-bottom:0;transition:background-color var(--wb-anim-fast),box-shadow var(--wb-anim-fast)}
 .wb-account:last-child{margin-bottom:0}
 .wb-account:hover{box-shadow:inset 0 0 0 1px var(--dsw-alias-border-l2,light-dark(#0000001a,#ffffff1f))}
+/*
+ * Pointer 拖拽：被拖行脱离文档流跟手，原位由 placeholder 占住；其余行 FLIP。
+ * transition 必须清空，否则 background/box-shadow 的 --wb-anim-fast 会把 transform
+ * 也补间成 160ms，拖拽会有滞后。
+ */
+/* 拖行车相对账号列表绝对定位：fixed 会被宿主设置弹窗的 transform 祖先
+   改变参照物，拖影会整体偏移（实测"拖拽飘了"）。absolute 不受祖先影响。 */
+.wb-account.wb-account-pointer-drag{position:absolute;z-index:20;margin:0;opacity:1;cursor:grabbing;transition:none;box-shadow:0 12px 32px light-dark(rgba(16,24,20,.18),rgba(0,0,0,.55));pointer-events:none}
+.wb-account-placeholder{border:1px dashed var(--dsw-alias-border-l3,light-dark(#00000033,#ffffff42));border-radius:10px;background:var(--dsw-alias-interactive-bg-hover,light-dark(#2631480f,#ffffff14));opacity:.5;pointer-events:none}
 .wb-account:last-child{border-bottom:0}
 .wb-account.bad b{color:light-dark(#a40e26,#ffb3ad)}
 .wb-account-head{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;min-width:0}
@@ -440,8 +458,13 @@ body.dark .wb-root,
   letter-spacing:-1px;
   user-select:none;
   flex:0 0 auto;
-  /* 保证手柄本身在键盘/读屏下也能被聚焦（aria-label 已带名称） */
+  /* 指针拖拽期间不要滚页；同时给 18px 最小命中区 */
   touch-action:none;
+  min-width:18px;
+  min-height:18px;
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
 }
 .wb-grip:active{cursor:grabbing}
 .wb-grip:focus-visible{outline:2px solid var(--dsw-alias-brand-primary,light-dark(#0f1115,#f9fafb));outline-offset:2px;border-radius:4px}
@@ -460,11 +483,6 @@ body.dark .wb-root,
 .wb-btn.is-sm.primary{color:light-dark(#fff,#0f1115)}
 .wb-account-toolbar .wb-input{font-size:12px;padding:3px 8px;min-height:24px}
 
-/* 被拖着的行：半透明，别让它在原位挡着落点 */
-.wb-account-dragging{opacity:.45}
-/* 落点指示线：上/下半插到目标行前/后 */
-.wb-account-drop-top{box-shadow:inset 0 2px 0 0 var(--dsw-alias-brand-primary,light-dark(#0f1115,#f9fafb))}
-.wb-account-drop-bottom{box-shadow:inset 0 -2px 0 0 var(--dsw-alias-brand-primary,light-dark(#0f1115,#f9fafb))}
 /* 已隐藏的账号：压暗 + 虚线边，一眼看出它不在默认列表里 */
 .wb-account-hidden{opacity:.62;border-style:dashed}
 /* 插件登录：卡片内部的节距与分组，避免每个元素自己写内联 margin */
@@ -479,7 +497,7 @@ body.dark .wb-root,
 .wb-login-actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}
 .wb-login-warning{margin-top:10px}
 /* 原生箭头在 Windows/暗色下粗细和位置不一致，统一关掉后自己画一个小箭头。 */
-.wb-select{appearance:none;-webkit-appearance:none;background-color:var(--dsw-alias-bg-module-platform,light-dark(#ffffff,#202226));background-image:linear-gradient(45deg,transparent 50%,var(--dsw-alias-label-tertiary,light-dark(#81858c,#adb2b8)) 50%),linear-gradient(135deg,var(--dsw-alias-label-tertiary,light-dark(#81858c,#adb2b8)) 50%,transparent 50%);background-position:calc(100% - 14px) calc(50% + 1px),calc(100% - 9px) calc(50% + 1px);background-size:5px 5px;background-repeat:no-repeat;color:var(--dsw-alias-label-primary,light-dark(#0f1115,#f9fafb));border:.5px solid var(--dsw-alias-border-l2,light-dark(#0000001f,#ffffff2e));border-radius:9px;padding:6px 30px 6px 10px;cursor:pointer;transition:all var(--wb-anim-fast)}
+.wb-select{appearance:none;-webkit-appearance:none;background-color:var(--dsw-alias-bg-module-platform,light-dark(#ffffff,#202226));background-image:linear-gradient(45deg,transparent 50%,var(--dsw-alias-label-tertiary,light-dark(#81858c,#adb2b8)) 50%),linear-gradient(135deg,var(--dsw-alias-label-tertiary,light-dark(#81858c,#adb2b8)) 50%,transparent 50%);background-position:calc(100% - 14px) calc(50% + 1px),calc(100% - 9px) calc(50% + 1px);background-size:5px 5px;background-repeat:no-repeat;color:var(--dsw-alias-label-primary,light-dark(#0f1115,#f9fafb));border:.5px solid var(--dsw-alias-border-l2,light-dark(#0000001f,#ffffff2e));border-radius:9px;padding:6px 30px 6px 10px;cursor:pointer;transition:background-color var(--wb-anim-fast),border-color var(--wb-anim-fast),color var(--wb-anim-fast),box-shadow var(--wb-anim-fast),opacity var(--wb-anim-fast),transform var(--wb-anim-fast)}
 .wb-select:hover{background-color:var(--dsw-alias-interactive-bg-hover,light-dark(#2631480f,#ffffff14));border-color:var(--dsw-alias-border-l3,light-dark(#00000033,#ffffff42))}
 .wb-select:focus{outline:none;border-color:var(--dsw-alias-brand-primary,light-dark(#0f1115,#f9fafb));box-shadow:0 0 0 3px light-dark(rgba(15,17,21,.07),rgba(255,255,255,.09))}
 .wb-select:disabled{opacity:.55;cursor:not-allowed}
@@ -513,7 +531,7 @@ body.dark .wb-root,
 .wb-prop-seg{height:100%;transition:width .45s cubic-bezier(0.16,1,0.3,1),opacity .2s ease,transform .2s ease;cursor:pointer;will-change:width}
 .wb-prop-seg:hover{filter:brightness(1.15)}
 .wb-prop-legend{display:flex;flex-wrap:wrap;gap:8px 12px;margin-bottom:10px;font-size:11.5px;color:var(--dsw-alias-label-secondary,light-dark(#61666b,#cfd3d6))}
-.wb-prop-legend-item{display:inline-flex;align-items:center;gap:5px;padding:2px 8px;border-radius:999px;background:var(--dsw-alias-interactive-bg-hover,light-dark(#26314808,#ffffff0a));border:.5px solid var(--dsw-alias-border-l1,light-dark(#0000000a,#ffffff10));cursor:pointer;user-select:none;transition:all var(--wb-anim-fast)}
+.wb-prop-legend-item{display:inline-flex;align-items:center;gap:5px;padding:2px 8px;border-radius:999px;background:var(--dsw-alias-interactive-bg-hover,light-dark(#26314808,#ffffff0a));border:.5px solid var(--dsw-alias-border-l1,light-dark(#0000000a,#ffffff10));cursor:pointer;user-select:none;transition:background-color var(--wb-anim-fast),border-color var(--wb-anim-fast),color var(--wb-anim-fast),box-shadow var(--wb-anim-fast),opacity var(--wb-anim-fast),transform var(--wb-anim-fast)}
 .wb-prop-legend-item:hover{background:var(--dsw-alias-interactive-bg-active,light-dark(#26314814,#ffffff18));border-color:var(--dsw-alias-border-l2,light-dark(#0000001f,#ffffff24))}
 .wb-prop-legend-item.on{border-color:var(--dsw-alias-brand-primary,#4f6bd8);box-shadow:0 0 0 1px var(--dsw-alias-brand-primary,#4f6bd8)}
 .wb-prop-legend-dot{width:7px;height:7px;border-radius:50%;flex:none;transition:transform .2s ease}
@@ -541,7 +559,7 @@ body.dark .wb-root,
 @media (prefers-reduced-motion: reduce){.wb-curve-enter{animation:none}.wb-prop-seg,.wb-bar-rect{transition:none}}
 /* 自定义圆角悬浮下拉菜单 (10px) */
 .wb-dropdown{position:relative;display:inline-block;min-width:0}
-.wb-dropdown-trigger{display:inline-flex;align-items:center;justify-content:space-between;gap:6px;background:var(--dsw-alias-bg-module-platform,light-dark(#ffffff,#202226));color:var(--dsw-alias-label-primary,light-dark(#0f1115,#f9fafb));border:.5px solid var(--dsw-alias-border-l2,light-dark(#0000001f,#ffffff2e));border-radius:9px;padding:6px 10px;font:inherit;font-size:12px;line-height:18px;min-height:32px;cursor:pointer;box-shadow:0 1px 2px light-dark(rgba(16,24,20,.035),rgba(0,0,0,.2));transition:all var(--wb-anim-fast);min-width:110px;max-width:280px;text-align:left}
+.wb-dropdown-trigger{display:inline-flex;align-items:center;justify-content:space-between;gap:6px;background:var(--dsw-alias-bg-module-platform,light-dark(#ffffff,#202226));color:var(--dsw-alias-label-primary,light-dark(#0f1115,#f9fafb));border:.5px solid var(--dsw-alias-border-l2,light-dark(#0000001f,#ffffff2e));border-radius:9px;padding:6px 10px;font:inherit;font-size:12px;line-height:18px;min-height:32px;cursor:pointer;box-shadow:0 1px 2px light-dark(rgba(16,24,20,.035),rgba(0,0,0,.2));transition:background-color var(--wb-anim-fast),border-color var(--wb-anim-fast),color var(--wb-anim-fast),box-shadow var(--wb-anim-fast),opacity var(--wb-anim-fast),transform var(--wb-anim-fast);min-width:110px;max-width:280px;text-align:left}
 .wb-dropdown-trigger:hover{background:var(--dsw-alias-interactive-bg-hover,light-dark(#2631480f,#ffffff14));border-color:var(--dsw-alias-border-l3,light-dark(#00000033,#ffffff42))}
 .wb-dropdown-trigger:disabled{opacity:.55;cursor:not-allowed;background:transparent;box-shadow:none}
 .wb-dropdown-trigger:focus-visible{outline:2px solid var(--dsw-alias-brand-primary,#6366f1);outline-offset:1px}
@@ -557,6 +575,7 @@ body.dark .wb-root,
 .wb-dropdown-item{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:5px 8px;border-radius:6px;font-size:12px;cursor:pointer;color:var(--dsw-alias-label-primary,light-dark(#0f1115,#f9fafb));transition:background-color var(--wb-anim-fast);user-select:none;border:0;background:transparent;width:100%;text-align:left;font:inherit}
 .wb-dropdown-item:hover{background:var(--dsw-alias-interactive-bg-hover,light-dark(#2631480f,#ffffff14))}
 .wb-dropdown-item.on{background:var(--dsw-alias-interactive-bg-active,light-dark(#2631481a,#ffffff24));font-weight:600}
+.wb-dropdown-item:focus-visible{outline:2px solid var(--dsw-alias-brand-primary,#6366f1);outline-offset:-2px}
 /* 上下文长度：滑块 + 刻度。官方 GUI 是连续滑杆，这里按**目录里真实存在的档位**
    吸附（自动 / 300K / 600K / 1M…），既不会滑出一个模型不支持的中间值，也保留
    一眼能看懂的梯度。 */
@@ -619,7 +638,7 @@ body.dark .wb-root,
 .wb-bar i.warn{background:#d29922}
 .wb-bar i.bad{background:#e5534b}
 /* 积分卡：概览页的头条指标 */
-.wb-quota{background:linear-gradient(180deg,light-dark(#ffffff,#24272c) 0%,var(--dsw-alias-bg-module-platform,light-dark(#f9fafb,#1b1c1f)) 100%)}
+.wb-quota{background:var(--dsw-alias-bg-module-platform,light-dark(#ffffff,#202226))}
 .wb-quota-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;flex-wrap:wrap}
 .wb-quota-label{color:var(--dsw-alias-label-secondary,light-dark(#61666b,#cfd3d6));font-size:12px;letter-spacing:.04em}
 .wb-quota-total{font-size:38px;line-height:1.15;font-weight:700;font-variant-numeric:tabular-nums;margin-top:2px;overflow-wrap:anywhere}
@@ -723,6 +742,33 @@ body.dark .wb-root,
 .wb-spinner{width:13px;height:13px;border-radius:50%;border:2px solid var(--dsw-alias-border-l2,light-dark(#0000001f,#ffffff2e));border-top-color:var(--dsw-alias-label-secondary,light-dark(#61666b,#cfd3d6));animation:wb-spin .7s linear infinite;flex:none}
 @keyframes wb-spin{to{transform:rotate(360deg)}}
 @media (prefers-reduced-motion: reduce){.wb-spinner{animation-duration:2s}}
+/*
+ * 统一降级：设置页挂在 .wb-root 下；对话页组件不在 .wb-root 里，用 wb-chat-* /
+ * wb-turn-cost 前缀单独兜住。**不要写裸星号选择器** —— 这页 CSS 是全局注入的，
+ * 会把 dsh 宿主自己的动画也一起关掉。
+ *
+ * 只压时长、不删动画名，依赖 animationend/transitionend 的逻辑仍能收到事件；
+ * 加载 spinner 是必要信息，保留 2s 慢转。
+ */
+@media (prefers-reduced-motion: reduce){
+  .wb-root,.wb-root *,
+  [class^="wb-chat-"],[class*=" wb-chat-"],[class^="wb-chat-"] *,[class*=" wb-chat-"] *,
+  .wb-turn-cost,.wb-turn-cost *{
+    animation-duration:.01ms!important;
+    animation-delay:0ms!important;
+    animation-iteration-count:1!important;
+    transition-duration:.01ms!important;
+    transition-delay:0ms!important;
+    scroll-behavior:auto!important;
+  }
+  .wb-root .wb-spinner{animation-duration:2s!important}
+  .wb-metric:hover,.wb-prop-legend-item:hover .wb-prop-legend-dot,.wb-range::-webkit-slider-thumb:hover,
+  .wb-tab:active,.wb-btn:active:not(:disabled),.wb-segmented-item:active{transform:none}
+}
+/* 触摸/粗指针：hover 会粘住，位移与缩放收掉，颜色和边框反馈保留 */
+@media (hover: none){
+  .wb-metric:hover,.wb-prop-legend-item:hover .wb-prop-legend-dot,.wb-range::-webkit-slider-thumb:hover{transform:none}
+}
 `;
 
     // ─────────────────────────── i18n（中 / 英） ───────────────────────────
@@ -2885,6 +2931,8 @@ body.dark .wb-root,
       const [dropUp, setDropUp] = useState(false);
       const wrapRef = useRef(null);
       const selectRef = useRef(null);
+      const triggerRef = useRef(null);
+      const pendingFocusRef = useRef(false);
 
       useEffect(() => {
         if (!open) return undefined;
@@ -2892,17 +2940,35 @@ body.dark .wb-root,
           if (wrapRef.current && !wrapRef.current.contains(e.target)) setOpen(false);
         };
         const onKeyDown = (e) => {
-          if (e.key === 'Escape') setOpen(false);
+          if (e.key === 'Escape') {
+            setOpen(false);
+            if (triggerRef.current) triggerRef.current.focus();
+          }
         };
+        // 键盘 Tab 离开下拉时也要收起，不能只依赖点击外部
+        const wrap = wrapRef.current;
+        const onFocusOut = (e) => {
+          if (wrap && !wrap.contains(e.relatedTarget)) setOpen(false);
+        };
+        if (wrap) wrap.addEventListener('focusout', onFocusOut);
         document.addEventListener('click', onDocClick);
         document.addEventListener('keydown', onKeyDown);
         return () => {
+          if (wrap) wrap.removeEventListener('focusout', onFocusOut);
           document.removeEventListener('click', onDocClick);
           document.removeEventListener('keydown', onKeyDown);
         };
       }, [open]);
 
-      const toggle = () => {
+      // 键盘打开时把焦点送进菜单；鼠标打开时保持焦点在触发器上（可直接 Tab 进去）
+      useEffect(() => {
+        if (!open || !pendingFocusRef.current) return;
+        pendingFocusRef.current = false;
+        const target = wrapRef.current && wrapRef.current.querySelector('.wb-dropdown-item.on, .wb-dropdown-item');
+        if (target) target.focus();
+      }, [open]);
+
+      const toggle = (focus = false) => {
         if (disabled) return;
         if (!open && wrapRef.current && typeof window !== 'undefined') {
           try {
@@ -2912,6 +2978,7 @@ body.dark .wb-root,
             setDropUp(spaceBelow < 260 && spaceAbove > spaceBelow);
           } catch (e) { /* ignore */ }
         }
+        if (focus && !open) pendingFocusRef.current = true;
         setOpen(!open);
       };
 
@@ -2938,8 +3005,20 @@ body.dark .wb-root,
         })),
         h('button', {
           type: 'button',
+          ref: triggerRef,
           className: 'wb-dropdown-trigger',
-          onClick: toggle,
+          onClick: () => toggle(),
+          onKeyDown: (e) => {
+            if (e.key === 'Enter' || e.key === ' ' || e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+              e.preventDefault();
+              if (open) {
+                const item = wrapRef.current && wrapRef.current.querySelector('.wb-dropdown-item.on, .wb-dropdown-item');
+                if (item) item.focus();
+              } else {
+                toggle(true);
+              }
+            }
+          },
           title: currentLabel,
           disabled: disabled === true,
           'aria-label': ariaLabel,
@@ -2950,7 +3029,7 @@ body.dark .wb-root,
           h('span', { style: { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } },
             currentRaw ? h(Raw, { text: currentLabel }) : currentLabel),
           h('span', { className: 'wb-dropdown-arrow' }, '▼')),
-        open ? h('div', { className: 'wb-dropdown-menu' },
+        open ? h('div', { className: 'wb-dropdown-menu', role: 'listbox' },
           (options || []).map((opt) => {
             const active = String(opt.value) === String(value);
             const label = opt.label || opt.text || opt.value;
@@ -2958,11 +3037,35 @@ body.dark .wb-root,
               type: 'button',
               key: String(opt.value),
               className: 'wb-dropdown-item' + (active ? ' on' : ''),
+              role: 'option',
+              'aria-selected': active,
               ...(opt.raw ? { 'data-wb-raw': '' } : {}),
+              onKeyDown: (e) => {
+                const items = Array.from(wrapRef.current
+                  ? wrapRef.current.querySelectorAll('.wb-dropdown-item')
+                  : []);
+                const i = items.indexOf(document.activeElement);
+                if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+                  e.preventDefault();
+                  const next = e.key === 'ArrowDown'
+                    ? (i < 0 ? 0 : (i + 1) % items.length)
+                    : (i <= 0 ? items.length - 1 : i - 1);
+                  if (items[next]) items[next].focus();
+                } else if (e.key === 'Home' || e.key === 'End') {
+                  e.preventDefault();
+                  const next = e.key === 'Home' ? 0 : items.length - 1;
+                  if (items[next]) items[next].focus();
+                } else if (e.key === 'Escape') {
+                  e.preventDefault();
+                  setOpen(false);
+                  if (triggerRef.current) triggerRef.current.focus();
+                }
+              },
               onClick: () => {
                 setOpen(false);
                 if (selectRef.current) selectRef.current.value = String(opt.value);
                 if (onChange) onChange({ target: { value: opt.value } });
+                if (triggerRef.current) triggerRef.current.focus();
               },
             },
               h('span', { style: { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } },
@@ -3014,6 +3117,8 @@ body.dark .wb-root,
       const plotW = width - pad.l - pad.r;
       const plotH = height - pad.t - pad.b;
       const max = Math.max(1, ...rows.map((row) => row.calls + row.failed));
+      // 计数轴上的 0.5 刻度不能四舍五入成 1，否则会出现 2,2,1,1,0 这种重复标签
+      const axisLabel = (value) => (Number.isInteger(value) ? fmtInt(value) : String(Math.round(value * 10) / 10));
       const step = plotW / Math.max(rows.length, 1);
       const barW = Math.max(2, Math.min(20, step * 0.58));
       const labelEvery = Math.ceil(rows.length / 6);
@@ -3036,7 +3141,7 @@ body.dark .wb-root,
               h('text', {
                 x: pad.l - 6, y: gy + 3, textAnchor: 'end', fontSize: 9.5,
                 fill: 'var(--dsw-alias-label-tertiary, #888)',
-              }, fmtInt(Math.round(max * ratio))));
+              }, axisLabel(max * ratio)));
           }),
           rows.map((row, i) => {
             const x = pad.l + step * i + (step - barW) / 2;
@@ -3174,7 +3279,9 @@ body.dark .wb-root,
       const activeHoverX = hoverIdx !== null ? pts[hoverIdx]?.x : null;
       const axisValue = (value) => (metric === 'tokens'
         ? fmtTokens(value)
-        : metric === 'calls' ? fmtInt(value) : Number(value).toFixed(2));
+        : metric === 'calls'
+          ? (Number.isInteger(value) ? fmtInt(value) : String(Math.round(value * 10) / 10))
+          : Number(value).toFixed(2));
       const moveHover = (event) => {
         try {
           const rect = event.currentTarget.getBoundingClientRect();
@@ -3218,7 +3325,7 @@ body.dark .wb-root,
                 fontSize: 9.5,
                 textAnchor: 'end',
                 fill: 'var(--dsw-alias-label-tertiary, #888)',
-              }, axisValue(Math.round(max * lvl))));
+              }, axisValue(max * lvl)));
           }),
           // 曲线与面积专属呼吸浮现组：消除圆点横向乱飞与路径撕裂，大幅度切换时如晨曦海浪般从底部柔和升起
           h('g', { key: chartKey, className: 'wb-curve-enter' },
@@ -4424,6 +4531,311 @@ body.dark .wb-root,
         );
     }
 
+    /*
+     * 账号排序的 Pointer Events 实现（与控制台同一套交互）：
+     * 1:1 跟手、占位符 + FLIP、120ms 速度采样 + 0.998 动量投影、
+     * k=320/c=36 弹簧、列表边界 rubber-band、Esc/pointercancel 回退。
+     * 原生 HTML5 DnD 已移除；键盘仍走「上移/下移」按钮。
+     */
+    function wireAccountPointerDrag(el, onPlace) {
+      let drag = null;
+
+      const rowsAll = () => [...el.querySelectorAll('.wb-account')];
+      const accountRows = () => [...el.querySelectorAll('.wb-account[data-account]')];
+      const captureRects = () => {
+        const m = new Map();
+        rowsAll().forEach((r) => { if (!drag || r !== drag.row) m.set(r, r.getBoundingClientRect()); });
+        return m;
+      };
+      const flipRows = (before) => {
+        if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+        rowsAll().forEach((row) => {
+          if (!drag || row === drag.row) return;
+          const old = before.get(row);
+          if (!old) return;
+          const box = row.getBoundingClientRect();
+          const dy = old.top - box.top;
+          if (Math.abs(dy) < 1) return;
+          if (row.__wbFlip) row.__wbFlip.cancel();
+          const anim = row.animate(
+            [{ transform: 'translateY(' + dy + 'px)' }, { transform: 'translateY(0)' }],
+            { duration: 220, easing: 'cubic-bezier(0.16, 1, 0.3, 1)' }
+          );
+          row.__wbFlip = anim;
+          anim.finished.catch(() => {}).finally(() => { if (row.__wbFlip === anim) row.__wbFlip = null; });
+        });
+      };
+      const nextAccount = (dir) => {
+        if (!drag || !drag.placeholder) return null;
+        let n = dir === 'next' ? drag.placeholder.nextElementSibling : drag.placeholder.previousElementSibling;
+        while (n && !(n.classList.contains('wb-account') && n.dataset.account && n !== drag.row)) {
+          n = dir === 'next' ? n.nextElementSibling : n.previousElementSibling;
+        }
+        return n;
+      };
+      const movePlaceholder = (target, where) => {
+        const before = captureRects();
+        if (where === 'after') target.after(drag.placeholder); else target.before(drag.placeholder);
+        flipRows(before);
+      };
+      const movePlaceholderToIndex = (idx) => {
+        const list = accountRows().filter((r) => r !== drag.row);
+        const before = captureRects();
+        if (idx < list.length) list[idx].before(drag.placeholder);
+        else if (list.length) list[list.length - 1].after(drag.placeholder);
+        flipRows(before);
+      };
+      const rubber = (over, dim) => (over * dim * 0.55) / (dim + 0.55 * Math.abs(over));
+      const projection = (v, d = 0.998) => (v / 1000) * d / (1 - d);
+
+      /*
+       * 按「指针位置 + 列表当前位置」每次重算拖影的 translateY。
+       *
+       * 行是相对列表绝对定位的：列表随页面/弹层滚动时，行也跟着走。
+       * 如果只按拖动开始时的 viewport 坐标算，滚一下页面拖影就会和指针脱开。
+       * 用布局槽位（offsetInList）换算，滚动前后都能让行贴着指针。
+       */
+      const track = (y) => {
+        if (!drag || !drag.started || drag.ending) return;
+        const list = el.getBoundingClientRect();
+        const anchor = list.top + drag.offsetInList - el.scrollTop;
+        const min = list.top - anchor;
+        const max = list.bottom - drag.rect.height - anchor;
+        let want = y - drag.offset - anchor;
+        if (want < min) want = min - rubber(min - want, list.height);
+        else if (want > max) want = max + rubber(want - max, list.height);
+        drag.currentY = want;
+        drag.row.style.transform = 'translateY(' + want + 'px)';
+        const n = nextAccount('next');
+        if (n) {
+          const r = n.getBoundingClientRect();
+          if (y > r.top + r.height / 2 + 8) { movePlaceholder(n, 'after'); return; }
+        }
+        const p = nextAccount('prev');
+        if (p) {
+          const r = p.getBoundingClientRect();
+          if (y < r.top + r.height / 2 - 8) movePlaceholder(p, 'before');
+        }
+      };
+
+      const onMove = (ev) => {
+        if (!drag || drag.ending || ev.pointerId !== drag.pointerId) return;
+        // 松手事件丢失（拖到窗口外释放）时，后续 mousemove 的 buttons 为 0。
+        if (ev.pointerType === 'mouse' && ev.buttons === 0) { cleanup(); return; }
+        if (!drag.row.isConnected || (drag.placeholder && !drag.placeholder.isConnected)) { cleanup(); return; }
+        const y = ev.clientY;
+        if (!drag.started) {
+          if (Math.abs(y - drag.startY) < 4) return;
+          drag.started = true;
+          /*
+           * 从按下到越过 4px 阈值之间页面可能已经滚动过：重新量行位置，
+           * 并按当前指针重算抓取 Offset，避免起手就偏一截。
+           */
+          const rect = drag.row.getBoundingClientRect();
+          drag.rect = rect;
+          drag.offset = y - rect.top;
+          // 拖行车改 absolute 后需要列表容器提供定位上下文（见上面的 CSS 说明）。
+          if (getComputedStyle(el).position === 'static') {
+            el.style.position = 'relative';
+            drag.listRelative = true;
+          }
+          const listRect = el.getBoundingClientRect();
+          drag.offsetInList = rect.top - listRect.top + el.scrollTop;
+          const ph = document.createElement('div');
+          ph.className = 'wb-account-placeholder';
+          ph.style.height = rect.height + 'px';
+          ph.style.marginBottom = getComputedStyle(drag.row).marginBottom;
+          drag.row.parentNode.insertBefore(ph, drag.row);
+          drag.placeholder = ph;
+          drag.row.classList.add('wb-account-pointer-drag');
+          drag.row.style.top = drag.offsetInList + 'px';
+          drag.row.style.left = (rect.left - listRect.left) + 'px';
+          drag.row.style.width = rect.width + 'px';
+          drag.row.style.height = rect.height + 'px';
+          drag.row.style.marginBottom = '0px';
+        }
+        const now = performance.now();
+        drag.samples.push({ y, t: now });
+        while (drag.samples.length > 2 && now - drag.samples[0].t > 120) drag.samples.shift();
+        const a = drag.samples[0];
+        const b = drag.samples[drag.samples.length - 1];
+        drag.velocity = b.t > a.t ? ((b.y - a.y) / (b.t - a.t)) * 1000 : 0;
+        drag.lastY = y;
+        track(y);
+      };
+
+      const finish = (canceled) => {
+        if (!drag || drag.ending) return;
+        if (!drag.row.isConnected || (drag.started && (!drag.placeholder || !drag.placeholder.isConnected))) {
+          cleanup();
+          return;
+        }
+        drag.ending = true;
+        if (!drag.started) { cleanup(); return; }
+        const list = el.getBoundingClientRect();
+        const projected = Math.max(list.top, Math.min(list.bottom, drag.lastY + projection(drag.velocity)));
+        const listAccounts = accountRows().filter((r) => r !== drag.row);
+        let idx = listAccounts.findIndex((r) => {
+          const b = r.getBoundingClientRect();
+          return projected < b.top + b.height / 2;
+        });
+        if (idx < 0) idx = listAccounts.length;
+        if (canceled) idx = drag.originalIndex;
+        movePlaceholderToIndex(idx);
+        if (!drag || !drag.placeholder || !drag.placeholder.isConnected) { cleanup(); return; }
+        // 与 track 同一套参照：列表当前位置 + 行的布局槽位。
+        const anchor = list.top + drag.offsetInList - el.scrollTop;
+        const targetY = drag.placeholder.getBoundingClientRect().top - anchor;
+        const done = () => finalize(canceled, idx);
+        if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+          drag.row.style.transform = 'translateY(' + targetY + 'px)';
+          done();
+          return;
+        }
+        springRow(drag.row, drag.currentY, targetY, drag.velocity, done);
+      };
+
+      const finalize = (canceled, idx) => {
+        if (!drag || drag.finalized) return;
+        drag.finalized = true;
+        const listAccounts = accountRows().filter((r) => r !== drag.row);
+        const target = idx < listAccounts.length ? listAccounts[idx] : listAccounts[listAccounts.length - 1];
+        const targetName = target ? target.dataset.account : '';
+        const before = idx < listAccounts.length;
+        const d = drag;
+        // 拖拽期间列表可能被轮询/登录卡重渲染：占位符或行已离屏时不插回，直接清理。
+        const parent = d.placeholder && d.placeholder.parentNode;
+        if (parent && d.row.isConnected) parent.insertBefore(d.row, d.placeholder);
+        if (d.placeholder) d.placeholder.remove();
+        cleanup();
+        if (parent && d.row.isConnected && !canceled && targetName && idx !== d.originalIndex) {
+          onPlace(d.file, targetName, before);
+        }
+      };
+
+      const cleanup = () => {
+        const d = drag;
+        if (!d) return;
+        if (d.springRaf) cancelAnimationFrame(d.springRaf);
+        if (d.springTimer) clearTimeout(d.springTimer);
+        try { d.grip.releasePointerCapture(d.pointerId); } catch { /* 已经释放 */ }
+        window.removeEventListener('pointermove', onMove);
+        window.removeEventListener('pointerup', onUp);
+        window.removeEventListener('pointercancel', onCancel);
+        window.removeEventListener('blur', onBlur);
+        window.removeEventListener('scroll', onScroll, true);
+        document.removeEventListener('scroll', onScroll, true);
+        document.removeEventListener('keydown', onKey, true);
+        if (d.placeholder) d.placeholder.remove();
+        d.row.classList.remove('wb-account-pointer-drag');
+        ['position', 'top', 'left', 'width', 'height', 'marginBottom', 'transform', 'zIndex', 'willChange', 'cursor'].forEach((p) => { d.row.style[p] = ''; });
+        if (d.listRelative) el.style.position = '';
+        drag = null;
+      };
+
+      const onUp = (ev) => { if (!drag || ev.pointerId !== drag.pointerId) return; finish(false); };
+      const onCancel = (ev) => { if (!drag || ev.pointerId !== drag.pointerId) return; finish(true); };
+      // 窗口失焦后收不到 pointerup：直接撤销，避免拖影和占位符留在页面上。
+      const onBlur = () => { if (drag) cleanup(); };
+      /*
+       * 拖拽中滚轮/触控板滚页面：列表和行一起滚走了，指针却没动。
+       * 用最后的指针位置重算一次，拖影继续贴住指针。
+       */
+      const onScroll = () => { if (drag && drag.started && !drag.ending) track(drag.lastY); };
+      const onKey = (e) => { if (e.key === 'Escape' && drag) { e.preventDefault(); finish(true); } };
+
+      function springRow(rowEl, from, to, v0, done) {
+        let x = from;
+        let v = Math.max(-2000, Math.min(2000, v0));
+        let last = performance.now();
+        let ended = false;
+        let timer = null;
+        const settle = () => {
+          if (ended) return;
+          ended = true;
+          if (timer) clearTimeout(timer);
+          rowEl.style.transform = 'translateY(' + to + 'px)';
+          done();
+        };
+        const step = (now) => {
+          const dt = Math.min(32, Math.max(1, now - last)) / 1000;
+          last = now;
+          const a = -320 * (x - to) - 36 * v;
+          v += a * dt;
+          x += v * dt;
+          rowEl.style.transform = 'translateY(' + x + 'px)';
+          if (Math.abs(v) < 8 && Math.abs(x - to) < 0.5) { settle(); return; }
+          if (drag) drag.springRaf = requestAnimationFrame(step);
+        };
+        timer = setTimeout(settle, 800);
+        if (drag) {
+          drag.springTimer = timer;
+          drag.springRaf = requestAnimationFrame(step);
+        }
+      }
+
+      const disposers = [];
+      for (const grip of el.querySelectorAll('.wb-grip[data-account]')) {
+        const row = grip.closest('.wb-account');
+        if (!row || !row.dataset.account) continue;
+        const onDown = (ev) => {
+          if (ev.button !== 0 || drag) return;
+          const rect = row.getBoundingClientRect();
+          drag = {
+            pointerId: ev.pointerId,
+            grip,
+            row,
+            file: row.dataset.account,
+            rect,
+            offset: ev.clientY - rect.top,
+            startY: ev.clientY,
+            lastY: ev.clientY,
+            velocity: 0,
+            samples: [],
+            started: false,
+            placeholder: null,
+            currentY: 0,
+            ending: false,
+            finalized: false,
+            originalIndex: accountRows().indexOf(row),
+            springRaf: 0,
+            springTimer: null,
+            listRelative: false,
+            offsetInList: 0,
+          };
+          try { grip.setPointerCapture(ev.pointerId); } catch { /* 退化到 window 监听 */ }
+          ev.preventDefault();
+          window.addEventListener('pointermove', onMove);
+          window.addEventListener('pointerup', onUp);
+          window.addEventListener('pointercancel', onCancel);
+          window.addEventListener('blur', onBlur);
+          window.addEventListener('scroll', onScroll, true);
+          document.addEventListener('scroll', onScroll, true);
+          document.addEventListener('keydown', onKey, true);
+        };
+        grip.addEventListener('pointerdown', onDown);
+        disposers.push(() => {
+          grip.removeEventListener('pointerdown', onDown);
+          if (drag && drag.grip === grip) cleanup();
+        });
+      }
+      return () => { for (const dispose of disposers) dispose(); };
+    }
+
+    function AccountListShell({ place, deps, children }) {
+      const listRef = useRef(null);
+      const placeRef = useRef(null);
+      placeRef.current = place;
+      useEffect(() => {
+        const list = listRef.current;
+        if (!list) return undefined;
+        return wireAccountPointerDrag(list, (file, target, before) => {
+          if (placeRef.current) placeRef.current(file, target, before);
+        });
+      }, [deps]);
+      return h('div', { ref: listRef, style: { marginTop: '10px' } }, children);
+    }
+
     // ─────────────────────────── 账号 ───────────────────────────
     function AccountsPanel({ onStartConsole, busy, reloadStatus, pageStatus }) {
       const api = useConsoleApi(CONSOLE_API + '/accounts', { interval: 30000 });
@@ -4440,17 +4852,6 @@ body.dark .wb-root,
       const [pluginLoginData, setPluginLoginData] = useState(null);
       /** 递增后让插件卡片立即重拉（切换插件凭据后不必等 15 秒轮询）。 */
       const [pluginRefreshKey, setPluginRefreshKey] = useState(0);
-      /*
-       * 拖拽排序用 **ref** 而不是 state —— 这是个"能跑起来但实际抓不住"的坑：
-       * React 18 的 state 更新是批处理的，onDragStart 里 setDragFile 之后，React 不会
-       * 立即把闭包里的 `dragFile` 换成新值；onDragOver 紧接着在另一个 DOM 节点上触发，
-       * 拿到的还是初始的 '' → "我什么都没在拖" → 直接 return，于是整个 drag 看起来"没用"。
-       * 实测换 ref 立即生效。
-       * `force` 只为让 onDragOver 设置的 box-shadow 重新渲染（className 是 render 时算的）。
-       */
-      const dragFileRef = useRef('');
-      const dropTargetRef = useRef(null);
-      const [, force] = useState(0);
       /*
        * 实际生效的凭据来源（来自桥的 /health.credential.source）。
        * 「使用中」只能有一个：插件来源生效时，桌面端那一行只是在桌面来源下
@@ -4497,6 +4898,12 @@ body.dark .wb-root,
       const desktopUids = new Set(distinct.map((a) => a.userId).filter(Boolean).map(String));
       // 桌面端没有对应账号的插件凭据：也放进同一个账号列表，不再单独列一张卡。
       const pluginOnly = pluginCredentials.filter((c) => !desktopUids.has(String(c.uid)));
+      /*
+       * 列表壳的稳定依赖：只由「行结构」决定，而不是每次渲染都新建的 visible 数组。
+       * 否则插件登录数据/轮询导致的任何父级重渲染都会让 effect 清理掉正在进行的拖拽。
+       */
+      const accountListKey = visible.map((a) => a.name).join('|')
+        + '::' + pluginOnly.map((c) => c.uid).join('|');
       /*
        * 插件登录卡片只负责登录与来源控制；它把完整数据上报给父级，
        * 账号列表据此合并同账号凭据、并把桌面端没有的插件账号追加进来。
@@ -4651,41 +5058,6 @@ body.dark .wb-root,
         rest.splice(before ? i : i + 1, 0, file);
         postOrder(rest);
       };
-      const onDragStart = (e, name) => {
-        // e.dataTransfer 在真实拖拽里有；某些合成 / 受限环境里没有 —— 不依赖它。
-        try { e.dataTransfer && e.dataTransfer.setData('text/plain', name); } catch { /* 读不到时不影响 */ }
-        try { e.dataTransfer && (e.dataTransfer.effectAllowed = 'move'); } catch { /* 同上 */ }
-        dragFileRef.current = name;
-        dropTargetRef.current = null;
-        force((x) => x + 1);
-      };
-      /** 指针在目标行上半 = 插到它前面，下半 = 插到它后面。 */
-      const onDragOver = (e, name) => {
-        if (!dragFileRef.current || dragFileRef.current === name) return;
-        e.preventDefault(); // 必须：否则 drop 永远不触发
-        try { e.dataTransfer && (e.dataTransfer.dropEffect = 'move'); } catch { /* */ }
-        const r = e.currentTarget.getBoundingClientRect();
-        const before = e.clientY < r.top + r.height / 2;
-        const cur = dropTargetRef.current;
-        if (!cur || cur.file !== name || cur.before !== before) {
-          dropTargetRef.current = { file: name, before };
-          force((x) => x + 1);
-        }
-      };
-      const onDrop = (e, name) => {
-        e.preventDefault();
-        const file = dragFileRef.current;
-        const dt = dropTargetRef.current;
-        if (file && file !== name && dt) place(file, name, dt.before);
-        dragFileRef.current = '';
-        dropTargetRef.current = null;
-        force((x) => x + 1);
-      };
-      const onDragEnd = () => {
-        dragFileRef.current = '';
-        dropTargetRef.current = null;
-        force((x) => x + 1);
-      };
       /*
        * 隐藏 / 恢复。**不删登录目录里的文件** —— 那份 `.info` 是 WorkBuddy 客户端的
        * 登录态，我们只是它的读者（见 `docs/SECURITY.md` 的硬约束）；删掉等于把人家
@@ -4742,7 +5114,7 @@ body.dark .wb-root,
            设置页是窄列（常见 600~700px），5~7 列的表格在这里必然被挤压 ——
            要么逐字折断、要么被卡片裁掉（用户截图里的样子）。账号通常就 2~3 个，
            列表既能容纳长域名，也不会有列宽问题。 */
-        h('div', { style: { marginTop: '10px' } },
+        h(AccountListShell, { place, deps: accountListKey },
           visible.length === 0 && pluginOnly.length === 0
             ? h('p', { className: 'wb-note' }, distinct.length === 0
               ? '还没有账号。插件登录后，账号会出现在这里。'
@@ -4752,14 +5124,9 @@ body.dark .wb-root,
             const pluginFor = a.userId ? pluginByUid.get(String(a.userId)) : null;
             const pluginEffective = !!(pluginFor && pluginFor.active && effectiveSource === 'plugin');
             const desktopEffective = !!(a.active && effectiveSource !== 'plugin');
-            const drag = dragFileRef.current;
-            const dt = dropTargetRef.current;
             const cls = 'wb-account'
               + (a.usable ? '' : ' bad')
-              + (a.hidden ? ' wb-account-hidden' : '')
-              + (drag === a.name ? ' wb-account-dragging' : '')
-              + (dt && dt.file === a.name && drag && drag !== a.name
-                ? (dt.before ? ' wb-account-drop-top' : ' wb-account-drop-bottom') : '');
+              + (a.hidden ? ' wb-account-hidden' : '');
             /*
              * 三段布局（与用量/请求面板的"主行 + 副行 + 工具行"一致）：
              *   head    : 拖拽手柄 | 名字 + 状态徽标 | 改名 (+ 切换)
@@ -4769,18 +5136,15 @@ body.dark .wb-root,
              * 把"上移/下移/隐藏"从 head 拆出来独占一行 —— head 里就不会出现
              * 「按钮一多就乱折行、把整行撑得歪七扭八」的局面，风格才和整页统一。
              */
-            return h('div', { key: a.name, className: cls,
-              onDragOver: (e) => onDragOver(e, a.name),
-              onDrop: (e) => onDrop(e, a.name) },
+            return h('div', { key: a.name, className: cls, 'data-account': a.name },
               // ── head：拖拽手柄 + 标题 + 主操作 ──
               h('div', { className: 'wb-account-head' },
                 h('span', {
                   className: 'wb-grip',
-                  draggable: true,
+                  draggable: false,
+                  'data-account': a.name,
                   title: '拖动排序',
                   'aria-label': '拖动排序',
-                  onDragStart: (e) => onDragStart(e, a.name),
-                  onDragEnd,
                 }, '⋮⋮'),
                 h('div', { className: 'wb-account-title' },
                   h('b', { title: a.path || a.name, 'data-wb-raw': '' }, h(Raw, { text: a.alias || a.name })),
@@ -4843,10 +5207,10 @@ body.dark .wb-root,
                       h(Btn, { primary: true, sm: true, disabled: saving, onClick: () => saveAlias(a) }, saving ? '保存中…' : '保存'),
                       h(Btn, { sm: true, disabled: saving, onClick: () => setEditing('') }, '取消'))
                   : h(Fragment, null,
-                      h(Btn, { sm: true, disabled: !!drag, onClick: () => move(a.name, -1), title: '上移' }, '上移'),
-                      h(Btn, { sm: true, disabled: !!drag, onClick: () => move(a.name, 1), title: '下移' }, '下移'),
+                      h(Btn, { sm: true, onClick: () => move(a.name, -1), title: '上移' }, '上移'),
+                      h(Btn, { sm: true, onClick: () => move(a.name, 1), title: '下移' }, '下移'),
                       // 生效中的那个不能隐藏（服务端也会拒），所以不渲染这个按钮
-                      a.active ? null : h(Btn, { sm: true, disabled: !!drag, onClick: () => toggleHidden(a) }, a.hidden ? '恢复' : '隐藏'))));
+                      a.active ? null : h(Btn, { sm: true, onClick: () => toggleHidden(a) }, a.hidden ? '恢复' : '隐藏'))));
           })),
           ...pluginOnly.map((c) => {
             const isEffective = c.active && effectiveSource === 'plugin'
@@ -5371,11 +5735,8 @@ body.dark .wb-root,
       }, [directory, all]);
       if (isInitialLoading(loading, data, error)) return h(Card, { title: '最近请求' }, h(Loading, { text: '正在读取请求记录…' }));
       const rows = all.filter((r) => (!onlyFailed || !r.ok) && (!modelFilter || r.model === modelFilter));
-      const failLabel = (r) => {
-        const base = `失败${r.status ? ' HTTP ' + r.status : ''}${r.code ? ' · code ' + r.code : ''}`;
-        const kind = failureKindLabel(r.failureKind);
-        return kind ? [base, ' · ', h('span', { style: { opacity: 0.75 } }, kind)] : base;
-      };
+      const failBase = (r) => `失败${r.status ? ' HTTP ' + r.status : ''}${r.code ? ' · code ' + r.code : ''}`;
+      const failKind = (r) => failureKindLabel(r.failureKind) || '';
       return h(Card, { title: '最近请求' },
         error ? h(Alert, { bad: true }, error) : null,
         h(ActiveRequests, { active: data?.active || [], alertMs: data?.activeAlertMs }),
@@ -5406,13 +5767,13 @@ body.dark .wb-root,
               ['time', 'model', 'stream', 'ok', 'ms', 'ttfbMs', 'overheadMs', 'promptTokens', 'completionTokens', 'cachedTokens', 'cacheMissTokens', 'credit', 'status', 'code', 'error'],
               rows.map((r) => [new Date(r.t).toISOString(), r.model, r.stream ? 1 : 0, r.ok ? 1 : 0, r.ms, r.ttfbMs ?? '', r.overheadMs ?? '', r.promptTokens || 0, r.completionTokens || 0, typeof r.cachedTokens === 'number' ? r.cachedTokens : '', typeof r.cacheMissTokens === 'number' ? r.cacheMissTokens : '', r.credit || 0, r.status || '', r.code || '', r.error || ''])) }, '导出当前筛选 CSV'))),
         h('div', { className: 'wb-scroll' },
-          h('table', { className: 'wb-table' },
+          h('table', { className: 'wb-table wb-req-table' },
             h('thead', null, h('tr', null,
               h('th', null, '时间'), h('th', null, '模型'), h('th', null, '流式'), h('th', { className: 'num' }, '耗时'),
-              h('th', { className: 'num' }, 'in'), h('th', { className: 'num' }, 'out'), h('th', { className: 'num' }, '积分'), h('th', null, '结果'))),
+              h('th', { className: 'num' }, '输入'), h('th', { className: 'num' }, '输出'), h('th', { className: 'num' }, '积分'), h('th', null, '结果'))),
             h('tbody', null, rows.map((r, i) => h('tr', { key: i, className: r.ok ? '' : 'bad' },
               h('td', { title: fmtTime(r.t) }, fmtClock(r.t)),
-              h('td', null, h(Raw, { text: String(r.model ?? '') })),
+              h('td', { title: r.model || '', 'data-wb-raw': '' }, r.model ? h(Raw, { text: String(r.model) }) : '—'),
               h('td', null, r.stream ? '是' : '否'),
               // 悬停看时延拆分：总耗时里有多少是等上游首字、多少是桥自身前置处理。
               h('td', {
@@ -5434,8 +5795,12 @@ body.dark .wb-root,
                   : null),
               h('td', { className: 'num' }, fmtTokens(r.completionTokens || 0)),
               h('td', { className: 'num' }, typeof r.credit === 'number' ? r.credit.toFixed(3) : '—'),
-              h('td', { className: r.ok ? '' : 'click', title: r.ok ? '' : (String(r.error || '').slice(0, 300) + '\n（点击复制完整详情）'), onClick: r.ok ? undefined : () => copyText(JSON.stringify(r, null, 2)) },
-                r.ok ? '成功' : failLabel(r)))))),
+              h('td', { className: 'wb-req-result' + (r.ok ? '' : ' click'), title: r.ok ? '' : (String(r.error || '').slice(0, 300) + '\n（点击复制完整详情）'), onClick: r.ok ? undefined : () => copyText(JSON.stringify(r, null, 2)) },
+                r.ok
+                  ? '成功'
+                  : h(Fragment, null,
+                    h('span', null, failBase(r)),
+                    failKind(r) ? h('span', { className: 'wb-req-kind' }, failKind(r)) : null)))))),
           !rows.length ? h('p', { className: 'wb-note' }, all.length ? '没有符合筛选条件的请求。' : '还没有请求记录。') : null));
     }
 

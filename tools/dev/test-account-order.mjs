@@ -302,6 +302,136 @@ try {
     } else fail(`合并后拖拽提交顺序不对：${JSON.stringify(dragOrder)}`);
   }
 
+  // ── 10b. Pointer Events 拖拽（真实鼠标路径） ─────────────────────
+  {
+    await setAccounts([A, B, C]);
+    await reloadAccounts();
+    await sleep(400);
+    await resetReqs();
+    /*
+     * 宿主/页面可能给祖先加 transform（入场动画、弹层）。fixed 会以它为参照物，
+     * 拖影整体漂移；这里主动把 `.panel` 平移，钉住“相对列表绝对定位”这条修复。
+     */
+    await q(cdp, `document.getElementById('accountList').closest('.panel').style.transform = 'translate(37px, 23px)'`);
+    /*
+     * 拖拽中滚动页面：中间行小幅拖动（离上下边界都远，避开刻意的
+     * rubber-band），拖影应继续贴住指针，而不是跟着内容一起滚走。
+     */
+    {
+      const scrollGeo = await q(cdp, `(() => {
+        const rows = [...document.querySelectorAll('#accountList .acct[data-acct]')];
+        const grip = rows[1].querySelector('[data-grip]');
+        grip.scrollIntoView({ block: 'center', behavior: 'instant' });
+        const g = grip.getBoundingClientRect();
+        return {
+          fx: Math.round(g.left + g.width / 2),
+          fy: Math.round(g.top + g.height / 2),
+          ty: Math.round(g.top + g.height / 2 + 14),
+        };
+      })()`);
+      await cdp.send('Input.dispatchMouseEvent', {
+        type: 'mousePressed', x: scrollGeo.fx, y: scrollGeo.fy, button: 'left', buttons: 1, clickCount: 1,
+      });
+      for (let i = 1; i <= 6; i += 1) {
+        await cdp.send('Input.dispatchMouseEvent', {
+          type: 'mouseMoved',
+          x: scrollGeo.fx,
+          y: Math.round(scrollGeo.fy + (scrollGeo.ty - scrollGeo.fy) * (i / 6)),
+          buttons: 1,
+        });
+        await sleep(18);
+      }
+      const topSel = `(() => {
+        const r = document.querySelector('#accountList .acct-pointer-drag');
+        return r ? Math.round(r.getBoundingClientRect().top) : null;
+      })()`;
+      const beforeScroll = await q(cdp, topSel);
+      await q(cdp, 'window.scrollBy(0, 40)');
+      await sleep(150);
+      const afterScroll = await q(cdp, topSel);
+      await q(cdp, 'window.scrollBy(0, -40)');
+      await sleep(150);
+      await cdp.send('Input.dispatchKeyEvent', {
+        type: 'keyDown', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27, nativeVirtualKeyCode: 27,
+      });
+      await cdp.send('Input.dispatchKeyEvent', {
+        type: 'keyUp', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27, nativeVirtualKeyCode: 27,
+      });
+      await cdp.send('Input.dispatchMouseEvent', {
+        type: 'mouseReleased', x: scrollGeo.fx, y: scrollGeo.ty, button: 'left', buttons: 0, clickCount: 1,
+      });
+      await sleep(900);
+      if (beforeScroll !== null && afterScroll !== null && Math.abs(afterScroll - beforeScroll) <= 2) {
+        pass('Pointer 拖拽：滚动页面时拖影继续贴住指针');
+      } else {
+        fail(`Pointer 拖拽滚动后脱手：top ${beforeScroll} → ${afterScroll}`);
+      }
+    }
+    const geo = await q(cdp, `(() => {
+      const from = document.querySelector(${JSON.stringify(`#accountList .acct[data-acct="${A.name}"] [data-grip]`)});
+      const to = document.querySelector(${JSON.stringify(`#accountList .acct[data-acct="${C.name}"]`)});
+      if (!from || !to) return null;
+      from.scrollIntoView({ block: 'center', behavior: 'instant' });
+      const row = from.closest('.acct');
+      const f = from.getBoundingClientRect();
+      const t = to.getBoundingClientRect();
+      const r = row.getBoundingClientRect();
+      return {
+        fx: Math.round(f.left + f.width / 2),
+        fy: Math.round(f.top + f.height / 2),
+        ty: Math.round(t.bottom - 12),
+        rowLeft: Math.round(r.left),
+        rowWidth: Math.round(r.width),
+      };
+    })()`);
+    if (!geo) {
+      fail('Pointer 拖拽：找不到 A 手柄或 C 行');
+    } else {
+      await cdp.send('Input.dispatchMouseEvent', {
+        type: 'mousePressed', x: geo.fx, y: geo.fy, button: 'left', buttons: 1, clickCount: 1,
+      });
+      for (let i = 1; i <= 8; i += 1) {
+        await cdp.send('Input.dispatchMouseEvent', {
+          type: 'mouseMoved',
+          x: geo.fx,
+          y: Math.round(geo.fy + (geo.ty - geo.fy) * (i / 8)),
+          buttons: 1,
+        });
+        await sleep(18);
+      }
+      const during = await q(cdp, `(() => {
+        const row = document.querySelector(${JSON.stringify(`#accountList .acct[data-acct="${A.name}"]`)});
+        const box = row ? row.getBoundingClientRect() : null;
+        return {
+          fixed: !!row && row.classList.contains('acct-pointer-drag'),
+          placeholder: !!document.querySelector('.acct-placeholder'),
+          left: box ? Math.round(box.left) : null,
+          width: box ? Math.round(box.width) : null,
+        };
+      })()`);
+      await cdp.send('Input.dispatchMouseEvent', {
+        type: 'mouseReleased', x: geo.fx, y: geo.ty, button: 'left', buttons: 0, clickCount: 1,
+      });
+      await sleep(1000);
+      await q(cdp, `document.getElementById('accountList').closest('.panel').style.transform = ''`);
+      const order = (await posts('/api/account/order')).slice(-1)[0];
+      const pointerOrder = order && order.body && order.body.order;
+      const expected = [B.name, C.name, A.name];
+      if (during.fixed && during.placeholder) {
+        pass('Pointer 拖拽：行脱离文档流跟随指针，原位由占位符占住');
+      } else fail(`Pointer 拖拽没有进入拖拽态：${JSON.stringify(during)}`);
+      if (during.left !== null && Math.abs(during.left - geo.rowLeft) <= 2
+        && during.width !== null && Math.abs(during.width - geo.rowWidth) <= 2) {
+        pass('Pointer 拖拽：带 transform 的祖先不会让拖影漂移（横向/宽度与行一致）');
+      } else {
+        fail(`Pointer 拖拽拖影漂移：left ${during.left}/${geo.rowLeft}，width ${during.width}/${geo.rowWidth}`);
+      }
+      if (pointerOrder && JSON.stringify(pointerOrder) === JSON.stringify(expected)) {
+        pass(`Pointer 拖拽 A 到 C 后面提交 [${expected.join(', ')}]`);
+      } else fail(`Pointer 拖拽提交顺序不对：${JSON.stringify(pointerOrder)}`);
+    }
+  }
+
   // ── 11. 英文：新文案都翻了 ────────────────────────────────────────
   {
     const B2 = { ...B, name: 'b-snapshot-2.info' };

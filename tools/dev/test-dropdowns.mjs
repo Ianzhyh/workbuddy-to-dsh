@@ -180,7 +180,7 @@ try {
     target.click();
     const sel = dd.querySelector('select');
     return JSON.stringify({ before, after: dd.querySelector('.dd-label').textContent,
-      value: sel.value, menuGone: !dd.querySelector('.dd-menu') });
+      value: sel.value, menuGone: !dd.querySelector('.dd-menu:not(.closing)') });
   })()`));
   if (pick.after !== pick.before && pick.menuGone) pass(`选一项后触发器文案从「${pick.before}」变为「${pick.after}」且菜单收起`);
   else fail(`选项交互异常：${JSON.stringify(pick)}`);

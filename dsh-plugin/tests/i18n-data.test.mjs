@@ -16,8 +16,8 @@ const CLIENT = readFileSync(join(ROOT, 'dsh-plugin', 'lib', 'client.js'), 'utf8'
 const CONSOLE = readFileSync(join(ROOT, 'dashboard', 'public', 'index.html'), 'utf8').replace(/\r\n/g, '\n');
 
 test('插件：数据展示位必须绕过 h() 的自动翻译', () => {
-  // 请求表模型列
-  assert.match(CLIENT, /h\('td', null, h\(Raw, \{ text: String\(r\.model \?\? ''\) \}\)\)/);
+  // 请求表模型列（空模型显示 —；title 也是数据，整格标 raw 跳过翻译）
+  assert.match(CLIENT, /h\('td', \{ title: r\.model \|\| '', 'data-wb-raw': '' \}, r\.model \? h\(Raw, \{ text: String\(r\.model\) \}\) : '—'\)/);
   // 桥日志 <pre>
   assert.match(CLIENT, /h\('pre', \{ className: 'wb-log' \}, all\.length \? h\(Raw, \{ text: all\.join\('\\n'\) \}\)/);
   // 对话正文与思考正文
