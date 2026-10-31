@@ -17,6 +17,88 @@
 
 只支持最近 2 个 minor 版本。
 
+## [1.21.0] - 2026-10-31
+
+这次发布把 **1.20.0 之后累积的桥 / 接入缺陷修复**，与控制台、dsh 插件的一轮动效 / 交互细化
+一起发出去。共同主题是「拖拽要真跟手、动效只在该动的时候动、失败不再假成功、
+窄列里把信息排清楚」。
+
+### Added
+
+- **控制台与插件的账号排序拖拽都改用 Pointer Events**：1:1 跟手、占位符 + FLIP、
+  120ms 速度采样 + 动量投影、临界阻尼弹簧（`k=320/c=36`）、列表边界 rubber-band；
+  Esc / `pointercancel` 回退。插件侧同时移除了原生 HTML5 DnD。
+- **拖拽定位不受宿主 transform 影响**：行相对账号列表绝对定位（不再用 `position:fixed`），
+  并在指针移动及 window/document 捕获到的 `scroll` 上按「列表位置 + 行槽位 − 滚动距离」
+  重算 —— 页面滚动时拖影继续贴住指针，不再横向漂移或脱手。
+- **拖拽安全兜底**：松手事件丢失（mouse `pointermove` 的 `buttons === 0`）、窗口失焦、
+  列表在拖拽中被轮询重渲染导致节点断开时，都会清理占位符/行样式，不再留在页面上。
+- 面板下拉菜单补齐键盘操作（Enter/Space/Arrow/Home/End/Escape、焦点归还、listbox/option 语义）。
+- 请求表补齐身份信息：模型为空显示 `—`，失败原因拆成「失败 HTTP … · code …」+ 归因小字；
+  表头改为「输入 / 输出」，长模型名省略并保留 title。
+- 新增 `dsh-plugin/tests/panel-drag.mjs`（`npm run panel:drag`，并入 `panel:check`）：
+  在带 transform 的祖先中验证拖影不漂、滚动 40px 仍跟手、Esc 不发请求、松手提交整表顺序。
+
+### Changed
+
+- **控制台动效与视觉**：去除由轮询驱动的卡片/提示入场重播；芯片动画收敛为单条 WAAPI 路径；
+  下拉/弹窗/菜单补退场；补 `prefers-reduced-motion`、`prefers-contrast: more`、
+  `prefers-reduced-transparency` 与 `(hover: none)` 分支；字体改用光学尺寸、图标统一描边尺寸；
+  概览与用量区改为卡片化组合，面板标题改用可见的 `--border` 发丝线。
+- **插件样式**：6 处 `transition: all` 改为显式属性；移除积分卡的装饰性渐变；
+  增加仅作用于 `.wb-root` / `wb-chat-*` / `.wb-turn-cost` 的 reduced-motion 规则，避免污染宿主。
+- 图表坐标轴按真实小数显示（`0.5 / 1.5`），不再把刻度四舍五入成重复整数。
+- 请求表的模型单元格标记 `data-wb-raw`，模型名与 title 不再被自动翻译；英文模式无残留中文。
+
+### Fixed（1.20.0 之后的缺陷修复）
+
+- **桥进程稳定性**：媒体 / 签到路由改为 `await`，上传中途取消时 `readBody` 的
+  rejection 不再逃成 unhandled rejection 打死整个桥进程（新增回归用例）；
+  `client key` 不能再改 `/v1/models/default`；`source=plugin` 只在凭据文件确实
+  不存在时才降级，暂时解不开不再悄悄换桌面钱包。
+- **凭据与切号**：凭据锁按 pid+token 归属释放，锁超时不再永久降级为 memory；
+  多 build 场景按信封 `keyId` 选 at-rest 密钥；刷新响应缺 `expiresIn` 时按 JWT `exp`
+  记有效期；401 接管的 `any` 模式优先 active 凭据并保留 nickname；账本目录自动创建；
+  配额历史按账号过滤。
+- **Codex / Claude Code / opencode 接入**：目录写入失败回滚 `config.toml`（新建文件则删除），
+  备份文件名在同一秒内重名时追加序号；冷目录保留真实的 `context_window` /
+  `max_output_tokens`，不再用 128K / 8K 降级真实值；备份/锁目录不可用时返回
+  `{ok:false,error}`，不再把裸异常抛成 500；原值是字面量 `null` 的配置项撤销后还原成
+  `null` 而不是删键（旧 manifest 仍按 `null=删除` 兼容）；opencode 的 provider 不是对象时
+  不再写 `model` 并如实回报被跳过的键；文件已是桥配置但 manifest 丢失时返回
+  `noManifest` + 明确提示，不再只说"无需改动"。
+- **上游协议 / 流式**：并行 tool call 交错下发时不再抢在前一个 `output_item.done` 之前
+  announce，收尾按 `output_index` 补发；两个 SSE relay 在 EOF 解析残留 buffer，
+  尾帧没有换行也不丢 usage / finish；上游缺 `usage` 时 Responses（流式/非流式）与
+  Anthropic `message_delta` 都用本地估算兜底并回填账本，不再给 Codex 报 0/0；
+  `/v1/usage` 天窗口对齐本地零点（`days=1` 不再混入昨天尾巴）；失败计数聚合后并入
+  成功模型桶，媒体 / 搜索 / 只有失败的模型不再污染 `models[]` 排行。
+- **控制台 / 插件进程与轮询**：`/api/login/*` 请求体超限改为明确 413 并 `resume`，
+  连接在 413 后仍可用；`BridgeSupervisor.probe/stop/ensure` 不再把调用方 abort
+  映射成 `stopped`，避免误报"已停止"或跳过 stop 复用旧进程；identity 轮询定时器与
+  disposer 同步注册，插件在 `ensure` 的 30 秒窗口内卸载不再泄漏 2 秒轮询；
+  `/api/accounts` 纳入 `PANEL_ONLY_GET`，插件自动切号补 `x-workbuddy-panel` 头
+  （无头 403 / 带头 200 均有回归用例）；面板 `useJson` 用 `activePath` 世代守卫，
+  切换 7→30 天后旧路径的在途响应和延迟重试不能覆盖新范围；设备码登录 poll 遇到
+  400/404 终态立即停止，并补 10 分钟过期看门狗。
+- **插件面板**：`ModelsPanel` 的筛选/排序 `useState` 移到所有提前 return 之前，
+  503 / 加载态切换不再因 hook 数变化白屏；切号后读取 `/login/source` 的真实结果，
+  失败不再谎报"两边同步"；网页搜索就绪度恢复 `tokenMatches` 比对，令牌过期不再显示
+  ready；旧 `llm-pi-ai` 路由清理支持任意 YAML 缩进；体检超时保留已完成结果；
+  账号列表断连可重试；模型显示偏好空请求返回 400 而不是静默"全隐藏"；
+  真实 dsh 只有 describe/replace 时也能拍快照，撤销不再依赖可能误删本机端点的兜底。
+
+### Fixed（界面与拖拽）
+
+- 控制台 20 秒一次的用量卡/告警/请求提示入场重播（轮询不再是「重新播放动画」的触发器）。
+- 减少动态偏好下 JS 平滑滚动仍会滚动的问题；回到顶部与排行榜跳转现在直接到位。
+- 模型详情行、日志抽屉的高度动画在真实表格/异步日志下不生效的问题。
+- 插件的账号拖拽在设置弹层中「飘」、滚动页面后脱手，以及拖完留下虚线占位符的问题。
+- 请求表空模型显示空白、失败结果折成三行导致行高跳动的问题。
+
+验证：`npm run lint`、`npm run check:types`、`npm run test:plugin`（254/254）、
+`npm run test:ui`（38/38）、`npm run panel:check`（渲染 / 拖拽 / 中英）全部通过。
+
 ## [1.20.0] - 2026-10-30
 
 两条线的一轮缺陷审计：**dsh 插件 / Web 控制台** 与 **Claude Code 接入**。共同主题是
