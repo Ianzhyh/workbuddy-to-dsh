@@ -10032,7 +10032,50 @@ function startAutoCheckinTimer() {
  * 该端点不会消耗积分，可安全地按需调用。月度套餐（CapacityType=4）看
  * CycleCapacityRemain，一次性套餐看 CapacityRemain。
  */
+/**
+ * 企业/教育账号的配额。
+ *
+ * 企业号（含 WorkBuddy 教育公益版，登录凭据带 enterprise_id）的月度额度不在
+ * 个人套餐端点（ProductCode=p_tcaca）里：那边返回 Accounts=null，面板会显示 0。
+ * 上游客户端对企业号改走 `get-enterprise-user-usage`（limitNum 总额、credit 已用），
+ * 这里对齐同一口径，避免把可用余额误报成 0。
+ */
+async function fetchEnterpriseQuota(auth) {
+  const data = await billingPost(auth, '/v2/billing/meter/get-enterprise-user-usage');
+  const usage = data?.Response?.Data && typeof data.Response.Data === 'object' ? data.Response.Data : data;
+  const limit = Number(usage?.limitNum);
+  if (!Number.isFinite(limit)) throw new Error('enterprise usage response has no limitNum');
+  const used = Number(usage?.credit);
+  const unlimited = limit < 0;
+  const total = unlimited ? -1 : Math.max(0, limit - (Number.isFinite(used) ? used : 0));
+  const result = {
+    total,
+    unlimited,
+    packages: unlimited ? [] : [{
+      name: '企业/教育月度额度',
+      remain: total,
+      size: limit,
+      monthly: true,
+      expiresAt: usage?.cycleEndTime || undefined,
+    }],
+    productCode: 'enterprise',
+    used: Number.isFinite(used) ? used : 0,
+    cycleStartTime: usage?.cycleStartTime,
+    cycleEndTime: usage?.cycleEndTime,
+    cycleResetTime: usage?.cycleResetTime,
+  };
+  recordQuotaSnapshot(result, auth);
+  return result;
+}
+
 async function fetchQuota(auth, { timeoutMs = 15000 } = {}) {
+  if (auth.enterpriseId) {
+    try {
+      return await fetchEnterpriseQuota(auth);
+    } catch (e) {
+      log('enterprise quota failed; falling back to personal packages', e.message);
+    }
+  }
   const pad = (n) => String(n).padStart(2, '0');
   const fmt = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
     + ` ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;

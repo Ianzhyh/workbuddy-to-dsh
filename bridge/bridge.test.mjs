@@ -64,17 +64,17 @@ const READABLE_FAKE_AUTH = {
   },
 };
 
-/** 可解码的假 JWT（只带 sub/exp）—— 账号跟随用例靠 sub 区分身份。 */
-function fakeJwt(sub) {
-  const body = Buffer.from(JSON.stringify({ sub, exp: Math.floor(Date.now() / 1000) + 86_400 }), 'utf8').toString('base64url');
+/** 可解码的假 JWT（默认只带 sub/exp，可选补充 claims）—— 账号跟随用例靠 sub 区分身份。 */
+function fakeJwt(sub, claims = {}) {
+  const body = Buffer.from(JSON.stringify({ sub, ...claims, exp: Math.floor(Date.now() / 1000) + 86_400 }), 'utf8').toString('base64url');
   return `e30.${body}.sig`;
 }
 
 /** 一份可被桥解密的登录文件内容（纯文本字段，不走 at-rest 信封）。 */
-function authFileFor(sub, domain = 'example.invalid') {
+function authFileFor(sub, domain = 'example.invalid', claims = {}) {
   return {
     auth: {
-      accessToken: fakeJwt(sub),
+      accessToken: fakeJwt(sub, claims),
       refreshToken: 'fake-refresh-token',
       domain,
       expiresAt: Date.now() + 30 * 86_400_000,
@@ -1415,6 +1415,67 @@ test('/v1/quota：余额必须带上归属账号，供面板按身份作废缓�
 
     const health = await (await fetch(bridge.baseUrl + '/health', { headers: auth })).json();
     assert.match(String(health.build || ''), /^[0-9a-f]{16}$/, '/health 必须带构建指纹（启动方据此重启旧桥）');
+  } finally {
+    await bridge.stop();
+    upstream.close();
+    rmSync(quotaDir, { recursive: true, force: true });
+  }
+});
+
+test('/v1/quota：企业/教育账号走企业配额，不能把可用余额显示成 0', { timeout: 90_000 }, async () => {
+  /*
+   * WorkBuddy 教育公益版（以及企业号）的登录凭据带 enterprise_id。上游把额度
+   * 放在 get-enterprise-user-usage（limitNum 总额、credit 已用），个人套餐端点
+   * 对它返回 Accounts=null。旧实现只查个人端点 → 面板恒显示 0。
+   */
+  let personalCalls = 0;
+  const upstream = createServer((req, res) => {
+    const path = new URL(req.url, 'http://127.0.0.1').pathname;
+    if (path === '/v2/billing/meter/get-enterprise-user-usage') {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      return res.end(JSON.stringify({
+        code: 0,
+        data: {
+          limitNum: 2000,
+          credit: 37.5,
+          cycleStartTime: '2026-11-01 00:00:00',
+          cycleEndTime: '2026-11-30 23:59:59',
+          cycleResetTime: '2026-12-01 00:00:00',
+        },
+      }));
+    }
+    if (path === '/v2/billing/meter/get-user-resource') {
+      personalCalls += 1;
+      res.writeHead(200, { 'content-type': 'application/json' });
+      return res.end(JSON.stringify({ code: 0, data: { Response: { Data: { Accounts: null } } } }));
+    }
+    res.writeHead(404, { 'content-type': 'application/json' });
+    return res.end('{}');
+  });
+  await new Promise((r) => upstream.listen(0, '127.0.0.1', r));
+  const quotaDir = mkdtempSync(join(tmpdir(), 'wb-quota-enterprise-'));
+  const quotaFile = join(quotaDir, 'quota-history.jsonl');
+  const bridge = await startBridge(
+    {
+      CODEBUDDY_ENDPOINT: `http://127.0.0.1:${upstream.address().port}`,
+      WORKBUDDY_BILLING_BASE: `http://127.0.0.1:${upstream.address().port}`,
+      WORKBUDDY_QUOTA_SNAPSHOT_MS: '0',
+      WORKBUDDY_QUOTA_HISTORY_FILE: quotaFile,
+    },
+    { auth: authFileFor('quota-enterprise', 'example.invalid', { enterprise_id: 'ent-stub' }) },
+  );
+  try {
+    const res = await fetch(bridge.baseUrl + '/v1/quota', { headers: auth, signal: AbortSignal.timeout(15000) });
+    const body = await res.json();
+    assert.equal(res.status, 200);
+    assert.equal(body.ok, true);
+    assert.equal(body.total, 1962.5, '企业额度必须按 limitNum - credit 折算剩余，而不是套餐端点的 0');
+    assert.equal(body.used, 37.5);
+    assert.equal(body.productCode, 'enterprise');
+    assert.equal(body.packages?.[0]?.size, 2000);
+    assert.equal(body.packages?.[0]?.remain, 1962.5);
+    assert.equal(body.packages?.[0]?.monthly, true);
+    assert.equal(personalCalls, 0, '企业号不应再回退到个人套餐端点');
   } finally {
     await bridge.stop();
     upstream.close();
