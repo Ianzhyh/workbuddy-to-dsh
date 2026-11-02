@@ -1251,7 +1251,9 @@ const I18N_EN = {
   '已关闭': 'Off',
   '已开启每日自动签到（桥侧需重启桥生效）': 'Daily auto check-in enabled (restart the bridge for the bridge side to apply)',
   '已关闭每日自动签到（桥侧需重启桥生效）': 'Daily auto check-in disabled (restart the bridge for the bridge side to apply)',
-  '今天还没签到，签到积分过期不补。': 'Not checked in today yet — check-in credit expires and is not made up.',
+  '今天还没签到，签到积分过期不补。': 'Not checked in today yet — check-in credit expires and is not made up.',  '今天': 'today',
+  '明天': 'tomorrow',
+  '查看积分': 'View credits',
   '）· 可手动重试': ') · you can retry manually',
 
   // ---- 最近请求面板 ----
@@ -2297,6 +2299,8 @@ const I18N_RULES_EN = [
     'No $2 records among the last $1 — try raising the row count to 200.'],
   [/^最近 60 秒内有 (\d+) 条请求，会打断正在进行的调用。$/,
     '$1 request(s) in the last 60 seconds; restarting will interrupt in-flight calls.'],
+  [/^(\d+) 天后$/, (m, n) => 'in ' + n + ' days'],
+  [/^有 (.+) 积分将在(.+)到期（(\d{2}-\d{2})）。$/, (m, n, when, date) => n + ' credits will expire ' + translateText(when) + ' (' + date + ').'],
   [/^最近请求里有 (\d+) 条新的失败。$/, (m, n) => n + (n === '1' ? ' new failure' : ' new failures') + ' in Recent requests.'],
   /* 积分卡的套餐摘要：`名称 余额/总量 · 名称 余额/总量 等 N 个套餐`（权益包名靠 applyTerms 兜） */
   [/^(.*) 等 (\d+) 个套餐$/, (m, head, n) => head + ' · ' + n + ' plans total'],
@@ -3279,6 +3283,44 @@ function renderAlerts() {
       dismiss: { label: '知道了', run: () => { tokenMuted = true; lsSet('wb.muted.token', '1'); renderAlerts(); } },
       action: { label: '重新诊断', run: () => $('diagBtn').click() },
     });
+  }
+
+  /*
+   * 2a. 积分到期（7 天内）。
+   *
+   * 放在顶部告警条，不塞进积分卡副行：卡片副行要保持“包名/余额”的可扫描性，
+   * 到期是独立、可操作的事件。同一个到期日签名只提醒一次；新到期的包出现后
+   * 会重新提醒。已过期/不限量/零余额不提醒（helper 已过滤）。
+   */
+  const quotaInfo = quotaExpiringInfo(lastOverview && lastOverview.quota);
+  if (quotaInfo) {
+    // 按账号隔离：不同账号可能恰好有相同的到期日，不能互相把提醒静音掉。
+    const quotaMuteKey = 'wb.muted.quotaExpiry:' + String((lastOverview.quota && lastOverview.quota.account) || '');
+    let muted = '';
+    try { muted = localStorage.getItem(quotaMuteKey) || ''; } catch { /* 隐私模式：忽略 */ }
+    if (muted !== quotaInfo.signature) {
+      const when = fmtQuotaRelative(quotaInfo.days, false);
+      const lead = /^\d/.test(when) ? ' ' : '';
+      items.push({
+        sev: quotaInfo.days <= 1 ? 1 : 2,
+        cls: quotaInfo.days <= 1 ? 'fail' : 'warn',
+        text: '有 ' + fmtNum(quotaInfo.remain) + ' 积分将在' + lead + when + '到期（' + fmtQuotaDate(quotaInfo.ms) + '）。',
+        dismiss: {
+          label: '知道了',
+          run: () => {
+            try { localStorage.setItem(quotaMuteKey, quotaInfo.signature); } catch { /* 隐私模式：忽略 */ }
+            renderAlerts();
+          },
+        },
+        action: {
+          label: '查看积分',
+          run: () => {
+            switchTab('overview');
+            window.scrollTo({ top: 0, behavior: 'smooth' });
+          },
+        },
+      });
+    }
   }
 
   /*
@@ -6327,6 +6369,58 @@ async function loadOverview() {
 let cardsIntroPlayed = false;
 let cardsIntroTimer = null;
 
+
+/*
+ * 积分到期提醒：控制台与插件面板同一套口径（默认提前 7 天，≤1 天升级）。
+ * 只统计还有剩余、到期日可解析的包；已过期/不限量/零余额不提醒。
+ */
+const QUOTA_EXPIRY_WARN_DAYS = 7;
+const QUOTA_DAY_MS = 86400000;
+function parseQuotaExpiryMs(value) {
+  if (!value) return 0;
+  const text = String(value).trim();
+  const normalized = /^d{4}-d{2}-d{2} d{2}:d{2}/.test(text) ? text.replace(' ', 'T') : text;
+  const ms = Date.parse(normalized);
+  return Number.isFinite(ms) ? ms : 0;
+}
+function localDayStart(ms) {
+  const d = new Date(ms);
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+}
+function quotaExpiringInfo(quota, warnDays = QUOTA_EXPIRY_WARN_DAYS, now = Date.now()) {
+  if (!quota || quota.unlimited === true || Number(quota.total) < 0) return null;
+  const rows = [];
+  for (const p of quota.packages || []) {
+    const remain = Number(p.remain) || 0;
+    const ms = parseQuotaExpiryMs(p.expiresAt);
+    if (remain <= 0 || !ms) continue;
+    const days = Math.round((localDayStart(ms) - localDayStart(now)) / QUOTA_DAY_MS);
+    if (days < 0 || days > warnDays) continue;
+    rows.push({ remain, ms, days });
+  }
+  if (!rows.length) return null;
+  rows.sort((a, b) => a.days - b.days || b.remain - a.remain);
+  const first = rows[0];
+  const firstDay = localDayStart(first.ms);
+  const same = rows.filter((r) => localDayStart(r.ms) === firstDay);
+  return {
+    days: first.days,
+    ms: first.ms,
+    remain: same.reduce((sum, r) => sum + r.remain, 0),
+    count: rows.length,
+    sameDayCount: same.length,
+    signature: [...new Set(rows.map((r) => localDayStart(r.ms)))].sort((a, b) => a - b).join(','),
+  };
+}
+function fmtQuotaDate(ms) {
+  const d = new Date(ms);
+  return String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+}
+function fmtQuotaRelative(days, en) {
+  if (days <= 0) return en ? 'today' : '今天';
+  if (days === 1) return en ? 'tomorrow' : '明天';
+  return en ? 'in ' + days + ' days' : days + ' 天后';
+}
 function renderCards() {
   const d = lastOverview;
   if (!d) return;

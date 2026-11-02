@@ -736,8 +736,10 @@ export const BRIDGE_ENV_PASSTHROUGH = Object.freeze([
   'WORKBUDDY_LOGIN_ORIGIN',
   // 客户端可执行文件路径覆盖（非常规安装目录 / 自定义包名）
   'WORKBUDDY_APP_EXECUTABLE',
-  // 桌面端出站身份（上游版本漂移时的逃生门）
+  // 桌面端出站身份（默认跟随本机桌面端；上游版本漂移时的逃生门）
+  'WORKBUDDY_IDENTITY',
   'WORKBUDDY_APP_VERSION',
+  'WORKBUDDY_CLI_VERSION',
   'WORKBUDDY_IDE_VERSION',
   'WORKBUDDY_IDE_NAME',
   // 11128 / 预校验 / 诊断
@@ -748,6 +750,7 @@ export const BRIDGE_ENV_PASSTHROUGH = Object.freeze([
   // 协议边界开关（关掉 = 退回原样透传；用户在 .env 写了就必须真的到桥）
   'WORKBUDDY_SSE_NORMALIZE',
   'WORKBUDDY_REPAIR_TOOL_HISTORY',
+  'WORKBUDDY_STRIP_ASSISTANT_REASONING',
   'WORKBUDDY_SANITIZE_ASSISTANT_HISTORY',
   'WORKBUDDY_FORWARD_REASONING',
   'WORKBUDDY_CONVERSATION_ID_BODY',
@@ -2303,8 +2306,13 @@ export function apply(ctx, rawConfig = {}) {
       })
         .then((r) => r.json()).catch(() => null);
       const target = pickAccountFailoverTarget(listed?.accounts, health?.auth?.userId || '');
+      const why = signal.reason === 'quota'
+        ? `账号用量已达上限（${signal.model || '?'}${signal.resetAt ? `，上游提示 ${signal.resetAt} 重置` : ''}）`
+        : signal.reason === 'account_restricted'
+          ? `账号被上游限制（异常行为，${signal.model || '?'}）`
+          : `上游限流 ${signal.count} 次（${signal.model || '?'}）`;
       if (!target) {
-        log(`自动切号跳过：没有其它可用账号（${signal.model || '?'} 已限流 ${signal.count} 次）`);
+        log(`自动切号跳过：没有其它可用账号（${why}）`);
         return;
       }
       const res = await fetch(`${consoleSupervisor.url}/api/account/switch`, {
@@ -2322,7 +2330,7 @@ export function apply(ctx, rawConfig = {}) {
       // 否则下一次 ensureReady 会按旧 authFile 把桥又重启回去。
       syncBridgeAccountConfig();
       adapter.invalidate();
-      log(`上游限流 ${signal.count} 次（${signal.model || '?'}），已自动切换账号 -> ${target.name}`);
+      log(`${why}，已自动切换账号 -> ${target.name}`);
     } catch (error) {
       log('自动切号异常', error);
     } finally {
@@ -2391,7 +2399,7 @@ export function apply(ctx, rawConfig = {}) {
     if (typeof ctx.effect === 'function') {
       ctx.effect(() => () => clearInterval(timer), 'workbuddy.account-failover');
     }
-    log(`限流自动切号已开启：同一模型 10 分钟内 ${config.accountFailoverAfter} 次 429 后切换账号`);
+    log(`限流自动切号已开启：同一模型 10 分钟内 ${config.accountFailoverAfter} 次瞬时 429 后切换账号；账号用量上限（6004/14018）一次即切`);
   }
 
   /*

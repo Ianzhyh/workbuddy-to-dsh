@@ -190,7 +190,7 @@ try {
     概览: ['本地桥', 'dsh 原生路由', '积分余额', '启动桥', '复制诊断报告'],
     账号: ['workbuddy-desktop.info', '330000000000', '使用中', '切换', 'CodeBuddyExtension'],
     用量: ['消耗积分', '积分花在哪些模型上', '搜索次数', '导出 CSV', 'deepseek-v4.1-flash'],
-    请求: ['最近请求', '仅看失败', '导出当前筛选 CSV'],
+    请求: ['最近请求', '仅看失败', '仅看需要处理', '导出当前筛选 CSV'],
     签到: ['每日签到', '连续签到', '自动签到', '上次尝试'],
     诊断: ['环境诊断', 'AtRest 密钥', '登录文件', 'profile bundles', '运行时注册，无需 settings.yaml'],
     模型: ['可用模型', '全部体检', '清除体检结论', '可用'],
@@ -699,10 +699,11 @@ try {
   if (expiryCard.rows.length !== 2) {
     problems.push(`同名不同到期日的套餐必须拆成 2 行，实际 ${expiryCard.rows.length} 行`);
   } else {
-    if (!/2026-11-15/.test(expiryCard.rows[0]) || !/×2/.test(expiryCard.rows[0])) {
+    // 面板现在显示短日期（MM-DD）+ 相对天数；断言短日期，别再依赖完整年份。
+    if (!/11-15/.test(expiryCard.rows[0]) || !/×2/.test(expiryCard.rows[0])) {
       problems.push(`最近到期的套餐没有排在第一行或没有合并计数：${expiryCard.rows[0]}`);
     }
-    if (!/2026-11-30/.test(expiryCard.rows[1]) || /×2/.test(expiryCard.rows[1])) {
+    if (!/11-30/.test(expiryCard.rows[1]) || /×2/.test(expiryCard.rows[1])) {
       problems.push(`较晚到期的套餐行不正确：${expiryCard.rows[1]}`);
     }
   }
@@ -2333,6 +2334,110 @@ async function verifyNarrow() {
 }
 
 /**
+ * 场景 6：账号页/模型页要把当前账号的限流状态说出来。
+ */
+async function verifyRateLimitVisibility() {
+  console.log('\n—— 场景 6：账号/模型限流可见 ——');
+  const nowMs = Date.now();
+  const dataLimit = {
+    ...data,
+    status: {
+      ...data.status,
+      bridge: {
+        ...data.status.bridge,
+        health: {
+          ...data.status.bridge.health,
+          rateLimit: {
+            windowMs: 600000,
+            count: 0,
+            model: '',
+            lastAt: '',
+            models: [],
+            quota: {
+              model: 'deepseek-v4.1-flash',
+              lastAt: new Date(nowMs).toISOString(),
+              resetAt: new Date(nowMs + 3_600_000).toISOString(),
+            },
+            modelBusy: { model: 'glm-5.3', lastAt: new Date(nowMs).toISOString(), resetAt: '' },
+            queue: { model: 'kimi-k3', code: 6020, position: 7, size: 900, lastAt: new Date(nowMs).toISOString() },
+          },
+        },
+      },
+    },
+  };
+  const routesLimit = buildRoutes(dataLimit);
+  const port = PORT + 6;
+  const extra = createServer((req, res) => {
+    const path = new URL(req.url, 'http://127.0.0.1:' + port).pathname;
+    if (path === '/harness.html') { res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }); return res.end(harnessHtml(routesLimit)); }
+    if (path === '/client.js') { res.writeHead(200, { 'content-type': 'text/javascript; charset=utf-8' }); return res.end(clientSource); }
+    if (path === '/vendor/react.js') { res.writeHead(200, { 'content-type': 'text/javascript; charset=utf-8' }); return res.end(react); }
+    if (path === '/vendor/react-dom.js') { res.writeHead(200, { 'content-type': 'text/javascript; charset=utf-8' }); return res.end(reactDom); }
+    res.writeHead(404); res.end('not found');
+  });
+  await new Promise((resolve) => extra.listen(port, '127.0.0.1', resolve));
+  const problems = [];
+  let pageLimit = null;
+  try {
+    pageLimit = await openPage('http://127.0.0.1:' + port + '/harness.html', {}, {
+      width: 900, height: 1400, injectStub: false, cdpPort: await freeCdpPort(),
+    });
+    await waitFor(pageLimit.cdp, 'window.__harness && window.__harness.rendered === true', 15000, '限流场景面板挂载');
+    await sleep(900);
+    await pageLimit.cdp.evaluate("(() => { const b=[...document.querySelectorAll('.wb-tab')].find(x=>x.textContent==='账号'); if(b) b.click(); return !!b; })()");
+    await sleep(900);
+    const accountText = await pageLimit.cdp.evaluate("document.querySelector('.wb-root') ? document.querySelector('.wb-root').innerText : ''");
+    if (!accountText.includes('当前账号的模型用量已达上限')) problems.push('账号页没有显示账号用量上限提示');
+    if (!accountText.includes('额度上限')) problems.push('账号页当前账号没有「额度上限」标记');
+    await pageLimit.cdp.evaluate("(() => { const b=[...document.querySelectorAll('.wb-tab')].find(x=>x.textContent==='模型'); if(b) b.click(); return !!b; })()");
+    await sleep(1100);
+    const modelText = await pageLimit.cdp.evaluate("document.querySelector('.wb-root') ? document.querySelector('.wb-root').innerText : ''");
+    for (const needle of ['额度上限', '模型繁忙', '排队中']) {
+      if (!modelText.includes(needle)) problems.push('模型页没有显示「' + needle + '」标记');
+    }
+    // 用量页空态：没有用量时不能只铺 0 值图表。
+    await pageLimit.cdp.evaluate(`window.__setRoute('/workbuddy/usage', ${JSON.stringify({
+      ok: true,
+      total: { calls: 0, credit: 0, promptTokens: 0, completionTokens: 0 },
+      models: [],
+      days: [],
+      failures: [],
+    })})`);
+    await pageLimit.cdp.evaluate("(() => { const b=[...document.querySelectorAll('.wb-tab')].find(x=>x.textContent==='用量'); if(b) b.click(); return !!b; })()");
+    await sleep(1000);
+    const emptyUsageText = await pageLimit.cdp.evaluate("document.querySelector('.wb-root') ? document.querySelector('.wb-root').innerText : ''");
+    if (!emptyUsageText.includes('还没有用量')) problems.push('用量页空态没有显示「还没有用量」');
+    // 请求页「仅看需要处理」：fixture 里有一条 quota 失败，筛选后应只剩它。
+    await pageLimit.cdp.evaluate("(() => { const b=[...document.querySelectorAll('.wb-tab')].find(x=>x.textContent==='请求'); if(b) b.click(); return !!b; })()");
+    await sleep(900);
+    const beforeFilter = await pageLimit.cdp.evaluate("document.querySelectorAll('.wb-table tbody tr').length");
+    await pageLimit.cdp.evaluate(`(() => {
+      const label = [...document.querySelectorAll('.wb-check')].find((el) => el.textContent.includes('仅看需要处理'));
+      const cb = label && label.querySelector('input');
+      if (cb) cb.click();
+      return !!cb;
+    })()`);
+    await sleep(400);
+    const afterFilter = await pageLimit.cdp.evaluate("document.querySelectorAll('.wb-table tbody tr').length");
+    if (!(afterFilter < beforeFilter) || afterFilter !== 1) {
+      problems.push('请求页「仅看需要处理」筛选结果不对：' + beforeFilter + ' -> ' + afterFilter);
+    }
+  } catch (error) {
+    problems.push('场景 6 失败：' + error.message);
+  } finally {
+    if (pageLimit) pageLimit.close();
+    await new Promise((resolve) => extra.close(resolve));
+  }
+  if (problems.length) {
+    console.error('场景 6 问题：');
+    for (const p of problems) console.error(' - ' + p);
+    failed = true;
+  } else {
+    console.log('场景 6 通过：账号页与模型页都能看到当前账号的限流状态。');
+  }
+}
+
+/**
  * 第二个场景：**宿主端还是旧构建**（透传接口 404）。
  * 控制台域的每个面板都必须给出「重启 dsh」的可行动提示，而不是空白或对 404 空转。
  */
@@ -2623,6 +2728,7 @@ async function verifyFirstRun() {
   }
 }
 
+await verifyRateLimitVisibility();
 await verifyStaleHost();
 await verifyNarrow();
 await verifyDegradedBridge();

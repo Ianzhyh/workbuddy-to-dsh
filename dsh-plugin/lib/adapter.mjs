@@ -68,16 +68,28 @@ export const CODE = {
   ABORTED: 'ABORTED',
   EMPTY: 'EMPTY_RESPONSE',
   CONTEXT: 'CONTEXT_WINDOW_EXCEEDED',
+  MODEL_QUEUE: 'MODEL_QUEUE',
+  ACCOUNT_RESTRICTED: 'ACCOUNT_RESTRICTED',
+  POLICY_BLOCKED: 'CONTENT_POLICY_BLOCKED',
+  MODEL_NOT_FOUND: 'MODEL_NOT_FOUND',
+  MODEL_QUOTA: 'MODEL_QUOTA_EXCEEDED',
 };
 
 /** 失败时给用户一句"下一步做什么"（dsh 只展示 message，错误码本身不解释）。 */
 export const ERROR_HINTS = {
   [CODE.AUTH]: '登录态可能已失效：到「账号」页重新登录（桌面端或插件登录均可），或运行 /workbuddy login 后重试。',
-  [CODE.QUOTA]: '积分不足：签到可领取每日积分，或换一个免费模型。',
+  [CODE.QUOTA]: '积分不足：签到可领取每日积分，或换一个免费模型/账号。',
   [CODE.RATE_LIMIT]: '触发上游频率限制：稍等再试，或换一个模型。',
   [CODE.CONTEXT]: '上下文超出该模型上限：压缩对话，或换上下文更大的模型。',
   [CODE.INVALID]: '上游拒绝了请求参数（常见：思考强度 / 输出上限不被该模型接受）——换个档位或恢复默认参数。',
   [CODE.TRANSPORT]: '本地桥连接异常：运行 /workbuddy restart 或确认桥进程还活着。',
+  [CODE.SERVER]: '上游模型服务暂时不可用：稍后重试，或换一个模型；不要把 11134 当成模型不存在。',
+  [CODE.TIMEOUT]: '上游响应超时：稍后重试，或换一个模型。',
+  [CODE.MODEL_QUEUE]: '模型排队中：稍后重新发送这条消息，或换一个模型；换账号不会改变位次。',
+  [CODE.ACCOUNT_RESTRICTED]: '账号被上游限制（异常行为）：重新登录通常无效；换账号或等上游恢复。',
+  [CODE.POLICY_BLOCKED]: '内容未通过上游安全审核：换号/重试都无效；调整内容或新开会话。',
+  [CODE.MODEL_NOT_FOUND]: '上游没有这个模型，或当前账号档位不允许：刷新模型目录/换模型；不要反复重试。',
+  [CODE.MODEL_QUOTA]: '该模型的额度已用尽（账号其它模型可能正常）：换模型或等上游重置。',
 };
 
 /**
@@ -89,8 +101,53 @@ export const ERROR_HINTS = {
  * 白折腾 —— 这类错误先重试，仍失败要看桥日志里的出站请求。
  */
 export function errorHint(code, detail = '') {
-  if (code === CODE.INVALID && /illegal API invocation|unapproved channel|first message is not system/i.test(String(detail))) {
+  const text = String(detail || '');
+  if (code === CODE.INVALID && /illegal API invocation|unapproved channel|first message is not system/i.test(text)) {
     return '上游拦截了这次调用的来源或模板（code 11128）—— 先原样重试一次；仍失败请到「设置 → WorkBuddy → 日志」查看桥记录，并把该行反馈到 issue。';
+  }
+  /*
+   * 6004 是**账号级用量上限**（上游文案：usage exceeds frequency limit /
+   * 使用量已超出频率限制，并带重置时刻），重置常在数小时后；长上下文/大请求
+   * 更容易触发。它与“积分不足”共用 QUOTA 码，但不能给“签到领积分”的建议 ——
+   * 能做的只有等重置或换账号（换模型不一定有效）；重试同一请求不会恢复。
+   */
+  if (code === CODE.QUOTA && /\b6004\b|\b6008\b|usage exceeds frequency limit|使用量已超出频率限制/i.test(text)) {
+    return '该账号的用量已达上限（不是积分不足）：按报错中的时刻重置，或切换账号；换模型不一定有效，重试不会恢复。'
+      + '若桌面端此刻仍可用，核对「账号」页的凭据来源是否为另一个账号（桥的客户端身份已默认跟随桌面端版本）。';
+  }
+  if (code === CODE.QUOTA && /\b402\b|\b14018\b|credits? (?:exhausted|insufficient)|积分(?:已)?耗尽/i.test(text)) {
+    return '该账号积分已耗尽：换一个账号或充值；重试不会恢复。';
+  }
+  if (code === CODE.QUOTA && /\b6000\b/.test(text) && !/切换其他模型/i.test(text)) {
+    return '该账号的模型用量已达上限：按报错中的时刻重置，或换账号；不要连续重试。';
+  }
+  /*
+   * 14003 是**模型级**繁忙：同一账号其它模型往往还能用。把它说成“账号限流/
+   * 额度不足”会让用户去等或换号，而真正有效的是换模型。
+   */
+  if (code === CODE.RATE_LIMIT && /\b14003\b|负载较低的模型|less busy model/i.test(text)) {
+    return '该模型当前繁忙（模型级，不是账号问题）：换一个模型即可；账号/余额正常。';
+  }
+  if (code === CODE.RATE_LIMIT && /\b6003\b/.test(text)) {
+    return '上游频率限制（code 6003）：换一个模型或稍后再试；不要连续重试同一请求。';
+  }
+  if (code === CODE.SERVER && /\b11134\b|temporarily unavailable|provider is temporarily unavailable/i.test(text)) {
+    return '模型提供方暂时不可用（code 11134）：稍后重试或换一个模型；不是模型不存在。';
+  }
+  if (code === CODE.INVALID && /\b11133\b|model_param_invalid|parameters were rejected/i.test(text)) {
+    return '上游拒绝了请求参数（code 11133）：换一个模型或新开会话；不要原样连续重试。';
+  }
+  if (code === CODE.INVALID && /\b11151\b|assistant.*reasoning/i.test(text)) {
+    return 'assistant 历史里带了 reasoning（code 11151）：新开会话，或让桥剥离历史 reasoning 后重试。';
+  }
+  if (code === CODE.AUTH && /\b12153\b|offline user session not found/i.test(text)) {
+    return '上游会话已失效（code 12153）：到「账号」页重新登录。';
+  }
+  if (code === CODE.MODEL_NOT_FOUND && /\b11102\b|service info not found/i.test(text)) {
+    return '上游没有这个模型 id（code 11102）：刷新模型目录或换模型；不要反复重试。';
+  }
+  if (code === CODE.MODEL_NOT_FOUND && /\b11158\b|not allowed for user type/i.test(text)) {
+    return '该模型不对当前账号档位开放（code 11158）：换一个模型；账号本身正常。';
   }
   return ERROR_HINTS[code] || '';
 }
@@ -101,12 +158,62 @@ export function classifyError(message, status) {
   // 桥把"上游登录态失效"包成 502（本地令牌没错，错的是上游会话）——
   // 按 AUTH 归类，避免 dsh 把它当 5xx 重试两次再报同一个错。
   if (/upstream login expired|re-?login in the workbuddy/i.test(text)) return CODE.AUTH;
-  if (status === 401 || status === 403 || /\b(?:401|403)\b/.test(text)) return CODE.AUTH;
-  if (/quota|insufficient|balance|积分|余额/i.test(text)) return CODE.QUOTA;
+
+  /*
+   * 11140 必须先于 403 → AUTH：它同一码承载三种含义（账号风控 / 内容审核 /
+   * 带 rate 措辞的软限流）。按 403 归 AUTH 会让用户去重新登录，而登录对
+   * 账号风控与内容审核都无效。
+   */
+  if (/\b11140\b|request illegal/i.test(text)) {
+    if (/未通过安全审核|内容.*(?:审核|拦截)|content[_ ]?(?:policy|filter)|blocked by .*safety/i.test(text)) {
+      return CODE.POLICY_BLOCKED;
+    }
+    if (/\b(?:rate|limit)\b|频率|重置|reset at/i.test(text)) {
+      return /重置|reset at/i.test(text) ? CODE.QUOTA : CODE.RATE_LIMIT;
+    }
+    return CODE.ACCOUNT_RESTRICTED;
+  }
+  if (/\b12153\b|offline user session not found/i.test(text)) return CODE.AUTH;
+  if (status === 401 || /\b401\b/.test(text)) return CODE.AUTH;
+  if (status === 403 || /\b403\b/.test(text)) return CODE.AUTH;
+
+  /*
+   * 额度类必须先于 429：6004/6008/14018 的重置在数小时后，归到 RATE_LIMIT
+   * 会让 dsh 按退避策略白重试（界面上就是「已重试模型请求 (2/2)」后仍失败）。
+   * 6000 的措辞决定是模型级还是账号级。
+   */
+  if (/\b6004\b|\b6008\b|\b14018\b|usage exceeds frequency limit|使用量已超出频率限制|credits? (?:exhausted|insufficient)|积分(?:已)?耗尽|quota (?:exhausted|exceeded)/i.test(text)) {
+    return CODE.QUOTA;
+  }
+  if (status === 402 || /\b402\b/.test(text)) return CODE.QUOTA;
+  if (/\b6000\b/.test(text)) {
+    return /切换其他模型|switch to .*other models/i.test(text) ? CODE.MODEL_QUOTA : CODE.QUOTA;
+  }
+  // 上游偶尔只给文案不给码：保留旧的额度措辞兜底。
+  if (/quota|insufficient|balance|余额/i.test(text)) return CODE.QUOTA;
+
+  // 队列：平台/模型级，不重试也不换号；位次在 message 里交给用户。
+  if (/\b6020\b|\b6021\b|\b6022\b|模型排队|queue (?:full|waiting)|queue_position/i.test(text)) {
+    return CODE.MODEL_QUEUE;
+  }
+
+  /*
+   * 11115 有两种形态：带数字的英文，以及**只有中文**的“本次输入……”
+   * 后者没有任何英文关键词，必须靠业务码/中文句识别，否则 dsh 会归成
+   * INVALID_REQUEST，既不压缩上下文也不给准确提示。
+   */
+  if (/\b11115\b|prompt (?:is )?too long|context[_ ]?length[_ ]?exceeded|maximum context|too many tokens|输入内容过长|本次输入.*(?:超过|超出).*上限/i.test(text)) {
+    return CODE.CONTEXT;
+  }
+  if (/\b11102\b|\b11158\b|service info not found|not allowed for user type|model_not_found/i.test(text)) {
+    return CODE.MODEL_NOT_FOUND;
+  }
+
   if (status === 429 || /\b429\b|rate.?limit|too many requests/i.test(text)) return CODE.RATE_LIMIT;
   if (/context|token.{0,12}(?:limit|exceed)|maximum context/i.test(text)) return CODE.CONTEXT;
+  if (/\b11133\b|\b11151\b|model_param_invalid|invalid_reasoning_effort/i.test(text)) return CODE.INVALID;
   if (status === 400 || status === 422 || /\b(?:400|422)\b|invalid.?request/i.test(text)) return CODE.INVALID;
-  if (status >= 500 || /\b5\d\d\b/.test(text)) return CODE.SERVER;
+  if (status >= 500 || /\b5\d\d\b|\b11134\b/.test(text)) return CODE.SERVER;
   if (/timeout|timed?\s*out|ETIMEDOUT/i.test(text)) return CODE.TIMEOUT;
   // 「流中途断了」是传输层故障（可重试），不能落到 PROVIDER_ERROR：
   // 桥补发的错误帧消息形如 "upstream stream interrupted before completion: …"。

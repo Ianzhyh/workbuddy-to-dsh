@@ -12,7 +12,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 
-import { WorkBuddyAdapter, mapUsage, errorHint, CODE } from '../lib/adapter.mjs';
+import { WorkBuddyAdapter, mapUsage, errorHint, classifyError, CODE } from '../lib/adapter.mjs';
 import { toAdapterModels } from '../lib/models.mjs';
 import { BridgeClient } from '../lib/bridge.mjs';
 
@@ -530,7 +530,7 @@ test('推理流：reasoning 块独立编号，正文块从其后的索引开始'
 });
 
 test('上游错误：不抛异常，以 error finish 收尾并带上状态码', async () => {
-  const stub = await startStub({ status: 429, errorBody: { error: { message: 'rate limited' }, code: 11102 } });
+  const stub = await startStub({ status: 429, errorBody: { error: { message: 'rate limited' }, code: 42901 } });
   try {
     const adapter = makeAdapter(stub.baseUrl);
     const out = [];
@@ -541,6 +541,50 @@ test('上游错误：不抛异常，以 error finish 收尾并带上状态码', 
     assert.equal(out[0].reason.failure.status, 429);
     assert.equal(out[0].reason.failure.code, 'RATE_LIMIT');
     assert.match(out[0].reason.failure.message, /rate limited/);
+  } finally { await stub.close(); }
+});
+
+test('上游 6004（账号用量上限）：按 QUOTA 收尾，不再让 dsh 白重试两次', async () => {
+  /*
+   * 现场（issue 截图）：上游 429 code 6004，文案说“将在 <时刻> 重置，也可以
+   * 切换其他模型”。旧 classifyError 只看 status 429 → RATE_LIMIT（可重试），
+   * dsh 于是显示「已重试模型请求 (2/2)」再失败；而重置在数小时后，重试没有意义。
+   */
+  const stub = await startStub({
+    status: 429,
+    errorBody: {
+      code: 6004,
+      msg: "usage exceeds frequency limit, but don't worry, your usage will reset at 2026-11-03 15:19:12 UTC+8, alternatively, you can switch to the other models to continue using it.",
+    },
+  });
+  try {
+    const adapter = makeAdapter(stub.baseUrl);
+    const out = [];
+    for await (const chunk of adapter.stream({ provider: 'workbuddy', model: 'stub-model', messages: [] })) out.push(chunk);
+    assert.equal(out.length, 1);
+    assert.equal(out[0].type, 'finish');
+    assert.equal(out[0].reason.failure.code, CODE.QUOTA, '6004 必须归到 QUOTA，不能是可重试的 RATE_LIMIT');
+    assert.equal(out[0].reason.failure.status, 429);
+    assert.match(out[0].reason.failure.message, /用量已达上限/, '提示必须说明是账号用量上限');
+    assert.match(out[0].reason.failure.message, /不是积分不足/, '不能误导用户去签到领积分');
+    assert.match(out[0].reason.failure.message, /2026-11-03 15:19:12/, '上游给的重置时刻要保留');
+    assert.ok(!adapter.providerRetryPolicy().retryableCodes.includes(CODE.QUOTA),
+      'QUOTA 不能出现在重试白名单里（否则 dsh 仍会重试 2 次）');
+  } finally { await stub.close(); }
+});
+
+test('上游 14018（积分耗尽）：同样按 QUOTA 收尾，不能落成可重试限流', async () => {
+  const stub = await startStub({
+    status: 429,
+    errorBody: { code: 14018, msg: 'Credits exhausted' },
+  });
+  try {
+    const adapter = makeAdapter(stub.baseUrl);
+    const out = [];
+    for await (const chunk of adapter.stream({ provider: 'workbuddy', model: 'stub-model', messages: [] })) out.push(chunk);
+    assert.equal(out.length, 1);
+    assert.equal(out[0].reason.failure.code, CODE.QUOTA);
+    assert.match(out[0].reason.failure.message, /积分(?:不足|已耗尽)/, '14018 用积分耗尽提示，而不是 6004 的用量上限文案');
   } finally { await stub.close(); }
 });
 
@@ -1056,13 +1100,42 @@ test('图片：同一附件跨轮次只读一次、并发只读一次，多图�
   } finally { await stub.close(); }
 });
 
+test('错误分类矩阵：14003/队列/11115/11140/11102/11133/11134/402', () => {
+  const cases = [
+    ['workbuddy-bridge: upstream 429 (code 14003): too many requests', 429, CODE.RATE_LIMIT, /繁忙/],
+    ['workbuddy-bridge: upstream 429 (code 6020): 模型排队中：你排在第 7 位，队列共 900 个请求。', 429, CODE.MODEL_QUEUE, /排队/],
+    ['workbuddy-bridge: upstream 400 (code 11115): 本次输入加上历史对话超过了模型上限 (prompt is too long)', 400, CODE.CONTEXT, /上下文/],
+    ['workbuddy-bridge: upstream 403 (code 11140): 账号存在异常行为，已被限制使用 (request illegal)', 403, CODE.ACCOUNT_RESTRICTED, /换账号/],
+    ['workbuddy-bridge: upstream 403 (code 11140): 内容未通过安全审核，请调整后重试', 403, CODE.POLICY_BLOCKED, /内容/],
+    ['workbuddy-bridge: upstream 400 (code 11102): model [x] service info not found', 400, CODE.MODEL_NOT_FOUND, /11102|刷新/],
+    ['workbuddy-bridge: upstream 400 (code 11158): not allowed for user type', 400, CODE.MODEL_NOT_FOUND, /11158|档位/],
+    ['workbuddy-bridge: upstream 400 (code 11133): the request parameters were rejected', 400, CODE.INVALID, /11133/],
+    ['workbuddy-bridge: upstream 400 (code 11151): assistant message with reasoning', 400, CODE.INVALID, /11151|新开会话/],
+    ['workbuddy-bridge: upstream 500 (code 11134): model provider is temporarily unavailable', 500, CODE.SERVER, /11134/],
+    ['workbuddy-bridge: upstream 429 (code 6003): too many requests', 429, CODE.RATE_LIMIT, /6003/],
+    ['workbuddy-bridge: upstream 402 (code 402): credits exhausted', 402, CODE.QUOTA, /积分已耗尽/],
+    ['workbuddy-bridge: upstream 429 (code 6000): 切换其他模型继续使用', 429, CODE.MODEL_QUOTA, /模型.*额度/],
+    ['workbuddy-bridge: upstream 429 (code 6000): usage exceeds frequency limit', 429, CODE.QUOTA, /用量已达上限/],
+    ['workbuddy-bridge: upstream 401 (code 12153): Offline user session not found', 401, CODE.AUTH, /12153|重新登录/],
+  ];
+  for (const [message, status, expected, hint] of cases) {
+    const code = classifyError(message, status);
+    assert.equal(code, expected, message);
+    assert.match(errorHint(code, message), hint, `${message} 的提示`);
+  }
+  const retryable = makeAdapter('http://127.0.0.1:1').providerRetryPolicy().retryableCodes;
+  for (const code of [CODE.QUOTA, CODE.MODEL_QUEUE, CODE.ACCOUNT_RESTRICTED, CODE.POLICY_BLOCKED, CODE.MODEL_NOT_FOUND, CODE.MODEL_QUOTA]) {
+    assert.ok(!retryable.includes(code), `${code} 不能进重试白名单`);
+  }
+});
+
 test('错误提示：11128 是来源/模板拦截，不能暗示用户去换思考档位', () => {
   const hint = errorHint(CODE.INVALID,
     'workbuddy-bridge: upstream 400: Illegal API invocation from an unapproved channel');
   assert.match(hint, /11128/);
   assert.doesNotMatch(hint, /思考强度|输出上限/, '11128 不是参数问题，通用文案会误导');
-  // 真正的参数拒绝仍然给参数提示
-  assert.match(errorHint(CODE.INVALID, 'model_param_invalid'), /思考强度|输出上限/);
+  // 真正的参数拒绝给 11133 专用提示（不再只说“换档位”）
+  assert.match(errorHint(CODE.INVALID, 'model_param_invalid'), /11133|换一个模型|新开会话/);
   // 其他分类不受影响
   assert.match(errorHint(CODE.AUTH, ''), /重新登录/);
 });

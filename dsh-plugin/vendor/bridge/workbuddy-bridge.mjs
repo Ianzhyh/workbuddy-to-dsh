@@ -124,9 +124,57 @@ function combineAbortSignals(signals) {
   return controller.signal;
 }
 
-const APP_VERSION = process.env.WORKBUDDY_APP_VERSION || '4.9.29177644';
+/**
+ * 出站客户端身份（版本 / 渠道）。
+ *
+ * ## 现场：桥自称 4.9.x/VSCode，桌面端已经是 5.9.x
+ *
+ * 2026-11-02 的讨论里，报告者自己定位到「桥伪装的上游客户端版本是 4.9.x，
+ * 而桌面端实际是 5.9.4，模型列表对不上」。本机只读 A/B（同一账号、同一时刻，
+ * 只改出站头）复现：
+ *
+ *   · `VSCode/1.119.0 CodeBuddy/4.9.x`  → `/v3/config` + `/v2/.../models` 合并 31 个模型
+ *   · 只把版本改成 5.9.3（仍是 VSCode）  → 仍然 31 个（版本号不是关键）
+ *   · `CLI/2.165.0 CodeBuddy/2.165.0`    → 33 个
+ *   · `WorkBuddy/5.9.3 …`（桌面身份）     → **48 个**，多出 glm-5.1 / kimi-k2.6 等
+ *
+ * 上游按 **UA/IDE 头声明的客户端通道**返回不同的产品配置；旧桥停在 VSCode
+ * 通道上，用户自然看到一份与桌面端不一致的模型清单。
+ *
+ * ## 默认身份
+ *
+ * `auto`（默认）按**本机已安装桌面端**的版本伪装成官方 WorkBuddy 客户端：
+ *   · app 版本：`resources/install-manifest.json` 的 `appVersion`；
+ *   · CLI 版本：`resources/app.asar.unpacked/cli/package.json` 的 `version`
+ *     —— 桌面端的聊天实际由这个内置 CLI 发出（见官方包结构）。
+ * 两者都读不到时用保守回退值，仍可用 `WORKBUDDY_APP_VERSION` /
+ * `WORKBUDDY_CLI_VERSION` 显式覆盖。
+ *
+ * ## 逃生门
+ *
+ * `WORKBUDDY_IDENTITY=legacy` 逐字恢复旧的 VSCode 形状；显式设置了
+ * `WORKBUDDY_IDE_NAME` / `WORKBUDDY_IDE_VERSION` 时也按旧形状拼 UA，
+ * 不静默改掉用户已有的覆盖。
+ */
+const IDENTITY_SETTING = String(process.env.WORKBUDDY_IDENTITY || 'auto').trim().toLowerCase();
+const LEGACY_IDENTITY = IDENTITY_SETTING === 'legacy'
+  || (IDENTITY_SETTING !== 'official' && Boolean(process.env.WORKBUDDY_IDE_NAME || process.env.WORKBUDDY_IDE_VERSION));
+const APP_VERSION_ENV = safeVersion(process.env.WORKBUDDY_APP_VERSION || '', '');
+const CLI_VERSION_ENV = safeVersion(process.env.WORKBUDDY_CLI_VERSION || '', '');
+const APP_VERSION_FALLBACK = '5.9.3';
+const CLI_VERSION_FALLBACK = '2.165.0';
 const IDE_VERSION = process.env.WORKBUDDY_IDE_VERSION || '1.119.0';
 const IDE_NAME = process.env.WORKBUDDY_IDE_NAME || 'VSCode';
+/** 从本机桌面端读到的版本；探测失败保持空串，由 env / 回退值兜底。 */
+const desktopIdentity = { app: '', cli: '', exe: '' };
+
+function appVersion() {
+  return APP_VERSION_ENV || desktopIdentity.app || APP_VERSION_FALLBACK;
+}
+
+function cliVersion() {
+  return CLI_VERSION_ENV || desktopIdentity.cli || CLI_VERSION_FALLBACK;
+}
 const CHAT_PATH = '/v2/chat/completions';
 /**
  * WorkBuddy 的独立网页搜索端点（WorkBuddy 客户端 WebSearch 工具在用）。
@@ -1631,6 +1679,52 @@ async function wbProbeSystemSignals() {
 }
 
 /**
+ * 读 JSON；文件不存在 / 半写入 / 权限问题一律返回 null。
+ *
+ * 版本探测发生在启动与凭据读取路径上，任何异常都不该影响桥主流程。
+ */
+function readJsonSafe(file) {
+  try { return JSON.parse(readFileSync(file, 'utf8')); } catch { return null; }
+}
+
+/**
+ * 从桌面端安装目录读版本，供出站身份使用（见 APP_VERSION 那段注释）。
+ *
+ * 两个真源都在安装目录里、无需启动 PowerShell：
+ *   · `resources/install-manifest.json` → `appVersion`（桌面端自身版本）
+ *   · `resources/app.asar.unpacked/cli/package.json` → `version`（内置 CLI）
+ *
+ * macOS 的 exe 在 `<app>/Contents/MacOS/`，资源在 `<app>/Contents/Resources/`；
+ * Windows/Linux 的 exe 在安装根，资源在同级 `resources/`。两类形状都试。
+ * 读不到就保持空串 —— 由 env 覆盖或回退值兜底，不猜、不影响请求。
+ */
+function detectDesktopVersionsFromExe(exe) {
+  if (!exe) return;
+  const exeDir = dirname(exe);
+  const resourceDirs = [...new Set([
+    join(exeDir, 'resources'),
+    join(exeDir, 'Resources'),
+    join(dirname(exeDir), 'Resources'),
+  ])];
+  let app = '';
+  let cli = '';
+  for (const dir of resourceDirs) {
+    const manifest = readJsonSafe(join(dir, 'install-manifest.json'))
+      || readJsonSafe(join(dir, 'resources', 'install-manifest.json'));
+    const cliPkg = readJsonSafe(join(dir, 'app.asar.unpacked', 'cli', 'package.json'))
+      || readJsonSafe(join(dir, 'resources', 'app.asar.unpacked', 'cli', 'package.json'));
+    app = app || safeVersion(String(manifest?.appVersion || ''), '');
+    cli = cli || safeVersion(String(cliPkg?.version || ''), '');
+    if (app || cli) break;
+  }
+  if (!app && !cli) return;
+  desktopIdentity.app = app;
+  desktopIdentity.cli = cli;
+  desktopIdentity.exe = exe;
+  log('desktop identity', `app ${app || '(unknown)'} / cli ${cli || '(unknown)'}`);
+}
+
+/**
  * 首个存在的客户端 exe；全部落空返回 ''。成功结果缓存，缓存失效自动重探。
  * 先便宜的（静态 + 扫描），全落空才动 PowerShell 兜底。
  */
@@ -1643,11 +1737,22 @@ async function resolveWorkBuddyExe() {
   if (!hit) hit = (await wbProbeSystemSignals()).find((p) => existsSync(p));
   if (hit) {
     wbExeCache = hit;
+    detectDesktopVersionsFromExe(hit);
     return hit;
   }
   wbMissAt = Date.now();
   return '';
 }
+
+/*
+ * 标准安装路径在启动时就能命中，先同步读一次版本：这样第一笔目录/聊天请求
+ * 就用上桌面端的真实版本，而不是回退值。装在自定义目录的用户由
+ * resolveWorkBuddyExe() 在读取桌面凭据时补探测。
+ */
+try {
+  const exe = workBuddyStaticCandidates().find((p) => existsSync(p));
+  if (exe) detectDesktopVersionsFromExe(exe);
+} catch { /* 版本探测失败不影响桥启动 */ }
 
 /** Length-prefixed UTF-8 string: uint32 big-endian length then the bytes. */
 function encodeLengthPrefixed(value) {
@@ -3654,6 +3759,19 @@ const REPAIR_TOOL_HISTORY_ENABLED = !/^(0|false|off|no)$/i.test(
   String(process.env.WORKBUDDY_REPAIR_TOOL_HISTORY || '1').trim(),
 );
 
+/**
+ * 出站前剥离 assistant 历史里的 reasoning 字段。
+ *
+ * 上游对 assistant 消息携带 `reasoning_content` / `reasoning` 会回
+ * `400 code 11151`（社区实测；请求形态问题，与账号无关）。宿主会把上一轮的
+ * 思考内容放进历史，正常聊天里看不出来，只在多轮/工具回合后炸。
+ * 只剥 assistant，user/tool 内容一个字不动；默认开启，可用
+ * `WORKBUDDY_STRIP_ASSISTANT_REASONING=0` 关闭。
+ */
+const STRIP_ASSISTANT_REASONING_ENABLED = !/^(0|false|off|no)$/i.test(
+  String(process.env.WORKBUDDY_STRIP_ASSISTANT_REASONING || '1').trim(),
+);
+
 function repairToolHistory(messages) {
   if (!REPAIR_TOOL_HISTORY_ENABLED || !Array.isArray(messages) || messages.length === 0) {
     return { messages, changed: false, renames: 0, synthesized: 0, dropped: 0 };
@@ -3788,6 +3906,18 @@ function normalizePayload(payload) {
   if (!Array.isArray(originalMessages) || originalMessages.length === 0) return next;
   const repaired = repairToolHistory(originalMessages);
   const messages = repaired.messages;
+  let strippedReasoning = 0;
+  const messageList = STRIP_ASSISTANT_REASONING_ENABLED
+    ? messages.map((m) => {
+      if (!m || m.role !== 'assistant') return m;
+      if (m.reasoning_content === undefined && m.reasoning === undefined) return m;
+      strippedReasoning++;
+      const rest = { ...m };
+      delete rest.reasoning_content;
+      delete rest.reasoning;
+      return rest;
+    })
+    : messages;
   if (repaired.changed) {
     log(`normalize: repaired tool history (renamed=${repaired.renames}`
       + ` synthesized=${repaired.synthesized} dropped=${repaired.dropped})`);
@@ -3799,9 +3929,12 @@ function normalizePayload(payload) {
       dropped: repaired.dropped,
     };
   }
+  if (strippedReasoning) {
+    log(`normalize: stripped assistant reasoning from ${strippedReasoning} message(s)`);
+  }
 
   let rewritten = 0;
-  const fixed = messages.map((m) => {
+  const fixed = messageList.map((m) => {
     if (m && (m.role === 'developer' || m.role === 'Developer')) {
       rewritten++;
       return { ...m, role: 'system' };
@@ -3837,7 +3970,8 @@ function normalizePayload(payload) {
   if (auditFixedSystem) log(`normalize: rewrote ${auditFixedSystem} audit-template system message(s)`);
   if (auditFixedAssistant) log(`normalize: rewrote ${auditFixedAssistant} audit-template assistant message(s)`);
   if (prepended) log('normalize: prepended a system message (upstream requires one first)');
-  if (!rewritten && !prepended && !auditFixedSystem && !auditFixedAssistant && !repaired.changed) return next;
+  if (!rewritten && !prepended && !auditFixedSystem && !auditFixedAssistant
+    && !repaired.changed && !strippedReasoning) return next;
   return { ...next, messages: sanitized };
 }
 
@@ -3911,24 +4045,74 @@ function isConversationIdFieldRejected(parsed, text) {
   return /unknown|unexpected|unrecognized|invalid|not allowed|extra field|additional propert/i.test(hay);
 }
 
-function buildHeaders(auth, model, conversationId) {
+/** 官方客户端的平台段：国内 `WorkBuddy`，国际 `WorkBuddy AI`（错写会触发 11140）。 */
+function officialPlatform(auth) {
+  return upstreamRegion(auth) === 'cn' ? 'WorkBuddy' : 'WorkBuddy AI';
+}
+
+/** 产品配置/目录通道的官方 UA：`WorkBuddy/<app> <platform>/<app> CLI/<cli>`。 */
+function officialAppUserAgent(auth) {
+  const version = appVersion();
+  return `WorkBuddy/${version} ${officialPlatform(auth)}/${version} CLI/${cliVersion()}`;
+}
+
+/** 聊天通道的官方 UA：桌面端的聊天由内置 CLI 发出。 */
+function officialChatUserAgent() {
+  const version = cliVersion();
+  return `CLI/${version} CodeBuddy/${version}`;
+}
+
+/**
+ * 出站身份头。`legacy` 逐字恢复旧 VSCode 形状；否则对齐官方桌面端。
+ *
+ * 官方形状（聊天/目录分开）来自两张实测：
+ *   · 桌面端 `app.asar.unpacked/cli` 就是聊天引擎 → 聊天认 CLI 通道；
+ *   · `/v3/config` 按 UA 归因产品配置 → 目录用桌面 App 三段式 UA。
+ * `X-Agent-Purpose: conversation` / `X-Product: WorkBuddy` 是官方桌面端
+ * 的归属头（`SaaS` 是旧版的泛化写法，Name/Type/Product 三处应同值）。
+ *
+ * @returns {Record<string, string>}
+ */
+function identityHeaders(auth, flow, legacy) {
+  if (legacy) {
+    return {
+      'X-Agent-Intent': 'craft',
+      'X-IDE-Type': IDE_NAME,
+      'X-IDE-Name': IDE_NAME,
+      'X-IDE-Version': IDE_VERSION,
+      'X-Product-Version': appVersion(),
+      'X-Product': 'SaaS',
+      'User-Agent': `${IDE_NAME}/${IDE_VERSION} CodeBuddy/${appVersion()}`,
+    };
+  }
+  const version = appVersion();
+  return {
+    'X-Agent-Purpose': 'conversation',
+    'X-CodeBuddy-Request': '1',
+    'Accept-Language': upstreamRegion(auth) === 'cn' ? 'zh-CN' : 'en-US',
+    'X-IDE-Type': 'WorkBuddy',
+    'X-IDE-Name': 'WorkBuddy',
+    'X-IDE-Version': version,
+    'X-Product-Version': version,
+    'X-Product': 'WorkBuddy',
+    'User-Agent': flow === 'chat' ? officialChatUserAgent() : officialAppUserAgent(auth),
+  };
+}
+
+/** @returns {Record<string, string>} */
+function buildHeaders(auth, model, conversationId, { flow = 'chat', legacy = LEGACY_IDENTITY } = {}) {
   const messageId = trace();
   const traceId = trace();
   const spanId = traceId.slice(0, 16);
   const parentSpanId = traceId.slice(16, 32);
+  /** @type {Record<string, string>} */
   const h = {
     Accept: 'application/json, text/plain, */*',
     'Content-Type': 'application/json',
     'X-Requested-With': 'XMLHttpRequest',
-    'X-Agent-Intent': 'craft',
-    'X-IDE-Type': IDE_NAME,
-    'X-IDE-Name': IDE_NAME,
-    'X-IDE-Version': IDE_VERSION,
-    'X-Product-Version': APP_VERSION,
+    ...identityHeaders(auth, flow, legacy),
     'X-Env-ID': 'production',
     'X-Domain': auth.domain,
-    'X-Product': 'SaaS',
-    'User-Agent': `${IDE_NAME}/${IDE_VERSION} CodeBuddy/${APP_VERSION}`,
     'X-Request-ID': messageId,
     'X-Conversation-ID': conversationId || trace(),
     'X-Conversation-Request-ID': messageId,
@@ -3964,10 +4148,15 @@ function buildHeaders(auth, model, conversationId) {
 
 /**
  * Chat 请求头：插件来源用 WorkBuddy 身份（见 PLUGIN_IDENTITY 的说明），
- * 桌面来源保持原样。所有 chat 协议路径最终都走 callUpstream → 这里。
+ * 桌面来源按官方桌面/CLI 形状（见 identityHeaders）。所有 chat 协议路径
+ * 最终都走 callUpstream → 这里。
  */
 function buildChatHeaders(auth, model, conversationId) {
-  const base = buildHeaders(auth, model, conversationId);
+  const pluginVscode = auth.source === 'plugin' && PLUGIN_IDENTITY === 'vscode';
+  const base = buildHeaders(auth, model, conversationId, {
+    flow: 'chat',
+    legacy: LEGACY_IDENTITY || pluginVscode,
+  });
   if (auth.source !== 'plugin' || PLUGIN_IDENTITY === 'vscode') return base;
   const region = auth.region === 'global' ? 'global' : 'cn';
   const origin = loginRegionConfig(region).origin;
@@ -3993,9 +4182,14 @@ function buildChatHeaders(auth, model, conversationId) {
   return h;
 }
 
-/** 模型目录头：插件来源按参考实现实测的 UA 形状（国际版 WorkBuddyAI，国内版 CLI）。 */
+/** 模型目录头：桌面来源用官方 WorkBuddy 桌面身份；插件来源按实测的目录 UA。 */
 function buildCatalogHeaders(auth) {
-  if (auth.source !== 'plugin' || PLUGIN_IDENTITY === 'vscode') return buildHeaders(auth, '', '');
+  if (auth.source !== 'plugin' || PLUGIN_IDENTITY === 'vscode') {
+    return buildHeaders(auth, '', '', {
+      flow: 'catalog',
+      legacy: LEGACY_IDENTITY || (auth.source === 'plugin' && PLUGIN_IDENTITY === 'vscode'),
+    });
+  }
   const region = auth.region === 'global' ? 'global' : 'cn';
   const origin = loginRegionConfig(region).origin;
   const h = {
@@ -4051,7 +4245,7 @@ function searchVersionFor(auth) {
   if (auth?.source === 'plugin') {
     return pluginClientVersion(auth.region === 'global' ? 'global' : 'cn');
   }
-  return APP_VERSION;
+  return appVersion();
 }
 
 // ── Miora 媒体生成（视频：text/frame/reference；图片：generate/edit）──────
@@ -5198,11 +5392,106 @@ const RATE_LIMIT_STATS_WINDOW_MS = numEnv('WORKBUDDY_RATE_LIMIT_WINDOW_MS', 10 *
 const RATE_LIMIT_STATS_MAX = 200;
 /** `${source}:${uid}\0${model}` -> number[]（429 发生时刻，升序） */
 const rateLimitStats = new Map();
+/**
+ * 账号级额度上限（6004 / 14018）的最近一次命中。
+ *
+ * 与 `rateLimitStats` 分开：6004 的重置在数小时后，把它混进「10 分钟 N 次」
+ * 的瞬时限流计数会让 opt-in 自动切号等一个毫无意义的次数。同类项目的共同
+ * 做法是**一次额度上限就切号**；这里只记事实，判定在 `lib/failover.mjs`。
+ * `resetAt` 来自上游文案（解析不到就是 0，不编造）。
+ *
+ * `${source}:${uid}\0${model}` -> `{ resetAt, lastAt }`
+ */
+const quotaResetStats = new Map();
 /** 上一次统计所属的账号身份；变化时清空（切回旧账号不应被旧计数立刻踢走）。 */
 let rateLimitIdentity = '';
 
 const rateLimitKey = (auth, model) => `${auth?.source || ''}:${auth?.uid || auth?.userId || ''}\0${model || ''}`;
 const pruneRateLimitList = (list, now) => list.filter((at) => now - at < RATE_LIMIT_STATS_WINDOW_MS && at <= now);
+
+function noteQuotaReset(auth, model, text, now = Date.now()) {
+  quotaResetStats.set(rateLimitKey(auth, model), {
+    resetAt: parseResetWallClock(text, upstreamRegion(auth), now),
+    lastAt: now,
+  });
+  if (quotaResetStats.size > 300) {
+    for (const [key, info] of quotaResetStats) {
+      if (now - info.lastAt > 24 * 3_600_000) quotaResetStats.delete(key);
+    }
+  }
+}
+
+/** 账号风控（11140）：账号级，开启自动切号时一次即切。 */
+const accountRestrictedStats = new Map();
+/** 模型繁忙（14003/6003）：模型级，仅展示，不参与账号切号。 */
+const modelBusyStats = new Map();
+/** 模型排队（6020/6021/6022）：平台/模型级，仅展示，不参与账号切号。 */
+const queueStats = new Map();
+
+function noteTimedFailure(map, auth, model, text, now = Date.now()) {
+  map.set(rateLimitKey(auth, model), {
+    lastAt: now,
+    resetAt: parseResetWallClock(text, upstreamRegion(auth), now),
+  });
+  if (map.size > 300) {
+    for (const [key, info] of map) {
+      if (now - info.lastAt > 24 * 3_600_000) map.delete(key);
+    }
+  }
+}
+
+function noteQueue(auth, model, queue, now = Date.now()) {
+  queueStats.set(rateLimitKey(auth, model), { lastAt: now, queue });
+  if (queueStats.size > 300) {
+    for (const [key, info] of queueStats) {
+      if (now - info.lastAt > 24 * 3_600_000) queueStats.delete(key);
+    }
+  }
+}
+
+/**
+ * 最终失败只记一次账/统计。放在 `callUpstreamWithChannelFallback` 的出口，
+ * 而不是 `callUpstream` 内部的 429 分支：402/11140/队列等并不都是 429，
+ * 而且 11128 的多轮救援只应该记最终那一次。
+ *
+ * 分类结果决定动作：
+ *   · quota / 402 / 11140-rate → 账号级，记 resetAt，供 opt-in 立即切号；
+ *   · account_restricted → 账号级，记入 `/health.rateLimit.accountRestricted`；
+ *   · 14003 / 6003 / 队列 → 模型级，仅展示，**不**进账号切号计数；
+ *   · 通用 429 → 仍按 10 分钟 N 次阈值。
+ */
+function noteFailureStats(auth, model, attempt) {
+  if (!auth || !attempt || attempt.res?.ok || attempt.channelRejected) return;
+  const status = Number(attempt.res?.status) || 0;
+  const text = String(attempt.bodyText || '');
+  const verdict = classifyUpstreamFailure({
+    status,
+    parsed: attempt.parsed,
+    text,
+    region: upstreamRegion(auth),
+  });
+  switch (verdict.kind) {
+    case 'quota':
+      noteQuotaReset(auth, model, text);
+      break;
+    case 'account_restricted':
+      noteTimedFailure(accountRestrictedStats, auth, model, text);
+      break;
+    case 'model_busy':
+      noteTimedFailure(modelBusyStats, auth, model, text);
+      break;
+    case 'queue':
+      noteQueue(auth, model, verdict.queue);
+      break;
+    case 'rate_limit':
+      if (verdict.accountWorthy && verdict.resetAt) noteQuotaReset(auth, model, text);
+      else if (verdict.accountWorthy) noteUpstream429(auth, model);
+      else noteTimedFailure(modelBusyStats, auth, model, text);
+      break;
+    default:
+      break;
+  }
+}
 
 function noteUpstream429(auth, model, now = Date.now()) {
   const key = rateLimitKey(auth, model);
@@ -5230,7 +5519,13 @@ function rateLimitSummary(auth) {
    * 一段陈年历史立刻再踢走一次。只在**真有身份**（uid 非空）时切换并清空；
    * 未登录时的空身份不参与。
    */
-  if (uid && rateLimitIdentity && rateLimitIdentity !== identity) rateLimitStats.clear();
+  if (uid && rateLimitIdentity && rateLimitIdentity !== identity) {
+    rateLimitStats.clear();
+    quotaResetStats.clear();
+    accountRestrictedStats.clear();
+    modelBusyStats.clear();
+    queueStats.clear();
+  }
   if (uid) rateLimitIdentity = identity;
   const models = [];
   let top = { count: 0, model: '', lastAt: 0 };
@@ -5244,12 +5539,80 @@ function rateLimitSummary(auth) {
     if (kept.length > top.count) top = { count: kept.length, model, lastAt: kept[kept.length - 1] };
   }
   models.sort((a, b) => b.count - a.count);
+  /*
+   * 额度上限：保留到上游给的重置时刻（解析不到则 24 小时）。过期的条目
+   * 清掉——重置时刻过了还不切号，只会拿一个已经恢复的账号去切走。
+   */
+  let quota = null;
+  for (const [key, info] of quotaResetStats) {
+    if (!key.startsWith(prefix)) continue;
+    const expired = (info.resetAt && info.resetAt <= now) || now - info.lastAt > 24 * 3_600_000;
+    if (expired) { quotaResetStats.delete(key); continue; }
+    const model = key.slice(prefix.length);
+    if (!quota || info.lastAt > quota.lastAtMs) {
+      quota = {
+        model,
+        count: (quota?.count || 0) + 1,
+        lastAt: new Date(info.lastAt).toISOString(),
+        resetAt: info.resetAt ? new Date(info.resetAt).toISOString() : '',
+        lastAtMs: info.lastAt,
+      };
+    } else {
+      quota.count += 1;
+    }
+  }
+  if (quota) delete quota.lastAtMs;
+
+  /** 取某个“带 reset 的失败”表里最新的一条（过期/超过 24h 清掉）。 */
+  const latestTimed = (map) => {
+    let found = null;
+    for (const [key, info] of map) {
+      if (!key.startsWith(prefix)) continue;
+      const expired = (info.resetAt && info.resetAt <= now) || now - info.lastAt > 24 * 3_600_000;
+      if (expired) { map.delete(key); continue; }
+      if (!found || info.lastAt > found.lastAtMs) {
+        found = { model: key.slice(prefix.length), lastAtMs: info.lastAt, resetAtMs: info.resetAt };
+      }
+    }
+    if (!found) return null;
+    return {
+      model: found.model,
+      lastAt: new Date(found.lastAtMs).toISOString(),
+      resetAt: found.resetAtMs ? new Date(found.resetAtMs).toISOString() : '',
+    };
+  };
+  const accountRestricted = latestTimed(accountRestrictedStats);
+  const modelBusy = latestTimed(modelBusyStats);
+  let queue = null;
+  for (const [key, info] of queueStats) {
+    if (!key.startsWith(prefix)) continue;
+    if (now - info.lastAt > 24 * 3_600_000) { queueStats.delete(key); continue; }
+    if (!queue || info.lastAt > queue.lastAtMs) {
+      queue = {
+        model: key.slice(prefix.length),
+        lastAtMs: info.lastAt,
+        code: info.queue?.code || 0,
+        position: info.queue?.position ?? null,
+        size: info.queue?.size ?? null,
+        retryAfter: info.queue?.retryAfter ?? null,
+      };
+    }
+  }
+  if (queue) {
+    queue.lastAt = new Date(queue.lastAtMs).toISOString();
+    delete queue.lastAtMs;
+  }
+
   return {
     windowMs: RATE_LIMIT_STATS_WINDOW_MS,
     count: top.count,
     model: top.model,
     lastAt: top.lastAt ? new Date(top.lastAt).toISOString() : '',
     models: models.slice(0, 5),
+    ...(quota ? { quota } : {}),
+    ...(accountRestricted ? { accountRestricted } : {}),
+    ...(modelBusy ? { modelBusy } : {}),
+    ...(queue ? { queue } : {}),
   };
 }
 
@@ -5372,6 +5735,17 @@ async function callUpstream(bodyString, model, conversationId, clientSignal, { s
   for (let i = 0; res.status === 429 && i < UPSTREAM_429_WAITS.length; i++) {
     const text = await res.text().catch(() => '');
     if (clientSignal?.aborted) return { res, bodyText: text, upstreamStartedAt: upEnter };
+    /*
+     * 6004 是账号级用量上限，重置时刻常在数小时后：等待计划（默认关闭，
+     * 用户显式配置 `WORKBUDDY_429_WAITS` 时才生效）对它毫无意义 ——
+     * 等待只会把一次注定失败的请求白白拖慢最多 90 秒。立刻原样返回，
+     * 让客户端按“换模型/等重置”处理。
+     */
+    let quotaParsed = null;
+    try { quotaParsed = JSON.parse(text); } catch { /* 非 JSON：按文案判 */ }
+    if (isUsageQuotaExhausted(quotaParsed, text)) {
+      return { res, bodyText: text, upstreamStartedAt: upEnter };
+    }
     const wait = Math.min(Math.max(upstreamRetryAfterMs(res, text) ?? UPSTREAM_429_WAITS[i], 0), 90_000);
     log(`upstream 429, bridge waits ${Math.round(wait / 1000)}s then retries (${i + 1}/${UPSTREAM_429_WAITS.length})`);
     await new Promise((r) => setTimeout(r, wait));
@@ -5383,8 +5757,17 @@ async function callUpstream(bodyString, model, conversationId, clientSignal, { s
       return { res, bodyText: t, upstreamStartedAt: upEnter };
     }
   }
-  // 最终仍是 429：记一笔（供插件侧 opt-in 的自动切号判断）；等待重试成功的不算
-  if (res.status === 429) noteUpstream429(auth, model);
+  /*
+   * 最终仍是 429：记一笔（供插件侧 opt-in 的自动切号判断）；等待重试成功的不算。
+   *
+   * 必须在**这里**把体读完并返回：额度上限（6004/14018）要解析重置时刻，
+   * 而且下面的 5xx/400 重试与通用非 2xx 分支对 429 都不适用。调用方拿到
+   * `bodyText` 后不会再碰这个流。
+   */
+  if (res.status === 429) {
+    const text = await res.text().catch(() => '');
+    return { res, bodyText: text, upstreamStartedAt: upEnter };
+  }
 
   /*
    * 上游 5xx（网关/模型服务短时中断）：在桥这层等一小会儿原样重发。
@@ -5457,28 +5840,293 @@ async function callUpstream(bodyString, model, conversationId, clientSignal, { s
 /** 11128 可能出现在顶层 code，也可能被网关塞进 extError；两种都认。 */
 function is11128Response(res, parsed) {
   if (!res || res.status !== 400) return false;
-  const code = parsed?.code ?? parsed?.extError?.code ?? parsed?.ext_error?.code;
-  return Number(code) === 11128;
+  return businessCodeOf(parsed) === 11128;
 }
 
-function upstreamAuthFailure(res) {
-  return res?.status === 401 || res?.status === 403;
+function upstreamAuthFailure(res, parsed) {
+  if (res?.status === 401) return true;
+  if (res?.status !== 403) return false;
+  /*
+   * 11140 是账号风控/内容审核，不是登录态失效：刷新令牌/提示重新登录都
+   * 救不了它（同类项目实测：额度接口仍 200，换 token 无变化）。只有没有
+   * 这个业务码的裸 403 才按鉴权失败处理。
+   */
+  return businessCodeOf(parsed) !== 11140;
 }
 
-function upstreamErrorCode(parsed) {
-  return parsed?.extError?.code || parsed?.ext_error?.code
-    || (typeof parsed?.code === 'number' ? parsed.code : null);
+/** 客户端可见的细粒度码：11133 这类包装码的 extError.code 比顶层 11133 更有用。 */
+function upstreamDetailCode(parsed) {
+  return parsed?.extError?.code
+    ?? parsed?.ext_error?.code
+    ?? parsed?.error?.code
+    ?? parsed?.error?.data?.code
+    ?? businessCodeOf(parsed)
+    ?? null;
 }
 
-/** 账本仍优先记上游顶层数字 code（11128/11133/6004），便于统计；没有才退回 extError。 */
+/** 账本优先记上游业务码（11128/11133/6004），便于统计；没有才退回 extError。 */
 function upstreamLedgerCode(parsed) {
-  return typeof parsed?.code === 'number' ? parsed.code : upstreamErrorCode(parsed);
+  return businessCodeOf(parsed)
+    ?? parsed?.extError?.code
+    ?? parsed?.ext_error?.code
+    ?? null;
 }
 
-function upstreamErrorText(parsed, text, res) {
-  return String(
-    parsed?.error?.message || parsed?.msg || parsed?.message || text || `upstream HTTP ${res?.status}`,
-  ).slice(0, 400);
+/**
+ * 上游 `429 code 6004` = **账号级用量上限**，不是普通的瞬时限流。
+ *
+ * 实测文案（`bridge/bridge.log`，两种语言都有）：
+ *   · usage exceeds frequency limit, but don't worry, your usage will reset at …,
+ *     alternatively, you can switch to the other models to continue using it.
+ *   · 您的使用量已超出频率限制，将在 … 重置，您也可以切换其他模型继续使用。
+ *
+ * 报错里的重置时刻常在**数小时甚至隔天**之后；社区长会话实测显示它与请求
+ * 体积强相关（长上下文更快撞上）。上游文案里的“换模型”建议并不可靠（免费
+ * 模型也会撞），真正有效的是等重置或换账号。把它当成 `14003 too many
+ * requests` 那样退避重试，只会让用户白等（dsh 的 2 次重试、桥侧可配的
+ * 429 等待都救不回来）。必须单独归因。
+ *
+ * 注意：`insufficient_quota` / `credit balance` 这类**积分**耗尽也在同一类
+ * 处理（不可重试），与 6004 一起收口。
+ */
+/**
+ * 上游业务码（结构化读取）。
+ *
+ * 上游信封不止一种：顶层 `{code:6004}`、`{error:{data:{code:14018}}}`、
+ * `extError.code`、字符串码。这里只读 JSON 字段，**绝不对整段文本做子串
+ * 匹配** —— requestId 里可能恰好含 `11140` / `6004`，拿子串判会把一次正常
+ * 失败误判成另一种（同类项目踩过，直接导致误换号/误冷却）。
+ *
+ * `code:0` 是成功信封，不算业务码。
+ */
+function businessCodeOf(parsed) {
+  if (!parsed || typeof parsed !== 'object') return null;
+  const values = [
+    parsed.code,
+    parsed.extError?.code,
+    parsed.ext_error?.code,
+    parsed.error?.code,
+    parsed.error?.data?.code,
+    parsed.data?.code,
+  ];
+  for (const value of values) {
+    if (typeof value === 'number' && Number.isFinite(value) && value !== 0) return value;
+    if (typeof value === 'string' && /^[1-9]\d*$/.test(value.trim())) return Number(value.trim());
+  }
+  return null;
+}
+
+/** 上游错误里**给人看**的句子：displayMsg/displayTips 优先，协议 msg 兜底。 */
+function upstreamHumanText(parsed, raw, res) {
+  const display = parsed?.displayMsg?.zh || parsed?.displayMsg?.en
+    || parsed?.displayTips?.zh || parsed?.displayTips?.en;
+  const msg = parsed?.error?.message || parsed?.msg || parsed?.message;
+  const detail = String(display || msg || raw || `upstream HTTP ${res?.status || 0}`).trim();
+  // `msg` 常是协议短语（如 `request illegal`），displayMsg 才有操作含义；
+  // 两者不同时把 msg 附在后面，保留上游原话便于对照。
+  const extra = display && msg && !detail.includes(String(msg)) && String(msg).length <= 160
+    ? ` (${String(msg).trim()})`
+    : '';
+  return `${detail}${extra}`.slice(0, 600);
+}
+
+function isContextOverflow(parsed, text) {
+  if (businessCodeOf(parsed) === 11115) return true;
+  return /prompt (?:is )?too long|context[_ ]?length[_ ]?exceeded|context[_ ]?window|maximum context|too many tokens|exceeds? the maximum|maximum (?:number of )?tokens|输入内容过长|本次输入.*(?:超过|超出).*上限|上下文(?:长度|窗口)?(?:超|超过)/i.test(String(text || ''));
+}
+
+/**
+ * 解析上游给的重置时刻（6004/6008/6000 共用）。
+ *
+ * 实测两种形态：
+ *   · CN 裸墙钟：`将在 2026-11-03 15:19:12 重置`（CST，按 UTC+8）
+ *   · Intl/带偏移：`reset at 2026-11-03 15:19:12 UTC+8`
+ *
+ * 解析失败返回 0 —— 调用方如实显示「上游未给出时刻」，不拿本地时间/自然日
+ * 猜倒计时（同类项目踩过：编造的倒计时会让用户去等一个毫无意义的时刻）。
+ *
+ * @param {string} text 上游错误原文
+ * @param {'cn'|'intl'} [region] 无显式偏移时，CN 按 UTC+8；其它不猜
+ * @param {number} [now] 当前时刻（测试可注入）
+ * @returns {number} epoch ms；无法解析 / 已过期 / 超远未来返回 0
+ */
+function parseResetWallClock(text, region = 'intl', now = Date.now()) {
+  const m = String(text || '').match(
+    /(\d{4})[-/](\d{2})[-/](\d{2})[ T](\d{2}):(\d{2}):(\d{2})(?:\s*\(?\s*UTC\s*([+-])(\d{1,2})(?::?(\d{2}))?\s*\)?)?/i,
+  );
+  if (!m) return 0;
+  const [, year, month, day, hour, minute, second, offSign, offH, offM] = m;
+  const utc = Date.UTC(
+    Number(year), Number(month) - 1, Number(day),
+    Number(hour), Number(minute), Number(second),
+  );
+  const wall = new Date(utc);
+  if (wall.getUTCFullYear() !== Number(year) || wall.getUTCMonth() !== Number(month) - 1
+    || wall.getUTCDate() !== Number(day) || wall.getUTCHours() !== Number(hour)
+    || wall.getUTCMinutes() !== Number(minute) || wall.getUTCSeconds() !== Number(second)) {
+    return 0;
+  }
+  let offsetMinutes;
+  if (offSign) {
+    const hours = Number(offH);
+    if (hours > 14) return 0;
+    offsetMinutes = hours * 60 + Number(offM || 0);
+    if (offSign === '-') offsetMinutes = -offsetMinutes;
+  } else if (region === 'cn') {
+    // CN 的裸墙钟是 CST（UTC+8）；Intl 无偏移时不猜。
+    offsetMinutes = 8 * 60;
+  } else {
+    return 0;
+  }
+  const at = utc - offsetMinutes * 60_000;
+  // 已过期（含 1 分钟时钟偏差）或超过 30 天：不采信。
+  if (!Number.isFinite(at) || at <= now - 60_000 || at > now + 30 * 86_400_000) return 0;
+  return at;
+}
+
+/** 兼容旧调用点（无区域信息时只认显式 UTC 偏移）。 */
+function parseQuotaResetAt(text, now = Date.now()) {
+  return parseResetWallClock(text, 'intl', now);
+}
+
+function isUsageQuotaExhausted(parsed, text = '') {
+  const code = businessCodeOf(parsed);
+  // 6004/6008 = 账号用量上限；14018 = 积分耗尽（同属不可重试、应换号）。
+  if (code === 6004 || code === 6008 || code === 14018) return true;
+  const hay = `${parsed?.msg || ''} ${parsed?.message || ''} ${parsed?.error?.message || ''} ${parsed?.displayMsg?.zh || ''} ${parsed?.displayMsg?.en || ''} ${text || ''}`;
+  return /usage exceeds frequency limit|使用量已超出频率限制|insufficient[_ ]?quota|insufficient[_ ]?balance|余额不足|quota (?:exhausted|exceeded)|credits? (?:balance|exhausted|insufficient)|积分(?:已)?耗尽/i.test(hay);
+}
+
+const QUEUE_CODES = new Set([6020, 6021, 6022]);
+
+/**
+ * 识别上游排队条件。6020 等待（带位次）、6021 队列满、6022 用户排队数达上限。
+ *
+ * 三种信封都要认（同类项目实测）：顶层 `{code,data}`、`data.code` 嵌套、
+ * `_meta['codebuddy.ai/errorMessage']` 里的 JSON 字符串。队列跟随模型/平台，
+ * 换账号拿到的是同一位次，**不能**参与账号切号。
+ */
+function parseQueueAnswer(parsed) {
+  const read = (obj) => {
+    if (!obj || typeof obj !== 'object') return null;
+    const code = businessCodeOf(obj);
+    if (!QUEUE_CODES.has(code)) return null;
+    const data = obj.data && typeof obj.data === 'object' ? obj.data : obj;
+    const num = (key) => {
+      const value = Number(data?.[key]);
+      return Number.isFinite(value) && value >= 0 ? value : undefined;
+    };
+    return {
+      code,
+      position: num('queue_position') ?? num('position'),
+      size: num('queue_size') ?? num('size'),
+      retryAfter: num('retry_after') ?? num('retryAfter'),
+    };
+  };
+  const direct = read(parsed);
+  if (direct) return direct;
+  const meta = parsed?._meta?.['codebuddy.ai/errorMessage'];
+  if (typeof meta === 'string') {
+    try { return read(JSON.parse(meta)); } catch { /* 不是 JSON：忽略 */ }
+  }
+  return read(parsed?.data);
+}
+
+function queueMessage(queue) {
+  const position = Number.isFinite(queue?.position) ? queue.position : null;
+  const size = Number.isFinite(queue?.size) ? queue.size : null;
+  if (queue?.code === 6021) return '模型排队队列已满，请稍后重新发送这条消息，或换一个模型。';
+  if (queue?.code === 6022) return '该模型的排队数已达上限，请稍后重新发送这条消息，或换一个模型。';
+  if (position !== null && size !== null) {
+    return `模型排队中：你排在第 ${position} 位，队列共 ${size} 个请求。请稍后重新发送这条消息，或换一个模型。`;
+  }
+  if (position !== null) return `模型排队中：你排在第 ${position} 位。请稍后重新发送这条消息，或换一个模型。`;
+  return '模型排队中，请稍后重新发送这条消息，或换一个模型。';
+}
+
+/**
+ * 统一的“上游失败 → 动作”分类。三条协议、账本、统计全部读这一份判据，
+ * 避免同一份报文在不同路径得出不同结论（同类项目最常见的漂移点）。
+ *
+ * @param {{status?: number, parsed?: any, text?: string, region?: 'cn'|'intl', now?: number}} input
+ * @returns {{kind: string, action: string, retryable: boolean, accountWorthy: boolean,
+ *   resetAt: number, queue: any, code: number|null, message: string}}
+ */
+function classifyUpstreamFailure({ status = 0, parsed = null, text = '', region = 'intl', now = Date.now() } = {}) {
+  const code = businessCodeOf(parsed);
+  const human = upstreamHumanText(parsed, text, { status });
+  const hay = `${human} ${parsed?.msg || ''} ${parsed?.message || ''} ${parsed?.displayMsg?.zh || ''} ${parsed?.displayMsg?.en || ''} ${text || ''}`;
+  const resetAt = parseResetWallClock(hay, region, now);
+  const result = (kind, action, retryable, accountWorthy, extra = {}) => ({
+    kind, action, retryable, accountWorthy, resetAt, queue: null, code, message: human, ...extra,
+  });
+
+  const queue = parseQueueAnswer(parsed);
+  if (queue) {
+    return result('queue', 'wait-queue', false, false, { queue, message: queueMessage(queue) });
+  }
+
+  /*
+   * 11140 同一码承载三种含义（同类项目实测）：内容审核、账号风控、以及
+   * 带 rate/limit 措辞的软限流。**措辞决定动作**，不能只看码。
+   */
+  if (code === 11140) {
+    if (/未通过安全审核|内容.*(?:审核|拦截)|content[_ ]?(?:policy|filter)|blocked by .*safety/i.test(hay)) {
+      return result('policy_blocked', 'adjust-content', false, false);
+    }
+    if (/rate|limit|频率/i.test(hay)) {
+      return result('rate_limit', resetAt ? 'wait-reset' : 'backoff', true, true);
+    }
+    return result('account_restricted', 'switch-account', false, true);
+  }
+  if (code === 12153 || /offline user session not found/i.test(hay)) {
+    return result('session_dead', 'relogin', false, false);
+  }
+  if (code === 6000) {
+    if (/切换其他模型|switch to .*other models/i.test(hay)) {
+      return result('model_quota', 'switch-model', false, false);
+    }
+    if (resetAt || /quota|额度|usage exceeds/i.test(hay)) {
+      return result('quota', 'wait-reset', false, true);
+    }
+    return result('rate_limit', 'switch-model', true, false);
+  }
+  if (isUsageQuotaExhausted(parsed, hay) || status === 402) {
+    return result('quota', 'wait-reset', false, true);
+  }
+  if (code === 14003) {
+    return result('model_busy', 'switch-model', true, false);
+  }
+  if (isContextOverflow(parsed, hay)) {
+    const marker = /prompt (?:is )?too long/i.test(human) ? '' : ' (prompt is too long)';
+    return result('context_overflow', 'compact-context', false, false, { message: `${human}${marker}` });
+  }
+  if (code === 11102 || code === 11158
+    || /service info not found|not allowed for user type/i.test(hay)) {
+    return result('model_not_found', 'switch-model', false, false);
+  }
+  if (code === 11128 || /unapproved channel|channel verification/i.test(hay)) {
+    return result('channel', 'diagnose', false, false);
+  }
+  if (code === 11133 || /model_param_invalid|invalid_reasoning_effort/i.test(hay)) {
+    return result('parameter', 'fix-request', false, false);
+  }
+  if (code === 11151 || code === 11101) {
+    return result('parameter', 'new-session', false, false);
+  }
+  if (code === 11134) {
+    return result('server', 'retry', true, false);
+  }
+  if (status === 401) return result('auth', 'relogin', false, false);
+  if (status === 403) return result('account', 'check-account', false, false);
+  if (status === 429 || code === 6003 || code === 15001) {
+    const accountWorthy = Number(code) !== 6003 && Number(code) !== 15001;
+    return result('rate_limit', 'backoff', true, accountWorthy);
+  }
+  if (status >= 500) return result('server', 'retry', true, false);
+  if (status >= 400) return result('client', 'fix-request', false, false);
+  if (status === 0) return result('network', 'retry', true, false);
+  return result('unknown', 'diagnose', false, false);
 }
 
 /** 上面的错误原文里保留上游 msg，同时给出“是 WorkBuddy 登录过期”的可操作说明。 */
@@ -5500,6 +6148,18 @@ async function callUpstreamWithChannelFallback(payload, model, conversationId, c
     let parsed;
     try { parsed = JSON.parse(text); } catch { /* 非 JSON：保留原文 */ }
     return { ...attempt, bodyText: text, parsed, fallback: null };
+  };
+  /*
+   * 最终失败只记一次统计（见 noteFailureStats）。中间 11128 救援尝试不记，
+   * 否则一次请求会被算成 N 次限流；成功也不记。
+   */
+  const finalize = async (attempt) => {
+    if (!attempt.res.ok) {
+      const auth = await resolveAuth().catch(() => null);
+      attempt.auth = auth;
+      noteFailureStats(auth, model, attempt);
+    }
+    return attempt;
   };
 
   /*
@@ -5524,7 +6184,7 @@ async function callUpstreamWithChannelFallback(payload, model, conversationId, c
       await callUpstream(JSON.stringify(payloadForUpstream), model, conversationId, clientSignal, { skipRateLimit: true }),
     );
   }
-  if (!is11128Response(attempt.res, attempt.parsed)) return attempt;
+  if (!is11128Response(attempt.res, attempt.parsed)) return finalize(attempt);
 
   let lastFallback = null;
   let tried = 0;
@@ -5544,7 +6204,7 @@ async function callUpstreamWithChannelFallback(payload, model, conversationId, c
     );
     attempt.fallback = candidate.strategy;
     if (attempt.res.ok) return attempt;
-    if (!is11128Response(attempt.res, attempt.parsed)) return attempt;
+    if (!is11128Response(attempt.res, attempt.parsed)) return finalize(attempt);
   }
   log('channel fallback exhausted', attempt.res.status, String(attempt.bodyText || '').slice(0, 300));
   attempt.fallback = lastFallback;
@@ -5557,7 +6217,7 @@ async function callUpstreamWithChannelFallback(payload, model, conversationId, c
     attempt.channelRejected = true;
     attempt.channelAttempts = 1 + tried;
   }
-  return attempt;
+  return finalize(attempt);
 }
 
 /** 一次上游尝试的账本/响应头元数据（三条协议共用）。 */
@@ -5576,6 +6236,146 @@ function channelRejectedMessage(attempt) {
   return 'workbuddy-bridge: upstream channel verification rejected this request'
     + ` after ${n} attempt(s). The bridge already neutralized the known host/identity templates;`
     + ' resending the same payload is unlikely to help. See docs/TROUBLESHOOTING.md (11128).';
+}
+
+/** 确定性拒绝：告诉所有会重试的客户端“别再试了”。 */
+const DETERMINISTIC_NO_RETRY_KINDS = new Set([
+  'quota', 'model_quota', 'account_restricted', 'policy_blocked', 'context_overflow',
+  'model_not_found', 'parameter', 'channel', 'session_dead',
+]);
+
+function deterministicErrorHeaders(verdict) {
+  if (verdict.kind === 'queue') {
+    const wait = Number(verdict.queue?.retryAfter) > 0 ? Number(verdict.queue.retryAfter) : 5;
+    return { 'x-should-retry': 'false', 'retry-after': String(wait) };
+  }
+  if (DETERMINISTIC_NO_RETRY_KINDS.has(verdict.kind)) {
+    // quota 的重置在数小时后：给 0 是“现在别等”，不是“立刻重试”；
+    // 配合 x-should-retry=false，SDK 会直接停手。
+    return { 'x-should-retry': 'false', 'retry-after': '0' };
+  }
+  return {};
+}
+
+/** 统一的上游失败 HTTP 状态（三条协议共用语义，客户端各自包形状）。 */
+function upstreamFailureStatus(verdict, upStatus) {
+  switch (verdict.kind) {
+    case 'queue':
+    case 'model_quota':
+    case 'model_busy':
+    case 'rate_limit':
+      return 429;
+    case 'quota':
+      return Number(upStatus) === 402 ? 402 : 429;
+    case 'account_restricted':
+      return 403;
+    case 'policy_blocked':
+      return Number(upStatus) === 403 ? 403 : 400;
+    case 'context_overflow':
+    case 'parameter':
+    case 'channel':
+      return 400;
+    case 'model_not_found':
+      return Number(upStatus) === 404 ? 404 : 400;
+    case 'session_dead':
+    case 'auth':
+      return 502;
+    case 'server':
+      return Number(upStatus) >= 500 ? Number(upStatus) : 502;
+    case 'client':
+      return Number(upStatus) >= 400 ? Number(upStatus) : 400;
+    case 'network':
+      return 502;
+    default:
+      return Number(upStatus) >= 400 ? Number(upStatus) : 502;
+  }
+}
+
+/** OpenAI 兼容错误 type。 */
+function openAIErrorType(verdict, { authFailure = false, channelRejected = false } = {}) {
+  if (authFailure) return 'upstream_auth_error';
+  if (channelRejected || verdict.kind === 'channel') return 'upstream_channel_error';
+  switch (verdict.kind) {
+    case 'quota': return 'insufficient_quota';
+    case 'model_quota': return 'model_quota_exceeded';
+    case 'model_busy':
+    case 'rate_limit': return 'rate_limit_error';
+    case 'account_restricted': return 'account_restricted';
+    case 'policy_blocked': return 'content_policy_error';
+    case 'queue': return 'model_queue';
+    case 'context_overflow':
+    case 'model_not_found':
+    case 'parameter':
+    case 'client': return 'invalid_request_error';
+    case 'server':
+    case 'network':
+    default: return 'upstream_error';
+  }
+}
+
+/** OpenAI 兼容错误 code：优先保留上游业务码/字符串码。 */
+function errorCodeForVerdict(verdict, extCode) {
+  switch (verdict.kind) {
+    case 'queue': return 'MODEL_QUEUE';
+    case 'context_overflow': return 'context_length_exceeded';
+    case 'model_not_found': return verdict.code === 11158 ? 'model_not_allowed' : 'model_not_found';
+    case 'account_restricted': return 11140;
+    case 'policy_blocked': return 'CONTENT_POLICY';
+    default: return extCode ?? verdict.code ?? null;
+  }
+}
+
+/** Anthropic Messages 错误 type。 */
+function anthropicErrorType(verdict, { authFailure = false, channelRejected = false } = {}) {
+  if (authFailure) return 'authentication_error';
+  if (channelRejected || verdict.kind === 'channel') return 'api_error';
+  switch (verdict.kind) {
+    case 'quota':
+    case 'model_quota':
+    case 'model_busy':
+    case 'rate_limit':
+    case 'queue': return 'rate_limit_error';
+    case 'account_restricted':
+    case 'policy_blocked': return 'permission_error';
+    case 'context_overflow':
+    case 'model_not_found':
+    case 'parameter':
+    case 'client': return 'invalid_request_error';
+    case 'server':
+    case 'network': return 'overloaded_error';
+    default: return 'api_error';
+  }
+}
+
+/** Responses 错误 code（Codex 按这个决定是否退避）。 */
+function responsesErrorCodeForVerdict(verdict, extCode) {
+  switch (verdict.kind) {
+    case 'quota': return 'insufficient_quota';
+    case 'model_quota': return 'model_quota_exceeded';
+    case 'model_busy':
+    case 'rate_limit': return 'rate_limit_exceeded';
+    case 'queue': return 'model_queue';
+    case 'account_restricted': return 'account_restricted';
+    case 'policy_blocked': return 'content_policy_violation';
+    case 'context_overflow': return 'context_length_exceeded';
+    case 'model_not_found': return verdict.code === 11158 ? 'model_not_allowed' : 'model_not_found';
+    case 'session_dead':
+    case 'auth': return 'authentication_error';
+    case 'parameter': return typeof extCode === 'string' && extCode ? extCode : 'invalid_request_error';
+    case 'server':
+    case 'network': return 'server_is_overloaded';
+    case 'client': return 'invalid_request_error';
+    case 'channel': return 'invalid_request_error';
+    default: return typeof extCode === 'string' && extCode ? extCode : 'upstream_error';
+  }
+}
+
+/** 失败文案：保留上游原话 + 业务码，便于用户对照和 adapter 分类。 */
+function failureMessage(verdict, status, { authFailure = false, channelRejected = false, attempt = null } = {}) {
+  if (authFailure) return upstreamAuthMessage(attempt?.parsed);
+  if (channelRejected) return channelRejectedMessage(attempt);
+  const code = verdict.code ? ` (code ${verdict.code})` : '';
+  return `workbuddy-bridge: upstream ${status}${code}: ${verdict.message}`;
 }
 
 /**
@@ -7429,48 +8229,6 @@ function responsesToolChoiceToOpenAI(tc) {
 }
 
 /**
- * 上游 HTTP 状态码 / 错误文本 → Codex 认识的 `error.code`。
- *
- * 为什么要映射：Codex 的 `parse_failed_response`
- * （`codex-rs/codex-api/src/sse/responses_error.rs`）按 `error.code` 分派：
- *   - `rate_limit_exceeded` / `slow_down` → `RateLimitExceeded`（**带 retry_after，可自动退避**）
- *   - `context_length_exceeded`          → `ContextWindowExceeded`（界面给准确提示）
- *   - `server_is_overloaded`             → `ServerOverloaded`
- *   - `insufficient_quota` 等            → `QuotaExceeded`
- *   - 其余（含认不出的字串）              → `Retryable`
- *
- * 原来我们发的是 `String(up.status)`（`"429"` / `"500"`…），**全部落进 `_`
- * 那一支的 Retryable**：429 拿不到官方退避节奏、上下文超限退化成泛化提示。
- * 这里做最小映射（只映射语义明确的几个），其余保持原状不误导。
- */
-function responsesErrorCode(status, message, parsedCode) {
-  const text = String(message || '').toLowerCase();
-  if (Number(status) === 429) return 'rate_limit_exceeded';
-  /*
-   * 上下文超限的措辞要认全。**上游真实原文**（2026-10-13 bridge.log 实测）：
-   *
-   *   {"code":11115,"msg":"prompt is too long: 1252936 tokens > 1048576 maximum"}
-   *
-   * 原来这条**不匹配**（旧正则只认 `context length` / `too many tokens` /
-   * `maximum context`），于是 `responsesErrorCode` 落到兜底 `upstream_error`
-   * → Codex 归到 `Retryable` → **原样重发 6 次、耗掉 249 秒**，最后给用户一句
-   * 泛化的失败；而它本可以立刻走 `ContextWindowExceeded` 去裁剪/压缩上下文。
-   * 实测同一请求连续 6 条 400 全是这个原因（08:50:33 → 08:52:16）。
-   *
-   * 所以补上 `too long` / `exceeds the maximum` 这两个真实措辞。
-   */
-  if (/context[_ ]?length|context[_ ]?window|too many tokens|maximum context/.test(text)
-    || /(prompt|input|request|message|conversation)[^.]{0,40}too long/.test(text)
-    || /exceeds? the maximum|maximum (?:number of )?tokens/.test(text)) {
-    return 'context_length_exceeded';
-  }
-  if (/insufficient[_ ]?quota|credit[_ ]?balance|spend[_ ]?limit/.test(text)) return 'insufficient_quota';
-  if (Number(status) >= 500) return 'server_is_overloaded';
-  // 上游自己给的机器可读 code 若本来就是官方认识的字串，原样透传
-  return typeof parsedCode === 'string' && parsedCode ? parsedCode : 'upstream_error';
-}
-
-/**
  * 上游 usage → Responses 的 usage。三个总数是 Codex 的必填项，一律补齐。
  *
  * **明细要透传**（`input_tokens_details.cached_tokens` /
@@ -8337,29 +9095,45 @@ function syncUsageMirror(file) {
  */
 function classifyFailure(entry) {
   const status = Number(entry?.status) || 0;
-  const code = entry?.code;
-  const text = `${code ?? ''} ${entry?.error ?? ''}`;
-  if (entry?.channelRejected === true || Number(code) === 11128 || /11128|unapproved channel/i.test(text)) {
+  const errorText = String(entry?.error || '');
+  const hay = `${entry?.code ?? ''} ${errorText}`;
+  if (entry?.channelRejected === true) {
     return { failureKind: 'channel', retryable: false, failureAction: 'diagnose' };
   }
-  if (status === 401) return { failureKind: 'auth', retryable: false, failureAction: 'relogin' };
-  if (status === 403) return { failureKind: 'account', retryable: false, failureAction: 'check-account' };
-  if (status === 429 || Number(code) === 14003 || Number(code) === 15001 || /rate.?limit|too many requests/i.test(text)) {
-    return { failureKind: 'rate_limit', retryable: true, failureAction: 'backoff' };
-  }
-  if (Number(code) === 6004 || /insufficient[_ ]?quota|quota (exhausted|exceeded)|credit (balance|exhausted)/i.test(text)) {
-    return { failureKind: 'quota', retryable: false, failureAction: 'wait-reset' };
-  }
-  if (Number(code) === 11148 || /11148|tool calls and tool results/i.test(text)) {
+  // 11148 / 断流有独立处置，先于通用分类保留原语义。
+  if (Number(entry?.code) === 11148 || /11148|tool calls and tool results/i.test(hay)) {
     return { failureKind: 'tool_history', retryable: false, failureAction: 'new-session' };
   }
-  if (/stream ended|stream interrupted|no finish_reason|no parseable SSE|EMPTY_RESPONSE|no parseable SSE data/i.test(text)) {
+  if (/stream ended|stream interrupted|no finish_reason|no parseable SSE|EMPTY_RESPONSE|no parseable SSE data/i.test(hay)) {
     return { failureKind: 'stream', retryable: true, failureAction: 'retry' };
   }
-  if (status >= 500) return { failureKind: 'upstream', retryable: true, failureAction: 'retry' };
-  if (status >= 400) return { failureKind: 'request', retryable: false, failureAction: 'fix-request' };
-  if (status === 0) return { failureKind: 'stream', retryable: true, failureAction: 'retry' };
-  return { failureKind: 'unknown', retryable: false, failureAction: 'diagnose' };
+  const verdict = classifyUpstreamFailure({
+    status,
+    parsed: { code: entry?.code, msg: errorText },
+    text: hay,
+  });
+  const map = {
+    quota: ['quota', 'wait-reset'],
+    model_busy: ['model_busy', 'switch-model'],
+    model_quota: ['model_quota', 'switch-model'],
+    account_restricted: ['account_restricted', 'switch-account'],
+    policy_blocked: ['policy', 'adjust-content'],
+    queue: ['queue', 'wait-queue'],
+    context_overflow: ['context', 'compact-context'],
+    model_not_found: ['model_not_found', 'switch-model'],
+    session_dead: ['auth', 'relogin'],
+    channel: ['channel', 'diagnose'],
+    parameter: ['parameter', verdict.action],
+    server: ['upstream', 'retry'],
+    rate_limit: ['rate_limit', verdict.resetAt ? 'wait-reset' : 'backoff'],
+    client: ['request', 'fix-request'],
+    network: ['stream', 'retry'],
+    auth: ['auth', 'relogin'],
+    account: ['account', 'check-account'],
+    unknown: ['unknown', 'diagnose'],
+  };
+  const [failureKind, failureAction] = map[verdict.kind] || map.unknown;
+  return { failureKind, retryable: verdict.retryable, failureAction };
 }
 
 function recordRequest(entry) {
@@ -8387,6 +9161,14 @@ function recordRequest(entry) {
      * 读取侧（recentRequests / summary）的 shortError 保留 —— 那是给**历史
      * 账本**兜底的，老文件里已经存着未截断的原文。
      */
+    /*
+     * 额度上限（6004/14018）的重置时刻在原文**尾部**：先解析再截断，
+     * 否则 160 字的上限可能把时间戳切掉，面板只能显示“上游未给出时刻”。
+     */
+    if (entry.ok === false && typeof entry.error === 'string') {
+      const resetAt = parseQuotaResetAt(entry.error);
+      if (resetAt) entry = { ...entry, quotaResetAt: new Date(resetAt).toISOString() };
+    }
     if (typeof entry.error === 'string') entry = { ...entry, error: shortError(entry.error) };
     if (entry.ok === false && !entry.failureKind) {
       entry = { ...entry, ...classifyFailure(entry) };
@@ -8715,6 +9497,7 @@ function summarizeUsage(days = 7, opts = {}) {
         kind: isVideo ? 'video' : (isImage ? 'image' : (isSearch ? 'search' : 'call')),
         failureKind,
         retryable: r.retryable === true,
+        ...(typeof r.failureAction === 'string' ? { failureAction: r.failureAction } : {}),
       });
       const failModel = r.model || '(unknown)';
       // `models` 保持“成功调用过的模型”这一既有契约（D4）；失败单独放
@@ -9309,7 +10092,7 @@ async function fetchCatalog(generation = catalogGeneration) {
     if (auth.source === 'plugin' && PLUGIN_IDENTITY !== 'vscode') {
       try {
         const res = await fetch(`${auth.endpoint}/v3/config`, {
-          headers: buildHeaders(auth, '', ''),
+          headers: buildHeaders(auth, '', '', { flow: 'catalog' }),
           signal: AbortSignal.timeout(8000),
         });
         if (res.ok) {
@@ -11641,7 +12424,15 @@ async function handleRequest(req, res) {
         if (!up.ok) {
           log('upstream error', up.status, text.slice(0, 300));
           const channelRejected = attempt.channelRejected === true;
-          const upstreamMessage = upstreamErrorText(parsed, text, up);
+          const authFailure = upstreamAuthFailure(up, parsed);
+          const verdict = classifyUpstreamFailure({
+            status: up.status,
+            parsed,
+            text,
+            region: attempt.auth ? upstreamRegion(attempt.auth) : 'intl',
+          });
+          const extCode = upstreamDetailCode(parsed);
+          const message = failureMessage(verdict, up.status, { authFailure, channelRejected, attempt });
           recordRequest({
             model,
             stream: wantStream,
@@ -11649,38 +12440,30 @@ async function handleRequest(req, res) {
             ok: false,
             status: up.status,
             code: upstreamLedgerCode(parsed),
-            error: channelRejected ? channelRejectedMessage(attempt) : upstreamMessage,
+            error: message,
             overheadMs: Math.max(0, upstreamStartedAt - startedAt),
             ...fallbackInfo,
           });
           /*
            * 错误体必须包成 OpenAI 的 `{ error: { message, type, code } }`。
-           *
-           * 原先这条路径**原样透传**上游的 `{code, msg}`：按 OpenAI 规范读
-           * `error.message` 的客户端拿不到内容，只剩一个状态码或整段原始 JSON。
-           * 另两条路径（Anthropic / Responses）早就包好了正确形状。
-           *
-           * 上游 401/403 也不能原样回 401：调用方会以为**本地桥的令牌**错了，
-           * 实际是上游登录态失效。回 502 + 明确文案，修法只有一个 ——
-           * 在 WorkBuddy 桌面端重新登录。
+           * 具体 type/code 由统一分类决定：6004/402/14018 → insufficient_quota，
+           * 队列 → model_queue，11115 → context_length_exceeded，11140 →
+           * account_restricted / content_policy_error，14003/429 → rate_limit_error。
+           * 确定性拒绝额外带 `x-should-retry: false`，避免客户端白重试。
            */
-          const extCode = upstreamErrorCode(parsed);
-          const authFailure = upstreamAuthFailure(up);
-          return json(res, up.status === 200 || authFailure ? 502 : up.status, {
-            error: {
-              message: authFailure
-                ? upstreamAuthMessage(parsed)
-                : channelRejected
-                  ? channelRejectedMessage(attempt)
-                  : `workbuddy-bridge: upstream ${up.status}: ${upstreamMessage}`,
-              type: authFailure
-                ? 'upstream_auth_error'
-                : channelRejected
-                  ? 'upstream_channel_error'
-                  : (up.status === 429 ? 'rate_limit_error' : 'upstream_error'),
-              ...(channelRejected ? { code: 'CHANNEL_REJECTED' } : (extCode ? { code: extCode } : {})),
+          const code = channelRejected ? 'CHANNEL_REJECTED' : errorCodeForVerdict(verdict, extCode);
+          return json(
+            res,
+            upstreamFailureStatus(verdict, up.status),
+            {
+              error: {
+                message,
+                type: openAIErrorType(verdict, { authFailure, channelRejected }),
+                ...(code === null || code === undefined ? {} : { code }),
+              },
             },
-          });
+            deterministicErrorHeaders(verdict),
+          );
         }
 
         if (wantStream) {
@@ -12269,14 +13052,16 @@ async function handleRequest(req, res) {
         const fallbackInfo = channelAttemptMeta(attempt, up);
         if (attempt.fallback) res.setHeader(CHANNEL_FALLBACK_HEADER, attempt.fallback);
         if (!up.ok) {
-          const authFailure = upstreamAuthFailure(up);
+          const authFailure = upstreamAuthFailure(up, parsed);
           const channelRejected = attempt.channelRejected === true;
-          const message = authFailure
-            ? upstreamAuthMessage(parsed)
-            : channelRejected
-              ? channelRejectedMessage(attempt)
-              : upstreamErrorText(parsed, text, up);
-          const code = upstreamErrorCode(parsed);
+          const verdict = classifyUpstreamFailure({
+            status: up.status,
+            parsed,
+            text,
+            region: attempt.auth ? upstreamRegion(attempt.auth) : 'intl',
+          });
+          const extCode = upstreamDetailCode(parsed);
+          const message = failureMessage(verdict, up.status, { authFailure, channelRejected, attempt });
           log('upstream error (anthropic)', up.status, text.slice(0, 300));
           recordRequest({
             model,
@@ -12288,17 +13073,21 @@ async function handleRequest(req, res) {
             error: message,
             ...fallbackInfo,
           });
-          // 错误体也必须是 Anthropic 的形状，否则客户端只会显示「未知错误」
-          return json(res, up.status === 200 || authFailure ? 502 : up.status, {
-            type: 'error',
-            error: {
-              type: authFailure
-                ? 'authentication_error'
-                : channelRejected ? 'upstream_channel_error' : 'api_error',
-              message,
-              ...(channelRejected ? { code: 'CHANNEL_REJECTED' } : (code !== null ? { code } : {})),
+          // 错误体也必须是 Anthropic 的形状，否则客户端只会显示「未知错误」。
+          const code = channelRejected ? 'CHANNEL_REJECTED' : errorCodeForVerdict(verdict, extCode);
+          return json(
+            res,
+            upstreamFailureStatus(verdict, up.status),
+            {
+              type: 'error',
+              error: {
+                type: anthropicErrorType(verdict, { authFailure, channelRejected }),
+                message,
+                ...(code === null || code === undefined ? {} : { code }),
+              },
             },
-          });
+            deterministicErrorHeaders(verdict),
+          );
         }
 
         if (wantStream) {
@@ -12533,18 +13322,21 @@ async function handleRequest(req, res) {
         if (attempt.fallback) res.setHeader(CHANNEL_FALLBACK_HEADER, attempt.fallback);
         if (!up.ok) {
           log('upstream error (responses)', up.status, text.slice(0, 300));
-          const authFailure = upstreamAuthFailure(up);
+          const authFailure = upstreamAuthFailure(up, parsed);
           const channelRejected = attempt.channelRejected === true;
-          const message = authFailure
-            ? upstreamAuthMessage(parsed)
-            : channelRejected
-              ? channelRejectedMessage(attempt)
-              : upstreamErrorText(parsed, text, up);
+          const verdict = classifyUpstreamFailure({
+            status: up.status,
+            parsed,
+            text,
+            region: attempt.auth ? upstreamRegion(attempt.auth) : 'intl',
+          });
+          const message = failureMessage(verdict, up.status, { authFailure, channelRejected, attempt });
           const errorCode = authFailure
             ? 'upstream_auth_error'
             : channelRejected
               ? 'CHANNEL_REJECTED'
-              : responsesErrorCode(up.status, message, parsed?.code ?? parsed?.error?.code);
+              : responsesErrorCodeForVerdict(verdict, upstreamDetailCode(parsed));
+          const errorHeaders = deterministicErrorHeaders(verdict);
           recordRequest({
             model,
             stream: wantStream,
@@ -12557,15 +13349,20 @@ async function handleRequest(req, res) {
           });
           // 非流式：按 Responses 的错误形状回
           if (!wantStream) {
-            return json(res, up.status === 200 || authFailure ? 502 : up.status, {
-              error: {
-                type: authFailure
-                  ? 'upstream_auth_error'
-                  : channelRejected ? 'upstream_channel_error' : 'upstream_error',
-                code: errorCode,
-                message,
+            return json(
+              res,
+              upstreamFailureStatus(verdict, up.status),
+              {
+                error: {
+                  type: authFailure
+                    ? 'upstream_auth_error'
+                    : channelRejected ? 'upstream_channel_error' : 'upstream_error',
+                  code: errorCode,
+                  message,
+                },
               },
-            });
+              errorHeaders,
+            );
           }
           // 已经答应过客户端「这是事件流」，就不能中途改回 JSON —— 用 SSE 发
           // response.failed（Codex 认这个事件并会把它转成可读的 API 错误）。
@@ -12577,21 +13374,14 @@ async function handleRequest(req, res) {
             ...SECURITY_HEADERS,
           });
           /*
-           * `error.code` 走映射（见 responsesErrorCode 的说明），让 429 能命中
-           * Codex 的 RateLimitExceeded（它会按 retry_after 自动退避）、上下文超限
-           * 能命中 ContextWindowExceeded。
-           * `error.headers` 里放 `retry-after`：Codex 的 `parse_failed_response`
-           * 正是从 `error.headers` 里取 retry-after（responses_error.rs:31-35）。
-           * 上游给了就用上游的秒数，没给就 429 兜底 1s（避免客户端立刻猛重试）。
+           * `error.code` 走统一分类映射；`error.headers` 里放 retry-after /
+           * x-should-retry：Codex 的 `parse_failed_response` 从 error.headers
+           * 取 retry-after。队列的等待来自上游 data.retry_after（缺省 5s），
+           * quota/context/account 等确定性拒绝用 0 + x-should-retry=false。
            */
-          /*
-           * ⚠️ `up` 是 node 的 `http.IncomingMessage`，**不是** fetch 的 `Response` ——
-           * `up.headers` 是普通对象，没有 `.get()`。写 `up.headers.get(...)` 会静默
-           * 返回 undefined（可选链把它吞掉），于是上游给的 retry-after 永远读不到、
-           * 一律落到下面的兜底 1s。node 侧要按小写键名直接取。
-           */
-          const retryAfterSec = up.headers?.['retry-after']
-            || (Number(up.status) === 429 ? '1' : null);
+          const retryAfterSec = errorHeaders['retry-after']
+            || up.headers?.['retry-after']
+            || (Number(up.status) === 429 && errorCode === 'rate_limit_exceeded' ? '1' : null);
           const failed = JSON.stringify({
             type: 'response.failed',
             response: {
@@ -12605,7 +13395,16 @@ async function handleRequest(req, res) {
               error: {
                 code: errorCode,
                 message,
-                ...(retryAfterSec ? { headers: { 'retry-after': String(retryAfterSec) } } : {}),
+                ...(retryAfterSec || errorHeaders['x-should-retry']
+                  ? {
+                    headers: {
+                      ...(retryAfterSec ? { 'retry-after': String(retryAfterSec) } : {}),
+                      ...(errorHeaders['x-should-retry']
+                        ? { 'x-should-retry': errorHeaders['x-should-retry'] }
+                        : {}),
+                    },
+                  }
+                  : {}),
               },
             },
           });

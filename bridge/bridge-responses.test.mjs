@@ -78,6 +78,45 @@ const upstream = createServer((req, res) => {
       return;
     }
 
+    if (scenario.kind === 'error6004') {
+      // 账号级用量上限（真实文案，bridge.log 实测）：重置在数小时后，
+      // 不属于可退避的瞬时限流。
+      res.writeHead(429, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        code: 6004,
+        msg: "usage exceeds frequency limit, but don't worry, your usage will reset at 2026-11-03 15:19:12 UTC+8, alternatively, you can switch to the other models to continue using it.",
+      }));
+      return;
+    }
+
+    if (scenario.kind === 'error14018') {
+      res.writeHead(429, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ code: 14018, msg: 'Credits exhausted' }));
+      return;
+    }
+
+    if (scenario.kind === 'errorQueue') {
+      res.writeHead(429, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ code: 6020, data: { queue_position: 7, queue_size: 900, retry_after: 40 } }));
+      return;
+    }
+
+    if (scenario.kind === 'errorAccount') {
+      res.writeHead(403, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        code: 11140,
+        msg: 'request illegal',
+        displayMsg: { zh: '账号存在异常行为，已被限制使用' },
+      }));
+      return;
+    }
+
+    if (scenario.kind === 'errorContextCn') {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ code: 11115, msg: '本次输入加上历史对话超过了模型上限' }));
+      return;
+    }
+
     if (scenario.kind === 'error500') {
       res.writeHead(500, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ msg: 'boom', code: 50001 }));
@@ -1285,6 +1324,79 @@ test('429 限流（流式）：response.failed 带 rate_limit_exceeded 与 retry
     '429 必须映射成 rate_limit_exceeded，否则 Codex 不会自动退避重试');
   assert.equal(failed.data.response.error.headers?.['retry-after'], '7',
     'retry-after 要放进 error.headers（Codex 从这里读退避时长）');
+});
+
+test('6004 账号用量上限：映射成 insufficient_quota（Codex 不再重试），且不塞 1s retry-after', async () => {
+  await waitReady();
+  /*
+   * 旧实现把所有 429 都映射成 rate_limit_exceeded，Codex 会按 retry-after
+   * （上游没给时兜底 1s）自动重发多次；而 6004 的重置在数小时后，重发注定失败。
+   */
+  scenario = { kind: 'error6004' };
+  const streamed = await post({
+    model: 'gpt-5.1-codex', stream: true,
+    input: [{ type: 'message', role: 'user', content: 'hi' }],
+  });
+  const failed = parseSse(streamed.text).find((e) => e.event === 'response.failed');
+  assert.ok(failed, '缺 response.failed');
+  assert.equal(failed.data.response.error.code, 'insufficient_quota',
+    '6004 必须映射成 insufficient_quota，不能是 rate_limit_exceeded');
+  assert.equal(failed.data.response.error.headers?.['retry-after'], '0',
+    '额度上限用 retry-after=0 + x-should-retry=false 明确“现在别等/别重试”');
+  assert.equal(failed.data.response.error.headers?.['x-should-retry'], 'false');
+  assert.match(failed.data.response.error.message, /2026-11-03 15:19:12/, '重置时刻要透传');
+
+  scenario = { kind: 'error6004' };
+  const plain = await post({
+    model: 'gpt-5.1-codex', stream: false,
+    input: [{ type: 'message', role: 'user', content: 'hi' }],
+  });
+  assert.equal(plain.status, 429, '非流式如实回上游状态码');
+  assert.equal(JSON.parse(plain.text).error?.code, 'insufficient_quota');
+});
+
+test('14018 积分耗尽：同样映射成 insufficient_quota（不能退化成可重试的限流）', async () => {
+  await waitReady();
+  scenario = { kind: 'error14018' };
+  const { status, text } = await post({
+    model: 'gpt-5.1-codex', stream: false,
+    input: [{ type: 'message', role: 'user', content: 'hi' }],
+  });
+  assert.equal(status, 429);
+  assert.equal(JSON.parse(text).error?.code, 'insufficient_quota');
+});
+
+test('队列 / 11140 账号 / 11115 中文上下文：Responses 也走统一分类', async () => {
+  await waitReady();
+  scenario = { kind: 'errorQueue' };
+  const queue = await post({
+    model: 'gpt-5.1-codex', stream: false,
+    input: [{ type: 'message', role: 'user', content: 'hi' }],
+  });
+  assert.equal(queue.status, 429);
+  const q = JSON.parse(queue.text);
+  assert.equal(q.error?.code, 'model_queue');
+  assert.match(q.error?.message || '', /第 7 位/);
+  assert.equal(queue.headers.get('x-should-retry'), 'false');
+  assert.equal(queue.headers.get('retry-after'), '40');
+
+  scenario = { kind: 'errorAccount' };
+  const account = await post({
+    model: 'gpt-5.1-codex', stream: false,
+    input: [{ type: 'message', role: 'user', content: 'hi' }],
+  });
+  assert.equal(account.status, 403);
+  assert.equal(JSON.parse(account.text).error?.code, 'account_restricted');
+
+  scenario = { kind: 'errorContextCn' };
+  const ctx = await post({
+    model: 'gpt-5.1-codex', stream: false,
+    input: [{ type: 'message', role: 'user', content: 'hi' }],
+  });
+  assert.equal(ctx.status, 400);
+  const c = JSON.parse(ctx.text);
+  assert.equal(c.error?.code, 'context_length_exceeded');
+  assert.match(c.error?.message || '', /prompt is too long/);
 });
 
 test('5xx：映射成 server_is_overloaded；非流式也带 error.code，且如实回状态码', async () => {

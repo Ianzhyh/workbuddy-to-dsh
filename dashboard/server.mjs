@@ -997,8 +997,13 @@ async function maybeAutoSwitchAccount() {
     lastAccountFailoverAt = Date.now();
     const listed = await listAccounts();
     const target = pickAccountFailoverTarget(listed.accounts, health.body?.auth?.userId || '');
+    const why = signal.reason === 'quota'
+      ? `账号用量已达上限（${signal.model || '?'}${signal.resetAt ? `，上游提示 ${signal.resetAt} 重置` : ''}）`
+      : signal.reason === 'account_restricted'
+        ? `账号被上游限制（异常行为，${signal.model || '?'}）`
+        : `上游限流 ${signal.count} 次（${signal.model || '?'}）`;
     if (!target) {
-      console.warn(`账号自动切换跳过：没有其它可用账号（${signal.model || '?'} 已限流 ${signal.count} 次）`);
+      console.warn(`账号自动切换跳过：没有其它可用账号（${why}）`);
       return;
     }
     const result = await switchDesktopAccount(target.name);
@@ -1006,7 +1011,7 @@ async function maybeAutoSwitchAccount() {
       console.warn(`账号自动切换失败：${result.error || '未知原因'}`);
       return;
     }
-    console.log(`上游限流 ${signal.count} 次（${signal.model || '?'}），已自动切换账号 -> ${target.name}`);
+    console.log(`${why}，已自动切换账号 -> ${target.name}`);
   } catch (error) {
     console.warn(`账号自动切换失败：${error?.message || error}`);
   } finally {
@@ -1018,7 +1023,7 @@ function startAccountFailoverWatchdog() {
   if (!ACCOUNT_FAILOVER_AFTER) return;
   const timer = setInterval(() => { void maybeAutoSwitchAccount(); }, 10_000);
   timer.unref?.();
-  console.log(`限流自动切号已开启：同一模型 10 分钟内 ${ACCOUNT_FAILOVER_AFTER} 次 429 后切换桌面账号`);
+  console.log(`限流自动切号已开启：同一模型 10 分钟内 ${ACCOUNT_FAILOVER_AFTER} 次瞬时 429 后切换桌面账号；账号用量上限（6004/14018）一次即切`);
 }
 
 /**

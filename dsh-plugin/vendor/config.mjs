@@ -518,13 +518,15 @@ export const config = {
     /**
      * 出站客户端身份（UA / X-IDE-* / X-Product-Version 的取值）。
      *
-     * 上游按这些指纹校验调用来源；官方客户端升级后旧指纹可能被拒（「上游
-     * 版本漂移」）。默认值与当前实测可用的官方版本一致，需要时在 .env
-     * 覆盖这三个即可，改完重启桥生效。
+     * 默认留空 = 桥按本机已安装的 WorkBuddy 桌面端自动探测版本，并按官方
+     * 桌面/CLI 形状发请求（目录通道决定模型列表，聊天通道由内置 CLI 发出）。
+     * 只有探测不到或需要逃生时才在 .env 里显式覆盖；改完重启桥生效。
      */
-    appVersion: env.WORKBUDDY_APP_VERSION || '4.9.29177644',
-    ideVersion: env.WORKBUDDY_IDE_VERSION || '1.119.0',
-    ideName: env.WORKBUDDY_IDE_NAME || 'VSCode',
+    identity: env.WORKBUDDY_IDENTITY || '',
+    appVersion: env.WORKBUDDY_APP_VERSION || '',
+    cliVersion: env.WORKBUDDY_CLI_VERSION || '',
+    ideVersion: env.WORKBUDDY_IDE_VERSION || '',
+    ideName: env.WORKBUDDY_IDE_NAME || '',
   },
   dashboard: {
     host: '127.0.0.1',
@@ -648,9 +650,12 @@ export function bridgeEnv(overrides = {}) {
     WORKBUDDY_ANTHROPIC_FAST_MODEL: config.bridge.anthropicFastModel,
     WORKBUDDY_RESPONSES_MODEL: config.bridge.responsesModel,
     WORKBUDDY_RESPONSES_FAST_MODEL: config.bridge.responsesFastModel,
-    WORKBUDDY_APP_VERSION: config.bridge.appVersion,
-    WORKBUDDY_IDE_VERSION: config.bridge.ideVersion,
-    WORKBUDDY_IDE_NAME: config.bridge.ideName,
+    // 出站身份：默认不注入，让桥按本机桌面端自动探测；只有显式配置时才覆盖。
+    ...(config.bridge.identity ? { WORKBUDDY_IDENTITY: config.bridge.identity } : {}),
+    ...(config.bridge.appVersion ? { WORKBUDDY_APP_VERSION: config.bridge.appVersion } : {}),
+    ...(config.bridge.cliVersion ? { WORKBUDDY_CLI_VERSION: config.bridge.cliVersion } : {}),
+    ...(config.bridge.ideVersion ? { WORKBUDDY_IDE_VERSION: config.bridge.ideVersion } : {}),
+    ...(config.bridge.ideName ? { WORKBUDDY_IDE_NAME: config.bridge.ideName } : {}),
     WORKBUDDY_RATE_LIMIT_RPM: String(config.bridge.rateLimitRpm),
     WORKBUDDY_RATE_LIMIT_MIN_INTERVAL_MS: String(config.bridge.rateLimitMinIntervalMs),
     WORKBUDDY_RATE_LIMIT_MODE: config.bridge.rateLimitMode,

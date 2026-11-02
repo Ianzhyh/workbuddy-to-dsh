@@ -19,6 +19,12 @@ const VENDOR = join(ROOT, '.tmp-research', 'vendor');
 export const LIVE = 'http://127.0.0.1:19387';
 
 const now = Date.now();
+/** 生成 `YYYY-MM-DD HH:mm:ss`，用于“N 天后到期”的样例（固定日期在跑测试那天会变成过去时）。 */
+const stampInDays = (days) => {
+  const d = new Date(now + days * 86_400_000);
+  const p = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+};
 
 /** 内置样例：真实端点不可用时的退路，字段与真实响应一致。 */
 export const FIXTURES = {
@@ -113,8 +119,10 @@ export const FIXTURES = {
     quota: {
       ok: true, total: 1427,
       packages: [
-        { name: 'CodeBuddy个人体验版', remain: 426, size: 500, monthly: true, expiresAt: '2026-10-31 23:59:59' },
+        { name: 'CodeBuddy个人体验版', remain: 426, size: 500, monthly: true, expiresAt: stampInDays(20) },
         { name: 'CodeBuddy个人版拉新权益包', remain: 100, size: 100 },
+        // 同一包名、不同到期日：面板必须拆行，并出现“3 天后到期”的提醒。
+        { name: 'CodeBuddy个人版拉新权益包', remain: 120, size: 120, expiresAt: stampInDays(3) },
       ],
     },
     quotaError: '',
@@ -438,6 +446,17 @@ export function buildRoutes(data) {
     error: '您的使用量已超出频率限制（harness 合成样例）',
   };
 
+  /*
+   * 一条**不进入概览待办**的可操作失败（probe:true）：只给请求页的
+   * 「仅看需要处理」筛选提供数据，避免默认概览截图出现账号被限的负面状态。
+   */
+  const syntheticActionable = {
+    t: Date.now() - 30_000, model: 'glm-5.3', stream: true, ok: false, ms: 640,
+    promptTokens: 0, completionTokens: 0, credit: 0, status: 429, code: 6004,
+    error: '模型用量已达上限（harness 合成样例）',
+    failureKind: 'quota', failureAction: 'wait-reset', probe: true,
+  };
+
   const routes = {
     // checkin 固定成"今日未签到"，好让概览页的待办提醒可断言（真实数据取决于今天签没签）
     '/workbuddy/status': { ...data.status, checkin: { status: { todayCheckedIn: false, streakDays: 3, todayCredit: 0 }, auto: { auto: true } } },
@@ -510,7 +529,7 @@ export function buildRoutes(data) {
       firstStatus: 404,
       payload: {
         ok: true,
-        requests: [syntheticFailure, ...((data.requests && Array.isArray(data.requests.requests)) ? data.requests.requests : [])],
+        requests: [syntheticFailure, syntheticActionable, ...((data.requests && Array.isArray(data.requests.requests)) ? data.requests.requests : [])],
         /*
          * 进行中请求必须给一条 **runningMs 超过 activeAlertMs** 的 ——
          * 「 · 流式 · 已运行 」与「 · 疑似卡死（超过 …）—— …」这两行的文案是拼接串，

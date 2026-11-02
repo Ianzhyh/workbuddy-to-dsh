@@ -37,6 +37,7 @@ copy .env.example .env
 | `WORKBUDDY_11128_FALLBACK` | `1` | 上游 11128（来源/模板校验）时是否自动降级 system 重试。`0` = 关闭，直接把错误交给客户端 |
 | `WORKBUDDY_SANITIZE_ASSISTANT_HISTORY` | `1` | assistant 历史里的 dsh 身份句也做精确中和。同类项目实测：assistant 历史里只要出现过同一句，之后每轮都会 11128；只改两句精确模板，不动普通正文 |
 | `WORKBUDDY_REPAIR_TOOL_HISTORY` | `1` | 工具调用历史自愈：重复/空 `tool_call_id` 改名并同步 result、缺 result 合成 `is_error` 结果、孤儿 result 丢弃、空 assistant 剔除。`0` = 关闭 |
+| `WORKBUDDY_STRIP_ASSISTANT_REASONING` | `1` | 出站前剥离 assistant 历史里的 `reasoning_content` / `reasoning`。上游对 assistant 带 reasoning 会回 400 code 11151；只动 assistant，user/tool 不变。`0` = 关闭 |
 | `WORKBUDDY_CONVERSATION_ID_BODY` | `1` | 上游按 body 的 `conversation_id` 分前缀缓存槽。客户端没带时，桥用「首条 system + 首条 user + 模型」的指纹补稳定值；若上游把它当未知字段拒绝，会自动去掉并关闭本进程注入 |
 | `WORKBUDDY_SSE_NORMALIZE` | `1` | chat 流式帧归一：补齐缺失的 `choices[0].delta`、把逐字符 `reasoning_content` 聚合成一段、`[DONE]` 只发一次。`0` = 原始字节透传（用于 A/B 或客户端特殊兼容） |
 | `WORKBUDDY_SKIP_MODEL_PREFLIGHT` | 未设 | `1` = 跳过本地模型目录预校验，未知模型也转发给上游（目录漏列可用模型时用）。默认未知模型在本地回 **404**（OpenAI/Anthropic 客户端据此切模型） |
@@ -63,7 +64,7 @@ copy .env.example .env
 | `DASHBOARD_PORT` | `8792` | 控制台端口 |
 | `DASHBOARD_AUTO_START_BRIDGE` | `1` | 控制台启动时自动拉起桥（"双击即用"的关键）。设为 `0` 则改为手动点「启动桥服务」 |
 | `DASHBOARD_IDLE_EXIT_MS` | 插件拉起时 `600000`；手动启动 `0` | 控制台闲置多久自动退出（毫秒，`0` = 不退出）。计活动只看页面/数据请求：插件探活（`/`、`/api/version`）不算，页面打开期间每 2 秒的身份轮询会保活。闲置退出后，面板取数或 `workbuddy console` 会自动拉起 |
-| `WORKBUDDY_ACCOUNT_FAILOVER_AFTER` | `0`（关闭） | Web 控制台的限流自动切号：同一账号同一模型在统计窗口内被上游最终 429 达到 N 次后，按「账号」页顺序切到下一个可用桌面账号（写 `.state.json` 并重启桥）。只对桌面来源生效；同一账号的多份登录快照**不算**下一个账号。会切换钱包，默认关闭。dsh 插件用户请改用插件配置 `accountFailoverAfter`，不要两边同时开 |
+| `WORKBUDDY_ACCOUNT_FAILOVER_AFTER` | `0`（关闭） | Web 控制台的自动切号：开启后，账号用量上限（上游 `6004` / `14018`）**一次就切**（重置在数小时后，等 N 次没有意义）；其它瞬时 429 仍需同一账号同一模型在统计窗口内达到 N 次。按「账号」页顺序切到下一个可用桌面账号（写 `.state.json` 并重启桥）。只对桌面来源生效；同一账号的多份登录快照**不算**下一个账号。会切换钱包，默认关闭。dsh 插件用户请改用插件配置 `accountFailoverAfter`，不要两边同时开 |
 | `WORKBUDDY_RATE_LIMIT_WINDOW_MS` | `600000` | 429 统计的**滑动窗口**（毫秒，最小 1000）。计数按时间戳过滤：窗口外的旧 429 会自动过期，不会无限累计。一般不用改；自动化测试会压到秒级 |
 | `WORKBUDDY_QUOTA_TTL_MS` | `60000` | 积分余额的缓存时长。总览每 20 秒轮询一次，而积分要打上游计费网关；调小可更快反映余额变化（如签到后），代价是更频繁的上游查询 |
 | `WORKBUDDY_QUOTA_SNAPSHOT_MS` | `3600000` | 余额快照采集间隔（毫秒）。用量页「账实差额」用首尾快照对比本地账本；`0` = 每次读到余额都记一条（只建议测试用） |
@@ -83,6 +84,8 @@ copy .env.example .env
 | 变量 | 默认值 | 说明 |
 |---|---|---|
 | `WORKBUDDY_APP_EXECUTABLE` | 自动探测 | 客户端可执行文件。探测顺序见下 |
+| `WORKBUDDY_IDENTITY` | `auto` | 出站客户端身份。默认按本机桌面端自动探测版本并伪装官方桌面/CLI 形状（目录用桌面 App UA、聊天用内置 CLI UA）；`legacy` = 退回旧的 VSCode 形状（逃生门） |
+| `WORKBUDDY_APP_VERSION` / `WORKBUDDY_CLI_VERSION` | 自动探测 | 手动覆盖桌面端 / 内置 CLI 版本；探测不到、或要做身份 A/B 时用 |
 | `WORKBUDDY_AUTH_FILE` | 自动定位 | 登录文件绝对路径。**多账号时务必显式指定** |
 | `WORKBUDDY_AUTH_DIR` | 平台默认 | 登录文件所在目录，仅在目录被移动时需要 |
 | `WORKBUDDY_CONTEXT_WINDOW` | 官方默认（多为 300000） | dsh 的上下文容量按模型解析。**推荐在插件「模型 → 详情 → 上下文窗口（Token）」里按模型单独调**（输入/输出改完自动保存；保存后下一轮请求按新预算解析，用量分母可能显示上一轮，发一条消息刷新；切换模型用该模型自己的预算；留空 = 自动，优先于本变量）；本变量作为面板选择「自动」时的桥端默认值，也用于不使用面板的其它 OpenAI 客户端。可钉到 `600000` / `1000000`（不超过模型上限）；不设置则用 `/v3/config` 的 `contextWindow.defaultLength` |

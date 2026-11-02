@@ -20,7 +20,7 @@ import assert from 'node:assert/strict';
 import { createCipheriv, createHash, randomBytes } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { createServer, request as httpRequest, Agent as HttpAgent } from 'node:http';
-import { mkdtempSync, rmSync, writeFileSync, existsSync, readFileSync, readdirSync, utimesSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, existsSync, readFileSync, readdirSync, utimesSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -136,6 +136,14 @@ async function startBridge(env = {}, opts = {}) {
     'WORKBUDDY_RATE_LIMIT_WINDOW_MS',
     'WORKBUDDY_CATALOG_RETRY_MS',
     'WORKBUDDY_429_WAITS',
+    // 出站身份：用例要能断言默认/覆盖两种形状，不能被开发者本机 env 污染。
+    'WORKBUDDY_APP_VERSION',
+    'WORKBUDDY_CLI_VERSION',
+    'WORKBUDDY_IDE_NAME',
+    'WORKBUDDY_IDE_VERSION',
+    'WORKBUDDY_IDENTITY',
+    'WORKBUDDY_PLUGIN_IDENTITY',
+    'WORKBUDDY_APP_EXECUTABLE',
   ]) delete inherited[key];
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
     lastError = null;
@@ -289,11 +297,14 @@ const openStubs = new Set();
  */
 async function startStubUpstream(models = ['stub-model'], opts = {}) {
   const seen = [];
+  /** 目录端点收到的请求头（出站身份断言用）。 */
+  const catalogSeen = [];
   /** `/v2/plugin/auth/token/refresh` 被调了几次 —— 「并发只刷一次」的用例靠它判定。 */
   let refreshCalls = 0;
   const srv = createServer((req, res) => {
     const path = new URL(req.url, 'http://127.0.0.1').pathname;
     if (path === '/v2/enterprises/personal/models') {
+      catalogSeen.push({ path, headers: req.headers });
       res.writeHead(200, { 'content-type': 'application/json' });
       return res.end(JSON.stringify({
         code: 0,
@@ -336,6 +347,7 @@ async function startStubUpstream(models = ['stub-model'], opts = {}) {
       return;
     }
     if (path === '/v3/config') {
+      catalogSeen.push({ path, headers: req.headers });
       res.writeHead(200, { 'content-type': 'application/json' });
       return res.end(JSON.stringify({ code: 0, data: { models: [] } }));
     }
@@ -409,6 +421,7 @@ async function startStubUpstream(models = ['stub-model'], opts = {}) {
   return {
     base: `http://127.0.0.1:${srv.address().port}`,
     seen,
+    catalogSeen,
     opts,
     get refreshCalls() { return refreshCalls; },
     close: async () => { openStubs.delete(close); await close(); },
@@ -2849,7 +2862,7 @@ test('桥：持续 429 时 /health 按账号+模型计数（自动切号的数�
     if (path === '/v2/chat/completions') {
       req.resume();
       res.writeHead(429, { 'content-type': 'application/json' });
-      return res.end(JSON.stringify({ code: 14003, msg: 'too many requests' }));
+      return res.end(JSON.stringify({ code: 42901, msg: 'too many requests' }));
     }
     res.writeHead(404, { 'content-type': 'application/json' });
     res.end('{}');
@@ -2977,6 +2990,323 @@ test('桥：501 不在 5xx 重试表内（重发也不会变）', { timeout: 90_
     await bridge.stop();
     stub.close();
     rmSync(bridge.dir, { recursive: true, force: true });
+  }
+});
+
+test('桥：6004 账号用量上限 —— 不等待重试、按 insufficient_quota 返回、账本归因 quota', { timeout: 90_000 }, async () => {
+  /*
+   * 现场（issue/讨论截图）：上游 429 `code 6004`，文案带“将在 <时刻> 重置，
+   * 也可以切换其他模型”。重置时刻在数小时后，不属于可退避的瞬时限流。
+   *
+   * 旧行为：桥按 429 原样透传 `rate_limit_error`；若用户配了
+   * `WORKBUDDY_429_WAITS`，桥还会对 6004 白等（最长 90s），dsh 再按
+   * RATE_LIMIT 重试 2 次 —— 一次注定失败的请求被拖很久。
+   */
+  // 重置时刻按“现在 + 20 小时”动态生成，避免 UTC+8 日期硬编码在将来某天变成过去时。
+  const resetAtMs = Math.floor((Date.now() + 20 * 3_600_000) / 1000) * 1000;
+  const resetWall = new Date(resetAtMs + 8 * 3_600_000); // UTC+8 的挂钟读数
+  const pad = (n) => String(n).padStart(2, '0');
+  const resetStamp = `${resetWall.getUTCFullYear()}-${pad(resetWall.getUTCMonth() + 1)}-${pad(resetWall.getUTCDate())}`
+    + ` ${pad(resetWall.getUTCHours())}:${pad(resetWall.getUTCMinutes())}:${pad(resetWall.getUTCSeconds())}`;
+  const quotaRaw = JSON.stringify({
+    code: 6004,
+    msg: `usage exceeds frequency limit, but don't worry, your usage will reset at ${resetStamp} UTC+8, alternatively, you can switch to the other models to continue using it.`,
+  });
+  const stub = await startStubUpstream(['quota-model'], {
+    chatSequence: [{ status: 429, type: 'application/json', raw: quotaRaw }],
+  });
+  const bridge = await startBridge({
+    CODEBUDDY_ENDPOINT: stub.base,
+    WORKBUDDY_SKIP_MODEL_PREFLIGHT: '1',
+    // 显式打开等待计划：6004 必须**绕过**它，否则这条断言会多等 5 秒。
+    WORKBUDDY_429_WAITS: '5000',
+  }, { auth: READABLE_FAKE_AUTH });
+  try {
+    const startedAt = Date.now();
+    const res = await fetch(bridge.baseUrl + '/v1/chat/completions', {
+      method: 'POST',
+      headers: { ...auth, 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'quota-model', messages: [{ role: 'user', content: 'hi' }], max_tokens: 8 }),
+      signal: AbortSignal.timeout(20_000),
+    });
+    const body = await res.json();
+    const elapsed = Date.now() - startedAt;
+    assert.equal(res.status, 429, '状态码仍如实回 429');
+    assert.equal(body.error?.type, 'insufficient_quota',
+      '6004 必须映射成 insufficient_quota，避免客户端按瞬时限流自动重试');
+    assert.equal(body.error?.code, 6004, '上游 code 要保留，便于对照');
+    assert.ok((body.error?.message || '').includes(resetStamp), '重置时刻不能被吞掉');
+    assert.equal(stub.seen.filter((s) => JSON.parse(s.body || '{}').model).length, 1,
+      '6004 不得触发桥侧等待重发');
+    assert.ok(elapsed < 3000, `6004 不应等待 WORKBUDDY_429_WAITS（实际 ${elapsed}ms）`);
+
+    await new Promise((r) => setTimeout(r, 100)); // 等账本落盘
+    const ledger = readFileSync(join(bridge.dir, 'usage.jsonl'), 'utf8')
+      .trim().split('\n').map((line) => JSON.parse(line));
+    const last = ledger.at(-1);
+    assert.equal(last.failureKind, 'quota', '账本必须按额度归因，而不是 rate_limit');
+    assert.equal(last.retryable, false, '6004 不可重试');
+    assert.equal(last.failureAction, 'wait-reset');
+    assert.equal(last.quotaResetAt, new Date(resetAtMs).toISOString(),
+      '账本要带上结构化重置时刻，面板/切号不用再解析文案');
+    const health = await (await fetch(bridge.baseUrl + '/health', { headers: auth })).json();
+    assert.equal(health.rateLimit?.quota?.resetAt, new Date(resetAtMs).toISOString(),
+      '/health.rateLimit.quota 要给出重置时刻，供自动切号判断');
+  } finally {
+    await bridge.stop();
+    stub.close();
+    rmSync(bridge.dir, { recursive: true, force: true });
+  }
+});
+
+test('桥：14018 积分耗尽也不能落成可重试的瞬时限流', { timeout: 90_000 }, async () => {
+  /*
+   * 14018（Credits exhausted）是**确定的账号额度耗尽**，与 6004 同一类：
+   * 重试不会变，正确动作是换号/充值。同类反代项目把它排在通用 429 之前判，
+   * 否则会被当成软限流冷却 12h 或白重试。
+   */
+  const stub = await startStubUpstream(['credit-model'], {
+    chatSequence: [{
+      status: 429,
+      type: 'application/json',
+      raw: JSON.stringify({ code: 14018, msg: 'Credits exhausted' }),
+    }],
+  });
+  const bridge = await startBridge({
+    CODEBUDDY_ENDPOINT: stub.base,
+    WORKBUDDY_SKIP_MODEL_PREFLIGHT: '1',
+  }, { auth: READABLE_FAKE_AUTH });
+  try {
+    const res = await fetch(bridge.baseUrl + '/v1/chat/completions', {
+      method: 'POST',
+      headers: { ...auth, 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'credit-model', messages: [{ role: 'user', content: 'hi' }], max_tokens: 8 }),
+      signal: AbortSignal.timeout(20_000),
+    });
+    const body = await res.json();
+    assert.equal(res.status, 429);
+    assert.equal(body.error?.type, 'insufficient_quota');
+    assert.equal(body.error?.code, 14018);
+    await new Promise((r) => setTimeout(r, 100));
+    const ledger = readFileSync(join(bridge.dir, 'usage.jsonl'), 'utf8')
+      .trim().split('\n').map((line) => JSON.parse(line));
+    assert.equal(ledger.at(-1).failureKind, 'quota', '14018 必须归到 quota');
+    assert.equal(ledger.at(-1).retryable, false);
+  } finally {
+    await bridge.stop();
+    stub.close();
+    rmSync(bridge.dir, { recursive: true, force: true });
+  }
+});
+
+test('桥：错误分类矩阵 —— 模型繁忙/队列/上下文/11140/11102/402 的动作与 header', { timeout: 90_000 }, async () => {
+  /*
+   * 同类项目的核心经验：错误分类决定动作。
+   *   · 14003 模型繁忙：可重试但不换号；
+   *   · 6020 队列：不重试、不换号，给位次；
+   *   · 11115 上下文（中文形态）：必须让宿主识别成 context_length_exceeded；
+   *   · 11140 账号风控 vs 内容审核：动作相反（换号 vs 调内容）；
+   *   · 11102 模型不存在：换模型，不是参数问题；
+   *   · 402 积分耗尽：不可重试，可换号。
+   */
+  const scenarios = {
+    'busy-model': { status: 429, body: { code: 14003, msg: 'too many requests' } },
+    'queue-model': { status: 429, body: { code: 6020, data: { queue_position: 7, queue_size: 900, retry_after: 40 } } },
+    'ctx-model': { status: 400, body: { code: 11115, msg: '本次输入加上历史对话超过了模型上限' } },
+    'restricted-model': {
+      status: 403,
+      body: { code: 11140, msg: 'request illegal', displayMsg: { zh: '账号存在异常行为，已被限制使用' } },
+    },
+    'policy-model': {
+      status: 403,
+      body: { code: 11140, msg: 'request illegal', displayMsg: { zh: '内容未通过安全审核，请调整后重试' } },
+    },
+    'missing-model': { status: 400, body: { code: 11102, msg: 'model [missing-model] service info not found' } },
+    'credit-model': { status: 402, body: { code: 402, msg: 'billing: credits exhausted' } },
+  };
+  const srv = createServer((req, res) => {
+    if (new URL(req.url, 'http://127.0.0.1').pathname !== '/v2/chat/completions') {
+      res.writeHead(404, { 'content-type': 'application/json' });
+      return res.end('{}');
+    }
+    let raw = '';
+    req.on('data', (c) => { raw += c; });
+    req.on('end', () => {
+      const model = JSON.parse(raw || '{}').model;
+      const scenario = scenarios[model];
+      res.writeHead(scenario?.status || 500, { 'content-type': 'application/json' });
+      res.end(JSON.stringify(scenario?.body || { msg: 'unknown scenario' }));
+    });
+  });
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+  const bridge = await startBridge({
+    CODEBUDDY_ENDPOINT: `http://127.0.0.1:${srv.address().port}`,
+    WORKBUDDY_SKIP_MODEL_PREFLIGHT: '1',
+    WORKBUDDY_429_WAITS: '',
+  }, { auth: READABLE_FAKE_AUTH });
+  const chat = async (model) => {
+    const res = await fetch(bridge.baseUrl + '/v1/chat/completions', {
+      method: 'POST',
+      headers: { ...auth, 'content-type': 'application/json' },
+      body: JSON.stringify({ model, messages: [{ role: 'user', content: 'hi' }] }),
+      signal: AbortSignal.timeout(15_000),
+    });
+    let body = null;
+    const text = await res.text();
+    try { body = JSON.parse(text); } catch { /* 非 JSON */ }
+    return { status: res.status, body, headers: res.headers };
+  };
+  try {
+    const busy = await chat('busy-model');
+    assert.equal(busy.status, 429);
+    assert.equal(busy.body.error.type, 'rate_limit_error');
+    assert.equal(busy.body.error.code, 14003);
+
+    const queue = await chat('queue-model');
+    assert.equal(queue.status, 429);
+    assert.equal(queue.body.error.type, 'model_queue');
+    assert.equal(queue.body.error.code, 'MODEL_QUEUE');
+    assert.match(queue.body.error.message, /第 7 位/);
+    assert.equal(queue.headers.get('x-should-retry'), 'false');
+    assert.equal(queue.headers.get('retry-after'), '40');
+
+    const ctx = await chat('ctx-model');
+    assert.equal(ctx.status, 400);
+    assert.equal(ctx.body.error.type, 'invalid_request_error');
+    assert.equal(ctx.body.error.code, 'context_length_exceeded');
+    assert.match(ctx.body.error.message, /prompt is too long/);
+
+    const restricted = await chat('restricted-model');
+    assert.equal(restricted.status, 403);
+    assert.equal(restricted.body.error.type, 'account_restricted');
+    assert.equal(restricted.body.error.code, 11140);
+    assert.equal(restricted.headers.get('x-should-retry'), 'false');
+
+    const policy = await chat('policy-model');
+    assert.equal(policy.body.error.type, 'content_policy_error');
+    assert.equal(policy.body.error.code, 'CONTENT_POLICY');
+
+    const missing = await chat('missing-model');
+    assert.equal(missing.status, 400);
+    assert.equal(missing.body.error.type, 'invalid_request_error');
+    assert.equal(missing.body.error.code, 'model_not_found');
+
+    const credit = await chat('credit-model');
+    assert.equal(credit.status, 402);
+    assert.equal(credit.body.error.type, 'insufficient_quota');
+    assert.equal(credit.body.error.code, 402);
+
+    const health = await (await fetch(bridge.baseUrl + '/health', { headers: auth })).json();
+    assert.equal(health.rateLimit?.count, 0, '14003/队列/402 都不属于通用 429 计数');
+    assert.equal(health.rateLimit?.modelBusy?.model, 'busy-model');
+    assert.equal(health.rateLimit?.queue?.model, 'queue-model');
+    assert.equal(health.rateLimit?.queue?.position, 7);
+    assert.equal(health.rateLimit?.accountRestricted?.model, 'restricted-model');
+    assert.equal(health.rateLimit?.quota?.model, 'credit-model');
+  } finally {
+    await bridge.stop();
+    await new Promise((r) => srv.close(r));
+    rmSync(bridge.dir, { recursive: true, force: true });
+  }
+});
+
+test('桥：assistant 历史带 reasoning 时出站前剥离（避免 11151）', { timeout: 90_000 }, async () => {
+  const stub = await startStubUpstream(['reason-model']);
+  const bridge = await startBridge(
+    { CODEBUDDY_ENDPOINT: stub.base, WORKBUDDY_SKIP_MODEL_PREFLIGHT: '1' },
+    { auth: READABLE_FAKE_AUTH },
+  );
+  try {
+    const res = await fetch(bridge.baseUrl + '/v1/chat/completions', {
+      method: 'POST',
+      headers: { ...auth, 'content-type': 'application/json' },
+      body: JSON.stringify({
+        model: 'reason-model',
+        messages: [
+          { role: 'user', content: 'hi' },
+          { role: 'assistant', content: 'previous answer', reasoning_content: 'chain of thought', reasoning: 'old' },
+          { role: 'user', content: 'again' },
+        ],
+      }),
+      signal: AbortSignal.timeout(15_000),
+    });
+    assert.equal(res.status, 200);
+    await res.text();
+    const outbound = JSON.parse(stub.seen.at(-1).body);
+    const assistant = outbound.messages.find((m) => m.role === 'assistant');
+    assert.equal(assistant.content, 'previous answer');
+    assert.equal(assistant.reasoning_content, undefined, '出站 assistant 不得带 reasoning_content');
+    assert.equal(assistant.reasoning, undefined, '出站 assistant 不得带 reasoning');
+  } finally {
+    await bridge.stop();
+    stub.close();
+    rmSync(bridge.dir, { recursive: true, force: true });
+  }
+});
+
+test('桥：默认按本机桌面端版本伪装官方客户端（目录/聊天身份分开）', { timeout: 90_000 }, async () => {
+  /*
+   * 现场（2026-11-02 讨论）：桥写死 VSCode/4.9.x，桌面端是 5.9.x，模型列表对不上。
+   * 本机只读 A/B：同一账号，VSCode/4.9 目录 31 个模型，WorkBuddy 桌面身份 48 个。
+   *
+   * 这里钉住两件事：
+   *   ① 版本从本机安装目录读（install-manifest.json + 内置 CLI package.json），
+   *      不写死；
+   *   ② 目录走桌面 App 三段式 UA，聊天走内置 CLI 的 UA —— 官方桌面端就是这么分工的。
+   */
+  const installDir = mkdtempSync(join(tmpdir(), 'wb-install-'));
+  const exe = join(installDir, 'WorkBuddy.exe');
+  writeFileSync(exe, '');
+  mkdirSync(join(installDir, 'resources', 'app.asar.unpacked', 'cli'), { recursive: true });
+  writeFileSync(join(installDir, 'resources', 'install-manifest.json'), JSON.stringify({ appVersion: '7.8.9' }));
+  writeFileSync(
+    join(installDir, 'resources', 'app.asar.unpacked', 'cli', 'package.json'),
+    JSON.stringify({ version: '1.2.3' }),
+  );
+  const stub = await startStubUpstream(['id-model']);
+  const bridge = await startBridge(
+    {
+      CODEBUDDY_ENDPOINT: stub.base,
+      WORKBUDDY_SKIP_MODEL_PREFLIGHT: '1',
+      WORKBUDDY_IDENTITY: 'official',
+      WORKBUDDY_APP_EXECUTABLE: exe,
+    },
+    { auth: authFileFor('identity-account', 'www.codebuddy.cn') },
+  );
+  try {
+    await fetch(bridge.baseUrl + '/v1/models?all=1', { headers: auth });
+    const res = await fetch(bridge.baseUrl + '/v1/chat/completions', {
+      method: 'POST',
+      headers: { ...auth, 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'id-model', messages: [{ role: 'user', content: 'hi' }] }),
+      signal: AbortSignal.timeout(15_000),
+    });
+    assert.equal(res.status, 200);
+    await res.text();
+
+    const chatHeaders = stub.seen.at(-1).headers;
+    assert.equal(chatHeaders['user-agent'], 'CLI/1.2.3 CodeBuddy/1.2.3',
+      '聊天通道应使用桌面端内置 CLI 的 UA 形状');
+    assert.equal(chatHeaders['x-ide-name'], 'WorkBuddy');
+    assert.equal(chatHeaders['x-ide-type'], 'WorkBuddy');
+    assert.equal(chatHeaders['x-ide-version'], '7.8.9', '版本应来自 install-manifest.json');
+    assert.equal(chatHeaders['x-product-version'], '7.8.9');
+    assert.equal(chatHeaders['x-product'], 'WorkBuddy', 'Name/Type/Product 必须同值');
+    assert.equal(chatHeaders['x-agent-purpose'], 'conversation');
+    assert.equal(chatHeaders['accept-language'], 'zh-CN');
+
+    const config = stub.catalogSeen.find((s) => s.path === '/v3/config');
+    assert.ok(config, `目录请求必须打到 /v3/config；实际目录请求=${JSON.stringify(stub.catalogSeen.map((s) => s.path))}；桥输出=${bridge.out().slice(-800)}`);
+    assert.equal(config.headers['user-agent'], 'WorkBuddy/7.8.9 WorkBuddy/7.8.9 CLI/1.2.3',
+      '目录通道应使用官方桌面端的三段式 UA');
+    assert.equal(config.headers['x-ide-name'], 'WorkBuddy');
+    assert.equal(config.headers['x-product'], 'WorkBuddy');
+    assert.equal(config.headers['x-agent-purpose'], 'conversation');
+  } finally {
+    await bridge.stop();
+    stub.close();
+    rmSync(bridge.dir, { recursive: true, force: true });
+    rmSync(installDir, { recursive: true, force: true });
   }
 });
 
@@ -4493,7 +4823,7 @@ test('桥：chat 错误体必须是 OpenAI 形状，且上游 401 不能被误�
     assert.ok(body.error?.message, '必须是 {error:{message}} 形状（客户端按 OpenAI 规范读）');
     assert.match(body.error.message, /rejected by the model provider/i);
     assert.equal(body.error.code, 'model_param_invalid', 'extError.code 要透出来，便于给出"换参数"而不是"重试"');
-    assert.equal(body.error.type, 'upstream_error');
+    assert.equal(body.error.type, 'invalid_request_error', '11133 是请求参数拒绝，不是上游 5xx');
   } finally {
     await bridge.stop();
     try { await stub.close(); } catch { /* 忽略 */ }
@@ -4665,7 +4995,8 @@ test('插件登录：设备码 → 加密落盘 → auto 回退 → 刷新轮换
     }
     if (u.pathname === '/v3/config') {
       catalogConfigUAs.push(req.headers['user-agent']);
-      const desktopIdentity = /VSCode\//i.test(String(req.headers['user-agent'] || ''));
+      // 桌面身份 = 官方 WorkBuddy 三段式 UA；插件身份 = 目录 UA（CN 为 CLI 两段）。
+      const desktopIdentity = /^WorkBuddy\//i.test(String(req.headers['user-agent'] || ''));
       return send(200, {
         code: 0,
         data: {
@@ -4786,9 +5117,9 @@ test('插件登录：设备码 → 加密落盘 → auto 回退 → 刷新轮换
     assert.ok(byId.has('glm-5.3'), '模型目录应包含插件身份返回的模型');
     assert.equal(byId.get('glm-5.3').badge, '夜间免费',
       '插件来源必须额外用桌面身份拿到 modelPromotions，否则夜间免费活动名会消失');
-    assert.ok(catalogConfigUAs.some((ua) => /VSCode\//i.test(String(ua || ''))),
+    assert.ok(catalogConfigUAs.some((ua) => /^WorkBuddy\//i.test(String(ua || ''))),
       '必须有一次桌面身份的 /v3/config 请求用于补促销');
-    assert.ok(catalogConfigUAs.some((ua) => /CLI\//i.test(String(ua || ''))),
+    assert.ok(catalogConfigUAs.some((ua) => /^CLI\//i.test(String(ua || ''))),
       '模型清单仍应来自插件身份的目录请求');
 
     assert.equal(refreshes, 1);
@@ -4894,7 +5225,9 @@ test('插件登录：设备码 → 加密落盘 → auto 回退 → 刷新轮换
     assert.equal(sourceBoth.effective.source, 'desktop', 'auto 必须桌面端优先');
     assert.equal((await chat(bridge3.baseUrl)).status, 200);
     assert.equal(chatAuths.at(-1), 'Bearer fake-access-token', 'auto 下请求应使用桌面端令牌');
-    assert.equal(chatHeaders.at(-1)['x-ide-type'], 'VSCode', '桌面来源的身份头必须保持原样');
+    assert.equal(chatHeaders.at(-1)['x-ide-type'], 'WorkBuddy', '桌面来源默认用官方 WorkBuddy 身份');
+    assert.match(String(chatHeaders.at(-1)['user-agent'] || ''), /^CLI\/.* CodeBuddy\//,
+      '桌面聊天默认走内置 CLI 的 UA 形状');
 
     // ⑧ 显式 desktop 是硬锁：envPinned 必须为 true，且桌面优先
     bridge4 = await startBridge({ ...sharedEnv, WORKBUDDY_CREDENTIAL_SOURCE: 'desktop' }, { auth: READABLE_FAKE_AUTH });
@@ -5982,7 +6315,8 @@ test('桥：11148 工具历史不配对归因为 tool_history，且标记不可�
     assert.equal(ledger.at(-1).failureAction, 'new-session');
 
     const usage = await (await fetch(bridge.baseUrl + '/v1/usage?days=1', { headers: auth })).json();
-    assert.equal(usage.total.failureKinds.tool_history, 1, '失败归因要进用量汇总');
+    assert.equal(usage.total.failureKinds.tool_history, 1, '失败归因要进用量汇总');    assert.equal(usage.failures.at(-1)?.failureAction, 'new-session',
+      '用量页的失败条目也要带建议动作（面板悬停展示）');
     const modelRow = usage.failureByModel.find((m) => m.model === 'tool-history-model');
     assert.equal(modelRow?.failed, 1, '按模型也要能看到失败数');
     assert.equal(modelRow?.byKind?.tool_history, 1);
@@ -6418,7 +6752,9 @@ test('限流统计：时间戳滑动窗口（窗口外的旧 429 不再计数）
    * 这里把窗口压到 1.2s：发一次 → 等它过期 → 再发一次，计数必须回到 1。
    */
   const upstream = await startStubUpstream(['stub-model'], {
-    chatSequence: [{ status: 429, type: 'application/json', raw: JSON.stringify({ code: 14003, msg: 'rate limited' }) }],
+    // 通用 429（没有 14003/6004 业务码）才计入账号切号的 10 分钟窗口；
+    // 14003 是模型级繁忙，另有专门用例钉住“不计数”。
+    chatSequence: [{ status: 429, type: 'application/json', raw: JSON.stringify({ code: 42901, msg: 'rate limited' }) }],
   });
   const bridge = await startBridge({
     CODEBUDDY_ENDPOINT: upstream.base,

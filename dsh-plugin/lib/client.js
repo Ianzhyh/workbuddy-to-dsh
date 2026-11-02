@@ -423,7 +423,8 @@ body.dark .wb-root,
 .wb-model-probe-updated{margin:4px 0 0;font-size:11px}
 @media (max-width:560px){.wb-models-card{padding:14px}.wb-model-hero-side{justify-content:space-between;gap:12px}.wb-model-stats{gap:14px}.wb-model-search{flex:1 1 150px}.wb-model-sort{flex:0 0 104px;width:104px}.wb-model-filter .wb-segmented-wrap{max-width:100%;overflow-x:auto}.wb-detail-section-head{flex-direction:column}.wb-model-detail-id{max-width:100%}.wb-token-field .wb-token-row{grid-template-columns:minmax(0,1fr) auto}.wb-token-field .wb-token-label{grid-column:1;grid-row:1}.wb-token-field .wb-token-control{grid-column:1/-1;grid-row:2}.wb-token-field .wb-token-value{grid-column:2;grid-row:1}.wb-token-field .wb-token-input{width:104px}}
 /* 促销徽章 */
-.wb-badge{display:inline-block;margin-left:6px;padding:0 6px;border-radius:6px;font-size:10.5px;line-height:16px;background:light-dark(#00000010,#ffffff1f);border:.5px solid transparent;white-space:nowrap;vertical-align:middle;transition:background-color var(--wb-anim-fast),border-color var(--wb-anim-fast),color var(--wb-anim-fast),box-shadow var(--wb-anim-fast),opacity var(--wb-anim-fast),transform var(--wb-anim-fast)}
+.wb-badge{display:inline-block;margin-left:6px;padding:0 6px;border-radius:6px;font-size:10.5px;line-height:16px;background:light-dark(#00000010,#ffffff1f);border:.5px solid transparent;white-space:nowrap;vertical-align:middle;transition:background-color var(--wb-anim-fast),border-color var(--wb-anim-fast),color var(--wb-anim-fast),box-shadow var(--wb-anim-fast),opacity var(--wb-anim-fast),transform var(--wb-anim-fast)}.wb-badge.warn{background:light-dark(#fff8e1,#3a2f10);color:light-dark(#6b4e00,#f0d38a);border-color:light-dark(#fde68a,#544416)}
+.wb-badge.bad{background:light-dark(#ffebe9,#3d1d1b);color:light-dark(#a40e26,#ffb3ad);border-color:light-dark(#fecaca,#5a2623)}
 /* 账号：每账号一行 */
 /* 账号：每账号一个卡片块（原来是「下划线分隔的行」，和模型卡不统一，也读不出边界） */
 .wb-account{padding:12px;margin-bottom:8px;border-radius:10px;background:var(--dsw-alias-interactive-bg-hover,light-dark(#2631480f,#ffffff14));border-bottom:0;transition:background-color var(--wb-anim-fast),box-shadow var(--wb-anim-fast)}
@@ -647,6 +648,14 @@ body.dark .wb-root,
 .wb-quota-pkg-head{display:flex;align-items:baseline;justify-content:space-between;gap:8px;min-width:0}
 .wb-quota-pkg-name{font-size:12px;min-width:0;overflow-wrap:anywhere}
 .wb-quota-pkg-num{font-size:12px;font-variant-numeric:tabular-nums;color:var(--dsw-alias-label-secondary,light-dark(#61666b,#cfd3d6));white-space:nowrap}
+.wb-expiry-notice{display:flex;align-items:center;justify-content:space-between;gap:10px;margin:10px 0 0;padding:8px 10px;border-radius:9px;font-size:12px;line-height:18px;background:light-dark(#fff8e1,#3a2f10);color:light-dark(#6b4e00,#f0d38a);border:.5px solid light-dark(#fde68a,#544416)}
+.wb-expiry-notice.bad{background:light-dark(#ffebe9,#3d1d1b);color:light-dark(#a40e26,#ffb3ad);border-color:light-dark(#fecaca,#5a2623)}
+.wb-expiry-text{min-width:0;overflow-wrap:anywhere}
+.wb-expiry-dismiss{appearance:none;border:0;background:transparent;color:inherit;font:inherit;font-size:12px;cursor:pointer;padding:2px 6px;border-radius:6px;opacity:.75;flex:none}
+.wb-expiry-dismiss:hover{opacity:1;background:light-dark(#0000000d,#ffffff14)}
+.wb-expiry-dismiss:focus-visible{outline:2px solid var(--dsw-alias-brand-primary,#6366f1);outline-offset:1px}
+.wb-expiry-soon{color:light-dark(#8a5a00,#f0d38a)}
+.wb-expiry-urgent{color:light-dark(#a40e26,#ffb3ad)}
 .wb-chart{width:100%;max-width:100%;height:auto;display:block}
 /* 用量页：范围控制 → 六项指标 → 趋势 → 模型 → 明细，和 Qoder 面板同一信息节奏。 */
 .wb-usage-page{display:flex;flex-direction:column;gap:16px;min-width:0;container-type:inline-size}
@@ -2564,6 +2573,92 @@ body.dark .wb-root,
     /** 企业/教育不限量账号：桥用 total < 0 表示，不能当成负数余额展示。 */
     const quotaIsUnlimited = (q) => Boolean(q)
       && (q.unlimited === true || (typeof q.total === 'number' && q.total < 0));
+    /*
+     * 积分到期提醒。
+     *
+     * 行业里常见的提醒节奏是 7/3/1 天（多个积分/订阅产品默认 7 天），
+     * 所以这里默认提前 7 天出现；≤1 天升级为红色。只提醒**还有剩余**且
+     * 到期日可解析的包，已过期/不限量/零余额不提醒，避免制造假紧迫感。
+     */
+    const QUOTA_EXPIRY_WARN_DAYS = 7;
+    const DAY_MS = 86_400_000;
+    const parseQuotaExpiryMs = (value) => {
+      if (!value) return 0;
+      const text = String(value).trim();
+      const normalized = /^d{4}-d{2}-d{2} d{2}:d{2}/.test(text) ? text.replace(' ', 'T') : text;
+      const ms = Date.parse(normalized);
+      return Number.isFinite(ms) ? ms : 0;
+    };
+    const localDayStart = (ms) => {
+      const d = new Date(ms);
+      return new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+    };
+    /** 按本机日历日算差：今天 23:59 到期显示「今天」，不是「0.1 天」。 */
+    const quotaDaysUntil = (ms, now = Date.now()) => Math.round((localDayStart(ms) - localDayStart(now)) / DAY_MS);
+    const quotaExpiringPackages = (quota, warnDays = QUOTA_EXPIRY_WARN_DAYS, now = Date.now()) => {
+      if (!quota || quotaIsUnlimited(quota)) return [];
+      const out = [];
+      for (const p of quota.packages || []) {
+        const remain = Number(p.remain) || 0;
+        const ms = parseQuotaExpiryMs(p.expiresAt);
+        if (remain <= 0 || !ms) continue;
+        const days = quotaDaysUntil(ms, now);
+        if (days < 0 || days > warnDays) continue;
+        out.push({
+          name: String(p.name || ''),
+          remain,
+          size: Number(p.size) || 0,
+          monthly: p.monthly === true,
+          expiresAt: p.expiresAt,
+          ms,
+          days,
+        });
+      }
+      out.sort((a, b) => a.days - b.days || b.remain - a.remain);
+      return out;
+    };
+    /** 把到期包按“最近一天”汇总；signature 用于“知道了”去重（同一批到期日只提醒一次）。 */
+    const quotaExpirySummary = (list) => {
+      if (!list.length) return null;
+      const firstDay = localDayStart(list[0].ms);
+      const sameDay = list.filter((e) => localDayStart(e.ms) === firstDay);
+      return {
+        days: list[0].days,
+        ms: list[0].ms,
+        remain: sameDay.reduce((sum, e) => sum + e.remain, 0),
+        sameDayCount: sameDay.length,
+        count: list.length,
+        signature: [...new Set(list.map((e) => localDayStart(e.ms)))].sort((a, b) => a - b).join(','),
+      };
+    };
+    const fmtQuotaDate = (ms) => {
+      const d = new Date(ms);
+      return String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+    };
+    const fmtQuotaRelative = (days, en) => {
+      if (days <= 0) return en ? 'today' : '今天';
+      if (days === 1) return en ? 'tomorrow' : '明天';
+      return en ? 'in ' + days + ' days' : days + ' 天后';
+    };
+    /** 限流恢复时刻：短格式，中英文都按本机时区显示。 */
+    const fmtRateReset = (iso, en) => {
+      const ms = Date.parse(String(iso || ''));
+      if (!Number.isFinite(ms)) return '';
+      return new Date(ms).toLocaleString(en ? 'en-US' : 'zh-CN', {
+        month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false,
+      });
+    };
+    const quotaQty = (n) => (Number.isInteger(Number(n)) ? fmtInt(Number(n)) : fmtCreditShort(n));
+    const readLocalJson = (key, fallback) => {
+      try {
+        const raw = globalThis.localStorage && globalThis.localStorage.getItem(key);
+        return raw ? JSON.parse(raw) : fallback;
+      } catch (e) { return fallback; }
+    };
+    const writeLocalJson = (key, value) => {
+      try { globalThis.localStorage && globalThis.localStorage.setItem(key, JSON.stringify(value)); } catch (e) { /* 隐私模式/配额满：只影响“不再提醒” */ }
+    };
+
     /** 积分：最多 3 位小数，去掉无意义的尾零；极小值不显示成 0。 */
     const fmtCreditShort = (n) => {
       const value = Number(n);
@@ -2580,15 +2675,38 @@ body.dark .wb-root,
     const failureKindLabel = (kind) => ({
       channel: '通道校验',
       account: '账号/权限',
+      account_restricted: '账号风控',
       auth: '登录态',
       rate_limit: '限流',
+      model_busy: '模型繁忙',
+      model_quota: '模型额度',
       quota: '额度',
+      queue: '排队',
+      context: '上下文超限',
+      model_not_found: '模型不存在',
+      policy: '内容策略',
+      parameter: '请求参数',
       tool_history: '工具历史',
       stream: '流中断',
       upstream: '上游',
       request: '请求参数',
       unknown: '未知',
-    }[kind] || '');
+    }[kind] || '');    /** 失败后的下一步动作（与桥的 failureAction 枚举一致）。 */
+    const failureActionText = (action, en) => ({
+      'wait-reset': en ? 'wait for reset / switch account' : '等重置 / 换账号',
+      'switch-model': en ? 'switch model' : '换模型',
+      'switch-account': en ? 'switch account' : '换账号',
+      'new-session': en ? 'start a new session' : '新开会话',
+      'compact-context': en ? 'compact the conversation' : '压缩上下文',
+      'adjust-content': en ? 'adjust the content' : '调整内容',
+      'fix-request': en ? 'fix the request parameters' : '修参数',
+      'wait-queue': en ? 'resend later / switch model' : '稍后重发 / 换模型',
+      'backoff': en ? 'retry later' : '稍后重试',
+      'relogin': en ? 'sign in again' : '重新登录',
+      'check-account': en ? 'check the account' : '检查账号',
+      'retry': en ? 'retry' : '重试',
+      'diagnose': en ? 'open diagnostics' : '去诊断',
+    }[action] || '');
     /**
      * 上下文档位的人话写法：600000 → 600K，128000 → 128K，131072 → 128K。
      *
@@ -3718,6 +3836,14 @@ body.dark .wb-root,
       const desktopAvailable = credential.desktop?.available === true;
       const pluginCount = Number(credential.plugin?.count ?? credential.pluginCount ?? 0);
       const alerts = [];
+      const en = useLang() === 'en';
+      const fmtResetAt = (iso) => {
+        const ms = Date.parse(String(iso || ''));
+        if (!Number.isFinite(ms)) return '';
+        return new Date(ms).toLocaleString(en ? 'en-US' : 'zh-CN', {
+          month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false,
+        });
+      };
       const [searchBusy, setSearchBusy] = useState(false);
       const [searchAction, setSearchAction] = useState('');
       const [searchMsg, setSearchMsg] = useState('');
@@ -3986,9 +4112,33 @@ body.dark .wb-root,
             : '令牌不到 7 天到期，建议重新登录 WorkBuddy 桌面端',
         });
       }
+      /*
+       * 账号级健康：把 /health.rateLimit 的 quota/accountRestricted 变成可操作提示。
+       * 模型繁忙/队列不在这里提示（换模型即可，且容易变成噪音）。
+       */
+      const rate = health?.rateLimit;
+      if (rate?.quota) {
+        const reset = rate.quota.resetAt ? fmtResetAt(rate.quota.resetAt) : '';
+        alerts.push({
+          tone: 'bad',
+          text: en
+            ? `Account usage limit reached (${rate.quota.model || '—'})${reset ? `; resets ${reset}` : ''}. Switch account or model.`
+            : `当前账号的模型用量已达上限（${rate.quota.model || '—'}）${reset ? `，预计 ${reset} 恢复` : ''}；可切换账号或换模型`,
+          action: 'accounts',
+        });
+      }
+      if (rate?.accountRestricted) {
+        alerts.push({
+          tone: 'bad',
+          text: en
+            ? `This account is restricted upstream (${rate.accountRestricted.model || '—'}); re-login will not help — switch account.`
+            : `当前账号被上游限制（异常行为，${rate.accountRestricted.model || '—'}）；重新登录无效，建议切换账号`,
+          action: 'accounts',
+        });
+      }
       if (!status?.route?.registered) alerts.push({ tone: 'bad', text: '原生模型路由未注册：' + (status?.route?.error || '未知原因') });
       const criticalFailures = failedRecent.filter(
-        (r) => ['channel', 'account', 'auth', 'quota'].includes(r.failureKind),
+        (r) => ['channel', 'account', 'account_restricted', 'auth', 'quota', 'model_not_found'].includes(r.failureKind),
       );
       if (criticalFailures.length) {
         alerts.push({
@@ -4014,9 +4164,9 @@ body.dark .wb-root,
       // 控制台 /api/overview 的 routeLive 同样是迁移前口径（只认 settings.yaml /
       // profile patch），原生路由它看不见 —— 原生路由已注册时不作为问题提示。
 
-      const ACTION_LABEL = { start: '启动桥', restart: '重启桥', 'console-start': '重启控制台', 'follow-desktop': '改用桌面端', cleanup: '清理旧路由', requests: '查看失败', checkin: '去签到', account: '去登录', websearch: '接入搜索' };
+      const ACTION_LABEL = { start: '启动桥', restart: '重启桥', 'console-start': '重启控制台', 'follow-desktop': '改用桌面端', cleanup: '清理旧路由', requests: '查看失败', checkin: '去签到', account: '去登录', accounts: '去账号页', websearch: '接入搜索' };
       const alertAction = (action) => {
-        if (action === 'account') onOpenTab('accounts');
+        if (action === 'account' || action === 'accounts') onOpenTab('accounts');
         else if (action === 'requests' || action === 'checkin') onOpenTab(action);
         else if (action === 'websearch') enableSearch();
         else onAct(action);
@@ -4234,6 +4384,35 @@ body.dark .wb-root,
         && status?.bridgeAccount
         && status.quotaAccount !== status.bridgeAccount
       );
+      const en = useLang() === 'en';
+      const quotaExpiring = useMemo(() => quotaExpiringPackages(quota), [quota]);
+      const expiry = quotaExpirySummary(quotaExpiring);
+      const expiryKey = 'wbQuotaExpiryDismiss:' + (status?.quotaAccount || 'current');
+      const [dismissedExpiry, setDismissedExpiry] = useState(() => readLocalJson(expiryKey, {}));
+      useEffect(() => { setDismissedExpiry(readLocalJson(expiryKey, {})); }, [expiryKey]);
+      const dismissExpiry = () => {
+        if (!expiry) return;
+        const next = { ...dismissedExpiry, [expiry.signature]: Date.now() };
+        setDismissedExpiry(next);
+        writeLocalJson(expiryKey, next);
+      };
+      const showExpiry = Boolean(expiry && !dismissedExpiry[expiry.signature]);
+      const expiryWhen = expiry
+        ? (expiry.days <= 0
+          ? (en ? 'today' : '今天')
+          : expiry.days === 1
+            ? (en ? 'tomorrow' : '明天')
+            : (en ? `in ${expiry.days} days` : `${expiry.days} 天后`))
+        : '';
+      const expiryQty = expiry ? quotaQty(expiry.remain) : '';
+      const expiryDate = expiry ? fmtQuotaDate(expiry.ms) : '';
+      const expiryText = expiry
+        ? (en
+          ? `${expiryQty} credits expire ${expiryWhen} (${expiryDate})`
+            + (expiry.count > expiry.sameDayCount ? ` · +${expiry.count - expiry.sameDayCount} more` : '')
+          : `${expiryQty} 积分${expiry.days <= 1 ? expiryWhen + '到期' : '将在 ' + expiryWhen + '到期'}（${expiryDate}）`
+            + (expiry.count > expiry.sameDayCount ? ` · 另有 ${expiry.count - expiry.sameDayCount} 组` : ''))
+        : '';
 
       const packages = useMemo(() => {
         const byBatch = new Map();
@@ -4318,17 +4497,42 @@ body.dark .wb-root,
             h(Btn, { primary: true, disabled: refreshing || busy || needsLogin, onClick: refreshQuota }, refreshing ? '刷新中…' : '刷新积分'),
             h(Btn, { onClick: () => onOpenTab('usage') }, '看用量'))),
         message ? h('p', { className: 'wb-note', style: { margin: '6px 0 0' } }, message) : null,
+        showExpiry
+          ? h('div', { className: 'wb-expiry-notice ' + (expiry.days <= 1 ? 'bad' : 'warn'), role: 'status' },
+            h('span', { className: 'wb-expiry-text' }, expiryText),
+            h('button', {
+              type: 'button',
+              className: 'wb-expiry-dismiss',
+              title: en ? 'Dismiss this reminder' : '知道了，本次不再提醒',
+              'aria-label': en ? 'Dismiss this reminder' : '知道了，本次不再提醒',
+              onClick: dismissExpiry,
+            }, en ? 'Dismiss' : '知道了'))
+          : null,
         packages.length
           ? h('div', { className: 'wb-quota-pkgs' },
-            packages.map((p) => h('div', { key: p.name, className: 'wb-quota-pkg' },
+            packages.map((p) => h('div', { key: p.name + '|' + (p.expiresAt || ''), className: 'wb-quota-pkg' },
               h('div', { className: 'wb-quota-pkg-head' },
                 h('span', { className: 'wb-quota-pkg-name', title: p.name }, p.name + (p.count > 1 ? ' ×' + p.count : '')),
                 h('span', { className: 'wb-quota-pkg-num' }, p.remain + ' / ' + p.size)),
               h('div', { className: 'wb-bar' }, h('i', { className: toneOf(p.remain, p.size), style: { width: Math.max(0, Math.min(100, p.size > 0 ? (p.remain / p.size) * 100 : 0)) + '%' } })),
-              (p.monthly || p.expiresAt)
-                ? h('div', { className: 'wb-note', style: { margin: '3px 0 0' } },
-                  [p.monthly ? '月度' : null, p.expiresAt ? '到期 ' + p.expiresAt : null].filter(Boolean).join(' · '))
-                : null)))
+              (() => {
+                const expiryMs = parseQuotaExpiryMs(p.expiresAt);
+                const days = expiryMs ? quotaDaysUntil(expiryMs) : null;
+                const parts = [];
+                if (p.monthly) parts.push(en ? 'Monthly' : '月度');
+                if (p.expiresAt) parts.push((en ? 'expires ' : '到期 ') + (expiryMs ? fmtQuotaDate(expiryMs) : p.expiresAt));
+                const relative = days === null
+                  ? ''
+                  : (days < 0 ? (en ? 'expired' : '已过期') : fmtQuotaRelative(days, en));
+                const label = parts.join(' · ') + (relative ? ' (' + relative + ')' : '');
+                return label
+                  ? h('div', {
+                    className: 'wb-note' + (days !== null && days <= 1 ? ' wb-expiry-urgent' : days !== null && days <= 7 ? ' wb-expiry-soon' : ''),
+                    style: { margin: '3px 0 0' },
+                    title: p.expiresAt || undefined,
+                  }, label)
+                  : null;
+              })())))
           : null);
     }
 
@@ -4882,6 +5086,11 @@ body.dark .wb-root,
        * 会选中的账号 —— 标成「使用中」会和下面的插件账号同时出现两个"使用中"。
        */
       const effectiveSource = pageStatus?.bridge?.health?.credential?.source || '';
+      const en = useLang() === 'en';
+      const rateLimit = pageStatus?.bridge?.health?.rateLimit;
+      const quotaLimit = rateLimit?.quota;
+      const restricted = rateLimit?.accountRestricted;
+      const quotaReset = quotaLimit ? fmtRateReset(quotaLimit.resetAt, en) : '';
       if (api.availability.state !== 'ok' && (status === 503 || status === 404)) {
         // 控制台没跑也不影响插件登录（它直接走桥）：登录卡放最前，别让 Gate 挡路。
         // 用 Fragment 而不是 div：两张卡都是 `.wb-tab-panel` 的直接子元素，才能吃到统一间距。
@@ -5124,6 +5333,18 @@ body.dark .wb-root,
         firstRun ? loginCard : null,
         h(Card, { title: '账号' },
           error ? h(Alert, { bad: true }, error) : null,
+          quotaLimit
+            ? h(Alert, null,
+              en
+                ? `Account usage limit reached (${quotaLimit.model || '—'})${quotaReset ? `; resets ${quotaReset}` : ''}. Switch to another account below, or use another model.`
+                : `当前账号的模型用量已达上限（${quotaLimit.model || '—'}）${quotaReset ? `，预计 ${quotaReset} 恢复` : ''}；可切换下面其它账号，或换模型。`)
+            : null,
+          restricted
+            ? h(Alert, { bad: true },
+              en
+                ? 'This account is restricted upstream (unusual activity); signing in again will not help — switch to another account.'
+                : '当前账号被上游限制（异常行为）；重新登录无效，建议切换账号。')
+            : null,
         message ? h(Alert, null, message) : null,
         data?.keyError ? h(Alert, null, 'AtRest 密钥获取失败：' + data.keyError + '（无法逐个验证账号可用性）') : null,
         h('p', { className: 'wb-note', style: { marginTop: 0 } }, '登录目录下存在多个账号快照时可在此切换。切换会自动重启桥、清空上一个账号的体检结论与余额缓存 —— 与控制器里点「切换」完全等价。可以改名、上移/下移排序，也可以直接拖动；不想看到的可以隐藏（只记在 .state.json 里，不动登录目录的文件）；同一账号的多份登录快照只显示一行（自动合并，不影响切换）；插件登录得到的账号也在同一列表里（标「插件」），与桌面端同账号时合并为一行「双凭据」。'),
@@ -5177,6 +5398,13 @@ body.dark .wb-root,
                     : a.active
                       ? h(Pill, { tone: '', text: '已选（未生效）' })
                       : (a.usable ? h(Pill, { tone: '', text: '可用' }) : h(Pill, { tone: 'bad', text: a.error ? '不可用' : '未验证' })),
+                  (pluginEffective || desktopEffective)
+                    ? (restricted
+                      ? h(Pill, { tone: 'bad', text: en ? 'Account restricted' : '账号风控', title: en ? 'Re-login will not help; switch account.' : '重新登录无效，建议切换账号' })
+                      : quotaLimit
+                        ? h(Pill, { tone: 'warn', text: en ? 'Usage limit' : '额度上限', title: quotaReset ? (en ? 'Resets ' : '恢复 ') + quotaReset : '' })
+                        : null)
+                    : null,
                   pluginFor ? h(Pill, { tone: '', text: '双凭据' }) : null,
                   a.hidden ? h(Pill, { tone: '', text: '已隐藏' }) : null),
                 h('div', { className: 'wb-account-primary' },
@@ -5280,7 +5508,8 @@ body.dark .wb-root,
     }
 
     // ─────────────────────────── 用量 ───────────────────────────
-    function UsagePanel() {
+    function UsagePanel({ onOpenTab } = {}) {
+      const en = useLang() === 'en';
       const [days, setDays] = useState(7);
       const [metric, setMetric] = useState('calls');
       const [chartView, setChartView] = useState('time');
@@ -5456,7 +5685,8 @@ body.dark .wb-root,
       const showSearchData = hasSearchMetric && (searches > 0 || searchFailed > 0);
       const searchAttempts = searches + searchFailed;
       const searchSuccessRate = searchAttempts > 0 ? (searches / searchAttempts) * 100 : null;
-      const showAuxCard = showSearchData || showGenerationCard;
+      const showAuxCard = showSearchData || showGenerationCard;      const noUsage = !loading && totalCalls === 0 && !showSearchData && !hasGenerationData
+        && !(usage?.failures || []).length;
       const kpi = (label, value, hint, tone, extra) => h('div', {
         className: 'wb-metric wb-usage-kpi' + (tone ? ' ' + tone : '') + (extra ? ' has-extra' : ''),
       },
@@ -5551,7 +5781,14 @@ body.dark .wb-root,
                   failureKindEntries.map(([kind, count]) => h('span', { key: kind, style: { marginRight: '10px' } },
                     failureKindLabel(kind), ' ', String(count))))
                 : null))),
-        h(Card, { title: '用量趋势', className: 'wb-usage-trend' },
+        noUsage
+          ? h(Card, { title: '还没有用量' },
+            h('p', { className: 'wb-note', style: { margin: 0 } },
+              en
+                ? 'No usage in this range. Send a message from chat, or switch to 7 / 30 days above.'
+                : '这个范围还没有用量。去对话页发一条消息，或用上方切换 7 / 30 天。'))
+          : null,
+        noUsage ? null : h(Card, { title: '用量趋势', className: 'wb-usage-trend' },
           h('div', { className: 'wb-usage-section-bar' },
             h('div', { className: 'wb-usage-section-left' },
               h(Segmented, {
@@ -5591,7 +5828,7 @@ body.dark .wb-root,
               : h(ModelBarChart, { models: usage?.models || [], metric })),
           h('p', { className: 'wb-note wb-usage-card-note' },
             hours ? '按小时统计本机账本；切换范围可看更长周期。' : '按天统计本机账本；切换范围可看更长周期。')),
-        h(Card, { title: '用量结构', className: 'wb-usage-structure-card' },
+        noUsage ? null : h(Card, { title: '用量结构', className: 'wb-usage-structure-card' },
           h('div', { className: 'wb-usage-structure' },
             h('div', { className: 'wb-usage-structure-panel' },
               h('p', { className: 'wb-usage-panel-title' }, 'Token 构成'),
@@ -5607,7 +5844,7 @@ body.dark .wb-root,
               h('p', { className: 'wb-usage-panel-title' }, hours ? '每小时调用' : '每日调用'),
               h('p', { className: 'wb-usage-panel-sub' }, '蓝色为成功，红色为失败；悬停查看单点数据。'),
               h(UsageBars, { series, hours })))),
-        h(Card, { title: '积分花在哪些模型上', className: 'wb-usage-models' },
+        noUsage ? null : h(Card, { title: '积分花在哪些模型上', className: 'wb-usage-models' },
           h('div', { className: 'wb-usage-section-bar' },
             h('p', { className: 'wb-note wb-usage-card-note' }, '按当前指标查看模型占比，用于判断额度花在哪里。'),
             h(Segmented, {
@@ -5699,14 +5936,23 @@ body.dark .wb-root,
           : null,
         (usage?.failures || []).length
           ? h(Card, { title: '最近失败', className: 'wb-usage-failures' },
-            h('p', { className: 'wb-note wb-usage-card-note' }, '只展示失败请求，不记录对话内容；点错误可复制。'),
+            h('div', { className: 'wb-usage-section-bar' },
+              h('p', { className: 'wb-note wb-usage-card-note' }, '只展示失败请求，不记录对话内容；点错误可复制。'),
+              typeof onOpenTab === 'function'
+                ? h(Btn, { sm: true, onClick: () => onOpenTab('requests') }, en ? 'View requests' : '查看请求')
+                : null),
             h('div', { className: 'wb-scroll', style: { maxHeight: '240px' } },
               h('table', { className: 'wb-table' },
                 h('thead', null, h('tr', null, h('th', null, '时间'), h('th', null, '模型'), h('th', null, '错误'))),
                 h('tbody', null, usage.failures.map((f, i) => h('tr', { key: i, className: 'bad' },
                   h('td', null, fmtClock(f.t)),
                   h('td', null, f.model + (f.kind === 'search' ? t('（搜索）') : '')),
-                  h('td', { title: '点击复制', className: 'click wrap', onClick: () => copyText(String(f.error || '')) }, String(f.error || '').slice(0, 160))))))))
+                  h('td', {
+                    title: '点击复制'
+                      + (f.failureAction ? (en ? ' · Suggested: ' : ' · 建议：') + failureActionText(f.failureAction, en) : ''),
+                    className: 'click wrap',
+                    onClick: () => copyText(String(f.error || '')),
+                  }, String(f.error || '').slice(0, 160))))))))
           : null,
         h('p', { className: 'wb-note wb-usage-footnote' }, '只记元数据（时间 / 模型 / 耗时 / token / 积分），不含任何对话内容。'));
     }
@@ -5748,8 +5994,9 @@ body.dark .wb-root,
     }
 
     function RequestsPanel() {
+      const en = useLang() === 'en';
       const [limit, setLimit] = useState(40);
-      const [onlyFailed, setOnlyFailed] = useState(false);
+      const [onlyFailed, setOnlyFailed] = useState(false);      const [onlyActionable, setOnlyActionable] = useState(false);
       const [modelFilter, setModelFilter] = useState('');
       const [paused, setPaused] = useState(false);
       const { data, error, reload, loading } = useJson(`/workbuddy/requests?limit=${limit}`, { interval: paused ? 0 : 5000 });
@@ -5764,9 +6011,28 @@ body.dark .wb-root,
         return fromDirectory;
       }, [directory, all]);
       if (isInitialLoading(loading, data, error)) return h(Card, { title: '最近请求' }, h(Loading, { text: '正在读取请求记录…' }));
-      const rows = all.filter((r) => (!onlyFailed || !r.ok) && (!modelFilter || r.model === modelFilter));
+      const actionableKinds = new Set(['channel', 'account', 'account_restricted', 'auth', 'quota', 'model_not_found']);
+      const actionableCount = all.filter((r) => actionableKinds.has(r.failureKind)).length;
+      const rows = all.filter((r) => (!onlyFailed || !r.ok)
+        && (!onlyActionable || actionableKinds.has(r.failureKind))
+        && (!modelFilter || r.model === modelFilter));
       const failBase = (r) => `失败${r.status ? ' HTTP ' + r.status : ''}${r.code ? ' · code ' + r.code : ''}`;
-      const failKind = (r) => failureKindLabel(r.failureKind) || '';
+      const failKind = (r) => failureKindLabel(r.failureKind) || '';      /** 建议动作只放在悬停标题里，不占表格宽度；分类已经由 failureKind 标签展示。 */
+      const failureActionLabel = (action) => ({
+        'wait-reset': en ? 'wait for reset / switch account' : '等重置 / 换账号',
+        'switch-model': en ? 'switch model' : '换模型',
+        'switch-account': en ? 'switch account' : '换账号',
+        'new-session': en ? 'start a new session' : '新开会话',
+        'compact-context': en ? 'compact the conversation' : '压缩上下文',
+        'adjust-content': en ? 'adjust the content' : '调整内容',
+        'fix-request': en ? 'fix the request parameters' : '修参数',
+        'wait-queue': en ? 'resend later / switch model' : '稍后重发 / 换模型',
+        'backoff': en ? 'retry later' : '稍后重试',
+        'relogin': en ? 'sign in again' : '重新登录',
+        'check-account': en ? 'check the account' : '检查账号',
+        'retry': en ? 'retry' : '重试',
+        'diagnose': en ? 'open diagnostics' : '去诊断',
+      }[action] || '');
       return h(Card, { title: '最近请求' },
         error ? h(Alert, { bad: true }, error) : null,
         h(ActiveRequests, { active: data?.active || [], alertMs: data?.activeAlertMs }),
@@ -5780,7 +6046,9 @@ body.dark .wb-root,
                 ...models.map((m) => ({ value: m, label: m, raw: true })),
               ],
             }),
-            h('label', { className: 'wb-check' }, h('input', { type: 'checkbox', checked: onlyFailed, onChange: (e) => setOnlyFailed(e.target.checked) }), `仅看失败（${all.filter((r) => !r.ok).length}）`),
+            h('label', { className: 'wb-check' }, h('input', { type: 'checkbox', checked: onlyFailed, onChange: (e) => setOnlyFailed(e.target.checked) }), `仅看失败（${all.filter((r) => !r.ok).length}）`),            h('label', { className: 'wb-check' },
+              h('input', { type: 'checkbox', checked: onlyActionable, onChange: (e) => setOnlyActionable(e.target.checked) }),
+              en ? `Needs attention (${actionableCount})` : `仅看需要处理（${actionableCount}）`),
             h(Segmented, {
               value: String(limit),
               onChange: (e) => setLimit(Number(e.target.value)),
@@ -5825,7 +6093,13 @@ body.dark .wb-root,
                   : null),
               h('td', { className: 'num' }, fmtTokens(r.completionTokens || 0)),
               h('td', { className: 'num' }, typeof r.credit === 'number' ? r.credit.toFixed(3) : '—'),
-              h('td', { className: 'wb-req-result' + (r.ok ? '' : ' click'), title: r.ok ? '' : (String(r.error || '').slice(0, 300) + '\n（点击复制完整详情）'), onClick: r.ok ? undefined : () => copyText(JSON.stringify(r, null, 2)) },
+                            h('td', {
+                className: 'wb-req-result' + (r.ok ? '' : ' click'),
+                title: r.ok ? '' : (String(r.error || '').slice(0, 300)
+                  + (failureActionLabel(r.failureAction) ? (en ? '\nSuggested: ' : '\n建议：') + failureActionLabel(r.failureAction) : '')
+                  + (en ? '\n(click to copy full details)' : '\n（点击复制完整详情）')),
+                onClick: r.ok ? undefined : () => copyText(JSON.stringify(r, null, 2)),
+              },
                 r.ok
                   ? '成功'
                   : h(Fragment, null,
@@ -6204,7 +6478,7 @@ body.dark .wb-root,
     }
 
     // ─────────────────────────── 可用模型 / 体检 ───────────────────────────
-    function ModelsPanel({ onStartConsole, busy, sampleModel, onUseModel }) {
+    function ModelsPanel({ onStartConsole, busy, sampleModel, onUseModel, pageStatus }) {
       const { data, error, reload, loading } = useJson('/workbuddy/models', { interval: 120000 });
       // 宽容器用紧凑表格，窄容器用卡片；阈值看面板实际宽度，不看窗口宽度。
       const layoutRef = useRef(null);
@@ -6229,6 +6503,41 @@ body.dark .wb-root,
       const [sortBy, setSortBy] = useState('default');
       const [copiedId, setCopiedId] = useState('');
       const models = data?.models || [];
+      const en = useLang() === 'en';
+      const rateLimit = pageStatus?.bridge?.health?.rateLimit;
+      /** 当前账号最近一次限流对应的模型；只做提示，不禁止选择。 */
+      const rateBadgeFor = (id) => {
+        if (!rateLimit || !id) return null;
+        const quota = rateLimit.quota;
+        if (quota && quota.model === id) {
+          const reset = fmtRateReset(quota.resetAt, en);
+          return {
+            tone: 'warn',
+            label: en ? 'Usage limit' : '额度上限',
+            title: (en ? 'Model usage limit reached' : '该模型用量已达上限')
+              + (reset ? (en ? '; resets ' : '，预计 ') + reset : '')
+              + (en ? '. Switch model or account.' : '；可换模型或换账号。'),
+          };
+        }
+        const busy = rateLimit.modelBusy;
+        if (busy && busy.model === id) {
+          return {
+            tone: 'warn',
+            label: en ? 'Model busy' : '模型繁忙',
+            title: en ? 'Model-level busy; switch model or retry later.' : '模型级繁忙；换模型或稍后重试。',
+          };
+        }
+        const queue = rateLimit.queue;
+        if (queue && queue.model === id) {
+          const where = Number.isFinite(queue.position) ? (en ? ' · position ' : ' · 第 ') + queue.position + (en ? '' : ' 位') : '';
+          return {
+            tone: 'warn',
+            label: en ? 'Queued' : '排队中',
+            title: (en ? 'Model queue' : '模型排队') + where + (en ? '; resend later or switch model.' : '；稍后重发或换模型。'),
+          };
+        }
+        return null;
+      };
       const unofficialCount = models.filter((m) => m.official === false).length;
       const results = probes?.results || {};
       useEffect(() => {
@@ -7028,6 +7337,7 @@ body.dark .wb-root,
                 })),
                 h('td', null, m.id + (m.id === sampleModel ? ' ★' : '')),
                 h('td', null, m.name ? h(Raw, { text: String(m.name) }) : '',
+                  (() => { const b = rateBadgeFor(m.id); return b ? h('span', { className: 'wb-badge ' + b.tone, title: b.title }, b.label) : null; })(),
                   denied.includes(m.id) ? h('span', { className: 'wb-badge', title: '配置的 modelDeny 排除了它' }, '配置排除') : null,
                   m.official === false
                     ? h('span', {
@@ -7109,7 +7419,7 @@ body.dark .wb-root,
                         h('div', null,
                           h('strong', null, '常用参数'),
                           h('p', { className: 'wb-note' }, '修改只作用于本插件发出的请求，不改 WorkBuddy 客户端。')),
-                        h('span', { className: 'wb-badge wb-model-detail-id' }, m.id)),
+                        h('span', { className: 'wb-badge wb-model-detail-id' }, m.id)),                      (() => { const b = rateBadgeFor(m.id); return b ? h('p', { className: 'wb-alert', style: { margin: '8px 0 0' } }, b.title) : null; })(),
                       (() => {
                         const state = buildModelDraftState(m);
                         const levels = Array.isArray(m.efforts)
@@ -8061,6 +8371,9 @@ body.dark .wb-root,
       }
       const ratio = size > 0 ? remain / size : null;
       const ratioTone = ratio !== null && ratio <= 0.1 ? 'bad' : ratio !== null && ratio <= 0.3 ? 'warn' : '';
+      const quotaExpiring = quotaExpiringPackages(quota);
+      const quotaExpiry = quotaExpirySummary(quotaExpiring);
+      const expiryTone = quotaExpiry ? (quotaExpiry.days <= 1 ? 'bad' : 'warn') : '';
       // 体检失败不是用户请求失败：胶囊只看真正的对话请求。
       const last = (requestData?.requests || []).find((r) => r.probe !== true);
       const lastAt = Number(last?.t) || 0;
@@ -8084,7 +8397,9 @@ body.dark .wb-root,
           ? (todayBucket && typeof todayBucket.credit === 'number' ? todayBucket.credit : 0)
           : (typeof usageFlat?.total?.credit === 'number' ? usageFlat.total.credit : null));
       // 读取/刷新失败、最近一次请求失败或积分仍属上一个账号 → 红点；其余按套餐余量分级。
-      const tone = error || lastFailed || accountMismatch ? 'bad' : ratioTone;
+      const tone = (error || lastFailed || accountMismatch)
+        ? 'bad'
+        : (ratioTone === 'bad' || expiryTone === 'bad' ? 'bad' : (ratioTone || expiryTone));
       const titleLines = [
         (en ? 'WorkBuddy credits: ' : 'WorkBuddy 积分余额：')
           + (unlimited ? (en ? '∞ (unlimited)' : '∞（不限量）') : fmtInt(total))
@@ -8093,6 +8408,11 @@ body.dark .wb-root,
           ? (en ? 'These credits still belong to the previous account; refreshing…' : '积分还是上一个账号的，正在自动重读…')
           : '',
         ratio !== null ? (en ? 'Package remaining: ' : '套餐余量：') + Math.round(ratio * 100) + '%' : '',
+        quotaExpiry
+          ? (en
+            ? `Expiring: ${quotaQty(quotaExpiry.remain)} credits ${fmtQuotaRelative(quotaExpiry.days, true)} (${fmtQuotaDate(quotaExpiry.ms)})`
+            : `到期提醒：${quotaQty(quotaExpiry.remain)} 积分${quotaExpiry.days <= 1 ? fmtQuotaRelative(quotaExpiry.days, false) + '到期' : '将在 ' + fmtQuotaRelative(quotaExpiry.days, false) + '到期'}（${fmtQuotaDate(quotaExpiry.ms)}）`)
+          : '',
         today !== null
           ? (en
             ? (usageBuckets ? 'Used today: ' : 'Used in the last 24h: ')
@@ -8119,6 +8439,7 @@ body.dark .wb-root,
         'aria-label': title,
         'aria-busy': busy ? 'true' : 'false',
         'data-workbuddy-quota': String(total),
+        'data-workbuddy-quota-expiring': quotaExpiry ? '1' : undefined,
         disabled: busy,
         onClick: refresh,
       },
@@ -8795,7 +9116,7 @@ body.dark .wb-root,
         },
           tab === 'overview' ? h(OverviewPanel, panelProps) : null,
           tab === 'accounts' ? h(AccountsPanel, { onStartConsole: startConsole, busy, reloadStatus, pageStatus: status }) : null,
-          tab === 'usage' ? h(UsagePanel, null) : null,
+          tab === 'usage' ? h(UsagePanel, { onOpenTab: switchTab }) : null,
           tab === 'requests' ? h(RequestsPanel, null) : null,
           tab === 'checkin' ? h(CheckinPanel, {
             onStartConsole: startConsole,
@@ -8816,6 +9137,7 @@ body.dark .wb-root,
             onStartConsole: startConsole,
             busy,
             sampleModel: status?.sampleModel,
+            pageStatus: status,
             onUseModel: (id) => { setChatModel(id); switchTab('chat'); },
           }) : null,
           tab === 'chat' ? h(ChatPanel, {

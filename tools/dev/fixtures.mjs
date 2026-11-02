@@ -134,6 +134,12 @@ export function consoleFixture() {
  */
 export function quotaFixture({ total = 715 } = {}) {
   if (total === null) return null;
+  const stampInDays = (days) => {
+    const d = new Date(Date.now() + days * 86_400_000);
+    const p = (n) => String(n).padStart(2, '0');
+    return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate())
+      + ' ' + p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
+  };
   return {
     ok: true,
     total,
@@ -157,7 +163,8 @@ export function quotaFixture({ total = 715 } = {}) {
     packages: [
       { name: 'CodeBuddy个人体验版', remain: 18, size: 20 },
       { name: 'CodeBuddy个人版拉新权益包', remain: 100, size: 100 },
-      { name: 'CodeBuddy个人版国内运营裂变包', remain: 100, size: 100 },
+      // 3 天后到期：控制台积分卡要出现到期提醒，且不新增卡片。
+      { name: 'CodeBuddy个人版国内运营裂变包', remain: 100, size: 100, expiresAt: stampInDays(3) },
     ],
     productCode: 'wb',
   };
