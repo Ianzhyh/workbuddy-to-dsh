@@ -4100,7 +4100,7 @@ async function mediaAuth(prefix) {
 async function quotaBalance(auth) {
   try {
     // 估算不该给提交添两次最长 15 秒的等待：读不到余额就放弃，creditEstimate=null。
-    const quota = await fetchQuota(auth, { timeoutMs: 5000 });
+    const quota = await fetchQuota(auth, { timeoutMs: QUOTA_BALANCE_TIMEOUT_MS });
     return typeof quota?.total === 'number' ? quota.total : null;
   } catch {
     return null;
@@ -9705,13 +9705,19 @@ function billingHeaders(auth) {
   };
 }
 
-/** 向计费网关发一次 POST，返回解包后的 data。 */
-async function billingPost(auth, path, body = {}) {
+/**
+ * 向计费网关发一次 POST，返回解包后的 data。
+ *
+ * `timeoutMs` 必须能被调用方收紧：积分余额会在媒体提交前后各读一次，
+ * 那两处要的是 5 秒预算（见 `quotaBalance`），不能因为签到之类的调用需要
+ * 宽裕一点就把提交路径也拖成 15 秒。
+ */
+async function billingPost(auth, path, body = {}, { timeoutMs = 15000 } = {}) {
   const res = await fetch(`${billingBase(auth)}${path}`, {
     method: 'POST',
     headers: billingHeaders(auth),
     body: JSON.stringify(body),
-    signal: AbortSignal.timeout(15000),
+    signal: AbortSignal.timeout(timeoutMs),
   });
   const envelope = await res.json().catch(() => null);
   if (!res.ok || !envelope || envelope.code !== 0) {
@@ -10027,11 +10033,30 @@ function startAutoCheckinTimer() {
 
 
 /**
- * 只读查询积分余额（按套餐聚合）。
+ * 读一次余额的**总预算**（企业接口 + 可能的个人套餐回退共用这一份）。
  *
- * 该端点不会消耗积分，可安全地按需调用。月度套餐（CapacityType=4）看
- * CycleCapacityRemain，一次性套餐看 CapacityRemain。
+ * 抽成环境变量是为了能被压到毫秒级做回归测试：测试要验证的正是
+ * 「企业接口超时后回退只花剩下的时间」，而这个行为在 15 秒尺度上没法断言。
  */
+const QUOTA_TIMEOUT_MS = numEnv('WORKBUDDY_QUOTA_TIMEOUT_MS', 15_000, { min: 100 });
+
+/**
+ * 回退到个人套餐端点的最低剩余预算。
+ *
+ * 企业接口若把预算吃干（超时），剩下的几毫秒不可能拿到结果，直接放弃回退，
+ * 而不是发一个注定被 abort 的请求。企业接口**快速失败**时剩余预算充足，
+ * 回退照常工作。
+ */
+const MIN_QUOTA_FALLBACK_MS = 250;
+
+/**
+ * `quotaBalance()` 用的预算（媒体提交前后各读一次）。
+ *
+ * 5000 是刻意小的：这两次读取串在提交链路上，读不到余额就放弃，
+ * 不该让一次提交在估算上先花掉十几秒。
+ */
+const QUOTA_BALANCE_TIMEOUT_MS = numEnv('WORKBUDDY_QUOTA_BALANCE_TIMEOUT_MS', 5_000, { min: 100 });
+
 /**
  * 企业/教育账号的配额。
  *
@@ -10040,8 +10065,13 @@ function startAutoCheckinTimer() {
  * 上游客户端对企业号改走 `get-enterprise-user-usage`（limitNum 总额、credit 已用），
  * 这里对齐同一口径，避免把可用余额误报成 0。
  */
-async function fetchEnterpriseQuota(auth) {
-  const data = await billingPost(auth, '/v2/billing/meter/get-enterprise-user-usage');
+async function fetchEnterpriseQuota(auth, { timeoutMs = QUOTA_TIMEOUT_MS } = {}) {
+  const data = await billingPost(
+    auth,
+    '/v2/billing/meter/get-enterprise-user-usage',
+    {},
+    { timeoutMs },
+  );
   const usage = data?.Response?.Data && typeof data.Response.Data === 'object' ? data.Response.Data : data;
   const limit = Number(usage?.limitNum);
   if (!Number.isFinite(limit)) throw new Error('enterprise usage response has no limitNum');
@@ -10068,11 +10098,35 @@ async function fetchEnterpriseQuota(auth) {
   return result;
 }
 
-async function fetchQuota(auth, { timeoutMs = 15000 } = {}) {
+/**
+ * 只读查询积分余额（按套餐聚合）。
+ *
+ * 该端点不会消耗积分，可安全地按需调用。月度套餐（CapacityType=4）看
+ * CycleCapacityRemain，一次性套餐看 CapacityRemain。
+ */
+async function fetchQuota(auth, { timeoutMs = QUOTA_TIMEOUT_MS } = {}) {
+  /*
+   * 预算按**整次读取**算，不是每个端点各给一份。
+   *
+   * `quotaBalance()` 在媒体提交前后各调一次，传的是 5000ms；若企业接口
+   * 独占 5s、失败回退个人套餐再独占 5s，一次读余额就能占掉 10s（20s 的
+   * 上限由此而来）。先落一个 deadline，回退时只花剩下的时间。
+   */
+  const deadline = Date.now() + timeoutMs;
+  const remaining = () => Math.max(1, deadline - Date.now());
   if (auth.enterpriseId) {
     try {
-      return await fetchEnterpriseQuota(auth);
+      return await fetchEnterpriseQuota(auth, { timeoutMs: remaining() });
     } catch (e) {
+      /*
+       * 预算已经耗光就别再撞一次上游：剩下的几毫秒只会变成一个必然被
+       * abort 的请求，既拿不到余额，还可能在上游侧留下一条无意义的调用。
+       * 直接把企业接口的错抛出去 —— 调用方本来就要处理"读不到余额"。
+       */
+      if (remaining() < MIN_QUOTA_FALLBACK_MS) {
+        log('enterprise quota failed and budget is spent; not falling back', e.message);
+        throw e;
+      }
       log('enterprise quota failed; falling back to personal packages', e.message);
     }
   }
@@ -10098,7 +10152,9 @@ async function fetchQuota(auth, { timeoutMs = 15000 } = {}) {
       PackageEndTimeRangeBegin: fmt(now),
       PackageEndTimeRangeEnd: fmt(new Date(now.getTime() + 3185136e6)),
     }),
-    signal: AbortSignal.timeout(timeoutMs),
+    // 与 `timeoutMs` 同义，但按剩余预算算：企业接口已经失败过一次时
+    // 不能再给它一整个超时窗口。
+    signal: AbortSignal.timeout(remaining()),
   });
 
   const body = await res.json().catch(() => null);
