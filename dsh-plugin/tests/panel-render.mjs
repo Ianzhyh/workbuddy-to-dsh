@@ -614,6 +614,94 @@ try {
     if (quotaCard.bars !== quotaCard.packages) problems.push(`套餐进度条数量（${quotaCard.bars}）与套餐数（${quotaCard.packages}）不一致`);
     console.log(`积分卡：数字 ${quotaCard.totalFontSize}px，${quotaCard.packages} 种套餐，${quotaCard.bars} 条进度条${quotaCard.merged ? '（同名套餐已合并）' : ''}`);
   }
+
+  /*
+   * 不限量（企业/教育账号）：桥用 total=-1 + unlimited=true 表示。
+   * 面板必须显示 ∞ —— 不能把 -1 当负数余额，也不能因为 packages 为空
+   * 提示"还没有读到套餐明细"（那会让人以为读取失败）。
+   */
+  const unlimitedQuota = await page.cdp.evaluate(`(async () => {
+    const cardHost = document.createElement('div');
+    document.body.appendChild(cardHost);
+    const cardRoot = ReactDOM.createRoot(cardHost);
+    cardRoot.render(React.createElement(window.__module.QuotaCard, {
+      status: {
+        quota: { ok: true, total: -1, unlimited: true, packages: [] },
+        quotaError: '', quotaAccount: 'acct-unlimited', bridgeAccount: 'acct-unlimited',
+      },
+      reload() {}, busy: false, onOpenTab() {},
+    }));
+    await new Promise((r) => setTimeout(r, 300));
+    const card = cardHost.querySelector('.wb-quota');
+    const cardText = card ? card.innerText : '';
+    const cardTotal = card && card.querySelector('.wb-quota-total')
+      ? card.querySelector('.wb-quota-total').textContent : '';
+    cardRoot.unmount();
+    cardHost.remove();
+
+    const orig = window.__routes['/workbuddy/quota'];
+    window.__setRoute('/workbuddy/quota', {
+      ok: true,
+      quota: { ok: true, total: -1, unlimited: true, packages: [] },
+      quotaError: '', at: new Date().toISOString(), bridgeState: 'running',
+      quotaAccount: 'acct-unlimited', bridgeAccount: 'acct-unlimited',
+    });
+    const pillHost = document.createElement('div');
+    document.body.appendChild(pillHost);
+    const pillRoot = ReactDOM.createRoot(pillHost);
+    pillRoot.render(React.createElement(window.__module.ChatQuotaPill));
+    await new Promise((r) => setTimeout(r, 700));
+    const pill = pillHost.querySelector('[data-workbuddy-quota]');
+    const pillText = pill ? pill.textContent : '';
+    pillRoot.unmount();
+    pillHost.remove();
+    window.__setRoute('/workbuddy/quota', orig);
+    return { cardText, cardTotal, pillText };
+  })()`);
+  if (unlimitedQuota.cardTotal !== '∞') {
+    problems.push(`不限量账号的积分卡必须显示 ∞，实际 ${JSON.stringify(unlimitedQuota.cardTotal)}`);
+  }
+  if (!/不限量/.test(unlimitedQuota.cardText)) problems.push('不限量账号的积分卡没有说明额度不限量');
+  if (/-1/.test(unlimitedQuota.cardText)) problems.push('不限量账号的积分卡把 -1 当余额显示了');
+  if (!/∞/.test(unlimitedQuota.pillText)) {
+    problems.push(`不限量账号的聊天积分胶囊没有显示 ∞：${JSON.stringify(unlimitedQuota.pillText)}`);
+  }
+  console.log(`不限量：积分卡 ${unlimitedQuota.cardTotal}，胶囊 ${JSON.stringify(unlimitedQuota.pillText)}`);
+
+  /*
+   * 用量页的「账实核对」：不限量账号不能拿 -1 快照算差额
+   * （两个 -1 相减 = 0，会显示成"余额没动过"的假账）。
+   */
+  const unlimitedUsage = await page.cdp.evaluate(`(async () => {
+    const now = Date.now();
+    const origQuota = window.__routes['/workbuddy/quota'];
+    window.__setRoute('/workbuddy/quota', {
+      ok: true,
+      quota: {
+        ok: true, total: -1, unlimited: true, packages: [],
+        history: [
+          { t: now - 2 * 3600 * 1000, account: 'acct-unlimited', total: -1, packages: [] },
+          { t: now - 1 * 3600 * 1000, account: 'acct-unlimited', total: -1, packages: [] },
+        ],
+      },
+      quotaError: '', at: new Date().toISOString(), bridgeState: 'running',
+      quotaAccount: 'acct-unlimited', bridgeAccount: 'acct-unlimited',
+    });
+    const host = document.createElement('div');
+    document.body.appendChild(host);
+    const root = ReactDOM.createRoot(host);
+    root.render(React.createElement(window.__module.UsagePanel));
+    await new Promise((r) => setTimeout(r, 1200));
+    const text = host.textContent || '';
+    root.unmount();
+    host.remove();
+    window.__setRoute('/workbuddy/quota', origQuota);
+    return text;
+  })()`);
+  if (!/不限量/.test(unlimitedUsage)) problems.push('用量页没有说明不限量账号不参与账实核对');
+  if (/余额变化 -?\d/.test(unlimitedUsage)) {
+    problems.push('用量页把不限量账号的 -1 快照算成了余额变化');
+  }
   const beforeQuota = await inspect(page.cdp);
   await page.cdp.evaluate(`(() => { const b=[...document.querySelectorAll('.wb-btn')].find(x=>x.textContent.includes('刷新积分')); if(b) b.click(); return !!b; })()`);
   await sleep(900);

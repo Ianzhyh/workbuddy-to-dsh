@@ -31,7 +31,7 @@ vendor 指纹、诊断项与最近失败归因；**不含令牌、密钥、对�
 |---|---|
 | `state.json` | 账号钉住、签到偏好、账号排序/隐藏 |
 | `usage.jsonl` | 本地用量账本（只含元数据） |
-| `quota-history.jsonl` | 最近 30 天余额快照（账实核对用） |
+| `quota-history.jsonl` | 余额快照（账实核对用；`/v1/quota` 返回最近 7 天，文件最多保留 4000 行） |
 | `media-tasks.json` | 媒体任务元数据（同步任务重启后仍可查；不含 prompt） |
 | `bridge-token` | 本地回环令牌（旧客户端配置里填的就是它） |
 | `credentials/` | 插件登录凭据（Windows DPAPI / 其他平台文件密钥 + AES-GCM 信封） |

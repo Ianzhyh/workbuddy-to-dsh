@@ -216,7 +216,12 @@ if (bridgePortState.state === 'ours' || bridgePortState.state === 'degraded') {
     const count = Array.isArray(models) ? models.length : (models.data || []).length;
     record(count > 0 ? 'ok' : 'warn', '模型目录', `桥报告 ${count} 个模型`, count > 0 ? null : '桥连上了但目录为空：检查 WorkBuddy 登录是否过期');
     const quota = await (await fetch(`http://127.0.0.1:${bridgePort}/v1/quota`, { headers, signal: AbortSignal.timeout(8000) })).json();
-    record('ok', '积分', typeof quota.total === 'number' ? `余额 ${quota.total}（${(quota.packages || []).length} 个套餐）` : '已读取（无 total 字段）', null);
+    const unlimited = quota.unlimited === true || (typeof quota.total === 'number' && quota.total < 0);
+    record('ok', '积分',
+      unlimited
+        ? '余额不限量（企业/教育额度）'
+        : (typeof quota.total === 'number' ? `余额 ${quota.total}（${(quota.packages || []).length} 个套餐）` : '已读取（无 total 字段）'),
+      null);
   } catch (error) {
     record('warn', '桥接口', `调用失败：${error.message}`, '看 bridge/bridge.log 的最后几行');
   }

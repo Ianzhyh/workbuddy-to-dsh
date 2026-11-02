@@ -343,7 +343,8 @@ export function createTools(deps) {
       if (state.quota?.ok) {
         const q = state.quota;
         const bits = [];
-        if (typeof q.total === 'number') bits.push(`总计 ${q.total}`);
+        if (q.unlimited === true || (typeof q.total === 'number' && q.total < 0)) bits.push('总计 不限量');
+        else if (typeof q.total === 'number') bits.push(`总计 ${q.total}`);
         for (const p of q.packages || []) bits.push(`${p.name} ${p.remain}/${p.size}`);
         if (bits.length) {
           // 归属核对：积分的账号与桥当前账号不一致时必须提醒（换号后缓存尚未换新），

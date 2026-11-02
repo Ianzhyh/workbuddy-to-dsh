@@ -1930,7 +1930,9 @@ export function apply(ctx, rawConfig = {}) {
                 `路由：${snap.route.registered ? `已注册 provider=${snap.route.provider}` : `未注册（${snap.route.error}）`}`,
                 `模型：桥目录 ${snap.directory.length} 个`,
                 `控制台：${snap.console.state === 'running' ? snap.console.url : `未运行（${snap.console.error || '未启动'}）`}`,
-                snap.quota?.total !== undefined ? `积分：${snap.quota.total}` : '',
+                snap.quota && (snap.quota.unlimited === true || (typeof snap.quota.total === 'number' && snap.quota.total < 0))
+                  ? '积分：不限量'
+                  : (snap.quota?.total !== undefined ? `积分：${snap.quota.total}` : ''),
                 snap.legacy.found ? `注意：仍有旧路由 ${snap.legacy.files.join('、')}（用 /workbuddy cleanup 清理）` : '',
               ].filter(Boolean);
               return { kind: 'success', text: lines.join('\n') };
