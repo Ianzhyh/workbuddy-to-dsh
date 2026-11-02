@@ -1007,6 +1007,7 @@ const I18N_EN = {
   '上游端点': 'Upstream endpoint',
   '桥进程': 'Bridge process',
   '积分余额': 'Credit balance',
+  '不限量': 'Unlimited',
   'DSH 配置': 'DSH config',
   '调用次数': 'Calls',
   '搜索次数': 'Search calls',
@@ -2025,6 +2026,8 @@ const I18N_TERMS_EN = {
   'CodeBuddy个人版拉新权益包': 'CodeBuddy Personal Referral Pack',
   'CodeBuddy个人版国内运营裂变包': 'CodeBuddy Personal Domestic Viral Pack',
   'CodeBuddy个人体验版': 'CodeBuddy Personal Trial',
+  // 企业/教育号（桥的 `/v1/quota` 会返回这个套餐名）
+  '企业/教育月度额度': 'Enterprise/education monthly quota',
   // 兜底：上游换一个新套餐类型时，至少把「个人版 / 个人体验版」这半截换掉
   '个人体验版': ' Personal Trial',
   '个人版': ' Personal',
@@ -6382,9 +6385,16 @@ function renderCards() {
 
   if (d.quota) {
     const pkgs = d.quota.packages || [];
-    const detail = pkgs.slice(0, 2).map(p => p.name + ' ' + p.remain + '/' + p.size).join(' · ')
-      + (pkgs.length > 2 ? ' 等 ' + pkgs.length + ' 个套餐' : '');
-    cards.push(card('积分余额', String(d.quota.total), detail || '无套餐', false, 'warn'));
+    /*
+     * 企业/教育不限量账号：桥用 total = -1 + unlimited = true 表示。
+     * 把它当普通余额会显示成负数；套餐列表也是空的，不能因此写「无套餐」。
+     */
+    const unlimited = d.quota.unlimited === true || Number(d.quota.total) < 0;
+    const detail = unlimited
+      ? '不限量'
+      : (pkgs.slice(0, 2).map(p => p.name + ' ' + p.remain + '/' + p.size).join(' · ')
+        + (pkgs.length > 2 ? ' 等 ' + pkgs.length + ' 个套餐' : ''));
+    cards.push(card('积分余额', unlimited ? '∞' : String(d.quota.total), detail || '无套餐', false, 'warn'));
   } else {
     cards.push(card('积分余额', '—', '桥未运行或查询失败', true, 'muted'));
   }

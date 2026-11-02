@@ -1085,11 +1085,15 @@ body.dark .wb-root,
 
       // ── 积分 ──
       '积分余额': 'Credit balance',
+      '不限量': 'Unlimited',
       '刷新积分': 'Refresh credits',
       '读取失败：': 'Failed to read: ',
       '刷新失败：': 'Refresh failed: ',
       '已刷新（': 'Refreshed (',
       '还没有读到套餐明细': 'No package details read yet',
+      '不限量（企业/教育额度）': 'Unlimited (enterprise/education quota)',
+      '该账号额度不限量，余额变化不参与账实核对。':
+        'This account has unlimited quota; balance changes are not part of reconciliation.',
       '⚠ 积分还是上一个账号的（正在自动重读）—— 缓存': '⚠ Credits still belong to the previous account (re-reading automatically) — cache',
       '… / 桥': '… / bridge',
       '…（与桥一致）': '… (matches the bridge)',
@@ -1890,6 +1894,8 @@ body.dark .wb-root,
       'CodeBuddy个人版拉新权益包': 'CodeBuddy Personal Referral Pack',
       'CodeBuddy个人版国内运营裂变包': 'CodeBuddy Personal Domestic Viral Pack',
       'CodeBuddy个人体验版': 'CodeBuddy Personal Trial',
+      // 企业/教育号（桥的 `/v1/quota` 会返回这个套餐名）
+      '企业/教育月度额度': 'Enterprise/education monthly quota',
       // 兜底：上游换一个新套餐类型时，至少把「个人版 / 个人体验版」这半截换掉
       '个人体验版': ' Personal Trial',
       '个人版': ' Personal',
@@ -2555,6 +2561,9 @@ body.dark .wb-root,
 
     // ─────────────────────────── 格式化 / 导出 ───────────────────────────
     const fmtInt = (n) => (typeof n === 'number' && isFinite(n) ? n.toLocaleString('zh-CN') : '—');
+    /** 企业/教育不限量账号：桥用 total < 0 表示，不能当成负数余额展示。 */
+    const quotaIsUnlimited = (q) => Boolean(q)
+      && (q.unlimited === true || (typeof q.total === 'number' && q.total < 0));
     /** 积分：最多 3 位小数，去掉无意义的尾零；极小值不显示成 0。 */
     const fmtCreditShort = (n) => {
       const value = Number(n);
@@ -4023,7 +4032,7 @@ body.dark .wb-root,
           '目录：' + (status?.directory || []).length + ' 个模型',
           '路由：' + (status?.route?.registered ? '已注册 provider=' + status.route.provider : '未注册 ' + (status?.route?.error || '')),
           '控制台：' + (con.state || '?') + ' ' + (con.url || ''),
-          '积分：' + (quota?.total !== undefined ? quota.total : '(未读取)'),
+          '积分：' + (quotaIsUnlimited(quota) ? '∞（不限量）' : (quota?.total !== undefined ? quota.total : '(未读取)')),
           '检出目录：' + (status?.config?.projectRoot || ''),
         ];
         copyText(lines.join('\n'));
@@ -4216,6 +4225,7 @@ body.dark .wb-root,
       const quota = status?.quota;
       const error = status?.quotaError || (quota && quota.ok === false ? String(quota.error || '读取失败') : '');
       const total = typeof quota?.total === 'number' ? quota.total : null;
+      const unlimited = quotaIsUnlimited(quota);
       const needsLogin = status?.bridge?.state === 'unauthenticated';
       /** 缓存的积分属于账号 X、桥却登录着账号 Y → 显示不匹配警告（正常情况两者一致或尚未探测到） */
       const accountMismatch = Boolean(
@@ -4274,15 +4284,17 @@ body.dark .wb-root,
         h('div', { className: 'wb-quota-head' },
           h('div', { style: { minWidth: 0 } },
             h('span', { className: 'wb-quota-label' }, '积分余额'),
-            h('div', { className: 'wb-quota-total' }, total === null ? '—' : fmtInt(total)),
+            h('div', { className: 'wb-quota-total' }, unlimited ? '∞' : (total === null ? '—' : fmtInt(total))),
             h('div', { className: 'wb-note', style: { margin: '2px 0 0' } },
               needsLogin
                 ? '登录后显示积分余额'
                 : (error
                   ? '读取失败：' + error
-                  : (packages.length
-                    ? `${packages.length} 种套餐${status?.quotaAt ? ' · 更新于 ' + fmtClock(status.quotaAt) : ''}`
-                    : '还没有读到套餐明细'))),
+                  : (unlimited
+                    ? '不限量（企业/教育额度）'
+                    : (packages.length
+                      ? `${packages.length} 种套餐${status?.quotaAt ? ' · 更新于 ' + fmtClock(status.quotaAt) : ''}`
+                      : '还没有读到套餐明细')))),
             accountMismatch
               ? h('div', { className: 'wb-note', style: { margin: '2px 0 0', color: '#b45309' } },
                 '⚠ 积分还是上一个账号的（正在自动重读）—— 缓存 ' + String(status?.quotaAccount || '?').slice(0, 8) + '… / 桥 ' + String(status?.bridgeAccount || '?').slice(0, 8) + '…')
@@ -5289,16 +5301,20 @@ body.dark .wb-root,
       const imageCreditKnown = Number(total.imageCreditKnown) || 0;
       const windowStart = Date.now() - days * 86400000;
       // /workbuddy/quota 的桥响应可能直接摊平，也可能套在 {quota:{...}} 里。
+      const quotaFlat = quotaData?.quota && typeof quotaData.quota === 'object' ? quotaData.quota : quotaData;
+      const quotaUnlimited = quotaIsUnlimited(quotaFlat);
       const quotaHistory = Array.isArray(quotaData?.history)
         ? quotaData.history
         : (Array.isArray(quotaData?.quota?.history) ? quotaData.quota.history : []);
       const quotaSnapshots = quotaHistory
         .filter((row) => Number(row?.t) >= windowStart)
+        // -1 是不限量的占位，不是余额；老版本桥可能已经写进历史，读取时也滤掉。
+        .filter((row) => Number.isFinite(Number(row?.total)) && Number(row.total) >= 0)
         .sort((a, b) => Number(a.t) - Number(b.t));
       // `balanceDelta` = 最早 − 最新 = **消耗**（正数）；展示成"余额变化"时符号要反过来。
-      const balanceDelta = quotaSnapshots.length >= 2
-        ? Number(quotaSnapshots[0].total) - Number(quotaSnapshots[quotaSnapshots.length - 1].total)
-        : null;
+      const balanceDelta = quotaUnlimited || quotaSnapshots.length < 2
+        ? null
+        : Number(quotaSnapshots[0].total) - Number(quotaSnapshots[quotaSnapshots.length - 1].total);
       const balanceChange = balanceDelta === null ? null : -balanceDelta;
       const ledgerCredit = Number(total.credit) || 0;
       const reconcileDiff = balanceDelta === null
@@ -5505,15 +5521,17 @@ body.dark .wb-root,
             h('div', { className: 'wb-usage-details-body' },
               noteLine1 ? h('p', { className: 'wb-note' }, noteLine1) : null,
               noteLine2 ? h('p', { className: 'wb-note' }, noteLine2) : null,
-              h('p', { className: 'wb-note' },
-                '账实核对：余额变化 ',
-                balanceChange === null ? '—' : (balanceChange >= 0 ? '+' : '') + balanceChange.toFixed(2),
-                '，本地账本 ',
-                ledgerCredit.toFixed(2),
-                '，差额 ',
-                reconcileDiff === null ? '—' : (reconcileDiff >= 0 ? '+' : '') + reconcileDiff.toFixed(2),
-                '；差额可能是客户端内使用/其他工具/估算，不是账单。'),
-              quotaSnapshots.length < 2
+              quotaUnlimited
+                ? h('p', { className: 'wb-note' }, '该账号额度不限量，余额变化不参与账实核对。')
+                : h('p', { className: 'wb-note' },
+                  '账实核对：余额变化 ',
+                  balanceChange === null ? '—' : (balanceChange >= 0 ? '+' : '') + balanceChange.toFixed(2),
+                  '，本地账本 ',
+                  ledgerCredit.toFixed(2),
+                  '，差额 ',
+                  reconcileDiff === null ? '—' : (reconcileDiff >= 0 ? '+' : '') + reconcileDiff.toFixed(2),
+                  '；差额可能是客户端内使用/其他工具/估算，不是账单。'),
+              !quotaUnlimited && quotaSnapshots.length < 2
                 ? h('p', { className: 'wb-note' }, '余额快照不足两条，账实差额暂时显示 —（桥运行后按小时采集）。')
                 : null,
               failureKindEntries.length
@@ -7940,6 +7958,7 @@ body.dark .wb-root,
       }, [data]);
       const quota = (data?.quota && typeof data.quota.total === 'number') ? data.quota : lastGood.current?.quota;
       const total = quota && typeof quota.total === 'number' ? quota.total : null;
+      const unlimited = quotaIsUnlimited(quota);
       const stale = !(data?.quota && typeof data.quota.total === 'number');
       // 与面板同一口径：缓存里的积分属于哪个账号，必须能看出来（换号后的过渡态）。
       const accountMismatch = Boolean(
@@ -8055,7 +8074,8 @@ body.dark .wb-root,
       // 读取/刷新失败、最近一次请求失败或积分仍属上一个账号 → 红点；其余按套餐余量分级。
       const tone = error || lastFailed || accountMismatch ? 'bad' : ratioTone;
       const titleLines = [
-        (en ? 'WorkBuddy credits: ' : 'WorkBuddy 积分余额：') + fmtInt(total)
+        (en ? 'WorkBuddy credits: ' : 'WorkBuddy 积分余额：')
+          + (unlimited ? (en ? '∞ (unlimited)' : '∞（不限量）') : fmtInt(total))
           + (stale && !error ? (en ? ' (cached)' : '（缓存）') : ''),
         accountMismatch
           ? (en ? 'These credits still belong to the previous account; refreshing…' : '积分还是上一个账号的，正在自动重读…')
@@ -8091,7 +8111,7 @@ body.dark .wb-root,
         onClick: refresh,
       },
       h('span', { className: 'wb-chat-quota-dot', 'aria-hidden': 'true' }),
-      (en ? 'Credits ' : '积分 ') + fmtInt(total));
+      (en ? 'Credits ' : '积分 ') + (unlimited ? '∞' : fmtInt(total)));
     }
 
     /**
@@ -8878,6 +8898,8 @@ body.dark .wb-root,
     exports.csvCell = csvCell;
     exports.getJson = getJson;
     exports.postJson = postJson;
+    exports.QuotaCard = QuotaCard;
+    exports.UsagePanel = UsagePanel;
     return module.exports;
   }
 

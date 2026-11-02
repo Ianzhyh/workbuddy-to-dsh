@@ -2668,7 +2668,9 @@ function publicCredential(cred) {
     uid: cred.uid,
     region: cred.region || '',
     nickname: cred.nickname || '',
-    enterpriseId: cred.enterpriseId || '',
+    // 与生效凭据同口径：老凭据没存企业标识时，从 token claims 补上，
+    // 面板的「企业版」标记才不会漏。
+    enterpriseId: enterpriseIdOfCredential(cred),
     domain: cred.domain || '',
     expiresAt: cred.expiresAtMs ? new Date(cred.expiresAtMs).toISOString() : '',
     updatedAt: cred.updatedAt || '',
@@ -2683,6 +2685,19 @@ async function listPluginCredentials() {
     .sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)));
 }
 
+/**
+ * 企业/教育号标识：与桌面凭据同口径，优先取 access token 的 `enterprise_id`，
+ * 缺失时再用登录接口回填的值。
+ *
+ * 插件登录原先只认 `/v2/plugin/login/account` 的可选字段；接口不返回时企业号
+ * 会退回个人套餐端点、余额重新变成 0。
+ */
+function enterpriseIdOfCredential(cred) {
+  const fromToken = String(decodeJwt(cred?.accessToken || '').enterprise_id || '').trim();
+  if (fromToken) return fromToken;
+  return String(cred?.enterpriseId || '').trim();
+}
+
 function pluginAuthFromCredential(cred) {
   return {
     source: 'plugin',
@@ -2694,7 +2709,7 @@ function pluginAuthFromCredential(cred) {
     expiresAt: Number(cred.expiresAtMs) || 0,
     refreshExpiresAt: Number(cred.refreshExpiresAtMs) || 0,
     userId: cred.uid,
-    enterpriseId: cred.enterpriseId || '',
+    enterpriseId: enterpriseIdOfCredential(cred),
     tenantId: '',
     endpoint: cred.endpoint || (cred.region === 'global' ? 'https://www.workbuddy.ai' : (EXPLICIT_ENDPOINT || 'https://copilot.tencent.com')),
     domain: cred.domain || (cred.region === 'global' ? 'www.workbuddy.ai' : 'www.codebuddy.cn'),
@@ -3208,7 +3223,7 @@ async function pollDeviceLogin(state) {
     uid,
     region: cfg.region,
     nickname: typeof account.nickname === 'string' ? account.nickname : '',
-    enterpriseId: typeof account.enterpriseId === 'string' ? account.enterpriseId : '',
+    enterpriseId: enterpriseIdOfCredential({ enterpriseId: account.enterpriseId, accessToken }),
     accessToken,
     refreshToken,
     expiresAtMs,
@@ -3404,7 +3419,7 @@ async function doRefreshPluginAuth(auth) {
       uid: auth.uid,
       region,
       nickname: auth.nickname || '',
-      enterpriseId: auth.enterpriseId || '',
+      enterpriseId: enterpriseIdOfCredential({ enterpriseId: auth.enterpriseId, accessToken: access }),
       accessToken: next.access,
       refreshToken: next.refresh,
       expiresAtMs: next.expiresAt,
@@ -4099,7 +4114,7 @@ async function mediaAuth(prefix) {
  */
 async function quotaBalance(auth) {
   try {
-    // 估算不该给提交添两次最长 15 秒的等待：读不到余额就放弃，creditEstimate=null。
+    // 估算不该给提交添两次长等待：读不到余额就放弃，creditEstimate=null。
     const quota = await fetchQuota(auth, { timeoutMs: QUOTA_BALANCE_TIMEOUT_MS });
     return typeof quota?.total === 'number' ? quota.total : null;
   } catch {
@@ -8438,7 +8453,11 @@ function quotaHistoryFile() {
     || join(RUNTIME_DATA_DIR, 'quota-history.jsonl');
 }
 function recordQuotaSnapshot(quota, auth) {
-  if (!quota || typeof quota.total !== 'number') return;
+  /*
+   * 不限量账号（total < 0）没有可比较的余额数字。把 -1 写进历史，
+   * 用量页的「账实核对」会拿 -1 当余额，算出一个虚假的差额。
+   */
+  if (!quota || typeof quota.total !== 'number' || quota.total < 0) return;
   const account = auth?.userId || auth?.uid || '';
   const now = Date.now();
   if (lastQuotaSnapshot.account === account && now - lastQuotaSnapshot.at < QUOTA_SNAPSHOT_INTERVAL_MS) return;
@@ -10073,10 +10092,30 @@ async function fetchEnterpriseQuota(auth, { timeoutMs = QUOTA_TIMEOUT_MS } = {})
     { timeoutMs },
   );
   const usage = data?.Response?.Data && typeof data.Response.Data === 'object' ? data.Response.Data : data;
-  const limit = Number(usage?.limitNum);
-  if (!Number.isFinite(limit)) throw new Error('enterprise usage response has no limitNum');
-  const used = Number(usage?.credit);
+  const rawLimit = usage?.limitNum;
+  const limit = Number(rawLimit);
+  /*
+   * `Number(null)` / `Number('')` 都是 0：上游把 limitNum 漏成空值时，
+   * 旧写法会把它当成「额度 0」直接返回，又回到「企业号恒显示 0」。
+   * 空值必须按「没有可用配额数据」处理，交给回退路径。
+   */
+  if (rawLimit === null || rawLimit === undefined
+    || (typeof rawLimit === 'string' && rawLimit.trim() === '')
+    || !Number.isFinite(limit)) {
+    throw new Error('enterprise usage response has no usable limitNum');
+  }
   const unlimited = limit < 0;
+  const rawCredit = usage?.credit;
+  const used = Number(rawCredit);
+  /*
+   * 限额账号的 `credit` 是唯一能算出剩余量的字段；缺失时按 0 处理会把
+   * 「已用未知」报成「一分没用」，余额被高估。不限量账号不依赖它。
+   */
+  if (!unlimited && (rawCredit === null || rawCredit === undefined
+    || (typeof rawCredit === 'string' && rawCredit.trim() === '')
+    || !Number.isFinite(used))) {
+    throw new Error('enterprise usage response has no usable credit');
+  }
   const total = unlimited ? -1 : Math.max(0, limit - (Number.isFinite(used) ? used : 0));
   const result = {
     total,
@@ -10114,6 +10153,8 @@ async function fetchQuota(auth, { timeoutMs = QUOTA_TIMEOUT_MS } = {}) {
    */
   const deadline = Date.now() + timeoutMs;
   const remaining = () => Math.max(1, deadline - Date.now());
+  /** 企业接口的失败原因：回退到个人端点后仍为空时要如实报出去，而不是返回假 0。 */
+  let enterpriseError = null;
   if (auth.enterpriseId) {
     try {
       return await fetchEnterpriseQuota(auth, { timeoutMs: remaining() });
@@ -10127,6 +10168,7 @@ async function fetchQuota(auth, { timeoutMs = QUOTA_TIMEOUT_MS } = {}) {
         log('enterprise quota failed and budget is spent; not falling back', e.message);
         throw e;
       }
+      enterpriseError = e;
       log('enterprise quota failed; falling back to personal packages', e.message);
     }
   }
@@ -10184,6 +10226,13 @@ async function fetchQuota(auth, { timeoutMs = QUOTA_TIMEOUT_MS } = {}) {
     });
   }
   const result = { total, packages, productCode: 'p_tcaca' };
+  if (enterpriseError && total === 0 && packages.length === 0) {
+    /*
+     * 企业接口失败时，个人端点返回空只说明"那边也没有数据"，不代表企业额度是 0。
+     * 把 0 当成功返回，面板会在故障期间显示一个假余额；如实报错。
+     */
+    throw enterpriseError;
+  }
   recordQuotaSnapshot(result, auth);
   return result;
 }
@@ -11204,9 +11253,13 @@ async function handleRequest(req, res) {
           /*
            * 快照按账号分别记录。混着返回时，面板的"账实核对"会拿 A 账号最早
            * 的快照减 B 账号最新的快照 —— 两个钱包相减，差额毫无意义。
+           *
+           * 不限量账号的 -1 也要滤掉：老版本可能已经写入过，两个 -1 相减
+           * 会得到 0，看起来像"余额没动过"。
            */
-          history: readQuotaHistory(7).filter((row) => !row.account
-            || row.account === (auth.userId || auth.uid || '')),
+          history: readQuotaHistory(7)
+            .filter((row) => !row.account || row.account === (auth.userId || auth.uid || ''))
+            .filter((row) => Number(row.total) >= 0),
           snapshotIntervalMs: QUOTA_SNAPSHOT_INTERVAL_MS,
         });
       } catch (e) {

@@ -245,7 +245,11 @@ maxInputTokens 缺失或 <= 0   // 未声明上下文窗口
 
 端点 `POST /v2/billing/meter/get-user-resource`（**只读，不消耗积分**），
 按套餐聚合：月度包看 `CycleCapacityRemain`，一次性包看 `CapacityRemain`。
-桥把它包装成 `GET /v1/quota`，控制台展示总额与套餐明细。
+企业/教育号（凭据带 `enterprise_id`）改走
+`POST /v2/billing/meter/get-enterprise-user-usage`：`limitNum` 是总额、
+`credit` 是已用量，剩余 = `limitNum - credit`；`limitNum < 0` 表示不限量
+（`/v1/quota` 返回 `total: -1` + `unlimited: true`）。企业接口失败时回退个人套餐，
+整次读取共用一份超时预算。桥把这些包装成 `GET /v1/quota`，控制台展示总额与套餐明细。
 
 ### 积分活动（签到）
 

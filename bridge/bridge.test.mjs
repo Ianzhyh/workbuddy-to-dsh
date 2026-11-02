@@ -1499,12 +1499,22 @@ test('/v1/quota：企业/教育账号走企业配额，不能把可用余额显�
  */
 
 /** 起一个"企业接口必失败 + 个人端点计数"的打桩上游。 */
-async function startEnterpriseFallbackUpstream({ enterpriseDelayMs = 0, personalTotal = 42 } = {}) {
+async function startEnterpriseFallbackUpstream({
+  enterpriseDelayMs = 0,
+  personalTotal = 42,
+  enterpriseBody = undefined,
+  personalEmpty = false,
+} = {}) {
   const hits = { enterprise: 0, personal: 0 };
   const server = createServer((req, res) => {
     const path = new URL(req.url, 'http://127.0.0.1').pathname;
     if (path === '/v2/billing/meter/get-enterprise-user-usage') {
       hits.enterprise += 1;
+      // 显式给 body：用于「企业接口成功但字段异常 / 不限量」的用例。
+      if (enterpriseBody !== undefined) {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        return res.end(JSON.stringify(enterpriseBody));
+      }
       // 慢路径：不主动回包，让客户端自己 abort —— 模拟"企业接口无响应"。
       if (enterpriseDelayMs > 0) {
         const timer = setTimeout(() => {
@@ -1525,7 +1535,7 @@ async function startEnterpriseFallbackUpstream({ enterpriseDelayMs = 0, personal
         data: {
           Response: {
             Data: {
-              Accounts: [{
+              Accounts: personalEmpty ? null : [{
                 PackageName: 'stub-package',
                 CapacityType: 4,
                 CycleCapacitySize: 100,
@@ -1609,6 +1619,245 @@ test('/v1/quota：企业接口耗光预算后不再另开一份超时给个人�
   } finally {
     await bridge.stop();
     server.close();
+    rmSync(quotaDir, { recursive: true, force: true });
+  }
+});
+
+test('/v1/quota：不限量企业账号返回 unlimited，且不写负余额快照', { timeout: 90_000 }, async () => {
+  /*
+   * 企业接口用 limitNum < 0 表示不限量。桥保留这个语义（total = -1），
+   * 但绝不能把它写进余额快照：两个 -1 相减得到 0，账实核对会误报「余额没动」。
+   */
+  const { server, hits, port } = await startEnterpriseFallbackUpstream({
+    enterpriseBody: {
+      code: 0,
+      data: { limitNum: -1, credit: 5, cycleEndTime: '2026-11-30 23:59:59' },
+    },
+  });
+  const quotaDir = mkdtempSync(join(tmpdir(), 'wb-quota-unlimited-'));
+  const quotaFile = join(quotaDir, 'quota-history.jsonl');
+  const bridge = await startBridge(
+    {
+      CODEBUDDY_ENDPOINT: `http://127.0.0.1:${port}`,
+      WORKBUDDY_BILLING_BASE: `http://127.0.0.1:${port}`,
+      WORKBUDDY_QUOTA_SNAPSHOT_MS: '0',
+      WORKBUDDY_QUOTA_HISTORY_FILE: quotaFile,
+    },
+    { auth: authFileFor('quota-unlimited', 'example.invalid', { enterprise_id: 'ent-stub' }) },
+  );
+  try {
+    const res = await fetch(bridge.baseUrl + '/v1/quota', { headers: auth, signal: AbortSignal.timeout(15000) });
+    const body = await res.json();
+    assert.equal(res.status, 200);
+    assert.equal(body.ok, true);
+    assert.equal(body.total, -1, '不限量必须保留 total = -1，供消费端识别');
+    assert.equal(body.unlimited, true);
+    assert.deepEqual(body.packages, [], '不限量账号没有可展示的套餐余量');
+    assert.equal(body.used, 5);
+    assert.equal(hits.personal, 0, '企业接口成功时不应回退个人套餐端点');
+    assert.equal(existsSync(quotaFile), false, '不限量账号的 -1 不应写进余额快照');
+  } finally {
+    await bridge.stop();
+    server.close();
+    rmSync(quotaDir, { recursive: true, force: true });
+  }
+});
+
+test('/v1/quota：企业接口 limitNum 为空时必须回退个人套餐', { timeout: 90_000 }, async () => {
+  /*
+   * `Number(null)` 是 0：上游把 limitNum 漏成空值时，旧写法会把它当成
+   * 「额度 0」直接返回，又变成企业号恒显示 0。空值必须视为没有可用配额数据。
+   */
+  const { server, hits, port } = await startEnterpriseFallbackUpstream({
+    enterpriseBody: { code: 0, data: { limitNum: null, credit: 1 } },
+    personalTotal: 33,
+  });
+  const quotaDir = mkdtempSync(join(tmpdir(), 'wb-quota-null-limit-'));
+  const bridge = await startBridge(
+    {
+      CODEBUDDY_ENDPOINT: `http://127.0.0.1:${port}`,
+      WORKBUDDY_BILLING_BASE: `http://127.0.0.1:${port}`,
+      WORKBUDDY_QUOTA_SNAPSHOT_MS: '0',
+      WORKBUDDY_QUOTA_HISTORY_FILE: join(quotaDir, 'quota-history.jsonl'),
+    },
+    { auth: authFileFor('quota-null-limit', 'example.invalid', { enterprise_id: 'ent-stub' }) },
+  );
+  try {
+    const res = await fetch(bridge.baseUrl + '/v1/quota', { headers: auth, signal: AbortSignal.timeout(15000) });
+    const body = await res.json();
+    assert.equal(res.status, 200);
+    assert.equal(body.ok, true);
+    assert.equal(body.total, 33, 'limitNum 为空必须回退个人套餐，不能把 null 折成 0');
+    assert.equal(body.productCode, 'p_tcaca');
+    assert.equal(hits.enterprise, 1);
+    assert.equal(hits.personal, 1);
+  } finally {
+    await bridge.stop();
+    server.close();
+    rmSync(quotaDir, { recursive: true, force: true });
+  }
+});
+
+test('/v1/quota：企业接口 credit 缺失时必须回退个人套餐', { timeout: 90_000 }, async () => {
+  /*
+   * credit 是已用量；缺失时按 0 处理会把「已用未知」报成「一分没用」，
+   * 余额被高估。与 limitNum 一样，缺字段按「没有可用配额数据」处理。
+   */
+  const { server, hits, port } = await startEnterpriseFallbackUpstream({
+    enterpriseBody: { code: 0, data: { limitNum: 2000 } },
+    personalTotal: 44,
+  });
+  const quotaDir = mkdtempSync(join(tmpdir(), 'wb-quota-null-credit-'));
+  const bridge = await startBridge(
+    {
+      CODEBUDDY_ENDPOINT: `http://127.0.0.1:${port}`,
+      WORKBUDDY_BILLING_BASE: `http://127.0.0.1:${port}`,
+      WORKBUDDY_QUOTA_SNAPSHOT_MS: '0',
+      WORKBUDDY_QUOTA_HISTORY_FILE: join(quotaDir, 'quota-history.jsonl'),
+    },
+    { auth: authFileFor('quota-null-credit', 'example.invalid', { enterprise_id: 'ent-stub' }) },
+  );
+  try {
+    const res = await fetch(bridge.baseUrl + '/v1/quota', { headers: auth, signal: AbortSignal.timeout(15000) });
+    const body = await res.json();
+    assert.equal(res.status, 200);
+    assert.equal(body.ok, true);
+    assert.equal(body.total, 44, 'credit 缺失时必须回退个人套餐，不能把余额高估成 2000');
+    assert.equal(body.productCode, 'p_tcaca');
+    assert.equal(hits.enterprise, 1);
+    assert.equal(hits.personal, 1);
+  } finally {
+    await bridge.stop();
+    server.close();
+    rmSync(quotaDir, { recursive: true, force: true });
+  }
+});
+
+test('/v1/quota：企业接口失败且个人套餐为空时要报错，不能假 0', { timeout: 90_000 }, async () => {
+  /*
+   * 企业接口故障时回退个人套餐；个人端点也返回空（Accounts=null）只说明
+   * "那边也没有数据"，不代表企业额度是 0。把 0 当成功返回，面板会在故障
+   * 期间显示一个假余额 —— 宁可报错让用户重试。
+   */
+  const { server, hits, port } = await startEnterpriseFallbackUpstream({ personalEmpty: true });
+  const quotaDir = mkdtempSync(join(tmpdir(), 'wb-quota-fallback-empty-'));
+  const bridge = await startBridge(
+    {
+      CODEBUDDY_ENDPOINT: `http://127.0.0.1:${port}`,
+      WORKBUDDY_BILLING_BASE: `http://127.0.0.1:${port}`,
+      WORKBUDDY_QUOTA_SNAPSHOT_MS: '0',
+      WORKBUDDY_QUOTA_HISTORY_FILE: join(quotaDir, 'quota-history.jsonl'),
+    },
+    { auth: authFileFor('quota-fallback-empty', 'example.invalid', { enterprise_id: 'ent-stub' }) },
+  );
+  try {
+    const res = await fetch(bridge.baseUrl + '/v1/quota', { headers: auth, signal: AbortSignal.timeout(15000) });
+    const body = await res.json();
+    assert.equal(res.status, 502, '两条路径都没有数据时必须如实报错，而不是返回 total: 0');
+    assert.equal(body.ok, false);
+    assert.match(String(body.error), /enterprise endpoint down/);
+    assert.equal(hits.enterprise, 1);
+    assert.equal(hits.personal, 1, '回退仍要尝试一次个人端点，只是空结果不能当余额');
+  } finally {
+    await bridge.stop();
+    server.close();
+    rmSync(quotaDir, { recursive: true, force: true });
+  }
+});
+
+test('/v1/quota：插件登录的企业号从 JWT 的 enterprise_id 兜底', { timeout: 120_000 }, async () => {
+  /*
+   * 插件登录原先只认 /v2/plugin/login/account 返回的可选 enterpriseId；
+   * 接口不返回时，凭据里就没有企业标识，/v1/quota 会退回个人端点、余额恒为 0。
+   * 桌面凭据一直按 JWT 的 enterprise_id 判定，插件路径必须同口径兜底。
+   */
+  const credentialRoot = mkdtempSync(join(tmpdir(), 'wb-quota-plugin-cred-'));
+  const quotaDir = mkdtempSync(join(tmpdir(), 'wb-quota-plugin-'));
+  const accessToken = `e30.${Buffer.from(JSON.stringify({
+    sub: 'uid-enterprise',
+    enterprise_id: 'ent-from-jwt',
+    exp: Math.floor(Date.now() / 1000) + 86_400,
+  })).toString('base64url')}.sig`;
+  const hits = { enterprise: 0, personal: 0, enterpriseHeader: '' };
+  const send = (res, obj) => {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify(obj));
+  };
+  const upstream = createServer((req, res) => {
+    const path = new URL(req.url, 'http://127.0.0.1').pathname;
+    if (path === '/v2/plugin/auth/state') {
+      return send(res, { code: 0, data: { state: 'state-ent', authUrl: 'http://127.0.0.1/login?state=state-ent' } });
+    }
+    if (path === '/v2/plugin/auth/token' && req.method === 'GET') {
+      return send(res, {
+        code: 0,
+        data: { accessToken, refreshToken: 'refresh-ent', expiresIn: 86_400, domain: 'www.codebuddy.cn' },
+      });
+    }
+    if (path === '/v2/plugin/login/account') {
+      // 故意不返回 enterpriseId：兜底只能来自 JWT claims。
+      return send(res, { code: 0, data: { uid: 'uid-enterprise' } });
+    }
+    if (path === '/v2/billing/meter/get-enterprise-user-usage') {
+      hits.enterprise += 1;
+      hits.enterpriseHeader = String(req.headers['x-enterprise-id'] || '');
+      return send(res, { code: 0, data: { limitNum: 1000, credit: 2 } });
+    }
+    if (path === '/v2/billing/meter/get-user-resource') {
+      hits.personal += 1;
+      return send(res, { code: 0, data: { Response: { Data: { Accounts: null } } } });
+    }
+    res.writeHead(404, { 'content-type': 'application/json' });
+    return res.end('{}');
+  });
+  await new Promise((r) => upstream.listen(0, '127.0.0.1', r));
+  const upstreamBase = `http://127.0.0.1:${upstream.address().port}`;
+  const bridge = await startBridge({
+    CODEBUDDY_ENDPOINT: upstreamBase,
+    WORKBUDDY_BILLING_BASE: upstreamBase,
+    WORKBUDDY_LOGIN_BASE: upstreamBase,
+    WORKBUDDY_LOGIN_ORIGIN: 'http://127.0.0.1',
+    WORKBUDDY_LOGIN_POLL_MIN_MS: '0',
+    WORKBUDDY_CREDENTIAL_DIR: join(credentialRoot, 'credentials'),
+    WORKBUDDY_CREDENTIAL_STORE: process.platform === 'win32' ? 'dpapi' : 'file',
+    WORKBUDDY_CREDENTIAL_SOURCE: 'plugin',
+    WORKBUDDY_QUOTA_SNAPSHOT_MS: '0',
+    WORKBUDDY_QUOTA_HISTORY_FILE: join(quotaDir, 'quota-history.jsonl'),
+    WORKBUDDY_SKIP_MODEL_PREFLIGHT: '1',
+  });
+  try {
+    const device = await (await fetch(`${bridge.baseUrl}/v1/auth/device`, {
+      method: 'POST',
+      headers: { ...auth, 'content-type': 'application/json' },
+      body: JSON.stringify({ region: 'cn' }),
+    })).json();
+    assert.equal(device.ok, true);
+    const poll = await (await fetch(
+      `${bridge.baseUrl}/v1/auth/device?state=${encodeURIComponent(device.state)}`,
+      { headers: auth },
+    )).json();
+    assert.equal(poll.status, 'ready');
+    /*
+     * 凭据清单也要显示企业身份：面板据此打「企业版」标记。
+     * 老凭据没存 enterpriseId 时同样要能从 claims 补出来。
+     */
+    const credentials = await (await fetch(`${bridge.baseUrl}/v1/auth/credentials`, { headers: auth })).json();
+    assert.equal(credentials.credentials?.[0]?.enterpriseId, 'ent-from-jwt');
+
+    const res = await fetch(bridge.baseUrl + '/v1/quota', { headers: auth, signal: AbortSignal.timeout(15000) });
+    const body = await res.json();
+    assert.equal(res.status, 200);
+    assert.equal(body.ok, true);
+    assert.equal(body.total, 998);
+    assert.equal(body.used, 2);
+    assert.equal(body.productCode, 'enterprise');
+    assert.equal(hits.enterprise, 1);
+    assert.equal(hits.personal, 0, '插件凭据补到 enterprise_id 后不应再查个人端点');
+    assert.equal(hits.enterpriseHeader, 'ent-from-jwt', '企业配额请求必须带 X-Enterprise-Id');
+  } finally {
+    await bridge.stop();
+    upstream.close();
+    rmSync(credentialRoot, { recursive: true, force: true });
     rmSync(quotaDir, { recursive: true, force: true });
   }
 });
