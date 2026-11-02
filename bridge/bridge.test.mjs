@@ -64,17 +64,17 @@ const READABLE_FAKE_AUTH = {
   },
 };
 
-/** 可解码的假 JWT（只带 sub/exp）—— 账号跟随用例靠 sub 区分身份。 */
-function fakeJwt(sub) {
-  const body = Buffer.from(JSON.stringify({ sub, exp: Math.floor(Date.now() / 1000) + 86_400 }), 'utf8').toString('base64url');
+/** 可解码的假 JWT（默认只带 sub/exp，可选补充 claims）—— 账号跟随用例靠 sub 区分身份。 */
+function fakeJwt(sub, claims = {}) {
+  const body = Buffer.from(JSON.stringify({ sub, ...claims, exp: Math.floor(Date.now() / 1000) + 86_400 }), 'utf8').toString('base64url');
   return `e30.${body}.sig`;
 }
 
 /** 一份可被桥解密的登录文件内容（纯文本字段，不走 at-rest 信封）。 */
-function authFileFor(sub, domain = 'example.invalid') {
+function authFileFor(sub, domain = 'example.invalid', claims = {}) {
   return {
     auth: {
-      accessToken: fakeJwt(sub),
+      accessToken: fakeJwt(sub, claims),
       refreshToken: 'fake-refresh-token',
       domain,
       expiresAt: Date.now() + 30 * 86_400_000,
@@ -1418,6 +1418,197 @@ test('/v1/quota：余额必须带上归属账号，供面板按身份作废缓�
   } finally {
     await bridge.stop();
     upstream.close();
+    rmSync(quotaDir, { recursive: true, force: true });
+  }
+});
+
+test('/v1/quota：企业/教育账号走企业配额，不能把可用余额显示成 0', { timeout: 90_000 }, async () => {
+  /*
+   * WorkBuddy 教育公益版（以及企业号）的登录凭据带 enterprise_id。上游把额度
+   * 放在 get-enterprise-user-usage（limitNum 总额、credit 已用），个人套餐端点
+   * 对它返回 Accounts=null。旧实现只查个人端点 → 面板恒显示 0。
+   */
+  let personalCalls = 0;
+  const upstream = createServer((req, res) => {
+    const path = new URL(req.url, 'http://127.0.0.1').pathname;
+    if (path === '/v2/billing/meter/get-enterprise-user-usage') {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      return res.end(JSON.stringify({
+        code: 0,
+        data: {
+          limitNum: 2000,
+          credit: 37.5,
+          cycleStartTime: '2026-11-01 00:00:00',
+          cycleEndTime: '2026-11-30 23:59:59',
+          cycleResetTime: '2026-12-01 00:00:00',
+        },
+      }));
+    }
+    if (path === '/v2/billing/meter/get-user-resource') {
+      personalCalls += 1;
+      res.writeHead(200, { 'content-type': 'application/json' });
+      return res.end(JSON.stringify({ code: 0, data: { Response: { Data: { Accounts: null } } } }));
+    }
+    res.writeHead(404, { 'content-type': 'application/json' });
+    return res.end('{}');
+  });
+  await new Promise((r) => upstream.listen(0, '127.0.0.1', r));
+  const quotaDir = mkdtempSync(join(tmpdir(), 'wb-quota-enterprise-'));
+  const quotaFile = join(quotaDir, 'quota-history.jsonl');
+  const bridge = await startBridge(
+    {
+      CODEBUDDY_ENDPOINT: `http://127.0.0.1:${upstream.address().port}`,
+      WORKBUDDY_BILLING_BASE: `http://127.0.0.1:${upstream.address().port}`,
+      WORKBUDDY_QUOTA_SNAPSHOT_MS: '0',
+      WORKBUDDY_QUOTA_HISTORY_FILE: quotaFile,
+    },
+    { auth: authFileFor('quota-enterprise', 'example.invalid', { enterprise_id: 'ent-stub' }) },
+  );
+  try {
+    const res = await fetch(bridge.baseUrl + '/v1/quota', { headers: auth, signal: AbortSignal.timeout(15000) });
+    const body = await res.json();
+    assert.equal(res.status, 200);
+    assert.equal(body.ok, true);
+    assert.equal(body.total, 1962.5, '企业额度必须按 limitNum - credit 折算剩余，而不是套餐端点的 0');
+    assert.equal(body.used, 37.5);
+    assert.equal(body.productCode, 'enterprise');
+    assert.equal(body.packages?.[0]?.size, 2000);
+    assert.equal(body.packages?.[0]?.remain, 1962.5);
+    assert.equal(body.packages?.[0]?.monthly, true);
+    assert.equal(personalCalls, 0, '企业号不应再回退到个人套餐端点');
+  } finally {
+    await bridge.stop();
+    upstream.close();
+    rmSync(quotaDir, { recursive: true, force: true });
+  }
+});
+
+
+/*
+ * 企业配额超时预算（code review 反馈）。
+ *
+ * 企业接口与个人套餐回退是**同一次余额读取**的两条路径，只能共用一份预算。
+ * 旧写法给每个端点各 15s，接口卡住时一次读取就能占掉 30s；经 `quotaBalance`
+ * 变成媒体提交路径上 2×(15+15)=60s 的隐性等待。
+ *
+ * 两条用例分别覆盖：
+ *   1. 回退仍要工作 —— 企业接口快速失败时，个人套餐必须照常返回（不能因为
+ *      收紧预算把回退逻辑写死）；
+ *   2. 回退吃同一份预算 —— 企业接口把预算耗光后，个人套餐端点连一个请求都
+ *      不该收到，整次读取要在预算附近结束，而不是再等一个完整超时。
+ */
+
+/** 起一个"企业接口必失败 + 个人端点计数"的打桩上游。 */
+async function startEnterpriseFallbackUpstream({ enterpriseDelayMs = 0, personalTotal = 42 } = {}) {
+  const hits = { enterprise: 0, personal: 0 };
+  const server = createServer((req, res) => {
+    const path = new URL(req.url, 'http://127.0.0.1').pathname;
+    if (path === '/v2/billing/meter/get-enterprise-user-usage') {
+      hits.enterprise += 1;
+      // 慢路径：不主动回包，让客户端自己 abort —— 模拟"企业接口无响应"。
+      if (enterpriseDelayMs > 0) {
+        const timer = setTimeout(() => {
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ code: 0, data: { limitNum: 2000, credit: 1 } }));
+        }, enterpriseDelayMs);
+        res.on('close', () => clearTimeout(timer));
+        return undefined;
+      }
+      res.writeHead(500, { 'content-type': 'application/json' });
+      return res.end(JSON.stringify({ code: 500, msg: 'enterprise endpoint down' }));
+    }
+    if (path === '/v2/billing/meter/get-user-resource') {
+      hits.personal += 1;
+      res.writeHead(200, { 'content-type': 'application/json' });
+      return res.end(JSON.stringify({
+        code: 0,
+        data: {
+          Response: {
+            Data: {
+              Accounts: [{
+                PackageName: 'stub-package',
+                CapacityType: 4,
+                CycleCapacitySize: 100,
+                CycleCapacityRemain: personalTotal,
+              }],
+            },
+          },
+        },
+      }));
+    }
+    res.writeHead(404, { 'content-type': 'application/json' });
+    return res.end('{}');
+  });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  return { server, hits, port: server.address().port };
+}
+
+test('/v1/quota：企业接口快速失败时仍要回退到个人套餐', { timeout: 90_000 }, async () => {
+  const { server, hits, port } = await startEnterpriseFallbackUpstream({ personalTotal: 77 });
+  const quotaDir = mkdtempSync(join(tmpdir(), 'wb-quota-fallback-'));
+  const bridge = await startBridge(
+    {
+      CODEBUDDY_ENDPOINT: `http://127.0.0.1:${port}`,
+      WORKBUDDY_BILLING_BASE: `http://127.0.0.1:${port}`,
+      WORKBUDDY_QUOTA_SNAPSHOT_MS: '0',
+      WORKBUDDY_QUOTA_HISTORY_FILE: join(quotaDir, 'quota-history.jsonl'),
+      // 收紧预算也不能影响"快速失败即可回退"这条主路径。
+      WORKBUDDY_QUOTA_TIMEOUT_MS: '1500',
+    },
+    { auth: authFileFor('quota-fallback', 'example.invalid', { enterprise_id: 'ent-stub' }) },
+  );
+  try {
+    const res = await fetch(bridge.baseUrl + '/v1/quota', { headers: auth, signal: AbortSignal.timeout(15000) });
+    const body = await res.json();
+    assert.equal(res.status, 200);
+    assert.equal(body.ok, true);
+    assert.equal(body.total, 77, '企业接口失败后必须回退到个人套餐，不能把余额报成 0');
+    assert.equal(body.productCode, 'p_tcaca');
+    assert.equal(hits.enterprise, 1, '企业接口应当只被调用一次');
+    assert.equal(hits.personal, 1, '快速失败后必须走一次个人套餐端点');
+  } finally {
+    await bridge.stop();
+    server.close();
+    rmSync(quotaDir, { recursive: true, force: true });
+  }
+});
+
+test('/v1/quota：企业接口耗光预算后不再另开一份超时给个人套餐', { timeout: 90_000 }, async () => {
+  /*
+   * 企业接口不响应时，回退必须落在**同一份**预算里：总耗时应当贴近
+   * QUOTA_TIMEOUT_MS（这里压到 800ms），而不是 2×预算。个人端点连请求都不该收到。
+   */
+  const BUDGET_MS = 800;
+  const { server, hits, port } = await startEnterpriseFallbackUpstream({
+    enterpriseDelayMs: 30_000,   // 远大于预算：一定被 abort
+    personalTotal: 77,
+  });
+  const quotaDir = mkdtempSync(join(tmpdir(), 'wb-quota-budget-'));
+  const bridge = await startBridge(
+    {
+      CODEBUDDY_ENDPOINT: `http://127.0.0.1:${port}`,
+      WORKBUDDY_BILLING_BASE: `http://127.0.0.1:${port}`,
+      WORKBUDDY_QUOTA_SNAPSHOT_MS: '0',
+      WORKBUDDY_QUOTA_HISTORY_FILE: join(quotaDir, 'quota-history.jsonl'),
+      WORKBUDDY_QUOTA_TIMEOUT_MS: String(BUDGET_MS),
+    },
+    { auth: authFileFor('quota-budget', 'example.invalid', { enterprise_id: 'ent-stub' }) },
+  );
+  try {
+    const startedAt = Date.now();
+    const res = await fetch(bridge.baseUrl + '/v1/quota', { headers: auth, signal: AbortSignal.timeout(20000) });
+    const elapsed = Date.now() - startedAt;
+    const body = await res.json();
+    assert.equal(res.status, 502, '两条路径都拿不到余额时应当如实报错，而不是编一个 0');
+    assert.equal(body.ok, false);
+    assert.equal(hits.personal, 0, '预算已耗尽时不该再向个人套餐端点发一个注定被 abort 的请求');
+    assert.ok(
+      elapsed < BUDGET_MS * 2,
+      `整次余额读取必须共用一份预算（${BUDGET_MS}ms），实际耗时 ${elapsed}ms —— 企业接口与回退各自计时的老问题回来了`,
+    );
+  } finally {
+    await bridge.stop();
+    server.close();
     rmSync(quotaDir, { recursive: true, force: true });
   }
 });
