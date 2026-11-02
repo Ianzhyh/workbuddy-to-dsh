@@ -669,20 +669,27 @@ try {
   console.log(`不限量：积分卡 ${unlimitedQuota.cardTotal}，胶囊 ${JSON.stringify(unlimitedQuota.pillText)}`);
 
   /*
-   * 积分到期展示：同名但到期日不同的套餐不能合并，必须拆成多行；
-   * 到期日早的排前面（用户先看到快过期的积分）。
+   * 积分到期展示：默认按套餐名折叠成一行，显示最近到期日和剩余天数；
+   * 点“查看全部”后展开所有到期批次，批次按到期日由近到远排序。
    */
   const expiryCard = await page.cdp.evaluate(`(async () => {
+    const pad = (n) => String(n).padStart(2, '0');
+    const stamp = (days) => {
+      const d = new Date(Date.now() + days * 86400000);
+      return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()) + ' 23:59:59';
+    };
+    const soon = stamp(3);
+    const later = stamp(20);
     const cardHost = document.createElement('div');
     document.body.appendChild(cardHost);
     const cardRoot = ReactDOM.createRoot(cardHost);
     cardRoot.render(React.createElement(window.__module.QuotaCard, {
       status: {
         quota: {
-          ok: true, total: 160, packages: [
-            { name: '同名包', remain: 100, size: 100, monthly: true, expiresAt: '2026-11-30 23:59:59' },
-            { name: '同名包', remain: 50, size: 50, monthly: true, expiresAt: '2026-11-15 23:59:59' },
-            { name: '同名包', remain: 10, size: 10, monthly: true, expiresAt: '2026-11-15 23:59:59' },
+          ok: true, total: 140, packages: [
+            { name: '同名包', remain: 100, size: 100, monthly: true, expiresAt: later },
+            { name: '同名包', remain: 30, size: 50, monthly: true, expiresAt: soon },
+            { name: '同名包', remain: 10, size: 10, monthly: true, expiresAt: soon },
           ],
         },
         quotaError: '', quotaAccount: 'acct-expiry', bridgeAccount: 'acct-expiry',
@@ -690,24 +697,55 @@ try {
       reload() {}, busy: false, onOpenTab() {},
     }));
     await new Promise((r) => setTimeout(r, 300));
+    const card = cardHost.querySelector('.wb-quota');
     const rows = [...cardHost.querySelectorAll('.wb-quota-pkg')].map((el) => el.textContent);
-    const note = (cardHost.querySelector('.wb-quota') || {}).textContent || '';
+    const toggle = cardHost.querySelector('.wb-quota-more');
+    const collapsed = card ? card.textContent : '';
+    const hasToggle = Boolean(toggle);
+    if (toggle) {
+      toggle.click();
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    const batches = [...cardHost.querySelectorAll('.wb-quota-batch')].map((el) => el.textContent);
+    const bars = [...cardHost.querySelectorAll('.wb-quota-batch-bar i')].map((el) => el.style.width);
     cardRoot.unmount();
     cardHost.remove();
-    return { rows, note };
+    return {
+      rows, hasToggle, collapsed, batches, bars,
+      soonDay: soon.slice(5, 10), laterDay: later.slice(5, 10),
+    };
   })()`);
-  if (expiryCard.rows.length !== 2) {
-    problems.push(`同名不同到期日的套餐必须拆成 2 行，实际 ${expiryCard.rows.length} 行`);
+  if (expiryCard.rows.length !== 1) {
+    problems.push(`同名套餐默认应折叠成 1 行，实际 ${expiryCard.rows.length} 行`);
   } else {
-    // 面板现在显示短日期（MM-DD）+ 相对天数；断言短日期，别再依赖完整年份。
-    if (!/11-15/.test(expiryCard.rows[0]) || !/×2/.test(expiryCard.rows[0])) {
-      problems.push(`最近到期的套餐没有排在第一行或没有合并计数：${expiryCard.rows[0]}`);
+    if (!/×3/.test(expiryCard.rows[0])) problems.push(`折叠行没有合并计数：${expiryCard.rows[0]}`);
+    if (!/最近到期/.test(expiryCard.rows[0]) || !expiryCard.collapsed.includes(expiryCard.soonDay) || !/天后/.test(expiryCard.rows[0])) {
+      problems.push(`折叠行没有显示最近到期和剩余天数：${expiryCard.rows[0]}`);
     }
-    if (!/11-30/.test(expiryCard.rows[1]) || /×2/.test(expiryCard.rows[1])) {
-      problems.push(`较晚到期的套餐行不正确：${expiryCard.rows[1]}`);
+    if (expiryCard.rows[0].includes(expiryCard.laterDay)) {
+      problems.push(`折叠时不应铺开较晚的到期日：${expiryCard.rows[0]}`);
     }
   }
-  console.log(`到期分组：${expiryCard.rows.length} 行`);
+  if (!expiryCard.hasToggle) problems.push('同名多到期日没有「查看全部」入口');
+  if (expiryCard.batches.length !== 2) {
+    problems.push(`展开后应按到期日显示 2 个批次，实际 ${expiryCard.batches.length} 个`);
+  } else {
+    if (!expiryCard.batches[0].includes(expiryCard.soonDay) || !expiryCard.batches[0].includes('40 / 60')) {
+      problems.push(`最近到期批次没有排第一或数量不对：${expiryCard.batches[0]}`);
+    }
+    if (!expiryCard.batches[1].includes(expiryCard.laterDay) || !expiryCard.batches[1].includes('100 / 100')) {
+      problems.push(`较晚到期批次不正确：${expiryCard.batches[1]}`);
+    }
+  }
+  if (expiryCard.bars.length !== 2) {
+    problems.push(`展开批次应各有 1 条小用量条，实际 ${expiryCard.bars.length} 条`);
+  } else {
+    const first = parseFloat(expiryCard.bars[0]);
+    if (!(first > 60 && first < 70)) problems.push(`40/60 批次的小用量条宽度不对：${expiryCard.bars[0]}`);
+    if (expiryCard.bars[1] !== '100%') problems.push(`满额批次的小用量条应为 100%：${expiryCard.bars[1]}`);
+  }
+  console.log(`到期折叠：${expiryCard.rows.length} 行，展开 ${expiryCard.batches.length} 个批次，小用量条 ${expiryCard.bars.join(' / ')}`);
+
 
   /*
    * 用量页的「账实核对」：不限量账号不能拿 -1 快照算差额

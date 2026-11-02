@@ -643,11 +643,32 @@ body.dark .wb-root,
 .wb-quota-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;flex-wrap:wrap}
 .wb-quota-label{color:var(--dsw-alias-label-secondary,light-dark(#61666b,#cfd3d6));font-size:12px;letter-spacing:.04em}
 .wb-quota-total{font-size:38px;line-height:1.15;font-weight:700;font-variant-numeric:tabular-nums;margin-top:2px;overflow-wrap:anywhere}
-.wb-quota-pkgs{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:10px 18px;margin-top:14px}
-.wb-quota-pkg{min-width:0}
+.wb-quota-pkgs{display:flex;flex-direction:column;margin-top:14px;border-top:.5px solid var(--dsw-alias-border-l2,light-dark(#0000001a,#ffffff1f))}
+.wb-quota-pkg{padding:11px 0 12px;min-width:0;border-bottom:.5px solid var(--dsw-alias-border-l2,light-dark(#0000001a,#ffffff1f))}
+.wb-quota-pkg:last-child{border-bottom:0}
 .wb-quota-pkg-head{display:flex;align-items:baseline;justify-content:space-between;gap:8px;min-width:0}
-.wb-quota-pkg-name{font-size:12px;min-width:0;overflow-wrap:anywhere}
+.wb-quota-pkg-name{font-size:12.5px;font-weight:550;min-width:0;overflow-wrap:anywhere}
 .wb-quota-pkg-num{font-size:12px;font-variant-numeric:tabular-nums;color:var(--dsw-alias-label-secondary,light-dark(#61666b,#cfd3d6));white-space:nowrap}
+.wb-quota-pkg-meta{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;margin:6px 0 0}
+.wb-quota-expiry{display:inline-flex;align-items:center;gap:6px;min-width:0;font-size:11.5px;line-height:17px;color:var(--dsw-alias-label-secondary,light-dark(#61666b,#cfd3d6));overflow-wrap:anywhere}
+.wb-quota-expiry-dot{width:5px;height:5px;border-radius:50%;background:currentColor;opacity:.55;flex:none}
+.wb-quota-expiry.wb-expiry-soon .wb-quota-expiry-dot,.wb-quota-expiry.wb-expiry-urgent .wb-quota-expiry-dot{opacity:1}
+.wb-quota-more{appearance:none;border:0;background:light-dark(#00000007,#ffffff10);color:var(--dsw-alias-label-secondary,light-dark(#61666b,#cfd3d6));font:inherit;font-size:11px;line-height:16px;cursor:pointer;padding:3px 9px;border-radius:999px;display:inline-flex;align-items:center;gap:4px;margin-left:auto;flex:none;transition:background var(--wb-anim-fast),color var(--wb-anim-fast)}
+.wb-quota-more:hover{background:light-dark(#0000000f,#ffffff1c);color:var(--dsw-alias-label-primary,light-dark(#1f2328,#f0f1f3))}
+.wb-quota-more:focus-visible{outline:2px solid var(--dsw-alias-brand-primary,#6366f1);outline-offset:2px}
+.wb-quota-chevron{font-size:9px;line-height:1;opacity:.7;transform:translateY(-.5px)}
+.wb-quota-batches{margin:8px 0 0;padding:8px;border-radius:12px;background:light-dark(#f5f5f4,#17181b);display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:8px;max-height:340px;overflow:auto;overscroll-behavior:contain;animation:wb-quota-reveal .18s ease-out}
+.wb-quota-batch{display:flex;flex-direction:column;gap:5px;min-width:0;padding:8px 9px 9px;border-radius:9px;background:light-dark(#ffffff,#202226);box-shadow:inset 0 0 0 .5px var(--dsw-alias-border-l2,light-dark(#00000014,#ffffff1f));font-variant-numeric:tabular-nums}
+.wb-quota-batch-head{display:flex;align-items:baseline;justify-content:space-between;gap:8px;min-width:0}
+.wb-quota-batch-date{min-width:0;white-space:nowrap;font-size:11.5px;font-weight:550;line-height:16px;color:var(--dsw-alias-label-secondary,light-dark(#61666b,#cfd3d6))}
+.wb-quota-batch-rel{min-width:0;font-size:10.5px;line-height:14px;color:var(--dsw-alias-label-tertiary,light-dark(#8a8f94,#9aa0a6));overflow-wrap:anywhere}
+.wb-quota-batch-bar{width:100%;height:3px;margin-top:1px;border-radius:999px;background:light-dark(#00000014,#ffffff1f);overflow:hidden}
+.wb-quota-batch-bar i{display:block;height:100%;border-radius:999px;background:#2ea043}
+.wb-quota-batch-bar i.warn{background:#d29922}
+.wb-quota-batch-bar i.bad{background:#e5534b}
+.wb-quota-batch-amt{flex:none;white-space:nowrap;text-align:right;font-size:11px;line-height:16px;color:var(--dsw-alias-label-secondary,light-dark(#61666b,#cfd3d6))}
+@keyframes wb-quota-reveal{from{opacity:0;transform:translateY(-3px)}to{opacity:1;transform:none}}
+
 .wb-expiry-notice{display:flex;align-items:center;justify-content:space-between;gap:10px;margin:10px 0 0;padding:8px 10px;border-radius:9px;font-size:12px;line-height:18px;background:light-dark(#fff8e1,#3a2f10);color:light-dark(#6b4e00,#f0d38a);border:.5px solid light-dark(#fde68a,#544416)}
 .wb-expiry-notice.bad{background:light-dark(#ffebe9,#3d1d1b);color:light-dark(#a40e26,#ffb3ad);border-color:light-dark(#fecaca,#5a2623)}
 .wb-expiry-text{min-width:0;overflow-wrap:anywhere}
@@ -2635,6 +2656,11 @@ body.dark .wb-root,
       const d = new Date(ms);
       return String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
     };
+    const fmtQuotaDay = (ms) => {
+      const d = new Date(ms);
+      const md = String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+      return d.getFullYear() === new Date().getFullYear() ? md : String(d.getFullYear()) + '-' + md;
+    };
     const fmtQuotaRelative = (days, en) => {
       if (days <= 0) return en ? 'today' : '今天';
       if (days === 1) return en ? 'tomorrow' : '明天';
@@ -4373,6 +4399,7 @@ body.dark .wb-root,
     function QuotaCard({ status, reload, busy, onOpenTab }) {
       const [refreshing, setRefreshing] = useState(false);
       const [message, setMessage] = useState('');
+      const [expandedQuota, setExpandedQuota] = useState({});
       const quota = status?.quota;
       const error = status?.quotaError || (quota && quota.ok === false ? String(quota.error || '读取失败') : '');
       const total = typeof quota?.total === 'number' ? quota.total : null;
@@ -4415,39 +4442,55 @@ body.dark .wb-root,
         : '';
 
       const packages = useMemo(() => {
-        const byBatch = new Map();
+        const byName = new Map();
         for (const p of quota?.packages || []) {
           const name = p.name || '(未命名套餐)';
+          const monthly = p.monthly === true;
+          const key = name + '\u0000' + (monthly ? 'm' : 'o');
+          const remain = Number(p.remain) || 0;
+          const size = Number(p.size) || 0;
           const expiresAt = p.expiresAt || '';
-          /*
-           * 同一档权益会拆成多条，但到期日可能不同。按「名称 + 到期日」分组：
-           * 到期日不同的必须拆开显示，否则只会留下第一条的到期时间，
-           * 用户看不到月中就过期的那部分。
-           */
-          const key = `${name}\u0000${expiresAt}`;
-          const prev = byBatch.get(key);
+          const ms = parseQuotaExpiryMs(expiresAt);
+          let group = byName.get(key);
+          if (!group) {
+            group = { key, name, monthly, remain: 0, size: 0, count: 0, expiries: new Map() };
+            byName.set(key, group);
+          }
+          group.remain += remain;
+          group.size += size;
+          group.count += 1;
+          const prev = group.expiries.get(expiresAt);
           if (prev) {
-            prev.remain += Number(p.remain) || 0;
-            prev.size += Number(p.size) || 0;
+            prev.remain += remain;
+            prev.size += size;
             prev.count += 1;
           } else {
-            byBatch.set(key, {
-              name,
-              remain: Number(p.remain) || 0,
-              size: Number(p.size) || 0,
-              count: 1,
-              monthly: p.monthly === true,
-              expiresAt: expiresAt || null,
-            });
+            group.expiries.set(expiresAt, { expiresAt, ms, remain, size, count: 1 });
           }
         }
-        // 到期由近到远；没有到期日的排最后。同一到期日先看剩余量。
-        const expiryOrder = (p) => (p.expiresAt ? String(p.expiresAt) : '\uffff');
-        return [...byBatch.values()].sort((a, b) => {
-          const byExpiry = expiryOrder(a).localeCompare(expiryOrder(b));
-          return byExpiry !== 0 ? byExpiry : b.remain - a.remain;
+        const groups = [...byName.values()].map((group) => {
+          const expiries = [...group.expiries.values()].sort((a, b) => {
+            if (a.ms && b.ms) return a.ms - b.ms || b.remain - a.remain;
+            if (a.ms) return -1;
+            if (b.ms) return 1;
+            return b.remain - a.remain;
+          });
+          const dated = expiries.filter((entry) => entry.ms);
+          return { ...group, expiries, nearest: dated[0] || null };
         });
+        /*
+         * 同名包可能有十几条不同到期日，全部铺开会把积分卡撑成一屏。
+         * 默认按套餐折叠，先按最近到期日排序；点“查看全部”再展开逐条批次。
+         */
+        groups.sort((a, b) => {
+          const am = a.nearest ? a.nearest.ms : Infinity;
+          const bm = b.nearest ? b.nearest.ms : Infinity;
+          if (am !== bm) return am - bm;
+          return b.remain - a.remain;
+        });
+        return groups;
       }, [quota]);
+
 
       const refreshQuota = async () => {
         setRefreshing(true);
@@ -4470,6 +4513,7 @@ body.dark .wb-root,
         const ratio = size > 0 ? remain / size : 1;
         return ratio <= 0.1 ? 'bad' : ratio <= 0.3 ? 'warn' : 'ok';
       };
+      const pctOf = (remain, size) => Math.max(0, Math.min(100, size > 0 ? (remain / size) * 100 : 0));
 
       return h('div', { className: 'wb-card wb-quota' },
         h('div', { className: 'wb-quota-head' },
@@ -4510,30 +4554,70 @@ body.dark .wb-root,
           : null,
         packages.length
           ? h('div', { className: 'wb-quota-pkgs' },
-            packages.map((p) => h('div', { key: p.name + '|' + (p.expiresAt || ''), className: 'wb-quota-pkg' },
-              h('div', { className: 'wb-quota-pkg-head' },
-                h('span', { className: 'wb-quota-pkg-name', title: p.name }, p.name + (p.count > 1 ? ' ×' + p.count : '')),
-                h('span', { className: 'wb-quota-pkg-num' }, p.remain + ' / ' + p.size)),
-              h('div', { className: 'wb-bar' }, h('i', { className: toneOf(p.remain, p.size), style: { width: Math.max(0, Math.min(100, p.size > 0 ? (p.remain / p.size) * 100 : 0)) + '%' } })),
-              (() => {
-                const expiryMs = parseQuotaExpiryMs(p.expiresAt);
-                const days = expiryMs ? quotaDaysUntil(expiryMs) : null;
-                const parts = [];
-                if (p.monthly) parts.push(en ? 'Monthly' : '月度');
-                if (p.expiresAt) parts.push((en ? 'expires ' : '到期 ') + (expiryMs ? fmtQuotaDate(expiryMs) : p.expiresAt));
-                const relative = days === null
-                  ? ''
-                  : (days < 0 ? (en ? 'expired' : '已过期') : fmtQuotaRelative(days, en));
-                const label = parts.join(' · ') + (relative ? ' (' + relative + ')' : '');
-                return label
-                  ? h('div', {
-                    className: 'wb-note' + (days !== null && days <= 1 ? ' wb-expiry-urgent' : days !== null && days <= 7 ? ' wb-expiry-soon' : ''),
-                    style: { margin: '3px 0 0' },
-                    title: p.expiresAt || undefined,
-                  }, label)
-                  : null;
-              })())))
+            packages.map((p) => {
+              const nearestDays = p.nearest ? quotaDaysUntil(p.nearest.ms) : null;
+              const nearestRelative = nearestDays === null
+                ? ''
+                : (nearestDays < 0 ? (en ? 'expired' : '已过期') : fmtQuotaRelative(nearestDays, en));
+              const nearestTone = nearestDays !== null && nearestDays <= 1
+                ? ' wb-expiry-urgent'
+                : nearestDays !== null && nearestDays <= 7 ? ' wb-expiry-soon' : '';
+              const multiple = p.expiries.length > 1;
+              const meta = [];
+              if (p.monthly) meta.push(en ? 'Monthly' : '月度');
+              if (p.nearest) {
+                const prefix = multiple
+                  ? (en ? `${p.count} entries · next expiry ` : `${p.count} 笔 · 最近到期 `)
+                  : (en ? 'expires ' : '到期 ');
+                meta.push(prefix + fmtQuotaDay(p.nearest.ms) + (nearestRelative ? ' (' + nearestRelative + ')' : ''));
+              }
+              const expanded = expandedQuota[p.key] === true;
+              return h('div', { key: p.key, className: 'wb-quota-pkg' },
+                h('div', { className: 'wb-quota-pkg-head' },
+                  h('span', { className: 'wb-quota-pkg-name', title: p.name }, p.name + (p.count > 1 ? ' ×' + p.count : '')),
+                  h('span', { className: 'wb-quota-pkg-num' }, p.remain + ' / ' + p.size)),
+                h('div', { className: 'wb-bar' }, h('i', { className: toneOf(p.remain, p.size), style: { width: pctOf(p.remain, p.size) + '%' } })),
+                meta.length
+                  ? h('div', { className: 'wb-quota-pkg-meta' },
+                    h('span', { className: 'wb-quota-expiry' + nearestTone, title: p.nearest ? p.nearest.expiresAt : undefined },
+                      h('i', { className: 'wb-quota-expiry-dot', 'aria-hidden': 'true' }),
+                      meta.join(' · ')),
+                    multiple
+                      ? h('button', {
+                        type: 'button',
+                        className: 'wb-quota-more',
+                        'aria-expanded': expanded ? 'true' : 'false',
+                        onClick: () => setExpandedQuota((prev) => ({ ...prev, [p.key]: !prev[p.key] })),
+                      },
+                      h('span', null, expanded ? (en ? 'Collapse' : '收起') : (en ? 'Show all' : '查看全部')),
+                      h('span', { className: 'wb-quota-chevron', 'aria-hidden': 'true' }, expanded ? '▴' : '▾'))
+                      : null)
+                  : null,
+                expanded
+                  ? h('div', { className: 'wb-quota-batches' },
+                    p.expiries.map((entry) => {
+                      const days = entry.ms ? quotaDaysUntil(entry.ms) : null;
+                      const relative = days === null
+                        ? ''
+                        : (days < 0 ? (en ? 'expired' : '已过期') : fmtQuotaRelative(days, en));
+                      const tone = days !== null && days <= 1
+                        ? ' wb-expiry-urgent'
+                        : days !== null && days <= 7 ? ' wb-expiry-soon' : '';
+                      return h('div', { key: entry.expiresAt || 'no-expiry', className: 'wb-quota-batch', title: entry.expiresAt || undefined },
+                        h('div', { className: 'wb-quota-batch-head' },
+                          h('span', { className: 'wb-quota-batch-date' + tone },
+                            (entry.ms ? fmtQuotaDay(entry.ms) : (en ? 'No expiry' : '无到期日'))
+                            + (entry.count > 1 ? ' ×' + entry.count : '')),
+                          h('span', { className: 'wb-quota-batch-amt' }, entry.remain + ' / ' + entry.size)),
+                        h('span', { className: 'wb-quota-batch-rel' }, relative),
+                        h('span', { className: 'wb-quota-batch-bar', 'aria-hidden': 'true' },
+                          h('i', { className: toneOf(entry.remain, entry.size), style: { width: pctOf(entry.remain, entry.size) + '%' } })));
+                    }))
+                  : null);
+            }))
           : null);
+
+
     }
 
     // ─────────────────────── 插件登录（不依赖桌面端） ───────────────────────

@@ -121,7 +121,7 @@ export const FIXTURES = {
       packages: [
         { name: 'CodeBuddy个人体验版', remain: 426, size: 500, monthly: true, expiresAt: stampInDays(20) },
         { name: 'CodeBuddy个人版拉新权益包', remain: 100, size: 100 },
-        // 同一包名、不同到期日：面板必须拆行，并出现“3 天后到期”的提醒。
+        // 同一包名、不同到期日：默认折叠成一行并显示最近到期，点开再看全部批次。
         { name: 'CodeBuddy个人版拉新权益包', remain: 120, size: 120, expiresAt: stampInDays(3) },
       ],
     },
