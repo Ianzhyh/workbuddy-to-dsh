@@ -10925,6 +10925,8 @@ async function fetchEnterpriseQuota(auth, { timeoutMs = QUOTA_TIMEOUT_MS } = {})
  *
  * 该端点不会消耗积分，可安全地按需调用。月度套餐（CapacityType=4）看
  * CycleCapacityRemain，一次性套餐看 CapacityRemain。
+ * 到期时刻不能只读 ExpiredTime：上游对非月度包经常把它留空，真实到期写在
+ * CycleEndTime（如裂变包 2026-11-16）；月度包的 CycleEndTime 是本周期结束。
  */
 async function fetchQuota(auth, { timeoutMs = QUOTA_TIMEOUT_MS } = {}) {
   /*
@@ -11005,7 +11007,7 @@ async function fetchQuota(auth, { timeoutMs = QUOTA_TIMEOUT_MS } = {}) {
       remain,
       size,
       monthly,
-      expiresAt: a.ExpiredTime || (monthly ? a.CycleEndTime : undefined) || undefined,
+      expiresAt: a.ExpiredTime || a.CycleEndTime || undefined,
     });
   }
   /*

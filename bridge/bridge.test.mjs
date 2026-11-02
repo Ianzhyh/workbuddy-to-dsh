@@ -1834,6 +1834,61 @@ test('/v1/quota：套餐按到期时间由近到远排序', { timeout: 90_000 },
   }
 });
 
+test('/v1/quota：非月度包把 CycleEndTime 当作到期时间', { timeout: 90_000 }, async () => {
+  /*
+   * 实测上游的「裂变包」等非月度包 ExpiredTime 为空，真实到期写在 CycleEndTime。
+   * 旧代码只对月度包读 CycleEndTime，面板因此只剩一个没有日期的 ×N 合并行。
+   */
+  const upstream = createServer((req, res) => {
+    const path = new URL(req.url, 'http://127.0.0.1').pathname;
+    if (path === '/v2/billing/meter/get-user-resource') {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      return res.end(JSON.stringify({
+        code: 0,
+        data: {
+          Response: {
+            Data: {
+              Accounts: [
+                { PackageName: '裂变包', CapacityType: 1, CapacitySize: 100, CapacityRemain: 100, ExpiredTime: '', CycleEndTime: '2026-11-16 23:16:41' },
+                { PackageName: '裂变包', CapacityType: 1, CapacitySize: 100, CapacityRemain: 80, CycleEndTime: '2026-11-12 09:00:00' },
+                { PackageName: '月度包', CapacityType: 4, CycleCapacitySize: 500, CycleCapacityRemain: 500, ExpiredTime: '', CycleEndTime: '2026-11-30 23:59:59' },
+              ],
+            },
+          },
+        },
+      }));
+    }
+    res.writeHead(404, { 'content-type': 'application/json' });
+    return res.end('{}');
+  });
+  await new Promise((r) => upstream.listen(0, '127.0.0.1', r));
+  const quotaDir = mkdtempSync(join(tmpdir(), 'wb-quota-cycle-end-'));
+  const bridge = await startBridge(
+    {
+      CODEBUDDY_ENDPOINT: `http://127.0.0.1:${upstream.address().port}`,
+      WORKBUDDY_BILLING_BASE: `http://127.0.0.1:${upstream.address().port}`,
+      WORKBUDDY_QUOTA_SNAPSHOT_MS: '0',
+      WORKBUDDY_QUOTA_HISTORY_FILE: join(quotaDir, 'quota-history.jsonl'),
+    },
+    { auth: authFileFor('quota-cycle-end') },
+  );
+  try {
+    const res = await fetch(bridge.baseUrl + '/v1/quota', { headers: auth, signal: AbortSignal.timeout(15000) });
+    const body = await res.json();
+    assert.equal(res.status, 200);
+    assert.equal(body.total, 680);
+    assert.deepEqual(body.packages.map((p) => p.expiresAt), [
+      '2026-11-12 09:00:00',
+      '2026-11-16 23:16:41',
+      '2026-11-30 23:59:59',
+    ]);
+  } finally {
+    await bridge.stop();
+    upstream.close();
+    rmSync(quotaDir, { recursive: true, force: true });
+  }
+});
+
 test('/v1/quota：插件登录的企业号从 JWT 的 enterprise_id 兜底', { timeout: 120_000 }, async () => {
   /*
    * 插件登录原先只认 /v2/plugin/login/account 返回的可选 enterpriseId；

@@ -2585,7 +2585,7 @@ body.dark .wb-root,
     const parseQuotaExpiryMs = (value) => {
       if (!value) return 0;
       const text = String(value).trim();
-      const normalized = /^d{4}-d{2}-d{2} d{2}:d{2}/.test(text) ? text.replace(' ', 'T') : text;
+      const normalized = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}/.test(text) ? text.replace(' ', 'T') : text;
       const ms = Date.parse(normalized);
       return Number.isFinite(ms) ? ms : 0;
     };
