@@ -612,7 +612,7 @@ try {
     if (quotaCard.totalFontSize < 26) problems.push(`积分数字不够"大"（${quotaCard.totalFontSize}px，期望 ≥26px）`);
     if (!quotaCard.packages) problems.push('积分卡没有列出套餐');
     if (quotaCard.bars !== quotaCard.packages) problems.push(`套餐进度条数量（${quotaCard.bars}）与套餐数（${quotaCard.packages}）不一致`);
-    console.log(`积分卡：数字 ${quotaCard.totalFontSize}px，${quotaCard.packages} 种套餐，${quotaCard.bars} 条进度条${quotaCard.merged ? '（同名套餐已合并）' : ''}`);
+    console.log(`积分卡：数字 ${quotaCard.totalFontSize}px，${quotaCard.packages} 组套餐，${quotaCard.bars} 条进度条${quotaCard.merged ? '（同名套餐已合并）' : ''}`);
   }
 
   /*
@@ -667,6 +667,46 @@ try {
     problems.push(`不限量账号的聊天积分胶囊没有显示 ∞：${JSON.stringify(unlimitedQuota.pillText)}`);
   }
   console.log(`不限量：积分卡 ${unlimitedQuota.cardTotal}，胶囊 ${JSON.stringify(unlimitedQuota.pillText)}`);
+
+  /*
+   * 积分到期展示：同名但到期日不同的套餐不能合并，必须拆成多行；
+   * 到期日早的排前面（用户先看到快过期的积分）。
+   */
+  const expiryCard = await page.cdp.evaluate(`(async () => {
+    const cardHost = document.createElement('div');
+    document.body.appendChild(cardHost);
+    const cardRoot = ReactDOM.createRoot(cardHost);
+    cardRoot.render(React.createElement(window.__module.QuotaCard, {
+      status: {
+        quota: {
+          ok: true, total: 160, packages: [
+            { name: '同名包', remain: 100, size: 100, monthly: true, expiresAt: '2026-11-30 23:59:59' },
+            { name: '同名包', remain: 50, size: 50, monthly: true, expiresAt: '2026-11-15 23:59:59' },
+            { name: '同名包', remain: 10, size: 10, monthly: true, expiresAt: '2026-11-15 23:59:59' },
+          ],
+        },
+        quotaError: '', quotaAccount: 'acct-expiry', bridgeAccount: 'acct-expiry',
+      },
+      reload() {}, busy: false, onOpenTab() {},
+    }));
+    await new Promise((r) => setTimeout(r, 300));
+    const rows = [...cardHost.querySelectorAll('.wb-quota-pkg')].map((el) => el.textContent);
+    const note = (cardHost.querySelector('.wb-quota') || {}).textContent || '';
+    cardRoot.unmount();
+    cardHost.remove();
+    return { rows, note };
+  })()`);
+  if (expiryCard.rows.length !== 2) {
+    problems.push(`同名不同到期日的套餐必须拆成 2 行，实际 ${expiryCard.rows.length} 行`);
+  } else {
+    if (!/2026-11-15/.test(expiryCard.rows[0]) || !/×2/.test(expiryCard.rows[0])) {
+      problems.push(`最近到期的套餐没有排在第一行或没有合并计数：${expiryCard.rows[0]}`);
+    }
+    if (!/2026-11-30/.test(expiryCard.rows[1]) || /×2/.test(expiryCard.rows[1])) {
+      problems.push(`较晚到期的套餐行不正确：${expiryCard.rows[1]}`);
+    }
+  }
+  console.log(`到期分组：${expiryCard.rows.length} 行`);
 
   /*
    * 用量页的「账实核对」：不限量账号不能拿 -1 快照算差额

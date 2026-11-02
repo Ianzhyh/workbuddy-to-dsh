@@ -2053,8 +2053,8 @@ body.dark .wb-root,
       [/^各模型占比 \((.+)\)$/, (m, metric) => 'Model share (' + translateText(metric) + ')'],
       [/^共 (\d+) 个活跃模型 · 合计 (.+)$/, (m, n, sum) => n + ' active models · ' + translateText(sum) + ' total'],
       [/^(.+)：(.+) \((\d+(?:\.\d+)?)%\)$/, (m, a, b, pct) => translateText(a) + ': ' + translateText(b) + ' (' + pct + '%)'],
-      [/^(\d+) 种套餐( · 更新于 (.+))?$/,
-        (m, n, _s, at) => n + ' package(s)' + (at ? ' · updated ' + at : '')],
+      [/^(\d+) 组套餐( · 更新于 (.+))?$/,
+        (m, n, _s, at) => n + ' package group(s)' + (at ? ' · updated ' + at : '')],
       [/^ · 更新于 (.+)$/, ' · updated $1'],
 
       // ── 推理能力（模型详情）──
@@ -4216,8 +4216,9 @@ body.dark .wb-root,
      *
      * 刷新走 `POST /workbuddy/quota`（宿主端强制重读上游），因为状态接口对积分有
      * 120 秒缓存 —— 不然点了"刷新"看不到变化，等于骗人。
-     * 同名套餐合并计数：上游会把同一档权益拆成多条（本机实测 4 条同名 100/100），
-     * 逐条列出来只是噪音。
+     * 同名且同一到期日的套餐合并计数：上游会把同一档权益拆成多条
+     * （本机实测 4 条同名 100/100），逐条列出来只是噪音；到期日不同则必须拆开，
+     * 否则只看得到第一条的到期时间。
      */
     function QuotaCard({ status, reload, busy, onOpenTab }) {
       const [refreshing, setRefreshing] = useState(false);
@@ -4235,27 +4236,38 @@ body.dark .wb-root,
       );
 
       const packages = useMemo(() => {
-        const byName = new Map();
+        const byBatch = new Map();
         for (const p of quota?.packages || []) {
-          const key = p.name || '(未命名套餐)';
-          const prev = byName.get(key);
+          const name = p.name || '(未命名套餐)';
+          const expiresAt = p.expiresAt || '';
+          /*
+           * 同一档权益会拆成多条，但到期日可能不同。按「名称 + 到期日」分组：
+           * 到期日不同的必须拆开显示，否则只会留下第一条的到期时间，
+           * 用户看不到月中就过期的那部分。
+           */
+          const key = `${name}\u0000${expiresAt}`;
+          const prev = byBatch.get(key);
           if (prev) {
             prev.remain += Number(p.remain) || 0;
             prev.size += Number(p.size) || 0;
             prev.count += 1;
-            if (p.expiresAt && !prev.expiresAt) prev.expiresAt = p.expiresAt;
           } else {
-            byName.set(key, {
-              name: key,
+            byBatch.set(key, {
+              name,
               remain: Number(p.remain) || 0,
               size: Number(p.size) || 0,
               count: 1,
               monthly: p.monthly === true,
-              expiresAt: p.expiresAt || null,
+              expiresAt: expiresAt || null,
             });
           }
         }
-        return [...byName.values()].sort((a, b) => b.remain - a.remain);
+        // 到期由近到远；没有到期日的排最后。同一到期日先看剩余量。
+        const expiryOrder = (p) => (p.expiresAt ? String(p.expiresAt) : '\uffff');
+        return [...byBatch.values()].sort((a, b) => {
+          const byExpiry = expiryOrder(a).localeCompare(expiryOrder(b));
+          return byExpiry !== 0 ? byExpiry : b.remain - a.remain;
+        });
       }, [quota]);
 
       const refreshQuota = async () => {
@@ -4293,7 +4305,7 @@ body.dark .wb-root,
                   : (unlimited
                     ? '不限量（企业/教育额度）'
                     : (packages.length
-                      ? `${packages.length} 种套餐${status?.quotaAt ? ' · 更新于 ' + fmtClock(status.quotaAt) : ''}`
+                      ? `${packages.length} 组套餐${status?.quotaAt ? ' · 更新于 ' + fmtClock(status.quotaAt) : ''}`
                       : '还没有读到套餐明细')))),
             accountMismatch
               ? h('div', { className: 'wb-note', style: { margin: '2px 0 0', color: '#b45309' } },

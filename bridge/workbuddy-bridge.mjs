@@ -10225,6 +10225,16 @@ async function fetchQuota(auth, { timeoutMs = QUOTA_TIMEOUT_MS } = {}) {
       expiresAt: a.ExpiredTime || (monthly ? a.CycleEndTime : undefined) || undefined,
     });
   }
+  /*
+   * 同一档权益会被上游拆成多条，且到期日可能不同。按到期时间由近到远排，
+   * 没有到期日的排最后；相同到期日先看剩余量。消费端直接按这个顺序展示，
+   * 用户才能先看到快过期的积分。
+   */
+  const expiryOrder = (p) => (p.expiresAt ? String(p.expiresAt) : '\uffff');
+  packages.sort((a, b) => {
+    const byExpiry = expiryOrder(a).localeCompare(expiryOrder(b));
+    return byExpiry !== 0 ? byExpiry : b.remain - a.remain;
+  });
   const result = { total, packages, productCode: 'p_tcaca' };
   if (enterpriseError && total === 0 && packages.length === 0) {
     /*
