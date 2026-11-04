@@ -26,6 +26,38 @@
   小卡片（日期/数量/相对天数/用量条），展开区最高 340px 内部滚动，不再一次铺开
   十几行；细用量条按余量比例显示绿 / 黄 / 红。(#21)
 
+## [1.22.3] - 2026-11-04
+
+### Fixed
+
+- **DSH 的 `@` 路径说明触发 11128 降级**（[#25](https://github.com/Ianzhyh/workbuddy-to-dsh/issues/25)，
+  由 [@William-0406](https://github.com/William-0406) 定位并验证最小改写）：上游把 system 里
+  `Tokens prefixed with @ ...` 与紧随其后的 `Relative paths resolve ...` 按固定先后共现当成
+  通道指纹；单独任一句都通过。已有三档渐进抓不到它，降级会直接落到 `neutral-system`，
+  system 里的工具约定与审批/沙箱策略被整体丢掉。出站改写表现在只把第一句的 `@` 换成
+  `an at-sign`，第二句与其余指令保持原样。
+- **控制台积分到期解析**：修正 `YYYY-MM-DD HH:mm:ss` 正则漏转义；严格日期引擎下到期提醒
+  不再整条静默失效。
+- **模型筛选下拉被 20 秒轮询重建**：选项未变化时不再重写 `<option>`，避免自绘下拉打开时
+  用户点中的项脱离文档、筛选被清空。
+- **用量粒度切换的旧响应覆盖**：切换小时/周/天时，过期响应会被丢弃并在 `singleFlight`
+  释放后补发当前窗口，不再把旧口径画到新选择上。
+- **localStorage 被禁用时初始化中断**：主题/强调色读取统一走降级封装，隐私模式或存储
+  被策略禁用时页面仍能完成初始化。
+- **控制台流式转发缺少背压**：`res.write()` 返回 false 时等待 drain，慢客户端不再把上游
+  数据堆进 Node 内存。
+- **日志面板每 3 秒同步读整份日志**：按 `size + mtime` 缓存已切好的行；日志滚动实现
+  收敛到 `lib/log-rotate.mjs`，控制台与插件共用同一份。
+
+### Changed
+
+- **发布卫生**：`bridge/start-bridge.sh` 入库并进入 npm 打包清单；CI 补 `panel:drag`；
+  `vendor --check` 增加“快照里多出源侧不存在的文件”反向校验；README / INSTALL /
+  TROUBLESHOOTING 的 macOS 入口、令牌/账本路径与分发件数字同步更新。
+- **低风险去重**：`normPath` 改用 `lib/diagnostics.mjs` 的 `normalizePath`；停桥轮询抽成
+  `waitPortReleased`；媒体终态判断复用 `isTerminalMediaStatus` / `isFailedMediaStatus`；
+  `/health` 的默认视图只算一次；删除 3 段无引用 CSS。
+
 ## [1.22.1] - 2026-11-02
 
 ### Fixed
