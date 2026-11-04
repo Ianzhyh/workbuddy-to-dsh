@@ -17,6 +17,7 @@ import {
   invalidInput,
   isObject,
   isTerminalMediaStatus,
+  makeOptionalString,
   mediaClientOptions,
   mediaPayload,
   mioraRequest,
@@ -73,13 +74,7 @@ function assertKnownKeys(input) {
   throw invalid(`unknown field(s): ${hinted.join(', ')}. Accepted: ${[...IMAGE_INPUT_KEYS].join(', ')}.`);
 }
 
-function optionalString(value, field, limit = 64) {
-  if (value === undefined || value === null || value === '') return undefined;
-  if (typeof value !== 'string') throw invalid(`${field} must be a string.`);
-  const text = value.trim();
-  if (!text || text.length > limit) throw invalid(`${field} must be 1-${limit} characters.`);
-  return text;
-}
+const optionalString = makeOptionalString(invalid);
 
 /** `size` 统一成小写 `宽x高`；上游认 `1024x1024` / `1024x768` 这类形状。 */
 function normalizeSize(value) {

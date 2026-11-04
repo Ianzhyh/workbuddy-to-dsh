@@ -1,7 +1,7 @@
 /**
  * 面板验收用的**共享桩数据与渲染骨架**。
  *
- * 为什么单独一份：`panel-render.mjs`（出截图）与 `panel-i18n.test.mjs`（扫残留
+ * 为什么单独一份：`panel-render.mjs`（出截图）与 `panel-i18n.mjs`（扫残留
  * 中文）需要**完全相同**的桩 —— 两份各写一份必然漂移，而桩一漂移，两边验的就不是
  * 同一个东西了（这个坑在 tools/dev/fixtures.mjs 的注释里已经记过一次）。
  *
@@ -433,7 +433,7 @@ window.__ModuleLoader__ = {
 /**
  * 一套完整的路由桩（路径 → 响应体）。
  *
- * `panel-render.mjs`（出截图）与 `panel-i18n.test.mjs`（扫残留中文）**必须用同一份** ——
+ * `panel-render.mjs`（出截图）与 `panel-i18n.mjs`（扫残留中文）**必须用同一份** ——
  * 两边各写一份必然漂移，而桩一漂移，验的就不是同一个东西了。
  *
  * @param {object} data gather() 的产物，或内置的 FIXTURES

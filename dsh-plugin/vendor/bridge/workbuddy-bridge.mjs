@@ -39,7 +39,7 @@ import { waitDrain } from './wait-drain.mjs';
 import { applyPromotion, groupPromotions } from './promotions.mjs';
 import { submitVideo, queryVideo, MioraVideoError, MAX_VIDEO_WAIT_MS } from './miora-video.mjs';
 import { submitImage, queryImage } from './miora-image.mjs';
-import { configureSubmissionStore, publicHttpsUrl } from './miora-media-core.mjs';
+import { configureSubmissionStore, isFailedMediaStatus, isTerminalMediaStatus, publicHttpsUrl } from './miora-media-core.mjs';
 
 /**
  * 本桥源码的构建指纹。
@@ -4420,7 +4420,7 @@ async function handleMediaSubmit(req, res, { submit, kind, label, prefix, defaul
      * 差值 ≤ 0 / 读不到 → 不记（界面显示「—」），绝不把“没测到”写成 0。
      * 同步失败就不必再读一次（本来也不会记 creditEstimate）。
      */
-    const failedTask = media.status === 'failed' || media.status === 'cancelled';
+    const failedTask = isFailedMediaStatus(media.status);
     const balanceAfter = failedTask ? null : await quotaBalance(resolved.auth);
     const creditEstimate = balanceBefore !== null && balanceAfter !== null && balanceBefore > balanceAfter
       ? Math.round((balanceBefore - balanceAfter) * 10000) / 10000
@@ -4430,9 +4430,9 @@ async function handleMediaSubmit(req, res, { submit, kind, label, prefix, defaul
      * 任务已经是终态，结果/错误就在这次响应里。HTTP 200 让调用方不必再查；
      * 账本也按真实成败记（同步失败不能再算一次“成功提交”）。
      */
-    const terminal = media.status === 'completed' || media.status === 'failed' || media.status === 'cancelled';
+    const terminal = isTerminalMediaStatus(media.status);
     const syncTerminal = media.sync === true && terminal;
-    const generationFailed = media.status === 'failed' || media.status === 'cancelled';
+    const generationFailed = failedTask;
     const httpStatus = syncTerminal ? 200 : 202;
     recordRequest({
       model: kind,
@@ -4577,7 +4577,7 @@ const OPENAI_IMAGE_ALLOWED_FIELDS = new Set([
   'prompt', 'model', 'n', 'size', 'quality', 'response_format', 'style', 'user',
   'background', 'moderation', 'output_compression', 'output_format', 'partial_images', 'stream',
 ]);
-const isOpenAIImageTerminal = (status) => ['completed', 'failed', 'cancelled'].includes(status);
+const isOpenAIImageTerminal = isTerminalMediaStatus;
 
 function openAIImageError(res, status, message, code = 'IMAGE_INVALID_INPUT') {
   return json(res, status, {
@@ -4659,7 +4659,7 @@ async function handleOpenAIImagesGenerations(req, res) {
       maxBodyBytes: MAX_BODY_BYTES,
       onBeforeRequest: async () => { balanceBefore = await quotaBalance(resolved.auth); },
     }));
-    const failedAtSubmit = submitted.status === 'failed' || submitted.status === 'cancelled';
+    const failedAtSubmit = isFailedMediaStatus(submitted.status);
     const balanceAfter = failedAtSubmit ? null : await quotaBalance(resolved.auth);
     const creditEstimate = balanceBefore !== null && balanceAfter !== null && balanceBefore > balanceAfter
       ? Math.round((balanceBefore - balanceAfter) * 10000) / 10000
@@ -4680,7 +4680,7 @@ async function handleOpenAIImagesGenerations(req, res) {
       }
     }
 
-    const failed = media.status === 'failed' || media.status === 'cancelled';
+    const failed = isFailedMediaStatus(media.status);
     const terminal = isOpenAIImageTerminal(media.status);
     let httpStatus = terminal ? (failed ? 400 : 200) : 202;
     let payload;
@@ -9028,8 +9028,8 @@ function usageFile() {
 /** 读文件指纹；文件不存在时返回 { size: 0, mtimeMs: -1 }。 */
 function usageStat(file) {
   try {
-    const st = existsSync(file) ? statSync(file) : null;
-    return st ? { size: st.size, mtimeMs: st.mtimeMs } : { size: 0, mtimeMs: -1 };
+    const st = statSync(file);
+    return { size: st.size, mtimeMs: st.mtimeMs };
   } catch {
     return { size: 0, mtimeMs: -1 };
   }
@@ -10443,7 +10443,8 @@ function defaultViewModels(catalog, region = '', requestLimit = 0) {
     return current.ids
       .map((id) => byId.get(id) ?? fallbackCatalogEntry(id, region))
       .filter(Boolean);
-  }  const wanted = effectiveModelLimit(requestLimit);
+  }
+  const wanted = effectiveModelLimit(requestLimit);
   /*
    * 精选集是**保底**：`wanted` 没设（0 = curated）时全给；设了就给到 `wanted`
    * 个 —— 包括**少于**精选数的情况。
@@ -11627,6 +11628,7 @@ async function handleRequest(req, res) {
         refreshCatalog();
       }
       const catalog = catalogCache.models;
+      const dv = defaultViewModels(catalog, region);
       return json(res, 200, {
         ok: true,
         pid: process.pid,
@@ -11647,7 +11649,7 @@ async function handleRequest(req, res) {
          * 函数。面板拿它当「客户端一键拉取会看到什么」的权威口径 —— 早先这里
          * 写死 `pickFeatured`，一改默认规模就会与客户端真正拉到的对不上。
          */
-        models: defaultViewModels(catalog, region).map((m) => m.id),
+        models: dv.map((m) => m.id),
         /*
          * 默认视图的规模设置。
          *
@@ -11660,7 +11662,7 @@ async function handleRequest(req, res) {
           ...effectiveModelsDefault(),
           total: catalog.length || fallbackCatalog(region).length,
           /** 客户端不带参数时（`GET /v1/models`）实际会拿到几个。 */
-          count: defaultViewModels(catalog, region).length,
+          count: dv.length,
         },
         catalogSize: catalog.length,
         catalogAt: catalogCache.at ? new Date(catalogCache.at).toISOString() : null,

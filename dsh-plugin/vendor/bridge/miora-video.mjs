@@ -12,8 +12,10 @@ import {
   MAX_MEDIA_WAIT_MS,
   SUBMIT_TIMEOUT_MS,
   assertInlineInputBudget,
+  invalidInput,
   isObject,
   isTerminalMediaStatus,
+  makeOptionalString,
   mediaClientOptions,
   mediaPayload,
   mioraRequest,
@@ -31,7 +33,7 @@ export const VIDEO_QUERY_PATH = '/api/ai/workbuddy-proxy/video/query-task';
 /** 视频查询的长轮询上限（与图片共用同一套预算语义）。 */
 export const MAX_VIDEO_WAIT_MS = MAX_MEDIA_WAIT_MS;
 
-const invalid = (message) => new MioraMediaError('VIDEO_INVALID_INPUT', message, { status: 400 });
+const invalid = (message) => invalidInput('VIDEO', message);
 
 /*
  * 允许的顶层字段。**不接受未知字段**：拼错一个键（firstFrameImage / image / size）
@@ -129,13 +131,7 @@ function optionalDuration(value) {
   return number;
 }
 
-function optionalString(value, field, limit = 64) {
-  if (value === undefined || value === null || value === '') return undefined;
-  if (typeof value !== 'string') throw invalid(`${field} must be a string.`);
-  const text = value.trim();
-  if (!text || text.length > limit) throw invalid(`${field} must be 1-${limit} characters.`);
-  return text;
-}
+const optionalString = makeOptionalString(invalid);
 
 /** 大小写归一：上游认 `768P` / `2K`。未知取值原样透传（不替它发明新档位）。 */
 const RESOLUTION_ALIASES = new Map([['768p', '768P'], ['2k', '2K']]);

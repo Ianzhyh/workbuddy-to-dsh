@@ -658,23 +658,37 @@ export async function bridgeRequests(limit = 50) {
  * `currentOnly` 只保留**本次桥进程**的输出：按最后一次启动横幅
  * （`listening on http`，每次启动必打一行）切分。日志文件是跨多次启动
  * 追加的，不切分就会出现「面板前几行是上上次启动的输出」。
+ *
+ * 控制台日志抽屉每 3 秒轮询一次。整份 2MB 日志反复同步读 + 切行会占用
+ * 事件循环，因此按 `size + mtimeMs` 缓存已经切好的行；追加后指纹变化，
+ * 下次读取自然更新。缓存键包含文件路径，测试用临时文件不会串档。
  */
-export function readBridgeLog(lines = 80, { currentOnly = false } = {}) {
-  const p = config.paths.bridgeLog;
-  if (!existsSync(p)) return [];
+let bridgeLogCache = { file: '', key: '', lines: [] };
+
+export function readBridgeLog(lines = 80, { currentOnly = false, file = config.paths.bridgeLog } = {}) {
+  let list;
   try {
-    let list = readFileSync(p, 'utf8').split('\n').filter(Boolean);
-    if (currentOnly) {
-      let start = -1;
-      for (let i = list.length - 1; i >= 0; i -= 1) {
-        if (list[i].includes('listening on http')) { start = i; break; }
-      }
-      list = start === -1 ? [] : list.slice(start);
+    const st = statSync(file);
+    const key = `${st.size}:${st.mtimeMs}`;
+    if (bridgeLogCache.file !== file || bridgeLogCache.key !== key) {
+      bridgeLogCache = {
+        file,
+        key,
+        lines: readFileSync(file, 'utf8').split('\n').filter(Boolean),
+      };
     }
-    return list.slice(-lines);
+    list = bridgeLogCache.lines;
   } catch {
     return [];
   }
+  if (currentOnly) {
+    let start = -1;
+    for (let i = list.length - 1; i >= 0; i -= 1) {
+      if (list[i].includes('listening on http')) { start = i; break; }
+    }
+    list = start === -1 ? [] : list.slice(start);
+  }
+  return list.slice(-lines);
 }
 
 // ── 凭据状态 ────────────────────────────────────────────────────────────

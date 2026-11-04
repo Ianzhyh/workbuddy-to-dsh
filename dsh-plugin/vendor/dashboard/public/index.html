@@ -3978,6 +3978,22 @@ async function doCheckin() {
   await loadOverview();
 }
 
+let usageReloadTimer = null;
+/**
+ * 粒度/天数在请求飞行中变了：等 singleFlight 释放后再补发一次。
+ *
+ * `loadUsage` 在初始化尾部被 singleFlight 包裹，在飞期间再次调用只会拿到
+ * 上一次的 Promise —— 只丢弃旧响应而不补发，页面会停在空白/旧视图。
+ * setTimeout 是宏任务，触发时 finally 已经清掉锁。
+ */
+function scheduleUsageReload() {
+  if (usageReloadTimer) return;
+  usageReloadTimer = setTimeout(() => {
+    usageReloadTimer = null;
+    loadUsage();
+  }, 0);
+}
+
 async function loadUsage() {
   const days = $('usageDays') ? $('usageDays').value : 7;
   const gran = $('trendGran') ? $('trendGran').value : 'day';
@@ -3987,9 +4003,10 @@ async function loadUsage() {
     // 小时视图单独请求一次（days=1&hours=1）；它只服务趋势图与卡片，
     // **不覆盖** lastUsage —— 成本列与导出 CSV 认的是按天窗口
     const d = await api('/api/usage?days=1&hours=1');
-    setStamp('usageStamp');
     usageHourCache = (d && d.usage) || null;
     if (usageHourCache) seedModelColors(usageHourCache.models);
+    if (trendGran !== 'hour') { scheduleUsageReload(); return; }
+    setStamp('usageStamp');
     usageView = usageHourCache;
     renderUsage();
     return;
@@ -4005,20 +4022,28 @@ async function loadUsage() {
      * 84 = 12 整周，且桥对 days 的上限就是 90，留了余量。
      */
     const d = await api('/api/usage?days=84');
-    setStamp('usageStamp');
     usageWeekCache = (d && d.usage) || null;
     if (usageWeekCache) seedModelColors(usageWeekCache.models);
+    if (trendGran !== 'week') { scheduleUsageReload(); return; }
+    setStamp('usageStamp');
     usageView = usageWeekCache;
     renderUsage();
     return;
   }
 
   const d = await api('/api/usage?days=' + days);
-  setStamp('usageStamp');
+  // 天数在飞行中变了：这份响应属于旧窗口。usageDayCache 不按天数分键，
+  // 写进去会让之后切回「天」时渲染错窗口 —— 直接丢弃并补发当前窗口。
+  if ($('usageDays') && $('usageDays').value !== String(days)) {
+    scheduleUsageReload();
+    return;
+  }
   usageDayCache = (d && d.usage) || null;
   // 先按稳定顺序把模型色分配好，再渲染 —— 否则「排行」与「按模型堆叠」会各排各的
   if (usageDayCache) seedModelColors(usageDayCache.models);
   lastUsage = usageDayCache;
+  if (trendGran !== 'day') { scheduleUsageReload(); return; }
+  setStamp('usageStamp');
   usageView = usageDayCache;
   renderUsage();
   refreshCostCells();
@@ -4665,13 +4690,22 @@ function requestModels() {
  * 选中值不在新明细里时回落「全部模型」并提示一次——否则用户会盯着一个
  * 筛不出任何东西的下拉，以为页面坏了。
  */
+let reqFilterModelsSig = null;
 function syncReqModelFilterUI() {
   const sel = $('reqModelFilter');
   if (!sel) return;
   const models = requestModels();
   const prev = reqModelFilter;
-  sel.innerHTML = '<option value="">全部模型</option>'
-    + models.map((id) => '<option value="' + escapeAttr(id) + '">' + escapeAttr(id) + '</option>').join('');
+  /*
+   * 20 秒轮询会反复调用这里。选项没变就不要重建 DOM：自绘下拉打开时
+   * 闭包持有的是旧 option，整表重建会让用户点中的项脱离文档、筛选被清空。
+   */
+  const sig = models.join('\u0000');
+  if (sig !== reqFilterModelsSig) {
+    reqFilterModelsSig = sig;
+    sel.innerHTML = '<option value="">全部模型</option>'
+      + models.map((id) => '<option value="' + escapeAttr(id) + '">' + escapeAttr(id) + '</option>').join('');
+  }
 
   let fellBackFrom = '';
   if (prev && !models.includes(prev)) {
@@ -6379,7 +6413,7 @@ const QUOTA_DAY_MS = 86400000;
 function parseQuotaExpiryMs(value) {
   if (!value) return 0;
   const text = String(value).trim();
-  const normalized = /^d{4}-d{2}-d{2} d{2}:d{2}/.test(text) ? text.replace(' ', 'T') : text;
+  const normalized = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}/.test(text) ? text.replace(' ', 'T') : text;
   const ms = Date.parse(normalized);
   return Number.isFinite(ms) ? ms : 0;
 }
@@ -7988,13 +8022,13 @@ const THEME_KEY = 'wb.theme';
 const darkQuery = window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)') : null;
 
 function initTheme() {
-  const saved = localStorage.getItem(THEME_KEY);
+  const saved = lsGet(THEME_KEY, '');
   // 首次应用**不做过渡**：页面还没画出来，没有「旧的一帧」可交叉淡化
   commitTheme(saved || (darkQuery && darkQuery.matches ? 'dark' : 'light'), { persist: false });
   if (darkQuery && darkQuery.addEventListener) {
     darkQuery.addEventListener('change', (e) => {
       // 用户已经表过态了，不覆盖他的选择
-      if (localStorage.getItem(THEME_KEY)) return;
+      if (lsGet(THEME_KEY, '')) return;
       applyTheme(e.matches ? 'dark' : 'light', { persist: false });
     });
   }
@@ -8003,7 +8037,7 @@ function initTheme() {
 function commitTheme(theme, opts) {
   document.documentElement.setAttribute('data-theme', theme);
   // 只有用户**亲手**切换才记住；跟随系统而来的主题不落盘，否则就"跟不动"了
-  if (!opts || opts.persist !== false) localStorage.setItem(THEME_KEY, theme);
+  if (!opts || opts.persist !== false) lsSet(THEME_KEY, theme);
   const isDark = theme === 'dark';
   const sun = $('themeIconSun');
   const moon = $('themeIconMoon');
@@ -8069,7 +8103,7 @@ function syncAccentDot() {
 
 function commitAccent(id) {
   document.documentElement.setAttribute('data-accent', id);
-  localStorage.setItem(ACCENT_KEY, id);
+  lsSet(ACCENT_KEY, id);
   syncAccentDot();
 }
 function applyAccent(id) {
@@ -8097,7 +8131,7 @@ function initAccent() {
       menu.append(item);
     }
   }
-  const saved = localStorage.getItem(ACCENT_KEY);
+  const saved = lsGet(ACCENT_KEY, '');
   if (saved && ACCENTS.some((a) => a.id === saved)) {
     document.documentElement.setAttribute('data-accent', saved);
   }

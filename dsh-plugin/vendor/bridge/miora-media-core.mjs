@@ -77,6 +77,21 @@ export function invalidInput(prefix, message) {
   return new MioraMediaError(`${prefix}_INVALID_INPUT`, message, { status: 400 });
 }
 
+/**
+ * 生成图片/视频模块共用的可选字符串校验器。
+ *
+ * `invalid` 由调用方传入，错误码前缀（IMAGE_/VIDEO_）因此保持不变。
+ */
+export function makeOptionalString(invalid) {
+  return function optionalString(value, field, limit = 64) {
+    if (value === undefined || value === null || value === '') return undefined;
+    if (typeof value !== 'string') throw invalid(`${field} must be a string.`);
+    const text = value.trim();
+    if (!text || text.length > limit) throw invalid(`${field} must be 1-${limit} characters.`);
+    return text;
+  };
+}
+
 function shortMessage(value, limit = 300) {
   const text = String(value ?? '').replace(/\s+/g, ' ').trim();
   if (!text) return '';
@@ -127,6 +142,12 @@ export const normalizeVideoStatus = normalizeMediaStatus;
 export function isTerminalMediaStatus(status) {
   const normalized = normalizeMediaStatus(status);
   return normalized === 'completed' || normalized === 'failed' || normalized === 'cancelled';
+}
+
+/** 失败终态（failed / cancelled），同样先归一化。 */
+export function isFailedMediaStatus(status) {
+  const normalized = normalizeMediaStatus(status);
+  return normalized === 'failed' || normalized === 'cancelled';
 }
 
 /**

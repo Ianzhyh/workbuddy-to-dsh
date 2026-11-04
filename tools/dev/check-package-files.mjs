@@ -94,6 +94,16 @@ while (queue.length) {
 let failures = 0;
 const bad = (message) => { console.error(`✗ ${message}`); failures += 1; };
 
+/*
+ * 启动资产不会被 import 图遍历到，但 README 承诺它们必须随包分发。
+ * 少一条，macOS / Linux 用户从 npm 装完就没有 `bridge/start-bridge.sh`。
+ */
+const START_ASSETS = ['bridge/start-bridge.cmd', 'bridge/start-bridge.sh'];
+for (const relPath of START_ASSETS) {
+  if (!existsSync(join(ROOT, relPath))) bad(`启动入口不存在：${relPath}`);
+  else if (!coveredByFiles(relPath)) bad(`启动入口不在 package.json files 里：${relPath}`);
+}
+
 console.log(`入口 ${ENTRIES.length} 个，递归检查 ${seen.size} 个本地文件\n`);
 if (brokenImports.size) {
   for (const item of brokenImports) bad(`import 指向不存在的文件：${item}`);
@@ -101,7 +111,7 @@ if (brokenImports.size) {
 if (missingInFiles.size) {
   for (const item of missingInFiles) bad(`不在 package.json files 里：${item}`);
 }
-if (!brokenImports.size && !missingInFiles.size) {
+if (!failures) {
   console.log(`✓ 入口与依赖都在 files 白名单内（${FILES.length} 条）`);
 }
 console.log(failures ? `\n✗ 失败 ${failures} 项` : '\n✓ 打包完整性检查通过');

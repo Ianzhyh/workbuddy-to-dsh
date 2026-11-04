@@ -17,9 +17,7 @@
     "scripts",
     "vendor",
     "cordis.patch.yml",
-    "README.md",
-    "LICENSE",
-    "NOTICE.md"
+    "README.md"
   ],
   "engines": {
     "node": ">=18"

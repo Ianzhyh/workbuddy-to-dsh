@@ -58,7 +58,7 @@ async function freeCdpPort() {
   return port;
 }
 
-// 桩数据与渲染骨架在 _panel-fixtures.mjs 里，与 panel-i18n.test.mjs 共用一份
+// 桩数据与渲染骨架在 _panel-fixtures.mjs 里，与 panel-i18n.mjs 共用一份
 import { FIXTURES, buildRoutes, ensureVendor, harnessHtml, gather } from './_panel-fixtures.mjs';
 
 const now = Date.now(); // 本文件自己的路由覆盖里要用（FIXTURES 那份在 _panel-fixtures.mjs）
@@ -86,7 +86,7 @@ const { data, source, liveStatus } = await gather({ offline });
 const { react, reactDom } = await ensureVendor();
 const clientSource = readFileSync(join(PLUGIN, 'lib', 'client.js'), 'utf8');
 
-// 路由桩在 _panel-fixtures.mjs 里，与 panel-i18n.test.mjs 共用一份
+// 路由桩在 _panel-fixtures.mjs 里，与 panel-i18n.mjs 共用一份
 const routes = buildRoutes(data);
 
 const server = await startStaticServer(PORT);

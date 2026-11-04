@@ -160,6 +160,7 @@ const need = [
   'package/vendor/dashboard/public/style.css',
   'package/vendor/lib/dsh.mjs',
   'package/vendor/lib/failover.mjs',
+  'package/vendor/lib/log-rotate.mjs',
 ];
 const byName = new Map(files.map((f) => [f.name, f]));
 const missing = need.filter((n) => !byName.has(n));

@@ -127,12 +127,41 @@ function prune(dir) {
   }
   return removed;
 }
+/**
+ * 列出 vendor/ 里源侧已经不存在的文件。
+ *
+ * 只查“源→快照”方向发现不了删掉源文件后遗留的旧副本；这些文件会被
+ * `npm pack` 一起发给用户。SKIP 命中的运行期数据不算多余 —— `prune()`
+ * 会在正常生成时清理它们，`--check` 不应因此假红。
+ */
+function extrasIn(dir) {
+  const extras = [];
+  if (!existsSync(dir)) return extras;
+  const walkExtras = (base) => {
+    for (const name of readdirSync(base)) {
+      const abs = join(base, name);
+      if (SKIP.some((re) => re.test(name))) continue;
+      if (statSync(abs).isDirectory()) { walkExtras(abs); continue; }
+      if (!expected.has(abs.toLowerCase())) extras.push(relative(VENDOR_DIR, abs));
+    }
+  };
+  walkExtras(dir);
+  return extras;
+}
+
 const pruned = checkOnly ? [] : prune(VENDOR_DIR);
+const extras = checkOnly ? extrasIn(VENDOR_DIR) : [];
 
 if (checkOnly) {
-  if (stale.length) {
-    console.error(`✖ vendor/ 与仓库不同步，共 ${stale.length} 个文件需要更新：`);
-    for (const f of stale.slice(0, 20)) console.error(`   ${f}`);
+  if (stale.length || extras.length) {
+    if (stale.length) {
+      console.error(`✖ vendor/ 与仓库不同步，共 ${stale.length} 个文件需要更新：`);
+      for (const f of stale.slice(0, 20)) console.error(`   ${f}`);
+    }
+    if (extras.length) {
+      console.error(`✖ vendor/ 里有 ${extras.length} 个源侧不存在的文件：`);
+      for (const f of extras.slice(0, 20)) console.error(`   ${f}`);
+    }
     console.error('   运行：node dsh-plugin/scripts/vendor.mjs');
     process.exit(1);
   }

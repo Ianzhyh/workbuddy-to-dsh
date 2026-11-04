@@ -7,10 +7,12 @@
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { createServer } from 'node:http';
-import { closeSync, existsSync, openSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
+import { closeSync, existsSync, openSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import config, { bridgeEnv } from '../config.mjs';
+import { waitDrain } from '../bridge/wait-drain.mjs';
+import { rotateLogIfNeeded } from '../lib/log-rotate.mjs';
 import {
   bridgeHealth,
   bridgeIdentity,
@@ -34,6 +36,7 @@ import {
   invalidateQuotaCache,
   listAccountFiles,
   listAccounts,
+  normalizePath,
   probeModel,
   readBridgeLog,
   reconcileAccountPin,
@@ -282,10 +285,6 @@ function parsePortPid(stdout, port) {
  * 只用于"等待端口释放"这条快路径；真正要 kill 的 PID 仍由同步版
  * {@link findPortPid} 给出（那条路径有 taskkill / process.kill 兜底，见 stopBridge）。
  *
- * 任何异常（命令不存在、超时、输出为空）都返回 null：对调用方来说
- * "探测不出来" 与 "没找到" 在轮询里是同一件事 —— 都表示还没释放/还不能关。
- */
-/**
  * 探测端口上还有没有监听者。**三种结果必须分开**：
  *
  *   `number`    —— 有监听者，这是它的 PID
@@ -365,19 +364,6 @@ function findPortPid(port) {
 
 // ── 桥进程管理 ──────────────────────────────────────────────────────────
 
-/** 日志超过 2MB 就滚动一次，避免长期运行后无限增长。 */
-const LOG_MAX_BYTES = 2 * 1024 * 1024;
-
-function rotateLogIfNeeded(file) {
-  try {
-    if (existsSync(file) && statSync(file).size > LOG_MAX_BYTES) {
-      renameSync(file, `${file}.1`);
-    }
-  } catch {
-    /* 滚动失败（文件被占用等）不影响启动 */
-  }
-}
-
 /**
  * 读取日志文件从 offset（字节）之后新增的内容。
  *
@@ -410,7 +396,7 @@ function startBridge(opts = {}) {
   const desktopAuth = config.workbuddy.authFile;
   const statePinned = Boolean(String(readState().authFile || '').trim());
   const followAuthFile = opts.followAuthFile
-    || ((statePinned && normPath(authFile) !== normPath(desktopAuth)) ? 'auto' : '');
+    || ((statePinned && normalizePath(authFile) !== normalizePath(desktopAuth)) ? 'auto' : '');
   const followUid = opts.followUid !== undefined
     ? String(opts.followUid || '')
     : String(readState().authFileDesktopUid || '');
@@ -725,9 +711,6 @@ function checkinViewWithBridge(bridgeAuto) {
   };
 }
 
-/** 归一化路径用于比对（Windows 上同一路径可能以 / 或 \ 出现）。 */
-const normPath = (p) => String(p || '').replace(/\\/g, '/').toLowerCase();
-
 /**
  * 桥健康响应是否符合"我们期望的登录文件"。
  *
@@ -736,8 +719,8 @@ const normPath = (p) => String(p || '').replace(/\\/g, '/').toLowerCase();
  * 否则控制台会误判"端口被另一个账号的桥占用"。
  */
 function authFileMatches(healthBody, expected) {
-  const want = normPath(expected);
-  return normPath(healthBody?.authFile) === want || normPath(healthBody?.authFilePinned) === want;
+  const want = normalizePath(expected);
+  return normalizePath(healthBody?.authFile) === want || normalizePath(healthBody?.authFilePinned) === want;
 }
 
 /**
@@ -748,7 +731,7 @@ function authFileMatches(healthBody, expected) {
  * 报成「已启动」。这里只认 PID 相符；不符时如实返回 reused + spawnError。
  */
 async function startBridgeAndWait(opts = {}) {
-  const expected = normPath(opts.authFile || effectiveAuthFile());
+  const expected = normalizePath(opts.authFile || effectiveAuthFile());
 
   // 已经在跑且账号一致的桥：直接复用，不做注定失败的重复启动
   const before = await bridgeHealth();
@@ -839,7 +822,7 @@ async function applyAccountPinCorrection(pin) {
      * 一个已经正确的桥；只有当前生效文件仍是旧钉住文件时才需要重启。
      */
     const running = health.body?.authFile || health.body?.authFilePinned;
-    if (pin.previousPin && normPath(running) !== normPath(pin.previousPin)) {
+    if (pin.previousPin && normalizePath(running) !== normalizePath(pin.previousPin)) {
       return { applied: false, restarted: false, error: null };
     }
     await stopBridgeAndWait();
@@ -1052,26 +1035,30 @@ export async function stopBridgeAndWait(target) {
   // 停止按钮是**立刻**返回的，不会先白等 5 秒。
   if (!result.stopped) return result;
 
-  let freed = false;
-  for (let i = 0; i < 20; i += 1) {
-    await sleep(250);
-    // 三态：null = 确认没监听者（已释放）；undefined = 探测不出来（不能当已释放）
-    const pid = await probePortPid(port);
-    if (pid === null) { freed = true; break; }
-    if (pid === undefined) break; // 未知就别在这儿空等 5 秒，交给下面的兜底与告警
-  }
+  // 三态：null = 确认没监听者（已释放）；undefined = 探测不出来（不能当已释放）
+  let freed = await waitPortReleased(port, 20);
   // POSIX 下 SIGTERM 被忽略时升级为 SIGKILL，否则重启会一直撞在旧进程上
   if (!freed && process.platform !== 'win32') {
     try { process.kill(result.pid, 'SIGKILL'); } catch { /* 已经退出了 */ }
-    for (let i = 0; i < 12; i += 1) {
-      await sleep(250);
-      // 三态：null = 确认没监听者（已释放）；undefined = 探测不出来（不能当已释放）
-    const pid = await probePortPid(port);
-    if (pid === null) { freed = true; break; }
-    if (pid === undefined) break; // 未知就别在这儿空等 5 秒，交给下面的兜底与告警
-    }
+    freed = await waitPortReleased(port, 12);
   }
   return freed ? result : { ...result, warning: `进程未在超时内退出，端口 ${port} 可能仍被占用` };
+}
+
+/**
+ * 轮询等待端口释放，最多 `attempts` 次（每次 250ms）。
+ *
+ * `probePortPid` 的 undefined 表示「探测不出来」，不能当已释放继续等；
+ * 直接返回 false，把决定权交给调用方的 SIGKILL 兜底与告警。
+ */
+async function waitPortReleased(port, attempts) {
+  for (let i = 0; i < attempts; i += 1) {
+    await sleep(250);
+    const pid = await probePortPid(port);
+    if (pid === null) return true;
+    if (pid === undefined) return false;
+  }
+  return false;
 }
 
 /**
@@ -1150,7 +1137,7 @@ async function proxyChat(req, res, payload) {
     for (;;) {
       const { done, value } = await reader.read();
       if (done) break;
-      res.write(Buffer.from(value));
+      if (!res.write(Buffer.from(value))) await waitDrain(res);
     }
     res.end();
   } catch (err) {

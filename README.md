@@ -181,10 +181,12 @@ dsh plugin --profile desktop add github:Ianzhyh/workbuddy-to-dsh
 # ── 第 1 步：跑起来（所有用法都需要，与 dsh 无关）──────────────────────
 git clone https://github.com/Ianzhyh/workbuddy-to-dsh.git
 cd workbuddy-to-dsh
-# 然后双击 启动.cmd —— 桥和控制台都会自动起来，不需要 npm install
+# Windows：双击 启动.cmd —— 桥和控制台都会自动起来，不需要 npm install
+# macOS / Linux：bash scripts/start.sh
 
 # 或者只要桥、不开控制台：
-bridge\start-bridge.cmd
+bridge\start-bridge.cmd        # Windows
+bash bridge/start-bridge.sh    # macOS / Linux
 ```
 
 跑起来后，去控制台「客户端接入」页签拿 Base URL 与令牌填进你的客户端
@@ -246,7 +248,7 @@ WorkBuddy 的上游后端本身就讲 OpenAI 协议，官方只是没有开放�
 | Node.js | **18 或更高**（开发验证于 22.22.2）。无 npm 依赖，无需 `npm install` |
 | WorkBuddy 桌面端 | **已安装且已登录**，进程可用（模型由它铸造的令牌驱动）；**或者**不装桌面端，用 dsh 插件里的「插件登录」完成一次浏览器授权（凭据由插件加密保管，见 [dsh-plugin/README](dsh-plugin/README.md)） |
 | DeepSeek Harness | 可选。只有要接入 dsh 时才需要；桥本身对任意 OpenAI 客户端都可用 |
-| 操作系统 | **Windows**（已验证）。macOS / Linux 的路径与调用逻辑已实现、也在 CI 矩阵里跑过单测，但**凭据解密未实测** |
+| 操作系统 | **Windows**（已验证）。macOS / Linux 的路径与调用逻辑已实现、也在 CI 矩阵里跑过单测；macOS 已有社区用户实机跑到模型列表，但**凭据解密未官方实测** |
 
 > **复用桌面端登录态目前只支持 Windows**：解密的密钥**不在本包里**，每次由 WorkBuddy 客户端
 > 自己的 Electron 原生绑定现取，这条路只在 Windows 上验过。插件包虽然声明了 `os: ["win32"]`，
@@ -265,7 +267,7 @@ WorkBuddy 的上游后端本身就讲 OpenAI 协议，官方只是没有开放�
 
 ## 快速开始
 
-**双击根目录的 `启动.cmd`。就这一步。**
+**Windows：双击根目录的 `启动.cmd`。macOS / Linux：`bash scripts/start.sh`。就这一步。**
 
 它会自动定位 Node.js、启动服务、并在浏览器里打开控制台——桥也会被自动拉起，
 不需要任何手工操作。打开后即可看到桥已就绪和完整的模型列表。
@@ -285,10 +287,14 @@ WorkBuddy 的上游后端本身就讲 OpenAI 协议，官方只是没有开放�
 
 不想开控制台也可以（用的是同一套配置）：
 
-```cmd
-bridge\start-bridge.cmd     :: 只起桥
-node tools\doctor.mjs       :: 命令行自检，输出缺失项与修法
-node tools\backup.mjs       :: 备份运行期数据（--restore <目录> --yes 恢复）
+```sh
+# 只起桥：
+bridge\start-bridge.cmd        # Windows
+bash bridge/start-bridge.sh    # macOS / Linux
+
+# 命令行自检 / 备份：
+node tools/doctor.mjs
+node tools/backup.mjs          # --restore <目录> --yes 恢复
 ```
 
 ### 把安装交给 Agent
@@ -716,6 +722,7 @@ bridge/
   workbuddy-bridge.mjs     桥本体（AtRest 解密 + 请求体归一化 + Anthropic 兼容层）
   launch.mjs               按统一配置独立启动桥
   start-bridge.cmd         Windows 独立启动入口
+  start-bridge.sh          macOS / Linux 独立启动入口
 dsh-plugin/                DeepSeek Harness 原生插件（宿主端 + dsh 设置页）
   lib/index.js            插件入口：桥/控制台生命周期、原生模型路由、工具、命令
   lib/adapter.mjs         dsh 词汇 ↔ OpenAI 词汇（SSE → StreamChunk）

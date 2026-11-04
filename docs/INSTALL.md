@@ -21,6 +21,9 @@
 改用插件登录时**不需要安装 WorkBuddy 桌面端**（凭据由插件保管：Windows DPAPI，其他平台文件密钥 + AES-GCM 落盘）。
 插件**只连本机回环地址**，不新增对外监听、不上传任何数据。
 
+> **macOS / Linux 启动入口**：控制台 `bash scripts/start.sh`，只起桥 `bash bridge/start-bridge.sh`。
+> 复用桌面端登录态的完整链路目前只有 Windows 实机验证，macOS / Linux 请按实验对待。
+
 ---
 
 ## 二、三条分发路线
@@ -37,6 +40,7 @@
      package.json  cordis.patch.yml  README.md
      lib/          宿主端 + 设置页
      scripts/      vendor.mjs（同步副本）preflight.mjs（环境自检）
+                   verify-standalone.mjs（独立分发演练）verify-github-install.mjs（GitHub 直装演练）
      vendor/       桥 + 控制台 + 共享库（自带，别人不需要仓库）
    ```
 3. 对方解压到任意目录（例如 `D:\dsh-plugin-workbuddy`），然后自检：
@@ -160,7 +164,7 @@ WORKBUDDY_AUTH_FILE=C:\Users\you\AppData\Local\CodeBuddyExtension\Data\Public\au
 - **改完仓库里的 `bridge/`、`dashboard/`、`config.mjs`、`lib/` 之后，一定要重跑 `npm run vendor`**，
   否则发出去的 `vendor/` 还是旧快照。CI / 发版前用 `npm run vendor:check` 校验（不同步会失败）。
 - 发版前一键三连：`npm run release:check`（= vendor 同步校验 + lib/桥/插件单测 + 独立分发演练）。
-- `vendor/` 只复制运行必需的 19 个文件（约 1.5 MB），**日志、`usage.jsonl` 用量账本、
+- `vendor/` 只复制运行必需的文件（当前 27 个、约 1.9 MB；以 `npm run vendor:check` 的输出为准），**日志、`usage.jsonl` 用量账本、
   `.state.json`、`*.bak`、`.env` 一律不打包**（这些属于使用者本人的数据，绝不能进分发包）；
   脚本还会**清理** vendor 里遗留的这类文件。
 - `npm run verify:standalone` 会把插件拷到一个没有仓库的临时目录，真起一遍桥与控制台

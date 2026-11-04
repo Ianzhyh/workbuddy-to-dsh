@@ -61,6 +61,10 @@ jobs:
       - name: 面板渲染验收（真实浏览器）
         run: npm run panel:shot
 
+      # panel:check 的第三项；它需要真实浏览器 + CDP，和上面两步同一环境。
+      - name: 面板拖拽排序验收（真实浏览器）
+        run: npm run panel:drag
+
       # Windows 中文/空格路径是现场高频故障（安装路径、TEMP、账号目录）。
       # 让独立分发包演练在含中文与空格的 TEMP 下再跑一次。
       - name: Windows 中文/空格路径独立演练

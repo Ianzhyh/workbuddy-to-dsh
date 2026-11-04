@@ -3179,13 +3179,6 @@ pre.log {
   white-space: pre;
 }
 
-.clientchips {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-2);
-  margin-bottom: var(--space-3);
-}
-
 .clientchip {
   font-size: var(--fs-label);
   color: var(--text-secondary);
@@ -3590,22 +3583,10 @@ pre.log {
  */
 .connectmodel .dd { flex: 1 1 auto; min-width: 0; max-width: 220px; }
 
-.connectmodel-sel { max-width: 100%; }
-
 /* 未接入 / 未检测到 用中性色，只有「已接入」给绿色 —— 避免整片花花绿绿 */
 .tag.idle {
   color: var(--hint);
   border-color: var(--border);
-}
-
-.connectdiff {
-  flex: 1 1 100%;
-  margin-top: var(--space-2);
-  padding: var(--space-3);
-  border: 1px dashed var(--border-strong);
-  border-radius: var(--radius-sm);
-  background: var(--panel);
-  font-size: var(--fs-label);
 }
 
 .connectchange {

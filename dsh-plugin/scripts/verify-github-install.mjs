@@ -107,6 +107,7 @@ try {
    */
   const VENDOR_ALLOWED = new Set([
     'dsh-plugin/vendor/lib/failover.mjs',
+    'dsh-plugin/vendor/lib/log-rotate.mjs',
     'dsh-plugin/vendor/LICENSE',
     'dsh-plugin/vendor/NOTICE.md',
     'dsh-plugin/vendor/.env.example',
