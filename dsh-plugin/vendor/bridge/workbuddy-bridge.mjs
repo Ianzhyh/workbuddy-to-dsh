@@ -3574,6 +3574,11 @@ const AUDIT_TEMPLATE_REWRITES = [
     "You are Claude Code, Anthropic's official CLI tool for Claude."],
   ['Main branch (you will usually use this for PRs)',
     'Default branch (you will usually use this for PRs)'],
+  // 2026-11-04（issue #25）：DSH 的 @ 路径说明里，这两句按固定先后共现会被
+  // 上游当成通道指纹；单独任一句都通过。只把 `@` 换成 `an at-sign` 即可，
+  // 语义不变，也不会影响单独出现的句子。
+  ['Tokens prefixed with @ are paths the user explicitly referenced.',
+    'Tokens prefixed with an at-sign are paths the user explicitly referenced.'],
 ];
 
 /**

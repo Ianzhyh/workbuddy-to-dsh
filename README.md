@@ -786,6 +786,7 @@ docs/                      架构、配置、排错、安全、接入链路审�
 |---|---|
 | [@JokesLin](https://github.com/JokesLin) | macOS 上 `CFBundleExecutable` 探测失效（#13）；控制台常驻内存与发布包体积（#14） |
 | [@liugangnhm](https://github.com/liugangnhm) | Claude Code 直连的模型名误路由与 200K 上下文（#18）、PR #19（已并入）的 `[1m]` 后缀与 1M beta 头 |
+| [@William-0406](https://github.com/William-0406) | DSH system 的 `@` 路径说明触发 11128 降级的定位与最小改写（#25） |
 | [@wflc](https://github.com/wflc) | Docker / NAS 部署下插件登录凭据每次都要重登（#16） |
 | [@GodGavin](https://github.com/GodGavin) | 限流后自动切换账号（#17） |
 | [@lenychang520](https://github.com/lenychang520) | PR #2：compact 崩溃修复 |

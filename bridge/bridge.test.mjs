@@ -5779,6 +5779,46 @@ test('桥：system 首句之外的 DeepSeek Harness 品牌词也必须中和', {
   }
 });
 
+test('桥：DSH 的 @ 路径说明两句共现时，出站 system 必须改写', { timeout: 60_000 }, async () => {
+  // issue #25：这两句单独出现都通过，按固定先后共现会被上游当成通道指纹。
+  // 只改第一句里的 `@`，第二句与后续指令必须原样保留。
+  const stub = await startStubUpstream(['atpath-model']);
+  const bridge = await startBridge(
+    { CODEBUDDY_ENDPOINT: stub.base, WORKBUDDY_SKIP_MODEL_PREFLIGHT: '1' },
+    { auth: READABLE_FAKE_AUTH },
+  );
+  const first = 'Tokens prefixed with @ are paths the user explicitly referenced.';
+  const second = 'Relative paths resolve from the workspace root; absolute paths identify files or directories on the host.';
+  try {
+    const res = await fetch(bridge.baseUrl + '/v1/chat/completions', {
+      method: 'POST',
+      headers: { ...auth, 'content-type': 'application/json' },
+      body: JSON.stringify({
+        model: 'atpath-model',
+        stream: false,
+        messages: [
+          { role: 'system', content: [first, second, 'Keep this rule.'].join('\n') },
+          { role: 'user', content: 'hi' },
+        ],
+      }),
+      signal: AbortSignal.timeout(15000),
+    });
+    assert.equal(res.status, 200);
+    await res.text();
+
+    assert.equal(stub.seen.length, 1, '主动改写后不应再触发 11128 重试');
+    const system = JSON.parse(stub.seen[0].body).messages.find((m) => m.role === 'system').content;
+    assert.ok(!system.includes(first), '出站 system 不得保留会触发指纹的原句');
+    assert.ok(system.includes('prefixed with an at-sign'), '应改成 at-sign 表述');
+    assert.ok(system.includes(second), '另一句必须原样保留');
+    assert.ok(system.includes('Keep this rule.'), '后续指令必须保留');
+  } finally {
+    await bridge.stop();
+    try { await stub.close(); } catch { /* 忽略 */ }
+    rmSync(bridge.dir, { recursive: true, force: true });
+  }
+});
+
 test('桥：assistant 历史身份句必须中和，user 原文不得改', { timeout: 60_000 }, async () => {
   // hub #574：assistant 历史里出现同一句身份模板会让整条会话每轮 11128。
   // 只动 assistant 的两句精确模板；user 的同一句不能被改（上游允许 user 提）。

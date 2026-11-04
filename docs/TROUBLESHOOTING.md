@@ -194,7 +194,7 @@ refreshToken : envelope keyId=9127dea1b44020a7 -> DECRYPTED len=698 jws-like=tru
 |---|---|---|
 | `11101` | `Non-stream chat request is currently not supported` | 上游只接受流式。桥已自动转换；若仍出现，说明请求绕过了桥 |
 | `11101` | `cannot unmarshal object into Go struct field Request.tool_choice of type string` | 客户端发了 **OpenAI 对象形式**的 `tool_choice`（`{"type":"function",...}`），而上游的 Go 结构体只收字符串。桥已在 `normalizePayload` 里归一化，正常不会出现；若出现，说明请求绕过了桥 |
-| `11128` | `Illegal API invocation from an unapproved channel` | 请求结构或调用方身份不被认可。常见于 `system` 提示词被放在 `developer` 角色、User-Agent 不匹配、**Claude Code 的固定 system 模板被逐字拉黑**（2026-10-08）、**dsh 身份句 `You are an AI agent powered by DeepSeek Harness.`**（2026-10-21），以及 **system 首句之外的其它 `DeepSeek Harness` 行 / assistant 历史里的同句**（2026-10-26 同类项目实测）。桥会对 system 全文做品牌词中和，并对 assistant 的两句精确身份模板做中和；三条协议路径上仍有渐进兜底（删品牌行 → 删首段 → assistant 品牌行 → 中性 system）。成功时响应头带 `X-WorkBuddy-11128-Fallback`。若仍再现：看桥日志 `normalize:` / `retrying with` 行，确认是否出现新的模板句；全部降级失败会回 `CHANNEL_REJECTED`，**不要原样反复重试** |
+| `11128` | `Illegal API invocation from an unapproved channel` | 请求结构或调用方身份不被认可。常见于 `system` 提示词被放在 `developer` 角色、User-Agent 不匹配、**Claude Code 的固定 system 模板被逐字拉黑**（2026-10-08）、**dsh 身份句 `You are an AI agent powered by DeepSeek Harness.`**（2026-10-21），以及 **system 首句之外的其它 `DeepSeek Harness` 行 / assistant 历史里的同句**（2026-10-26 同类项目实测）、**DSH 的 `@` 路径说明两句按固定先后共现**（2026-11-04，issue #25）。桥会对 system 全文做品牌词中和，并对 assistant 的两句精确身份模板做中和；三条协议路径上仍有渐进兜底（删品牌行 → 删首段 → assistant 品牌行 → 中性 system）。成功时响应头带 `X-WorkBuddy-11128-Fallback`。若仍再现：看桥日志 `normalize:` / `retrying with` 行，确认是否出现新的模板句；全部降级失败会回 `CHANNEL_REJECTED`，**不要原样反复重试** |
 | `11148` | `tool calls and tool results do not match` | 历史里 `tool_call_id` 重复、缺 result 或出现孤儿 result。桥默认会自愈（改名 / 补 `is_error` 结果 / 丢弃孤儿），账本记 `toolRepair`；若自定义关了 `WORKBUDDY_REPAIR_TOOL_HISTORY=0`，先打开。仍失败时新建会话 |
 | `11133` | 网关包装的上游故障 —— **但真因在 `extError.code` 里** | 桥会看 `extError.code` 分流（见下）：**确定性**的（`model_param_invalid` / `invalid_reasoning_effort` …）立刻返回，**瞬时**的才退避重试 |
 
@@ -251,6 +251,25 @@ refreshToken : envelope keyId=9127dea1b44020a7 -> DECRYPTED len=698 jws-like=tru
   会显示为 ok（并给出策略），不再把日志里的“retrying”误报成故障。
 - 若仍复现：检查日志里是否出现了**新的** system 模板句，或 tools/工具结果字段；
   设置 `WORKBUDDY_SHAPE=1` 可打印请求形状（不含对话内容）。
+
+### 2026-11-04：DSH 的 `@` 路径说明两句共现
+
+**症状**：dsh 正常对话几乎每轮都落到 `neutral-system`，账本里
+`fallback: "neutral-system"`；回复看起来正常，但 system 里的工具约定、审批/沙箱
+策略都被整体丢掉。
+
+**原因**：上游把 DSH system 里这两句按固定先后共现当成通道指纹：
+
+```
+Tokens prefixed with @ are paths the user explicitly referenced.
+Relative paths resolve from the workspace root; absolute paths identify files or directories on the host.
+```
+
+单独任一句都通过；换顺序、把 `@` 换掉、把 `workspace root` 换掉也都能通过。
+
+**处置**：桥的出站改写表已把第一句的 `@` 换成 `an at-sign`，只改 system，
+第二句与其余指令保持原样。重启桥（或升级）即可；若仍复现，按上面的通用排查
+看是否出现新的模板句。
 
 ### 让 dsh 的网页搜索走 WorkBuddy，而不是 DeepSeek
 
