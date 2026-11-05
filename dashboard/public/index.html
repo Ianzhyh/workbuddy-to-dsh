@@ -356,10 +356,30 @@ function translateText(text) {
         return applyTerms(out);
       }
     }
+    /*
+     * 整串都没命中 —— 若它是**多句拼接**（诊断把几条建议接成一条），逐句再试。
+     * 不做这一步的话，英文界面里整段会留在中文（比漏翻一条更明显）。
+     */
+    const sentences = splitSentences(folded);
+    if (sentences.length > 1) {
+      return applyTerms(sentences.map((one) => translateText(one)).join(' '));
+    }
     return applyTerms(s);
   } finally {
     i18nDepth -= 1;
   }
+}
+
+/**
+ * 把「服务端拼出来的一条多句文案」切成句子。
+ *
+ * 诊断会把几条独立建议拼成一条 hint（`A。 B。`）：整串不在词条表里，也匹配不到
+ * 任何单句规则，英文模式下就**整段留在中文**。切句只在整串没命中时兜底 ——
+ * `可选实验 bundle…` 那种"本来就是一整条"的多句文案仍由整串规则先处理。
+ */
+function splitSentences(text) {
+  const parts = String(text).split(/(?<=[。！？])\s+/).filter(Boolean);
+  return parts.length > 1 ? parts : [String(text)];
 }
 
 /** 供**原生弹窗**（confirm/alert）与代码里主动拼接的场景使用。 */
@@ -2445,10 +2465,20 @@ const I18N_RULES_EN = [
     'workbuddy route is live ($1) · $2 models registered'],
   [/^插件原生路由已启用（provider=(.+)，运行时注册，无需 settings.yaml）· 模型跟随桥目录$/,
     (m, p) => 'Native plugin route is active (provider=' + p + ', registered at runtime; no settings.yaml needed) · models follow the bridge catalog'],
-  [/^(\d+) 个，缺失 (\d+) 个（其中 (\d+) 个是可选实验 bundle）( · DSH (.+))?$/,
-    (m, total, missing, optional, _d, version) => total + ' total, ' + missing + ' missing ('
-      + optional + ' optional experimental bundles)' + (version ? ' · DSH ' + version : '')],
-  [/^(\d+) 个，缺失 (\d+) 个( · DSH (.+))?$/, 'bundles: $1, missing: $2$3'],
+  /*
+   * bundle 计数（issue #26）：可选实验 bundle 与「随安装提供」是两个独立的
+   * 附加段，可以同时出现，所以用一条可选段规则吃掉全部组合，别再拆成两条
+   * ——拆开后组合形态会落在通用规则上，英文界面里丢掉整个括号。
+   */
+  [/^(\d+) 个，缺失 (\d+) 个(（其中 (\d+) 个是可选实验 bundle）)?(（(\d+) 个随安装提供）)?( · DSH (.+))?$/,
+    (m, total, missing, _o, optional, _p, packed, _dsh, version) => total + ' total, ' + missing + ' missing'
+      + (optional ? ' (' + optional + ' optional experimental bundles)' : '')
+      + (packed ? ' (' + packed + ' built into the installation)' : '')
+      + (version ? ' · DSH ' + version : '')],
+  /* 判不了的那一档（打包 asar 读不到 / 布局不认识）：不写「缺失」，只写「无法确认」 */
+  [/^(\d+) 个，缺失 (\d+) 个，(\d+) 个无法确认( · DSH (.+))?$/,
+    (m, total, missing, unsure, _d, version) => total + ' total, ' + missing + ' missing, '
+      + unsure + ' unconfirmed' + (version ? ' · DSH ' + version : '')],
   [/^未找到 profile( · DSH (.+))?$/, 'no profile found$1'],
   [/^桥实际使用账号 (.+)…（来源 (.+)），桌面登录文件是 (.+)…；后者当前未生效。$/,
     (m, bridge, source, desktop) => 'The bridge uses account ' + bridge + '… (source '
@@ -2458,8 +2488,21 @@ const I18N_RULES_EN = [
     translateText(head) + ' · desktop file ' + desktop + '… is not in effect'],
   [/^存在多个账号快照，已固定使用 (.+)，避免选错账号$/,
     'multiple account snapshots exist; pinned to $1 to avoid picking the wrong account'],
-  [/^缺失：(.+)；在 profile 目录执行 pnpm add <包名>@<与 DSH 一致的版本>。注意版本必须对齐——装错代次会连 peer 依赖一起错$/,
+  /*
+   * 核心 bundle 缺失（随安装提供，不能靠 pnpm 修）。必须排在通用 `缺失：` 之前。
+   */
+  [/^缺失：(.+)。它们随 DSH 安装提供，不要往 profile 里装（会与安装自带的那份冲突），请修复或重装 DeepSeek Harness。$/,
+    (m, names) => 'Missing: ' + names + '. They ship with DSH — do not install them into the profile'
+      + ' (that duplicates the bundled copy); repair or reinstall DeepSeek Harness.'],
+  [/^缺失：(.+)；在 profile 目录执行 pnpm add <包名>@<与 DSH 一致的版本>。注意版本必须对齐——装错代次会连 peer 依赖一起错。$/,
     'Missing: $1; in the profile directory run pnpm add <package>@<same version as DSH>. Versions must line up — installing the wrong generation breaks peer dependencies too.'],
+  [/^安装链接已失效：(.+)（指向的临时目录已被清理）。重装该 bundle 即可；dsh 仍能正常启动就不用管。$/,
+    (m, names) => 'Dangling install link: ' + names + ' (it points at a temp directory that has been cleaned up).'
+      + ' Reinstall that bundle — or ignore this if dsh still starts fine.'],
+  [/^无法确认：(.+)。当前安装布局无法从磁盘确认（bundle 可能在 app.asar 内，插件进程读不到）—— 这不等于缺失，dsh 能正常启动就不用处理。$/,
+    (m, names) => 'Cannot confirm: ' + names + '. This install layout cannot be verified from disk'
+      + ' (the bundles may live inside app.asar, which the plugin process cannot read) — that does not mean'
+      + ' they are missing; nothing to do if dsh starts fine.'],
   [/^可选实验 bundle 未安装：(.+)。它们各自对应一项实验功能，不装不影响基础模型路由。若要安装：先在 profile 目录备份 package.json 与 pnpm-lock.yaml，再执行 pnpm add <包名>@<与 DSH 一致的版本>。$/,
     (m, names) => 'Optional experimental bundles are not installed: ' + names
       + '. Each one backs an experimental feature; not installing them does not affect the base model route. '

@@ -2041,13 +2041,35 @@ body.dark .wb-root,
       [/^(.+) 未监听$/, '$1 not listening'],
       [/^workbuddy 路由已生效（(.+)）· 已注册 (\d+) 个模型$/,
         'workbuddy route is live ($1) · $2 models registered'],
-      [/^(\d+) 个，缺失 (\d+) 个( · DSH (.+))?$/, 'bundles: $1, missing: $2$3'],
+      /*
+       * bundle 计数（issue #26）：可选实验 bundle 与「随安装提供」是两个独立的
+       * 附加段，可以同时出现 —— 用一条可选段规则吃掉全部组合。
+       */
+      [/^(\d+) 个，缺失 (\d+) 个(（其中 (\d+) 个是可选实验 bundle）)?(（(\d+) 个随安装提供）)?( · DSH (.+))?$/,
+        (m, total, missing, _o, optional, _p, packed, _dsh, version) => total + ' total, ' + missing + ' missing'
+          + (optional ? ' (' + optional + ' optional experimental bundles)' : '')
+          + (packed ? ' (' + packed + ' built into the installation)' : '')
+          + (version ? ' · DSH ' + version : '')],
+      [/^(\d+) 个，缺失 (\d+) 个，(\d+) 个无法确认( · DSH (.+))?$/,
+        (m, total, missing, unsure, _d, version) => total + ' total, ' + missing + ' missing, '
+          + unsure + ' unconfirmed' + (version ? ' · DSH ' + version : '')],
       [/^未找到 profile( · DSH (.+))?$/, 'no profile found$1'],
       [/^存在多个账号快照，已固定使用 (.+)，避免选错账号$/,
         'multiple account snapshots exist; pinned to $1 to avoid picking the wrong account'],
-      [/^缺失：(.+)；在 profile 目录执行 pnpm add <包名>@<与 DSH 一致的版本>。注意版本必须对齐——装错代次会连 peer 依赖一起错$/,
+      /* 核心 bundle 缺失（随安装提供，不能靠 pnpm 修）—— 必须排在通用 `缺失：` 之前 */
+      [/^缺失：(.+)。它们随 DSH 安装提供，不要往 profile 里装（会与安装自带的那份冲突），请修复或重装 DeepSeek Harness。$/,
+        (m, names) => 'Missing: ' + names + '. They ship with DSH — do not install them into the profile'
+          + ' (that duplicates the bundled copy); repair or reinstall DeepSeek Harness.'],
+      [/^缺失：(.+)；在 profile 目录执行 pnpm add <包名>@<与 DSH 一致的版本>。注意版本必须对齐——装错代次会连 peer 依赖一起错。$/,
         'Missing: $1; in the profile directory run pnpm add <package>@<same version as DSH>. Versions must line up — installing the wrong generation breaks peer dependencies too.'],
-      [/^缺失：(.+)$/, 'Missing: $1'],
+      [/^安装链接已失效：(.+)（指向的临时目录已被清理）。重装该 bundle 即可；dsh 仍能正常启动就不用管。$/,
+        (m, names) => 'Dangling install link: ' + names + ' (it points at a temp directory that has been cleaned up).'
+          + ' Reinstall that bundle — or ignore this if dsh still starts fine.'],
+      [/^无法确认：(.+)。当前安装布局无法从磁盘确认（bundle 可能在 app.asar 内，插件进程读不到）—— 这不等于缺失，dsh 能正常启动就不用处理。$/,
+        (m, names) => 'Cannot confirm: ' + names + '. This install layout cannot be verified from disk'
+          + ' (the bundles may live inside app.asar, which the plugin process cannot read) — that does not mean'
+          + ' they are missing; nothing to do if dsh starts fine.'],
+      [/^缺失：([^。]+)$/, 'Missing: $1'],
       /* `建议（<项名>）：<hint>` 是拼接串（源码里三段相加），整串查不到词条 */
       [/^建议（(.+)）：(.+)$/, (m, who, hint) => 'Suggestions (' + translateText(who) + '): ' + translateText(hint)],
       [/^建议：(.+)$/, (m, h) => 'Suggestion: ' + translateText(h)],
@@ -2270,6 +2292,18 @@ body.dark .wb-root,
 
     let i18nDepth = 0;
     /**
+     * 把「服务端拼出来的一条多句文案」切成句子。
+     *
+     * 诊断会把几条独立建议拼成一条 hint（`A。 B。`）：整串不在词条表里，也匹配
+     * 不到任何单句规则，英文模式下就**整段留在中文**。只在整串没命中时兜底 ——
+     * `可选实验 bundle…` 那种本来就是一整条的多句文案仍由整串规则先处理。
+     * （与控制台 `dashboard/public/index.html` 的同名函数保持同一套判据。）
+     */
+    function splitSentences(text) {
+      const parts = String(text).split(/(?<=[。！？])\s+/).filter(Boolean);
+      return parts.length > 1 ? parts : [String(text)];
+    }
+    /**
      * 单条文案翻译：先查词条表，再走动态规则，都不中则**原样返回**。
      *
      * 「原样返回」是刻意的降级：宁可显示中文原文，也不要显示 key 或空白 ——
@@ -2289,6 +2323,11 @@ body.dark .wb-root,
           const out = typeof rule[1] === 'function' ? rule[1].apply(null, m) : s.replace(rule[0], rule[1]);
           // 规则产物里还可能残留**专有名词**（权益包名会嵌在拼接串中间），再过一道
           return applyTerms(out);
+        }
+        // 整串没命中：多句拼接的逐句再试（见 splitSentences）
+        const sentences = splitSentences(s);
+        if (sentences.length > 1) {
+          return applyTerms(sentences.map((one) => translateText(one)).join(' '));
         }
         return applyTerms(s);
       } finally {

@@ -136,6 +136,13 @@ translateText = (text) => {
         return applyTerms(out);
       }
     }
+    /*
+     * **多句拼接的兜底**（与源码里的 `splitSentences` 同一判据）：诊断会把几条
+     * 建议用空格接成一条 hint，整串既不在表里也匹配不到单句规则。不复刻这一步
+     * 就会把「其实能翻」的多句串报成漏翻。
+     */
+    const parts = folded.split(/(?<=[。！？])\s+/).filter(Boolean);
+    if (parts.length > 1) return applyTerms(parts.map((one) => translateText(one)).join(' '));
     return applyTerms(s);
   } finally { i18nDepth -= 1; }
 };

@@ -17,6 +17,36 @@
 
 只支持最近 2 个 minor 版本。
 
+## [1.22.4] - 2026-11-05
+
+### Fixed
+
+- **打包安装的 DSH 上 `profile bundles` 误报核心 bundle 缺失**
+  （[#26](https://github.com/Ianzhyh/workbuddy-to-dsh/issues/26)，由
+  [@OxOld](https://github.com/OxOld) 定位到两层成因并给出分档修法）：
+  Electron 形态的 DSH 把 `@deepseek-ai/dsh-base` / `dsh-web-app` 打进
+  `resources\app.asar`，普通 node 进程的 `existsSync` 穿不透归档；同时
+  `~/.dsh/profiles/node_modules/@deepseek-ai/*` 可能是**指向 `%TEMP%\bunx-…` 的悬空
+  junction**（临时目录被清理后 `existsSync` 为 false，`readdir` 却列得出来）。两者叠加
+  导致判定前提不成立，还会给出"去 profile 里 `pnpm add`"的错误建议 —— 对随安装提供的
+  核心 bundle 那是有害的（双实例 + 代次冲突）。现在：
+  - **读 asar 索引头**确认（`readAsarHeader()`，零依赖、只读头部、不解包），
+    detail 里注明「N 个随安装提供」；
+  - **悬空链接**单独判成「安装链接已失效」（warn），不再与「没装」混为一谈；
+  - **布局认不出来**时只说「无法确认」（warn），概览也不再显示「待修复」——
+    不知道的事不写成结论；
+  - 缺失建议按类别分流：核心 bundle 提示修复/重装 DSH，**只有第三方 bundle** 才给
+    `pnpm add`。
+
+### Changed
+
+- 诊断建议可以是多句拼接：`translateText()`（控制台与插件各一份）在整串没命中时
+  逐句再翻一次，英文界面里不再整段留在中文；`check-i18n-coverage.mjs` 同步这套判据。
+- 新增 `lib/dsh.mjs` 的 `readAsarHeader()` / `dshInstallLayout()` / `resolveBundle()` /
+  `collectBundles()` / `bundleHealth()` / `isCoreBundle()`，配套 12 条用例
+  （含真实 asar 头部格式、打包安装、悬空 junction、未知布局、三档结论）。
+- README / TROUBLESHOOTING 补「打包安装的 DSH：profile bundles 误报缺失」一节。
+
 ## [1.22.2] - 2026-11-02
 
 ### Changed

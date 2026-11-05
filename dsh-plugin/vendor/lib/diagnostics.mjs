@@ -19,7 +19,7 @@ import { inspectClientInstalls } from './find-workbuddy.mjs';
 import config from '../config.mjs';
 import { effectiveAuthFile, readAccountAliases, readAccountOrder, readHiddenAccounts, readState, writeState } from './state.mjs';
 import { describeConfigCheck, validateConfigEnv } from './config-schema.mjs';
-import { readDshStatus } from './dsh.mjs';
+import { readDshStatus, bundleHealth, isCoreBundle } from './dsh.mjs';
 /*
  * 与 `client-connect.mjs` 是**循环引用**（那边也 import 本模块的 bridgeHealth /
  * bridgeModels）。安全的前提是：两边都只在**函数体里**用它，且这里导入的是
@@ -976,30 +976,62 @@ export async function diagnose() {
         : '缺少占位凭据',
     (dsh.hasBridgeKey || nativeRoute) ? '' : 'pi-ai 的 OpenAI 实现要求必须提供 API key 引用');
 
-  const missing = dsh.bundles.filter((b) => !b.installed);
-  const missingRequired = missing.filter((b) => b.optional !== true);
-  const missingOptional = missing.filter((b) => b.optional === true);
+  /*
+   * bundle 判定的三档结论（issue #26）：
+   *   fail —— 确认缺失，且能指出该装在哪（第三方 bundle）
+   *   warn —— 悬空链接 / 判不了（打包 asar 读不到、布局不认识）：既不能证实也
+   *           不能证伪，之前这里一律报红，于是打包安装的用户被要求去 profile
+   *           里 pnpm add 一个**安装自带**的核心 bundle（有破坏性）
+   *   ok   —— 全部解析到了（含从 app.asar 里确认的那几个）
+   */
+  const bundleState = bundleHealth(dsh.bundles);
   const desktop = config.dsh.desktopVersion ? ` · DSH ${config.dsh.desktopVersion}` : '';
+  const nameList = (list) => list.map((b) => b.name).join(', ');
+  const optionalSeg = bundleState.missingOptional.length
+    ? `（其中 ${bundleState.missingOptional.length} 个是可选实验 bundle）`
+    : '';
+  const packedSeg = bundleState.packed ? `（${bundleState.packed} 个随安装提供）` : '';
   // 读不到 profile ≠ 全部装好：空列表必须如实说「未找到」，而不是给绿灯
-  const bundlesStatus = !dsh.bundles.length
-    ? 'warn'
-    : (missingRequired.length ? 'fail' : (missingOptional.length ? 'warn' : 'ok'));
-  push('bundles', 'profile bundles', bundlesStatus,
-    dsh.bundles.length
-      ? `${dsh.bundles.length} 个，缺失 ${missing.length} 个`
-        + (missingOptional.length
-          ? `（其中 ${missingOptional.length} 个是可选实验 bundle）`
-          : '')
-        + desktop
-      : `未找到 profile${desktop}`,
-    missingRequired.length
-      ? `缺失：${missingRequired.map((b) => b.name).join(', ')}；在 profile 目录执行 pnpm add <包名>@<与 DSH 一致的版本>。`
-        + '注意版本必须对齐——装错代次会连 peer 依赖一起错'
-      : (missingOptional.length
-        ? `可选实验 bundle 未安装：${missingOptional.map((b) => b.name).join(', ')}。`
-          + '它们各自对应一项实验功能，不装不影响基础模型路由。'
-          + '若要安装：先在 profile 目录备份 package.json 与 pnpm-lock.yaml，再执行 pnpm add <包名>@<与 DSH 一致的版本>。'
-        : ''));
+  const bundlesDetail = !dsh.bundles.length
+    ? `未找到 profile${desktop}`
+    : (bundleState.unverified.length
+      // 判不了的项不计入「缺失」—— 说缺失就是断言我们并不知道的事
+      ? `${dsh.bundles.length} 个，缺失 ${bundleState.missing.length - bundleState.unverified.length} 个，`
+        + `${bundleState.unverified.length} 个无法确认${desktop}`
+      : `${dsh.bundles.length} 个，缺失 ${bundleState.missing.length} 个${optionalSeg}${packedSeg}${desktop}`);
+
+  /*
+   * 建议按「谁该动手」分组：核心 bundle 的正确动作是修 DSH 安装，
+   * 第三方 bundle 才是 pnpm add。混在一起给一条 pnpm 建议，
+   * 对 `@deepseek-ai/dsh-base` 是**错误且有害**的指引（双实例/代次冲突）。
+   */
+  const bundlesHint = [];
+  if (bundleState.reallyMissing.length) {
+    const core = bundleState.reallyMissing.filter((b) => isCoreBundle(b.name));
+    const third = bundleState.reallyMissing.filter((b) => !isCoreBundle(b.name));
+    if (core.length) {
+      bundlesHint.push(`缺失：${nameList(core)}。它们随 DSH 安装提供，不要往 profile 里装`
+        + '（会与安装自带的那份冲突），请修复或重装 DeepSeek Harness。');
+    }
+    if (third.length) {
+      bundlesHint.push(`缺失：${nameList(third)}；在 profile 目录执行 pnpm add <包名>@<与 DSH 一致的版本>。`
+        + '注意版本必须对齐——装错代次会连 peer 依赖一起错。');
+    }
+  }
+  if (bundleState.brokenLinks.length) {
+    bundlesHint.push(`安装链接已失效：${nameList(bundleState.brokenLinks)}（指向的临时目录已被清理）。`
+      + '重装该 bundle 即可；dsh 仍能正常启动就不用管。');
+  }
+  if (bundleState.unverified.length) {
+    bundlesHint.push(`无法确认：${nameList(bundleState.unverified)}。当前安装布局无法从磁盘确认`
+      + '（bundle 可能在 app.asar 内，插件进程读不到）—— 这不等于缺失，dsh 能正常启动就不用处理。');
+  }
+  if (bundleState.missingOptional.length) {
+    bundlesHint.push(`可选实验 bundle 未安装：${nameList(bundleState.missingOptional)}。`
+      + '它们各自对应一项实验功能，不装不影响基础模型路由。'
+      + '若要安装：先在 profile 目录备份 package.json 与 pnpm-lock.yaml，再执行 pnpm add <包名>@<与 DSH 一致的版本>。');
+  }
+  push('bundles', 'profile bundles', bundleState.status, bundlesDetail, bundlesHint.join(' '));
 
   const order = { fail: 0, warn: 1, ok: 2 };
   items.sort((a, b) => order[a.status] - order[b.status]);

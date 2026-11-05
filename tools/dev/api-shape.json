@@ -466,6 +466,9 @@
       "$.dsh.bundles[].optional": {
         "type": "boolean"
       },
+      "$.dsh.bundles[].source": {
+        "type": "string"
+      },
       "$.dsh.registeredModels": {
         "type": "array"
       }
@@ -1604,6 +1607,9 @@
       },
       "$.dsh.bundles[].optional": {
         "type": "boolean"
+      },
+      "$.dsh.bundles[].source": {
+        "type": "string"
       },
       "$.dsh.bundlesOk": {
         "type": "boolean"

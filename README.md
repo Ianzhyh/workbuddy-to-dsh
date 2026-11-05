@@ -201,7 +201,7 @@ dsh plugin --profile desktop add github:Ianzhyh/workbuddy-to-dsh
 
 # 方式二：release 附件（tgz 安装包，无构建、无需 allowBuilds 授权）
 #   从 GitHub Releases 下载 dsh-plugin-workbuddy-<版本>.tgz 后：
-dsh plugin --profile desktop add ./dsh-plugin-workbuddy-1.22.3.tgz
+dsh plugin --profile desktop add ./dsh-plugin-workbuddy-1.22.4.tgz
 
 # 方式三：从源码（插件在 dsh-plugin/ 子目录，接第 1 步的 git clone）
 dsh plugin --profile desktop add workbuddy-to-dsh/dsh-plugin
@@ -554,6 +554,14 @@ dsh plugin --profile desktop add <本仓库路径>/dsh-plugin
 两种方式可以共存：控制台照旧能开，桥是同一个进程；但**不要同时保留旧的手写
 `llm-pi-ai.providers.workbuddy` 路由**——插件首次加载会自动把它清掉（先备份）。
 
+> **诊断怎么认「打包安装」**：Electron 形态的 DSH 把 `@deepseek-ai/dsh-base` /
+> `dsh-web-app` 这类**随安装提供**的 bundle 打进 `resources\app.asar`，普通 node
+> 的 `existsSync` 穿不透归档 —— 旧版因此把它们报成「缺失」，还建议你去 profile 里
+> `pnpm add`（那会与自带的那份形成双实例与代次冲突）。现在会读 asar 的索引头
+> 确认（零依赖、只读几十字节），detail 里注明「N 个随安装提供」；布局实在认不出来
+> 时只说「无法确认」，不报红。详见
+> [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md#打包安装的-dshprofile-bundles-误报缺失)。
+
 ### 上下文窗口（Token）
 
 <img src="docs/plugin-panel-models-detail.png" width="100%"
@@ -787,6 +795,7 @@ docs/                      架构、配置、排错、安全、接入链路审�
 | [@JokesLin](https://github.com/JokesLin) | macOS 上 `CFBundleExecutable` 探测失效（#13）；控制台常驻内存与发布包体积（#14） |
 | [@liugangnhm](https://github.com/liugangnhm) | Claude Code 直连的模型名误路由与 200K 上下文（#18）、PR #19（已并入）的 `[1m]` 后缀与 1M beta 头 |
 | [@William-0406](https://github.com/William-0406) | DSH system 的 `@` 路径说明触发 11128 降级的定位与最小改写（#25） |
+| [@OxOld](https://github.com/OxOld) | 打包安装的 DSH 上 `profile bundles` 误报核心 bundle 缺失 —— 定位到 asar 内路径与悬空 junction 两层成因，并给出分档修法（#26） |
 | [@wflc](https://github.com/wflc) | Docker / NAS 部署下插件登录凭据每次都要重登（#16） |
 | [@GodGavin](https://github.com/GodGavin) | 限流后自动切换账号（#17） |
 | [@lenychang520](https://github.com/lenychang520) | PR #2：compact 崩溃修复 |
@@ -800,6 +809,7 @@ docs/                      架构、配置、排错、安全、接入链路审�
 | 现象 | 常见原因 |
 |---|---|
 | 模型没出现在 dsh 里 | 桥没启动 / 路由未生效 / profile bundle 缺失 |
+| 诊断里 `profile bundles` 报缺失，但 DSH 明明能正常用 | 打包安装（Electron）的 DSH 把核心 bundle 放在 `resources\app.asar` **里面**，普通 node 进程看不见。v1.22.4 起会读 asar 索引确认，并在 detail 里注明「N 个随安装提供」；旧版会误报。**不要**照旧版提示往 profile 里 `pnpm add @deepseek-ai/dsh-*` —— 那会与安装自带的那份形成双实例与代次冲突 |
 | `settings.yaml` 不见了 | **正常**——DSH Desktop 0.2.0 已把它导入 profile 的 patch 层并归档为 `.imported` |
 | `401 Authorization Required` | 令牌失效（重新登录）或凭据未解开 |
 | `key fetch failed` | 客户端未找到或取不到密钥——自动探测覆盖 默认位置 / 磁盘扫描 / 进程与注册表，换目录重装后无需配置；看启动日志的 `client exe` 一行确认实际定位结果 |

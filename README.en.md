@@ -61,6 +61,14 @@ clients can connect directly.
 dsh plugin --profile desktop add github:Ianzhyh/workbuddy-to-dsh
 ```
 
+> **Packed installs are recognised.** In the Electron build of DSH the core bundles
+> (`@deepseek-ai/dsh-base`, `dsh-web-app`) live inside `resources\app.asar`, which plain
+> `fs.existsSync` cannot see — older versions reported them as missing and told you to
+> `pnpm add` them into the profile (which duplicates the bundled copy). The diagnostics
+> now read the asar index header instead, label those bundles "built into the
+> installation", and say "cannot confirm" instead of "missing" when the layout is
+> unrecognised.
+
 **One-click ready:** install the plugin → open **Settings → WorkBuddy → Account → Sign in**
 (the browser opens automatically) → pick a WorkBuddy model. No desktop app, API key,
 Base URL, token, port or environment variable is required. If the desktop app is already

@@ -301,8 +301,36 @@ export function diagnoseFixture({ items = null } = {}) {
         detail: '.\\dsh-plugin\\.bridge-token 未能收紧：icacls 起不来：EBUSY',
         hint: '同机其它用户可能读到本地令牌并调用桥、消耗账号额度。常见原因：组策略禁用 icacls、受限沙箱、或 USERNAME 环境变量缺失。手动修复：icacls "<令牌文件>" /inheritance:r /grant:r "%USERNAME%:F"',
       },
+      /*
+       * profile bundles 的三档结论（issue #26）。文案由 `lib/diagnostics.mjs` 拼，
+       * 桩里不放就等于没测 —— 而这三条**恰好是英文界面最容易整段留中文**的形态：
+       * detail 是一句 + 两个可选括号段，hint 可能由 2~3 句拼成。
+       */
+      {
+        id: 'bundles',
+        label: 'profile bundles',
+        status: 'ok',
+        detail: '7 个，缺失 0 个（3 个随安装提供） · DSH 0.2.1-rc.5',
+        hint: '',
+      },
+      {
+        id: 'bundles-unverified',
+        label: 'profile bundles',
+        status: 'warn',
+        detail: '7 个，缺失 0 个，2 个无法确认 · DSH 0.2.1-rc.5',
+        hint: '无法确认：@deepseek-ai/dsh-base, @deepseek-ai/dsh-web-app。当前安装布局无法从磁盘确认'
+          + '（bundle 可能在 app.asar 内，插件进程读不到）—— 这不等于缺失，dsh 能正常启动就不用处理。',
+      },
+      {
+        id: 'bundles-broken-link',
+        label: 'profile bundles',
+        status: 'warn',
+        detail: '1 个，缺失 1 个 · DSH 0.2.1-rc.5',
+        hint: '安装链接已失效：dsh-whale-widget（指向的临时目录已被清理）。重装该 bundle 即可；'
+          + 'dsh 仍能正常启动就不用管。',
+      },
     ],
-    summary: { fail: 0, warn: 2, ok: 2 },
+    summary: { fail: 0, warn: 4, ok: 3 },
     /**
      * `authRejected` / `status` 同样是真实接口一直有、夹具一直缺的字段
      * （2026-10-10 重捕形状时才暴露）。`authRejected` 是「桥在跑但不认这把令牌」

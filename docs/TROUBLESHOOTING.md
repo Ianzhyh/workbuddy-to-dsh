@@ -113,7 +113,8 @@ tgz 安装的把包名换成 `dsh-plugin-workbuddy`，然后重启 dsh。升级�
    插件在运行时注册 provider，诊断会按 profile 里的插件 bundle 识别（不需要
    `WORKBUDDY_BRIDGE_KEY`）；只有不用插件、走手写 `llm-pi-ai` 路由时才需要它
 3. **profile bundle 完整** → doctor 的 `profile bundles` 项为绿（实验性 `dsh-experimental-*`
-   bundle 缺失只会显示黄色警告，不影响基础路由）
+   bundle 缺失只会显示黄色警告，不影响基础路由；打包安装的 `app.asar` 里那几个由
+   asar 索引确认，detail 会写「N 个随安装提供」，见下一节）
 
 第 3 项最常见的失败长这样：
 
@@ -1258,6 +1259,53 @@ pnpm add <包名>@<与 DSH 版本对齐的版本>
 装完用 `pnpm peers check` 看 peer 是否满足。注意 **peer 警告不一定是真问题**——
 DSH Desktop 的部分 peer（如 `@deepseek-ai/cordis`）由它的 app.asar 在运行时提供，
 pnpm 从文件系统看不到，会报 missing。
+
+> ⚠️ 上面这条只适用于**第三方** bundle（`dsh-whale-widget`、`qoder-to-dsh` 这类）。
+> `@deepseek-ai/dsh-base` / `dsh-web-app` 等 `@deepseek-ai/dsh-*` 是**随安装提供**的
+> 核心包，profile 里再装一份会造成双实例与代次冲突 —— 它们缺失时应该修 DSH 安装，
+> 详见下一节。
+
+## 打包安装的 DSH：profile bundles 误报缺失
+
+**现象**（[#26](https://github.com/Ianzhyh/workbuddy-to-dsh/issues/26)）：诊断里
+`profile bundles` 报红，说 `@deepseek-ai/dsh-base` / `@deepseek-ai/dsh-web-app` 缺失，
+可 `dsh --version` 正常、对话能调、dsh 自己也起得来 —— 也就是说**判定前提不成立**。
+
+**成因有两层，都不能靠 `existsSync` 发现**：
+
+1. **asar**：Electron 打包安装把核心 bundle 放进
+   `%LOCALAPPDATA%\Programs\DeepSeek Harness\resources\app.asar\dsh\node_modules\…`。
+   插件与控制台是普通 node 进程，`existsSync` 穿不透归档 —— 三个候选路径全部落空。
+2. **悬空 junction**：`%USERPROFILE%\.dsh\profiles\node_modules\@deepseek-ai\*` 有时是指向
+   `%TEMP%\bunx-…` 的**目录链接**。临时目录被系统清理后链接就悬空了：`readdir`
+   仍列得出来，`existsSync` 却返回 false。「链接坏了」与「没装」是两件事。
+
+**v1.22.4 起的判定**（`lib/dsh.mjs`）：
+
+| 情形 | 结论 | detail 里的说法 |
+|---|---|---|
+| runtime / profile 里有真实目录（或有效链接） | 已安装 | `N 个，缺失 0 个` |
+| 打包安装的 `app.asar` 索引里有这个包 | **已安装** | `（N 个随安装提供）` |
+| 只找到悬空链接 | 警告 | `/ 建议：安装链接已失效：…` |
+| asar 里查过、确实没有 | 失败 | `/ 建议：缺失：…；在 profile 目录执行 pnpm add …` |
+| 布局认不出来（既无 `node_modules` 也读不到 `app.asar`） | 警告 | `N 个无法确认` |
+
+asar 索引是**只读**解析的（8 字节头 + 索引 JSON，零依赖，见 `readAsarHeader()`），
+不会解包、不会碰 DSH 的安装目录。
+
+> ⚠️ **不要**照旧版提示往 profile 里 `pnpm add @deepseek-ai/dsh-base` /
+> `dsh-web-app`：这两个由安装自带，profile 再落一份等于**双实例 + 代次冲突**
+> （见 [#1](https://github.com/Ianzhyh/workbuddy-to-dsh/issues/1) 的破坏记录）。
+> 这类包缺失时的唯一正确动作是修复或重装 DSH 本身。
+
+自查命令（都是只读的）：
+
+```cmd
+node tools\doctor.mjs
+```
+
+看 `profile bundles` 一行的 detail：出现「随安装提供」说明是打包形态、已确认存在；
+出现「无法确认」说明插件进程判不了 —— 只要 dsh 能正常启动就不用处理。
 
 ## 完全重置
 
