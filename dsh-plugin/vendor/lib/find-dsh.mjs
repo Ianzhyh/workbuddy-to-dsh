@@ -8,10 +8,14 @@
  *
  * 探测顺序（廉价 → 昂贵）：
  *   1. DSH_RUNTIME 环境变量（显式覆盖）
- *   2. 常见安装位置（默认安装 + 历史自定义路径）
- *   3. 运行中进程 —— DSH Desktop 在跑时最准：<exe 所在目录>\resources\runtime
+ *   2. 当前进程的宿主 exe —— dsh 宿主、以及它用 `ELECTRON_RUN_AS_NODE=1`
+ *      拉起的桥/控制台里，`process.execPath` 就是 DSH 的 exe：取
+ *      `<exe 目录>\resources\runtime` 一步到位（比 PowerShell 探针便宜，
+ *      也不受子进程环境差异影响）
+ *   3. 常见安装位置（默认安装 + 历史自定义路径）
+ *   4. 运行中进程 —— DSH Desktop 在跑时最准：<exe 所在目录>\resources\runtime
  *      （Electron 应用的标准布局；DSH Desktop 几乎总在运行）
- *   4. 磁盘浅扫描 —— 常见父目录下"名字像 DSH"的目录（deepseek / dsh / harness）
+ *   5. 磁盘浅扫描 —— 常见父目录下"名字像 DSH"的目录（deepseek / dsh / harness）
  *      里的 resources\runtime 或 runtime
  *
  * **所有候选都必须通过 looksLikeDshRuntime() 特征校验**（primary-runtime/runtime.json
@@ -38,6 +42,27 @@ export function looksLikeDshRuntime(dir) {
 
 /** 目录名含这些词 → 值得当成"DSH 安装根"看一眼。 */
 const DIR_KEYWORD_RE = /deepseek|dsh|harness/i;
+
+/**
+ * 从**当前进程的宿主 exe**推导 runtime 候选（issue #26 补充）。
+ *
+ * dsh 插件、以及它用 `ELECTRON_RUN_AS_NODE=1` 拉起的桥/控制台里，
+ * `process.execPath` 就是 DSH 的 exe —— 这是最便宜也最可靠的一条：
+ * 不用起 PowerShell 进程探针，也不受子进程环境差异影响。
+ *
+ * Electron 布局：Windows/Linux `<exe 目录>/resources/runtime`；
+ * macOS `<App>.app/Contents/MacOS/<exe>` → `../Resources/runtime`（大写 R）。
+ * 两个都试，特征校验会否掉不成立的那个（普通 node 的 execPath 也走这里，无害）。
+ */
+export function dshRuntimeFromExecPath(exePath = process.execPath) {
+  const exe = String(exePath || '');
+  if (!exe) return [];
+  const dir = dirname(exe);
+  return [
+    join(dir, 'resources', 'runtime'),
+    join(dir, '..', 'Resources', 'runtime'),
+  ].filter(looksLikeDshRuntime);
+}
 
 /** 「再往下看看」的父目录白名单（与 find-workbuddy 同款）。 */
 const DESCEND_RE = /^(?:app|apps|application|applications|program|programs|program files(?:\s*\(x86\))?|software|soft|tools?|portable|green|应用|软件)$/i;
@@ -139,6 +164,8 @@ export function staticDshRuntimeCandidates() {
   const out = [];
   const explicit = process.env.DSH_RUNTIME;
   if (explicit) out.push(explicit);
+  // 宿主 exe 推导：dsh 进程内最可靠的一条，排在显式覆盖之后、静态路径之前
+  out.push(...dshRuntimeFromExecPath());
 
   if (process.platform === 'win32') {
     const roots = [

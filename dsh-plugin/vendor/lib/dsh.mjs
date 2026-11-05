@@ -119,6 +119,30 @@ export function detectNativeRoute(patchText, bundles) {
 const ASAR_MAX_HEADER = 64 * 1024 * 1024;
 
 /**
+ * 临时关掉 Electron 的 asar fs 补丁。
+ *
+ * dsh 宿主、以及它用 `ELECTRON_RUN_AS_NODE=1` 拉起的桥/控制台都带着这层补丁：
+ * `.asar` 被当成**虚拟目录** —— `statSync` 报 size 0，`openSync` 抛 ENOENT。
+ * 于是归档头明明可读，进程内却读不出来，核心 bundle 又被判成「无法确认」
+ * （issue #26 的补充报告）。普通 node 里 `process.noAsar` 只是普通属性，赋值无害。
+ *
+ * 这个开关是**进程级**的：这里同步执行，结束后恢复原值（含原本没有该属性的情况）。
+ */
+export function withoutAsarPatch(fn) {
+  // Electron 专有开关，@types/node 里没有声明；普通 node 里它只是普通属性
+  const proc = /** @type {{ noAsar?: boolean }} */ (process);
+  const had = Object.prototype.hasOwnProperty.call(proc, 'noAsar');
+  const prev = proc.noAsar;
+  proc.noAsar = true;
+  try {
+    return fn();
+  } finally {
+    if (had) proc.noAsar = prev;
+    else delete proc.noAsar;
+  }
+}
+
+/**
  * 读 Electron asar 归档的索引头（只读 8 + headerSize 字节，不解包任何文件）。
  *
  * 格式（实测 `%LOCALAPPDATA%\Programs\WorkBuddy\resources\app.asar` 对照验证）：
@@ -134,31 +158,33 @@ const ASAR_MAX_HEADER = 64 * 1024 * 1024;
  * @returns {{ ok: true, files: Record<string, any> } | { ok: false, reason: string }}
  */
 export function readAsarHeader(asarPath) {
-  let fd;
-  try {
-    fd = openSync(asarPath, 'r');
-    const head = Buffer.alloc(8);
-    if (readSync(fd, head, 0, 8, 0) !== 8) return { ok: false, reason: '头部不足 8 字节' };
-    const headerSize = head.readUInt32LE(4);
-    if (headerSize <= 8 || headerSize > ASAR_MAX_HEADER) {
-      return { ok: false, reason: `头部长度异常（${headerSize}）` };
+  return withoutAsarPatch(() => {
+    let fd;
+    try {
+      fd = openSync(asarPath, 'r');
+      const head = Buffer.alloc(8);
+      if (readSync(fd, head, 0, 8, 0) !== 8) return { ok: false, reason: '头部不足 8 字节' };
+      const headerSize = head.readUInt32LE(4);
+      if (headerSize <= 8 || headerSize > ASAR_MAX_HEADER) {
+        return { ok: false, reason: `头部长度异常（${headerSize}）` };
+      }
+      const buf = Buffer.alloc(headerSize);
+      if (readSync(fd, buf, 0, headerSize, 8) !== headerSize) return { ok: false, reason: '头部读取不完整' };
+      const jsonLen = buf.readUInt32LE(4);
+      if (jsonLen <= 0 || jsonLen > headerSize - 8) {
+        return { ok: false, reason: `索引长度异常（${jsonLen}）` };
+      }
+      const files = JSON.parse(buf.toString('utf8', 8, 8 + jsonLen))?.files;
+      if (!files || typeof files !== 'object') return { ok: false, reason: '索引里没有 files' };
+      return { ok: true, files };
+    } catch (err) {
+      return { ok: false, reason: String(err?.message || err) };
+    } finally {
+      if (fd !== undefined) {
+        try { closeSync(fd); } catch { /* 已经关掉/从未打开 */ }
+      }
     }
-    const buf = Buffer.alloc(headerSize);
-    if (readSync(fd, buf, 0, headerSize, 8) !== headerSize) return { ok: false, reason: '头部读取不完整' };
-    const jsonLen = buf.readUInt32LE(4);
-    if (jsonLen <= 0 || jsonLen > headerSize - 8) {
-      return { ok: false, reason: `索引长度异常（${jsonLen}）` };
-    }
-    const files = JSON.parse(buf.toString('utf8', 8, 8 + jsonLen))?.files;
-    if (!files || typeof files !== 'object') return { ok: false, reason: '索引里没有 files' };
-    return { ok: true, files };
-  } catch (err) {
-    return { ok: false, reason: String(err?.message || err) };
-  } finally {
-    if (fd !== undefined) {
-      try { closeSync(fd); } catch { /* 已经关掉/从未打开 */ }
-    }
-  }
+  });
 }
 
 /**
@@ -171,7 +197,8 @@ const asarCache = new Map();
 
 function asarFiles(asarPath) {
   let st;
-  try { st = statSync(asarPath); } catch { return null; }
+  // stat 也要绕开补丁：Electron 里 `.asar` 是虚拟目录，size 恒为 0，缓存键会失真
+  try { st = withoutAsarPatch(() => statSync(asarPath)); } catch { return null; }
   const hit = asarCache.get(asarPath);
   if (hit && hit.mtimeMs === st.mtimeMs && hit.size === st.size) return hit.result;
   const result = readAsarHeader(asarPath);
@@ -277,7 +304,8 @@ function inspectPath(p) {
 export function dshInstallLayout(runtime = '') {
   if (!runtime) return { runtime: '', asarPath: '', layout: 'unknown' };
   const asarPath = join(dirname(runtime), 'app.asar');
-  const packedAsar = existsSync(asarPath) ? asarPath : '';
+  // 同上：宿主进程里 `.asar` 会被 fs 补丁认成目录，必须按真实文件判断
+  const packedAsar = withoutAsarPatch(() => existsSync(asarPath)) ? asarPath : '';
   const layout = existsSync(join(runtime, 'node_modules'))
     ? 'standalone'
     : (packedAsar ? 'packed' : 'unknown');
@@ -486,8 +514,10 @@ export function readDshStatus() {
    * profile 的 bundles 是否都能解析；缺一个整个 profile 就起不来。
    *
    * 判定不能只看 `existsSync`（issue #26）：
-   *   - 打包安装（Electron）把核心 bundle 放在 `resources/app.asar` **里面**，
-   *     插件进程是普通 node，`existsSync` 永远为 false；
+   *   - 打包安装（Electron）把核心 bundle 放在 `resources/app.asar` **里面**：
+   *     普通 node 的 `existsSync` 穿不透归档；而宿主进程里的 asar fs 补丁又把
+   *     `.asar` 当成虚拟目录（连归档头都读不到）—— 所以读取必须走
+   *     `withoutAsarPatch()`；
    *   - `profiles/node_modules` 下的 junction 可能指向已被系统清理的临时目录，
    *     `existsSync` 也是 false，但"不存在"和"链接坏了"是两回事。
    * 两种误判都会让诊断报红并给出"去 profile 里 pnpm add"的错误建议 ——

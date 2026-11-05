@@ -2065,9 +2065,9 @@ body.dark .wb-root,
       [/^安装链接已失效：(.+)（指向的临时目录已被清理）。重装该 bundle 即可；dsh 仍能正常启动就不用管。$/,
         (m, names) => 'Dangling install link: ' + names + ' (it points at a temp directory that has been cleaned up).'
           + ' Reinstall that bundle — or ignore this if dsh still starts fine.'],
-      [/^无法确认：(.+)。当前安装布局无法从磁盘确认（bundle 可能在 app.asar 内，插件进程读不到）—— 这不等于缺失，dsh 能正常启动就不用处理。$/,
+      [/^无法确认：(.+)。当前安装布局无法从磁盘确认（app\.asar 不可读，或运行时里没有 node_modules）—— 这不等于缺失，dsh 能正常启动就不用处理。$/,
         (m, names) => 'Cannot confirm: ' + names + '. This install layout cannot be verified from disk'
-          + ' (the bundles may live inside app.asar, which the plugin process cannot read) — that does not mean'
+          + ' (app.asar is unreadable, or the runtime has no node_modules) — that does not mean'
           + ' they are missing; nothing to do if dsh starts fine.'],
       [/^缺失：([^。]+)$/, 'Missing: $1'],
       /* `建议（<项名>）：<hint>` 是拼接串（源码里三段相加），整串查不到词条 */

@@ -1271,16 +1271,20 @@ pnpm 从文件系统看不到，会报 missing。
 `profile bundles` 报红，说 `@deepseek-ai/dsh-base` / `@deepseek-ai/dsh-web-app` 缺失，
 可 `dsh --version` 正常、对话能调、dsh 自己也起得来 —— 也就是说**判定前提不成立**。
 
-**成因有两层，都不能靠 `existsSync` 发现**：
+**成因有三层，都不能靠 `existsSync` 发现**：
 
 1. **asar**：Electron 打包安装把核心 bundle 放进
    `%LOCALAPPDATA%\Programs\DeepSeek Harness\resources\app.asar\dsh\node_modules\…`。
-   插件与控制台是普通 node 进程，`existsSync` 穿不透归档 —— 三个候选路径全部落空。
-2. **悬空 junction**：`%USERPROFILE%\.dsh\profiles\node_modules\@deepseek-ai\*` 有时是指向
+   普通 node 进程的 `existsSync` 穿不透归档 —— 三个候选路径全部落空。
+2. **宿主里的 asar fs 补丁**：控制台与桥是插件用 `process.execPath` +
+   `ELECTRON_RUN_AS_NODE=1` 拉起的，Electron 的 fs 补丁会把 `.asar` 当成
+   **虚拟目录**（`statSync` 报 size 0，`openSync` 抛 ENOENT）。于是即便按
+   文件去读索引头也会失败 —— 表现为「命令行诊断绿、面板黄」。
+3. **悬空 junction**：`%USERPROFILE%\.dsh\profiles\node_modules\@deepseek-ai\*` 有时是指向
    `%TEMP%\bunx-…` 的**目录链接**。临时目录被系统清理后链接就悬空了：`readdir`
    仍列得出来，`existsSync` 却返回 false。「链接坏了」与「没装」是两件事。
 
-**v1.22.4 起的判定**（`lib/dsh.mjs`）：
+**新版判定**（`lib/dsh.mjs`）：
 
 | 情形 | 结论 | detail 里的说法 |
 |---|---|---|
@@ -1288,10 +1292,14 @@ pnpm 从文件系统看不到，会报 missing。
 | 打包安装的 `app.asar` 索引里有这个包 | **已安装** | `（N 个随安装提供）` |
 | 只找到悬空链接 | 警告 | `/ 建议：安装链接已失效：…` |
 | asar 里查过、确实没有 | 失败 | `/ 建议：缺失：…；在 profile 目录执行 pnpm add …` |
-| 布局认不出来（既无 `node_modules` 也读不到 `app.asar`） | 警告 | `N 个无法确认` |
+| 布局认不出来 / asar 索引确实读不出 | 警告 | `N 个无法确认` |
 
 asar 索引是**只读**解析的（8 字节头 + 索引 JSON，零依赖，见 `readAsarHeader()`），
-不会解包、不会碰 DSH 的安装目录。
+不会解包、不会碰 DSH 的安装目录。读归档头时用 `withoutAsarPatch()` 临时关掉
+Electron 的 asar fs 补丁（`process.noAsar = true`，同步执行后恢复），所以宿主
+进程内也能读到同一份索引。runtime 定位新增了一条最可靠的来源：`process.execPath`
+就是宿主 exe 时，直接取 `<exe 目录>\resources\runtime`（macOS 为
+`Contents\Resources\runtime`），不再依赖 PowerShell 进程探针。
 
 > ⚠️ **不要**照旧版提示往 profile 里 `pnpm add @deepseek-ai/dsh-base` /
 > `dsh-web-app`：这两个由安装自带，profile 再落一份等于**双实例 + 代次冲突**
@@ -1305,7 +1313,8 @@ node tools\doctor.mjs
 ```
 
 看 `profile bundles` 一行的 detail：出现「随安装提供」说明是打包形态、已确认存在；
-出现「无法确认」说明插件进程判不了 —— 只要 dsh 能正常启动就不用处理。
+出现「无法确认」说明连 asar 索引都读不出来（归档格式变化/损坏，或布局确实认不出）——
+只要 dsh 能正常启动就不用处理。
 
 ## 完全重置
 

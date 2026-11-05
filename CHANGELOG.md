@@ -17,6 +17,25 @@
 
 只支持最近 2 个 minor 版本。
 
+## [Unreleased]
+
+### Fixed
+
+- **dsh 宿主/子进程内 `profile bundles` 仍报「无法确认」**
+  （[#26](https://github.com/Ianzhyh/workbuddy-to-dsh/issues/26) 的补充报告，由
+  [@OxOld](https://github.com/OxOld) 定位）：Electron 的 asar fs 补丁把 `.asar`
+  当成**虚拟目录**（`statSync` 报 size 0、`openSync` 抛 ENOENT），而控制台与桥是
+  插件用 `process.execPath` + `ELECTRON_RUN_AS_NODE=1` 拉起的 —— 于是命令行诊断绿、
+  面板却黄。现在 `readAsarHeader()` 用 `withoutAsarPatch()` 临时关掉补丁再读
+  （同步执行、结束恢复），`statSync`/`existsSync` 也走同一层；runtime 定位新增
+  `process.execPath` 推导（`<exe 目录>/resources/runtime`，macOS 为
+  `Contents/Resources/runtime`），宿主进程内不再依赖 PowerShell 进程探针。
+  「无法确认」的提示也改成如实描述（asar 不可读 / 没有 node_modules），
+  不再说「插件进程读不到」。
+- **vendor 快照不再带上轮转日志**：`\.log$` 漏掉了 `bridge.log.1` 这类轮转文件，
+  `npm pack` 会把运行期日志（本机约 2 MB）一起发给用户。SKIP 改为
+  `\.log(?:\.\d+)?$`，已存在的副本由 `npm run vendor` 清理。
+
 ## [1.22.4] - 2026-11-05
 
 ### Fixed

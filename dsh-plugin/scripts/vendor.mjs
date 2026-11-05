@@ -46,7 +46,7 @@ const ENTRIES = [
  * 绝不能进分发包（`npm pack` 会把它一起发出去，等于泄漏使用记录）。
  */
 const SKIP = [
-  /\.log$/i,
+  /\.log(?:\.\d+)?$/i,   // 日志与轮转日志（bridge.log.1 之类）
   /\.jsonl$/i,          // 用量账本
   /\.bak($|-)/i,        // 备份（index.html.bak 之类）
   // **测试文件不进分发包**：bridge.test.mjs 是仓库里的合约测试（要起真桥、

@@ -558,8 +558,9 @@ dsh plugin --profile desktop add <本仓库路径>/dsh-plugin
 > `dsh-web-app` 这类**随安装提供**的 bundle 打进 `resources\app.asar`，普通 node
 > 的 `existsSync` 穿不透归档 —— 旧版因此把它们报成「缺失」，还建议你去 profile 里
 > `pnpm add`（那会与自带的那份形成双实例与代次冲突）。现在会读 asar 的索引头
-> 确认（零依赖、只读几十字节），detail 里注明「N 个随安装提供」；布局实在认不出来
-> 时只说「无法确认」，不报红。详见
+> 确认（零依赖、只读几十字节；在 dsh 宿主进程里会临时关掉 Electron 的 asar fs
+> 补丁，所以面板与命令行看到的是同一份事实），detail 里注明「N 个随安装提供」；
+> 布局实在认不出来时只说「无法确认」，不报红。详见
 > [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md#打包安装的-dshprofile-bundles-误报缺失)。
 
 ### 上下文窗口（Token）
@@ -809,7 +810,7 @@ docs/                      架构、配置、排错、安全、接入链路审�
 | 现象 | 常见原因 |
 |---|---|
 | 模型没出现在 dsh 里 | 桥没启动 / 路由未生效 / profile bundle 缺失 |
-| 诊断里 `profile bundles` 报缺失，但 DSH 明明能正常用 | 打包安装（Electron）的 DSH 把核心 bundle 放在 `resources\app.asar` **里面**，普通 node 进程看不见。v1.22.4 起会读 asar 索引确认，并在 detail 里注明「N 个随安装提供」；旧版会误报。**不要**照旧版提示往 profile 里 `pnpm add @deepseek-ai/dsh-*` —— 那会与安装自带的那份形成双实例与代次冲突 |
+| 诊断里 `profile bundles` 报缺失，但 DSH 明明能正常用 | 打包安装（Electron）的 DSH 把核心 bundle 放在 `resources\app.asar` **里面**，普通 node 进程看不见。新版会读 asar 索引确认（宿主进程里会临时关掉 asar fs 补丁），并在 detail 里注明「N 个随安装提供」；旧版（≤1.22.4 的部分场景）会误报。**不要**照旧版提示往 profile 里 `pnpm add @deepseek-ai/dsh-*` —— 那会与安装自带的那份形成双实例与代次冲突 |
 | `settings.yaml` 不见了 | **正常**——DSH Desktop 0.2.0 已把它导入 profile 的 patch 层并归档为 `.imported` |
 | `401 Authorization Required` | 令牌失效（重新登录）或凭据未解开 |
 | `key fetch failed` | 客户端未找到或取不到密钥——自动探测覆盖 默认位置 / 磁盘扫描 / 进程与注册表，换目录重装后无需配置；看启动日志的 `client exe` 一行确认实际定位结果 |

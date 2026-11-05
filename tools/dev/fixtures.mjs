@@ -318,8 +318,9 @@ export function diagnoseFixture({ items = null } = {}) {
         label: 'profile bundles',
         status: 'warn',
         detail: '7 个，缺失 0 个，2 个无法确认 · DSH 0.2.1-rc.5',
-        hint: '无法确认：@deepseek-ai/dsh-base, @deepseek-ai/dsh-web-app。当前安装布局无法从磁盘确认'
-          + '（bundle 可能在 app.asar 内，插件进程读不到）—— 这不等于缺失，dsh 能正常启动就不用处理。',
+        hint: '无法确认：@deepseek-ai/dsh-base, @deepseek-ai/dsh-web-app。'
+          + '当前安装布局无法从磁盘确认（app.asar 不可读，或运行时里没有 node_modules）'
+          + '—— 这不等于缺失，dsh 能正常启动就不用处理。',
       },
       {
         id: 'bundles-broken-link',

@@ -65,9 +65,11 @@ dsh plugin --profile desktop add github:Ianzhyh/workbuddy-to-dsh
 > (`@deepseek-ai/dsh-base`, `dsh-web-app`) live inside `resources\app.asar`, which plain
 > `fs.existsSync` cannot see — older versions reported them as missing and told you to
 > `pnpm add` them into the profile (which duplicates the bundled copy). The diagnostics
-> now read the asar index header instead, label those bundles "built into the
-> installation", and say "cannot confirm" instead of "missing" when the layout is
-> unrecognised.
+> now read the asar index header instead (temporarily lifting Electron's asar fs patch in
+> the dsh host process, so the panel and the CLI see the same facts), label those bundles
+> "built into the installation", and say "cannot confirm" instead of "missing" when the
+> layout is unrecognised. The runtime location is also derived from `process.execPath`
+> when dsh itself is the host (`<exe dir>/resources/runtime`).
 
 **One-click ready:** install the plugin → open **Settings → WorkBuddy → Account → Sign in**
 (the browser opens automatically) → pick a WorkBuddy model. No desktop app, API key,
