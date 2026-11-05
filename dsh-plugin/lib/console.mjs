@@ -66,20 +66,48 @@ export function consoleBuildHash(projectRoot) {
   }
 }
 
-/** 端口上正在监听的那个进程（找不到就返回 null；只用于“确认是我们自己的控制台”之后）。 */
-export function findPortPid(port) {
+/** Windows 系统工具的绝对路径，避免依赖 PATH（与 dashboard/server.mjs 的 systemExe 同款）。 */
+function systemExe(name, platform = process.platform) {
+  if (platform !== 'win32') return name;
+  return join(process.env.SystemRoot || 'C:\\Windows', 'System32', `${name}.exe`);
+}
+
+/**
+ * 端口探测的 spawnSync 选项。
+ *
+ * **stdin 必须 ignore**：默认三个 `'pipe'` 时 stdin 也走管道，Windows/Electron
+ * 宿主里实测会让 spawnSync 直接返回 EBUSY（同 index.js 的 icacls 教训）。
+ * 探测命令不需要任何输入，忽略 stdin 是零代价的。
+ */
+const PORT_PROBE_OPTS = {
+  stdio: ['ignore', 'pipe', 'pipe'],
+  encoding: 'utf8',
+  windowsHide: true,
+  timeout: 4000,
+  maxBuffer: 4 * 1024 * 1024,
+};
+
+/**
+ * 端口上正在监听的那个进程（找不到就返回 null；只用于“确认是我们自己的控制台”之后）。
+ *
+ * @param {number} port
+ * @param {{ spawn?: typeof spawnSync, platform?: NodeJS.Platform }} [options] 仅测试注入
+ */
+export function findPortPid(port, { spawn = spawnSync, platform = process.platform } = {}) {
   try {
-    if (process.platform === 'win32') {
-      const r = spawnSync('netstat', ['-ano', '-p', 'tcp'], { encoding: 'utf8', windowsHide: true, timeout: 4000 });
+    if (platform === 'win32') {
+      const r = spawn(systemExe('netstat', platform), ['-ano', '-p', 'TCP', '-n'], PORT_PROBE_OPTS);
       if (r.error || r.status !== 0) return null;
+      // 端口必须紧跟 ':' 或 IPv6 的 ']'，且后面是空白 —— 避免 18792 之类的子串误命中
+      const portRe = new RegExp(`[:\\]]${port}\\s`);
       for (const line of String(r.stdout || '').split('\n')) {
-        if (!line.includes('LISTENING') || !line.includes(`:${port}`)) continue;
+        if (!line.includes('LISTENING') || !portRe.test(line)) continue;
         const pid = Number((line.trim().match(/(\d+)\s*$/) || [])[1]);
         if (Number.isInteger(pid) && pid > 0) return pid;
       }
       return null;
     }
-    const r = spawnSync('lsof', ['-ti', `tcp:${port}`, '-sTCP:LISTEN'], { encoding: 'utf8', timeout: 4000 });
+    const r = spawn('lsof', ['-nP', `-iTCP:${port}`, '-sTCP:LISTEN', '-t'], PORT_PROBE_OPTS);
     if (r.error || r.status !== 0) return null;
     const pid = Number(String(r.stdout || '').trim().split(/\s+/)[0]);
     return Number.isInteger(pid) && pid > 0 ? pid : null;
