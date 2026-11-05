@@ -17,7 +17,7 @@
 
 只支持最近 2 个 minor 版本。
 
-## [Unreleased]
+## [1.22.5] - 2026-11-05
 
 ### Fixed
 
@@ -35,6 +35,13 @@
 - **vendor 快照不再带上轮转日志**：`\.log$` 漏掉了 `bridge.log.1` 这类轮转文件，
   `npm pack` 会把运行期日志（本机约 2 MB）一起发给用户。SKIP 改为
   `\.log(?:\.\d+)?$`，已存在的副本由 `npm run vendor` 清理。
+- **控制台端口探测补齐 stdin 约束**：`dsh-plugin/lib/console.mjs` 的
+  `findPortPid()` 调 `spawnSync` 时没有忽略 stdin，Windows 依赖 PATH 里的
+  `netstat`。仓库其余探测点都把 `stdio: ['ignore','pipe','pipe']` 当硬约束
+  （Windows/Electron 宿主里 stdin 管道可能直接 EBUSY）；漏掉会让「升级后自动
+  替换旧控制台 / 停止控制台」退化成要求用户手动关闭。现在统一走忽略 stdin 的
+  探测选项 + `System32\netstat.exe` 绝对路径，端口匹配收紧为 `[:\]]<port>\s`
+  （不会把 18792 认成 8792）。
 
 ## [1.22.4] - 2026-11-05
 
