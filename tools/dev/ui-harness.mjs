@@ -9,7 +9,7 @@
  */
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { closeSync, existsSync, mkdtempSync, openSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, extname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -133,8 +133,10 @@ async function devtoolsPages(port) {
  *
  * 冷启动路径只该**等**，不该判"这是不是别人"。归属判定属于复用分支。
  */
-async function waitForPages(port) {
-  for (let i = 0; i < 60; i += 1) {
+async function waitForPages(port, timeoutMs = 15_000) {
+  // 每 250ms 探一次；次数由超时预算决定（CI 上冷启动可能十几秒）
+  const attempts = Math.max(1, Math.ceil(timeoutMs / 250));
+  for (let i = 0; i < attempts; i += 1) {
     try {
       const res = await fetch(`http://127.0.0.1:${port}/json/list`);
       const targets = await res.json();
@@ -143,7 +145,7 @@ async function waitForPages(port) {
     } catch { /* 还没起来 */ }
     await sleep(250);
   }
-  throw new Error(`端口 ${port} 上 15 秒内没有出现任何 DevTools 页面`);
+  throw new Error(`端口 ${port} 上 ${Math.round(timeoutMs / 1000)} 秒内没有出现任何 DevTools 页面`);
 }
 
 /**
@@ -355,26 +357,40 @@ export function fetchStubSource(routes) {
  * ## 为什么单独抽出来，而不是内联在 `openPage` 的那段里
  *
  * 冷启动失败必须**能换端口重试**：探测到 `absent` 与 Chrome 真正 `bind` 之间有一个
- * 窗口（TOCTOU），端口可能刚被别的程序抢走。原先冷启动失败就一路抛错 ——
- * CI run 42241477770 就死在这里，报的是「15 秒内没有出现任何 DevTools 页面」，
- * 而真因（bind 失败 / profile 建不出来）完全看不到，重跑一次要十几分钟。
+ * 窗口（TOCTOU），端口可能刚被别的程序抢走。
  *
- * ## 两处「静默失效」一起修
+ * ## 三处「静默失效」一起修
  *
- *   ① **Chrome 的 stderr 不能丢**。失败形态往往只有 Chrome 自己说得清：
+ *   ① **Chrome 的输出不能丢**。失败形态往往只有 Chrome 自己说得清：
  *      `bind() failed: Permission denied`、`Cannot create user data directory`、
- *      `DevToolsActivePort file doesn't exist`。原先 `stdio: 'ignore'` 把它们
- *      全丢了，于是所有原因都被说成"超时"。
+ *      `DevToolsActivePort file doesn't exist`。
+ *      ⚠️ 用 `stderr: 'pipe'` **在 detached + unref 下不可靠**：父进程 unref 之后
+ *      管道可能拿不到数据（实测 CI 上收回来的是 0 字节，反而让真因更看不见）。
+ *      改成重定向到**临时文件**，失败时读它 —— 文件不依赖父进程还持有句柄。
  *   ② **`error` 事件必须挂监听**。spawn 失败（ENOENT / EACCES / EMFILE）不抛异常，
  *      而是异步 emit —— 没监听就是未捕获异常，整个验收脚本被带走。
+ *   ③ **失败信息不能自己套自己**。原先 `detail()` 为空时回退成 `error.message`，
+ *      而 `error.message` 就是那句「15 秒内没有出现任何 DevTools 页面」——
+ *      于是输出变成「没起来（15 秒内没有出现…），换端口重试」，看起来像有信息，
+ *      实际什么都没说。现在分开：`detail` 只放 Chrome 自己说的话，没有就是空。
  *
- * @returns {Promise<{ok: true, wsUrl: string} | {ok: false, detail: string, error?: any}>}
+ * @returns {Promise<{ok: true, wsUrl: string, chrome: any, profileDir: string}
+ *   | {ok: false, detail: string, error?: any}>}
  */
 async function coldStartOn(port, { width, height }) {
   const exe = findChrome();
   if (!exe) throw new Error('找不到 Chrome/Edge，请设置 CHROME_PATH');
   const profileDir = mkdtempSync(join(tmpdir(), 'wb-cdp-'));
-  let chromeStderr = '';
+  /*
+   * Chrome 的 stdout/stderr 写进文件（不用 pipe）：见上面 ①。
+   * 放在 profileDir 之外，因为失败时 profileDir 会被整个删掉。
+   */
+  const logFile = join(tmpdir(), `wb-cdp-chrome-${process.pid}-${port}.log`);
+  let logFd = null;
+  try {
+    logFd = openSync(logFile, 'w');
+  } catch { /* 打不开就退回 ignore：至少不影响启动 */ }
+
   const child = spawn(exe, [
     '--headless=new',
     `--remote-debugging-port=${port}`,
@@ -384,32 +400,51 @@ async function coldStartOn(port, { width, height }) {
     '--disable-gpu',
     `--window-size=${width},${height}`,
     'about:blank',
-  ], { stdio: ['ignore', 'ignore', 'pipe'], detached: true });
+  ], {
+    stdio: logFd === null ? 'ignore' : ['ignore', logFd, logFd],
+    detached: true,
+  });
   child.unref();
   let spawnError = null;
   child.on('error', (error) => { spawnError = String(error?.message || error); });
-  child.stderr?.on('data', (chunk) => {
-    if (chromeStderr.length < 8192) chromeStderr += String(chunk);
-  });
-  const detail = () => [spawnError, chromeStderr.trim().split('\n').filter(Boolean).slice(-4).join(' / ')]
-    .filter(Boolean).join(' | ');
+  if (logFd !== null) { try { closeSync(logFd); } catch { /* 忽略 */ } }
+
+  /** 只收集 **Chrome 自己说的话**；拿不到就返回空串（不再用 error.message 冒充）。 */
+  const chromeSays = () => {
+    if (spawnError) return spawnError;
+    try {
+      const text = readFileSync(logFile, 'utf8').trim();
+      if (!text) return '';
+      return text.split('\n').filter(Boolean).slice(-5).join(' / ');
+    } catch {
+      return '';
+    }
+  };
 
   try {
     /*
      * 冷启动路径用 `waitForPages`（只等、不判定归属）：
      * 这个端口的 Chrome 是我们**刚 spawn 的**，窗口期里 probeCdp 会把它的
      * 未就绪响应误判成 foreign（详见 waitForPages 的注释）。
+     *
+     * 预算给到 30 秒：CI 的 windows-latest 上冷启动明显更慢（实测同一份代码
+     * 本地 ~400ms、CI 要数秒到十几秒），15 秒不足以稳定通过。
      */
-    const pages = await waitForPages(port);
+    const pages = await waitForPages(port, 30_000);
+    // 起来了：Chrome 自己的日志已经没用了，清掉（保留 profileDir —— close() 还要清）
+    try { rmSync(logFile, { force: true }); } catch { /* 忽略 */ }
     return { ok: true, wsUrl: pages[0].webSocketDebuggerUrl, chrome: child, profileDir };
   } catch (error) {
     /*
      * 收掉进程与临时 profile 再返回。不收的话它会在后台活着（bind 失败后未必
      * 立刻退出），下一个脚本又 spawn 一个 —— 实测泄漏到 3 个无头实例。
+     * 顺序要紧：**先读日志再删**（删了就读不到真因了）。
      */
+    const detail = chromeSays();
     try { child.kill(); } catch { /* 已经退出 */ }
     try { rmSync(profileDir, { recursive: true, force: true }); } catch { /* 忽略 */ }
-    return { ok: false, detail: detail() || String(error?.message || error), error };
+    try { rmSync(logFile, { force: true }); } catch { /* 忽略 */ }
+    return { ok: false, detail, error };
   }
 }
 
@@ -585,12 +620,13 @@ export async function openPage(url, routes, { cdpPort = 9333, width = 1440, heig
      *
      * 冷启动也放进这个循环里，而不是循环外单独一段 —— 因为**bind 失败要继续换端口**：
      * 探测到 absent 与 Chrome 真正 bind 之间有一个窗口（TOCTOU），端口可能刚被
-     * 别的程序抢走。原先冷启动失败就直接抛错（CI run 42241477770 就死在这里，
-     * 报的是「15 秒内没有出现任何 DevTools 页面」，看不出真因）。
+     * 别的程序抢走。
+     *
+     * ⚠️ 重试次数要数清楚：先判定"还能不能再试"，再用本次端口去试。
+     * 原先写的是「if (attempt >= 2) throw」在调用**之前**，于是第 3 次
+     * （attempt=2）根本没试就抛错 —— 报错里那个端口一次都没被真正使用过
+     * （CI 日志里「最后一个是 29456」其实从未启动过 Chrome）。
      */
-    if (attempt >= 2) {
-      throw new Error(`连续 3 个端口都起不来 Chrome（最后一个是 ${usingPort}）`);
-    }
     const started = await coldStartOn(usingPort, { width, height });
     if (started.ok) {
       wsUrl = started.wsUrl;
@@ -600,7 +636,12 @@ export async function openPage(url, routes, { cdpPort = 9333, width = 1440, heig
       break;
     }
     process.stderr.write(`[ui-harness] Chrome 在端口 ${usingPort} 上没起来`
-      + `${started.detail ? `（${started.detail}）` : ''}，换端口重试\n`);
+      + `${started.detail ? `：${started.detail}` : '（Chrome 没有输出，通常是启动即崩）'}`
+      + `，换端口重试\n`);
+    if (attempt >= 2) {
+      throw new Error(`连续 ${attempt + 1} 个端口都起不来 Chrome`
+        + `（最后一个是 ${usingPort}${started.detail ? `：${started.detail}` : ''}）`, { cause: started.error });
+    }
     usingPort = await freePort();
   }
   /** 实际使用的调试端口（自动换过端口时与入参不同）。 */
