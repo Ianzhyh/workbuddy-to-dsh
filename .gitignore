@@ -1,6 +1,11 @@
 # 依赖与运行时
 node_modules/
 *.log
+# 轮转后的日志（bridge.log.1 / console.log.2 之类）。
+# `*.log` 只匹配**结尾**是 .log 的名字，`bridge.log.1` 不匹配 —— 实测漏了这条：
+# 本机跑过一次滚动后 `git status` 就多出一个未跟踪的 bridge.log.1，里面含
+# 账号 session UUID 与本机路径。它一旦被 `git add -A` 就会进仓库。
+*.log.[0-9]*
 
 # 构建产物：插件的 tgz 由 `npm run pack:plugin` 生成，走 GitHub Releases 分发，
 # **不入库**（二进制体积会随每次发布膨胀，而且 release 附件本来就有独立存档）

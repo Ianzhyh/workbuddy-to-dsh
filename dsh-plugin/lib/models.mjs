@@ -92,9 +92,14 @@ export function describeModel(model, contextOverride = 0) {
 /**
  * 模型名后缀：让选择器/聊天顶部的模型名直接带上消耗倍率。
  * `credits` 是桥目录里的积分倍率（0.11 = 每次扣 0.11 倍），免费模型给「免费」。
+ *
+ * ⚠️ **不能写 `Number(model?.credits) === 0`**：目录层把「上游没给倍率」表示成
+ * `credits: null`（见 {@link toDirectory}），而 `Number(null) === 0` —— 那会把
+ * 「不知道多少钱」标成「免费」，是**对用户的钱包撒谎**。免费只认两种显式事实：
+ * `free === true`，或 credits 是**数值**且等于 0。
  */
 export function modelCostLabel(model) {
-  const credits = Number(model?.credits);
+  const credits = typeof model?.credits === 'number' ? model.credits : null;
   if (model?.free === true || credits === 0) return '免费';
   if (Number.isFinite(credits) && credits > 0) return '×' + String(credits);
   return '';

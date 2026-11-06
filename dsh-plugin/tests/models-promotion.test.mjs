@@ -88,3 +88,24 @@ test('过期活动：桥不再下发 badge/free，面板回原价', () => {
   assert.equal(directory.promotionActive, false);
   assert.equal(toAdapterModel(model).name, 'Step-5-Preview · ×0.43');
 });
+
+/*
+ * 回归（2026-11-06）：`Number(null) === 0` 把「上游没给倍率」显示成「免费」。
+ *
+ * 桥在 credits 缺失时**不发**该字段，`toDirectory` 于是给 `credits: null`
+ * （语义 = 未知）。而 dsh 选择器里的模型名、面板的对话下拉都曾用
+ * `Number(credits) === 0` 判免费 → 一个照价扣费的模型被标成「免费」。
+ */
+test('credits 缺失（null）不等于免费', () => {
+  const unknown = { ...base, id: 'glm-5.3', name: 'GLM-5.3' };
+  assert.equal(toAdapterModel(unknown).name, 'GLM-5.3', '未知倍率不能加「免费」后缀');
+  assert.doesNotMatch(toAdapterModel(unknown).description || '', /免费/);
+  const directory = toDirectory([unknown])[0];
+  assert.equal(directory.credits, null, '目录层把「没给」表示成 null');
+  assert.equal(directory.free, false);
+
+  // 显式免费仍然要标
+  assert.equal(toAdapterModel({ ...base, id: 'hy3', name: 'HY3', credits: 0, free: true }).name, 'HY3 · 免费');
+  // 数值 0 但没 free 标记：倍率确实是 0，按免费显示是对的
+  assert.equal(toAdapterModel({ ...base, id: 'z', name: 'Z', credits: 0 }).name, 'Z · 免费');
+});

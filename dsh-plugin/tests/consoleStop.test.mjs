@@ -256,6 +256,8 @@ test('停桥：端口上是真桥时仍能正常停掉（别为了安全把功�
  * **诊断是假的**，用户会去找一个不存在的进程冲突。
  *
  * 契约：桥回 401 时仍然要能把它停掉（它确实是我们自己的进程）。
+ * 注意 `_auth401Holder.mjs` 必须回**与真桥同形的**错误体 —— 归属校验现在要
+ * 一份正向证据，桩要是比真桥少了标识，这条用例就会把一个正确的实现判成错的。
  */
 
 test('限流自动切号：Web 控制台按账号列表挑下一个可用账号', () => {
@@ -297,6 +299,51 @@ test('停桥：桥回 401（令牌不一致）时仍应能停掉它 —— 401 �
       '401 说明这确实是我们自己的桥（只是令牌不一致），应当能停。实际：' + JSON.stringify(result));
     await new Promise((r) => setTimeout(r, 600));
     assert.ok(child.exitCode !== null || child.signalCode !== null, '报了 stopped:true，进程却还活着');
+  } finally {
+    try { child.kill(); } catch { /* 已退 */ }
+  }
+});
+
+/*
+ * ## 401 的另一个方向：**别人的 401 绝不能当成自己的桥**
+ *
+ * 上一条钉住"自家的桥回 401 也能停"，这条钉住相反的一面：端口上是用户自己的
+ * dev server（也回 401），点一下「停止桥服务」**不能**把那个无关进程杀掉。
+ *
+ * 为什么必须有这条：`isOurBridge()` 早先只凭 `status === 401` 就返回 true，
+ * 而它后面直接跟着 `taskkill /F`。实测（`.tmp-audit/p3-401-kill.mjs`）：
+ * 一个无关服务占着端口、回 401 → `stopBridgeAndWait` 报 `stopped:true` →
+ * 那个进程被杀掉（exitCode=1）。这是控制台里唯一会**主动破坏用户环境**的行为。
+ *
+ * 两条用例合起来才构成完整的契约：401 是**必要条件**而非**充分条件** ——
+ * 还要能证明"这确实是我们家的东西"（响应体是本项目 unauthorizedBody 的形状）。
+ */
+test('停桥：别人的 401 服务绝不能被当成自家桥杀掉（401 不是充分条件）', { timeout: 30_000 }, async () => {
+  const child = spawn(process.execPath, [join(HERE, '_foreign401Holder.mjs')],
+    { stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true });
+
+  const port = await new Promise((ok, fail) => {
+    let buf = '';
+    const timer = setTimeout(() => fail(new Error('无关 401 进程没报端口')), 5000);
+    child.stdout.on('data', (c) => {
+      buf += c;
+      const line = buf.split('\n')[0].trim();
+      if (/^\d+$/.test(line)) { clearTimeout(timer); ok(Number(line)); }
+    });
+    child.on('error', (e) => { clearTimeout(timer); fail(e); });
+  });
+
+  try {
+    const result = await stopBridgeAndWait(port);
+    assert.equal(result.stopped, false,
+      '端口上是个无关的 401 服务，绝不能报"已停止"——那意味着用户的进程被杀了。'
+      + `实际：${JSON.stringify(result)}`);
+
+    // 关键断言：那个无关进程必须**还活着**
+    await new Promise((r) => setTimeout(r, 600));
+    assert.equal(child.exitCode, null,
+      '❌ 无关进程被杀了 —— 用户点"停止桥"不该误伤端口上的其它服务');
+    assert.equal(child.signalCode, null, '无关进程被信号杀掉了');
   } finally {
     try { child.kill(); } catch { /* 已退 */ }
   }

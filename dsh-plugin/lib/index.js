@@ -536,11 +536,63 @@ export const DEFAULTS = {
   log: true,
 };
 
-/** 毫秒配置：undefined/null → 默认；非法或负数 → 默认；0 合法（表示关闭）。 */
+/**
+ * 毫秒配置：undefined/null → 默认；非法或负数 → 默认；0 合法（表示关闭）。
+ *
+ * ⚠️ 布尔值一律当**非法**：`Number(true) === 1`，一个 `streamIdleTimeoutMs: true`
+ * 的笔误会变成"1 毫秒空闲就判卡死"，几乎每个流式回答都被砍断。
+ * 这类配置只接受数字（或数字字符串）。
+ */
 function asMs(value, fallback) {
   if (value === undefined || value === null) return fallback;
+  if (typeof value === 'boolean') return fallback;
   const n = Number(value);
   return Number.isFinite(n) && n >= 0 ? n : fallback;
+}
+
+/**
+ * 必须为正的毫秒（超时这类）：`0` 没有意义（deadline 立刻到期），当默认处理。
+ *
+ * 与 {@link asMs} 分开是因为两者的「0」语义相反：TTL 的 0 是"每次都重取"（合法），
+ * 超时的 0 是"立刻失败"（等于把功能关掉）。混用会让其中一边无法表达。
+ */
+function asPositiveMs(value, fallback) {
+  if (value === undefined || value === null || value === '') return fallback;
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+}
+
+/**
+ * 端口：必须是 1–65535 的整数。
+ *
+ * 原先一律 `Number(x) || DEFAULT` —— 只挡住 0/NaN，**负数与 >65535 全部放行**，
+ * 拼出来的 `http://127.0.0.1:-1` 让 `fetch` 直接抛 `Failed to parse URL`，
+ * 于是 `probe()` 归成 `stopped`、`ensure()` 永远在"启动中"失败，
+ * 用户看到的只是"桥拉不起来"（实测 `.tmp-audit2/t12` B 段）。
+ * 非法值宁可回退默认并明确说明，也不要造一个语法错的 URL。
+ */
+function asPort(value, fallback) {
+  const n = Number(value);
+  if (!Number.isInteger(n) || n < 1 || n > 65535) return fallback;
+  return n;
+}
+
+/**
+ * 主机：只接受 IP / 主机名形状。
+ *
+ * 原先只 `String(x || default)`，`WORKBUDDY_HOST=127.0.0.1:8790` 这种很常见的
+ * 误写会把 `:` 原样拼进 URL，得到 `http://127.0.0.1:8790:8790`
+ * （实测 `.tmp-audit2/t30`）。带协议头、带斜杠、带查询串同理。
+ */
+function asHost(value, fallback) {
+  const text = String(value ?? '').trim();
+  if (!text) return fallback;
+  // 允许 [::1] 这种 IPv6 字面量；其余只允许字母数字、点、连字符、下划线与冒号外的东西
+  const bare = text.replace(/^\[|\]$/g, '');
+  const ok = /^[A-Za-z0-9._:-]+$/.test(bare) && !/[/\\?#@\s]/.test(text);
+  // 冒号只允许出现在 IPv6 字面量里（裸 IPv6 一定含多个冒号）
+  const colonOk = !bare.includes(':') || /^[0-9A-Fa-f:]+$/.test(bare);
+  return ok && colonOk ? text : fallback;
 }
 
 /**
@@ -550,18 +602,42 @@ function asMs(value, fallback) {
 export { pickAccountFailoverTarget };
 
 
+/**
+ * 布尔开关。
+ *
+ * ⚠️ **空串不算 true**（实测缺陷，2026-11-06）：原先 `''` 在 true 列表里，于是
+ * `.env` 里常见的留空行 `WORKBUDDY_AUTO_CHECKIN=` 会**打开**自动签到
+ * （用户的本意是"这项留空、跟随默认/面板"）。实测 `.tmp-audit2/t33`：
+ * `WORKBUDDY_AUTO_CHECKIN=` 空值 → `config.autoCheckin = true`。
+ * 现在空串按"未设置"处理，回退到 `fallback`。
+ */
 function asBool(value, fallback) {
   if (value === undefined || value === null) return fallback;
   if (typeof value === 'boolean') return value;
   const text = String(value).trim().toLowerCase();
-  if (['1', 'true', 'yes', 'on', ''].includes(text)) return true;
+  if (text === '') return fallback;
+  if (['1', 'true', 'yes', 'on'].includes(text)) return true;
   if (['0', 'false', 'no', 'off'].includes(text)) return false;
   return fallback;
 }
 
+/**
+ * 模型清单（allow / deny）。
+ *
+ * 除了数组与逗号串，还要收 **mapping 形状**（`{deepseek: true}`）—— 用户在 YAML
+ * 里把列表写成映射是很常见的误写。原先直接 `String(value)` 得到
+ * `"[object Object]"`，于是 allow 集合里只有一个不存在的 id，
+ * **所有模型都被过滤掉**，选择器空掉且不报错（实测 `.tmp-audit2/t17b`）。
+ * 现在：mapping 取**键名**；无法识别的形状按"没配"处理，而不是造一个假 id。
+ */
 function asStringArray(value) {
   if (!value) return [];
   if (Array.isArray(value)) return value.map((v) => String(v)).filter(Boolean);
+  if (typeof value === 'object') {
+    // mapping / 集合：键名就是模型 id；值为 false 的键视为"显式排除"
+    const keys = Object.keys(value).filter((k) => value[k] !== false);
+    return keys.map((k) => String(k)).filter(Boolean);
+  }
   return String(value).split(',').map((v) => v.trim()).filter(Boolean);
 }
 
@@ -571,8 +647,8 @@ export function resolveConfig(raw = {}) {
   return {
     ...cfg,
     projectRoot: String(cfg.projectRoot || ''),
-    bridgeHost: String(cfg.bridgeHost || DEFAULTS.bridgeHost),
-    bridgePort: Number(cfg.bridgePort) || DEFAULTS.bridgePort,
+    bridgeHost: asHost(cfg.bridgeHost, DEFAULTS.bridgeHost),
+    bridgePort: asPort(cfg.bridgePort, DEFAULTS.bridgePort),
     localToken: resolveLocalToken(cfg.localToken),
     /*
      * 令牌文件权限加固的结果（`{ok, code, reason}`）。加固是「尽力而为、不阻断
@@ -587,22 +663,28 @@ export function resolveConfig(raw = {}) {
       : asBool(cfg.autoCheckin, undefined),
     autoWebSearch: asBool(cfg.autoWebSearch, DEFAULTS.autoWebSearch),
     autoStart: asBool(cfg.autoStart, DEFAULTS.autoStart),
-    autoStartTimeoutMs: Number(cfg.autoStartTimeoutMs) || DEFAULTS.autoStartTimeoutMs,
+    autoStartTimeoutMs: asPositiveMs(cfg.autoStartTimeoutMs, DEFAULTS.autoStartTimeoutMs),
     consoleAutoStart: asBool(cfg.consoleAutoStart, DEFAULTS.consoleAutoStart),
     consoleIdleExitMs: asMs(cfg.consoleIdleExitMs, DEFAULTS.consoleIdleExitMs),
     accountFailoverAfter: Math.max(0, Math.floor(Number(cfg.accountFailoverAfter) || 0)),
-    consoleHost: String(cfg.consoleHost || DEFAULTS.consoleHost),
-    consolePort: Number(cfg.consolePort) || DEFAULTS.consolePort,
+    consoleHost: asHost(cfg.consoleHost, DEFAULTS.consoleHost),
+    consolePort: asPort(cfg.consolePort, DEFAULTS.consolePort),
     provider: String(cfg.provider || DEFAULTS.provider),
     fallbackProvider: String(cfg.fallbackProvider || DEFAULTS.fallbackProvider),
     displayName: String(cfg.displayName || DEFAULTS.displayName),
-    catalogTtlMs: Number(cfg.catalogTtlMs) || DEFAULTS.catalogTtlMs,
+    /*
+     * TTL 一律走 `asMs`：**0 是合法值**（"每次都重取 / 每次都重新探测"）。
+     * 原先用 `Number(x) || DEFAULT`，0 被替换成默认值 —— 想关掉缓存的人配了等于没配，
+     * 而配置层没有任何提示（实测 `.tmp-audit2/t16`：
+     * `catalogTtlMs: 0 -> 60000`、`bridgeAliveTtlMs: 0 -> 5000`）。
+     */
+    catalogTtlMs: asMs(cfg.catalogTtlMs, DEFAULTS.catalogTtlMs),
     loginRegion: ['cn', 'global'].includes(String(cfg.loginRegion)) ? String(cfg.loginRegion) : DEFAULTS.loginRegion,
     credentialSource: ['auto', 'desktop', 'plugin', 'api-key'].includes(String(cfg.credentialSource))
       ? String(cfg.credentialSource) : DEFAULTS.credentialSource, // '' = 不锁定
     credentialStore: ['dpapi', 'file', 'memory'].includes(String(cfg.credentialStore)) ? String(cfg.credentialStore) : '',
     credentialDir: String(cfg.credentialDir || ''),
-    bridgeAliveTtlMs: Number(cfg.bridgeAliveTtlMs) || DEFAULTS.bridgeAliveTtlMs,
+    bridgeAliveTtlMs: asMs(cfg.bridgeAliveTtlMs, DEFAULTS.bridgeAliveTtlMs),
     modelAllow: asStringArray(cfg.modelAllow),
     modelDeny: asStringArray(cfg.modelDeny),
     defaultMaxTokens: cfg.defaultMaxTokens === undefined || cfg.defaultMaxTokens === null || cfg.defaultMaxTokens === ''
@@ -617,7 +699,19 @@ export function resolveConfig(raw = {}) {
     defaultReasoningEffort: ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'].includes(String(cfg.defaultReasoningEffort))
       ? String(cfg.defaultReasoningEffort)
       : undefined,
-    streamIdleTimeoutMs: Number(cfg.streamIdleTimeoutMs) > 0 ? Number(cfg.streamIdleTimeoutMs) : 0,
+    /*
+     * 流空闲看门狗：**非数字不能悄悄变成 0**。
+     *
+     * 原先写的是 `Number(cfg.streamIdleTimeoutMs) > 0 ? Number(...) : 0`，
+     * 于是 `"5m"` / `"300000ms"` / `true` 这类写法 `Number()` 得到 NaN、
+     * `NaN > 0` 为 false → **0 = 关掉看门狗**，而用户的本意是"5 分钟"。
+     * 默认是 5 分钟，也就是说一个笔误把"流卡死保护"彻底关了，且无任何提示
+     * （实测 `.tmp-audit2/t7`：`"5m" -> 0`）。
+     * 现在非法值回退默认；显式 0 仍然表示关闭（那是明确的意图）。
+     */
+    streamIdleTimeoutMs: cfg.streamIdleTimeoutMs === undefined || cfg.streamIdleTimeoutMs === null || cfg.streamIdleTimeoutMs === ''
+      ? DEFAULTS.streamIdleTimeoutMs
+      : asMs(cfg.streamIdleTimeoutMs, DEFAULTS.streamIdleTimeoutMs),
     migrateLegacy: asBool(cfg.migrateLegacy, DEFAULTS.migrateLegacy),
     tools: asBool(cfg.tools, DEFAULTS.tools),
     commands: asBool(cfg.commands, DEFAULTS.commands),
@@ -710,7 +804,15 @@ export const BRIDGE_SECRET_ENV = Object.freeze([
 export function collectBridgeSecretEnv(projectEnv = {}, env = process.env) {
   const out = {};
   for (const key of BRIDGE_SECRET_ENV) {
-    const value = projectEnv[key] ?? env[key];
+    /*
+     * 与 `apply()` 里 `reconcile` 的优先级**必须一致**：进程环境 > `.env`。
+     *
+     * 原先写的是 `projectEnv[key] ?? env[key]`（`.env` 优先）。两处相反时，
+     * 同一个 `WORKBUDDY_CREDENTIAL_KEY` / `WORKBUDDY_HOST` 会让"插件自己连的值"
+     * 与"桥子进程拿到的值"分家 —— 表现为桥绑一个地址、插件连另一个，
+     * 或者凭据用旧 key 解密失败（实测 `.tmp-audit2/t13`）。
+     */
+    const value = env[key] ?? projectEnv[key];
     if (value !== undefined && value !== '') out[key] = String(value);
   }
   return out;
@@ -806,7 +908,8 @@ export const BRIDGE_ENV_PASSTHROUGH = Object.freeze([
 export function collectBridgeExtraEnv(projectEnv = {}, env = process.env) {
   const out = {};
   for (const key of BRIDGE_ENV_PASSTHROUGH) {
-    const value = projectEnv[key] ?? env[key];
+    // 同一优先级：进程环境 > .env（见 collectBridgeSecretEnv 的说明）
+    const value = env[key] ?? projectEnv[key];
     if (value !== undefined && value !== '') out[key] = String(value);
   }
   return out;
@@ -893,26 +996,60 @@ export function apply(ctx, rawConfig = {}) {
   // 相反时，同一台机器上「插件拉起的桥」与「控制台拉起的桥」会选不同端口/令牌。
   // 只在用户**没有显式**在 config 里写这一项时才补，避免覆盖用户意图。
   const explicit = new Set(Object.keys(rawConfig || {}));
+  /**
+   * 把 `.env` / 进程环境的值补进配置。
+   *
+   * ## 优先级必须与注释一致：进程环境 > .env
+   *
+   * `process.env[envName] ?? projectEnv[envName]` 已经是这个顺序 —— 但
+   * `collectBridgeSecretEnv()` / `collectBridgeExtraEnv()` 注入**桥子进程**时
+   * 写的是 `projectEnv[key] ?? env[key]`（`.env` 优先）。两处相反，于是同一个
+   * `WORKBUDDY_HOST` 可能出现「桥绑 .env 的值、插件连进程 env 的值」：
+   * 看起来一切正常，实际连的是另一个实例（实测 `.tmp-audit2/t13`）。
+   * 子进程那两处已同步改成同一顺序。
+   *
+   * ## `coerce` 不是可选项
+   *
+   * `resolveConfig()` 对枚举/端口/布尔都做过一轮校验，而这里是在**校验之后**
+   * 用原始字符串覆盖。没有 coerce 的键会把非法值直接注进桥与控制台
+   * （`WORKBUDDY_LOGIN_REGION=us` → 桥真的收到 `us`；实测 `.tmp-audit2/t12` A 段）。
+   * 所以每个键都必须给一个复用同一套校验函数的 `coerce`。
+   */
   const reconcile = (key, envName, coerce) => {
     if (explicit.has(key)) return;
     const raw = process.env[envName] ?? projectEnv[envName];
     if (raw === undefined || raw === '') return;
-    config[key] = coerce ? coerce(raw, config[key]) : String(raw);
+    config[key] = coerce(raw, config[key]);
   };
-  reconcile('bridgeHost', 'WORKBUDDY_HOST');
-  reconcile('bridgePort', 'WORKBUDDY_PORT', (raw, fallback) => Number(raw) || fallback);
-  reconcile('localToken', 'WORKBUDDY_LOCAL_TOKEN');
-  reconcile('authFile', 'WORKBUDDY_AUTH_FILE');
-  reconcile('credentialSource', 'WORKBUDDY_CREDENTIAL_SOURCE');
-  reconcile('credentialStore', 'WORKBUDDY_CREDENTIAL_STORE');
-  reconcile('credentialDir', 'WORKBUDDY_CREDENTIAL_DIR');
-  reconcile('loginRegion', 'WORKBUDDY_LOGIN_REGION');
+  /** 枚举：非法值回退到当前（已校验过的）值，绝不把原始字符串放进去。 */
+  const asEnum = (allowed) => (raw, fallback) => {
+    const text = String(raw).trim();
+    return allowed.includes(text) ? text : fallback;
+  };
+  reconcile('bridgeHost', 'WORKBUDDY_HOST', asHost);
+  reconcile('bridgePort', 'WORKBUDDY_PORT', asPort);
+  reconcile('localToken', 'WORKBUDDY_LOCAL_TOKEN', (raw) => String(raw).trim());
+  reconcile('authFile', 'WORKBUDDY_AUTH_FILE', (raw) => String(raw));
+  // '' = 不锁定；枚举里含空串，所以空值走上面的 early-return（保持当前值）
+  reconcile('credentialSource', 'WORKBUDDY_CREDENTIAL_SOURCE', asEnum(['auto', 'desktop', 'plugin', 'api-key']));
+  reconcile('credentialStore', 'WORKBUDDY_CREDENTIAL_STORE', asEnum(['dpapi', 'file', 'memory']));
+  reconcile('credentialDir', 'WORKBUDDY_CREDENTIAL_DIR', (raw) => String(raw));
+  reconcile('loginRegion', 'WORKBUDDY_LOGIN_REGION', asEnum(['cn', 'global']));
   // 控制台端口跟项目自己的 config.mjs 同源（读同一个 DASHBOARD_PORT）
-  reconcile('consolePort', 'DASHBOARD_PORT', (raw, fallback) => Number(raw) || fallback);
+  reconcile('consolePort', 'DASHBOARD_PORT', asPort);
   // 手动启动控制台也读同一个 DASHBOARD_IDLE_EXIT_MS（0 = 常驻）
   reconcile('consoleIdleExitMs', 'DASHBOARD_IDLE_EXIT_MS', (raw, fallback) => asMs(raw, fallback));
-  if (!explicit.has('autoCheckin') && (process.env.WORKBUDDY_AUTO_CHECKIN ?? projectEnv.WORKBUDDY_AUTO_CHECKIN) !== undefined) {
-    config.autoCheckin = asBool(process.env.WORKBUDDY_AUTO_CHECKIN ?? projectEnv.WORKBUDDY_AUTO_CHECKIN, true);
+  /*
+   * `autoCheckin` 的三态（true / false / **undefined = 跟随面板**）必须保住。
+   *
+   * 空串要当成"没设置"：`.env` 里 `WORKBUDDY_AUTO_CHECKIN=` 这种留空行是常见写法，
+   * 用户的意思是"这项交给面板"。原先 `asBool('', true)` 返回 true，
+   * 于是留空反而**打开了**自动签到（实测 `.tmp-audit2/t33`）。
+   * 注意 `fallback` 必须传 `undefined` —— 传 `true` 等于把"没设置"强行变成"开"。
+   */
+  const rawAutoCheckin = process.env.WORKBUDDY_AUTO_CHECKIN ?? projectEnv.WORKBUDDY_AUTO_CHECKIN;
+  if (!explicit.has('autoCheckin') && rawAutoCheckin !== undefined && String(rawAutoCheckin).trim() !== '') {
+    config.autoCheckin = asBool(rawAutoCheckin, undefined);
   }
   reconcile('autoWebSearch', 'WORKBUDDY_AUTO_WEB_SEARCH', (raw, fallback) => asBool(raw, fallback));
 
@@ -1184,28 +1321,53 @@ export function apply(ctx, rawConfig = {}) {
       // 对话失败时 reset() 会立刻作废缓存（见 stream 的 TRANSPORT 路径）。
       if (!config.autoStart) return client;
       if (state.readyPromise) return state.readyPromise;
+      /*
+       * ⚠️ **`readyPromise` 必须在任何 `await` 之前赋值**（实测缺陷，2026-11-06）。
+       *
+       * 原先的顺序是「查 readyPromise → `await supervisor.probe()` → 才赋值」。
+       * 中间那个 await 让出事件循环，于是并发调用**全部**看到 null、全部走 probe、
+       * 全部去 ensure：一次会话里两条消息同时发、或面板轮询与用户发消息重叠，
+       * 就会拉起**多个真桥进程**。
+       *
+       * 实测（`.tmp-audit2/t27-e2e-clean-duplicate.mjs`，真进程真 socket）：
+       *   并发 2 次 ensureReady → spawn 计数 = 2，pids = ["36560","36252"]，
+       *   前者成了孤儿进程。
+       *
+       * 现在先把整段逻辑包进 promise 并**立刻**挂到 state 上，再让它内部去 await。
+       * 并发调用者共享同一个 promise。
+       */
       // 桥挂了要重新拉起时，先读一次面板最新选择（切过账号后不能用旧快照）
       if (syncBridgeAccountConfig()) state.bridgeAliveAt = 0;
       const now = Date.now();
       if (now - (state.bridgeAliveAt || 0) < config.bridgeAliveTtlMs) return client;
-      const probe = await supervisor.probe();
-      let restart = false;
-      if (probe.state === 'running') {
-        /*
-         * 桥活着但还在服务**别的登录文件**：面板切号只重启了桥并写了
-         * `.state.json`，插件进程里的 supervisor 要到下一次 ensure 才会
-         * 跟着改。不在这里重启，用户会在面板上看到"已切到 B"，对话却仍
-         * 扣 A 的额度。
-         */
-        if (supervisor.authFile && !authFileMatchesHealth(probe.health, supervisor.authFile)) {
-          restart = true;
-          log(`桥仍在服务旧账号（${probe.health?.authFile || '未知'}），按当前选择重启`);
-        } else {
-          state.bridgeAliveAt = now;
-          return client;
-        }
-      }
       state.readyPromise = (async () => {
+        const probe = await supervisor.probe();
+        let restart = false;
+        if (probe.state === 'running') {
+          /*
+           * 桥活着但还在服务**别的登录文件**：面板切号只重启了桥并写了
+           * `.state.json`，插件进程里的 supervisor 要到下一次 ensure 才会
+           * 跟着改。不在这里重启，用户会在面板上看到"已切到 B"，对话却仍
+           * 扣 A 的额度。
+           */
+          if (supervisor.authFile && !authFileMatchesHealth(probe.health, supervisor.authFile)) {
+            restart = true;
+            log(`桥仍在服务旧账号（${probe.health?.authFile || '未知'}），按当前选择重启`);
+          } else if (probe.staleBuild === true) {
+            /*
+             * 桥是当前账号的，但**跑的是旧脚本**：升级后端口上还是旧进程。
+             * 原先这里直接 `return client`，`staleBuild` 被丢掉 —— 用户升级
+             * 插件后一直被旧逻辑服务（思考档位/换号跟随/目录判定全是旧的），
+             * 而且**永不重启**（实测 `.tmp-audit2/t11`：ensure 调用次数 = 0）。
+             * `#ensure` 里本来就有构建比对，这里必须把判定交给它。
+             */
+            restart = true;
+            log(`桥仍是旧构建（${probe.bridgeBuild || '未知'} -> ${probe.expectedBuild || '当前'}），重启以加载新代码`);
+          } else {
+            state.bridgeAliveAt = now;
+            return client;
+          }
+        }
         const result = await supervisor.ensure({ restart, readyTimeoutMs: config.autoStartTimeoutMs });
         state.lastEnsure = { at: Date.now(), ...result };
         if (!result.ok) throw new Error(result.error || '桥不可用');
@@ -1999,7 +2161,37 @@ export function apply(ctx, rawConfig = {}) {
         error: '',
       };
       syncBridgeAccountConfig();
-      const ready = await supervisor.ensure({ readyTimeoutMs: config.autoStartTimeoutMs });
+      /*
+       * ## `autoStart: false` 时**绝不能**顺手把桥拉起来（实测缺陷，2026-11-06）
+       *
+       * `autoStart` 是一个用户明确配置的开关（"别自动帮我起桥"）。原先这里
+       * 无条件 `supervisor.ensure(...)`，而启动路径
+       * `index.js:2409` 的 `maybeAutoConfigureWebSearch('startup')` 被刻意放在
+       * `if (config.autoStart)` 分支**之外**，于是：`autoStart=false` +
+       * `autoWebSearch=true`（默认就是 true）→ 仍然 spawn 一个桥进程。
+       *
+       * 实测（`.tmp-audit2/t31-autostart-false-websearch.mjs`，端到端）：
+       *   autoStart = false | autoWebSearch = true
+       *   supervisor.ensure 被调用次数 = 1（应为 0）
+       *
+       * 现在：不自动起桥时，只接受**已经在跑**的桥；没在跑就给一条能照着做的
+       * 错误，而不是偷偷替用户违反设置。手动点按钮同样遵守这条 —— 用户要的是
+       * "接入搜索"，不是"顺便帮我起一个我明确关掉的进程"。
+       */
+      if (!config.autoStart) {
+        const probe = await supervisor.probe();
+        const alive = probe.state === 'running' || probe.state === 'degraded' || probe.state === 'unauthenticated';
+        if (!alive) {
+          throw new Error(
+            'autoStart 已关闭，且端口上没有正在运行的桥。'
+            + '请先手动启动桥（或把 autoStart 设回 true），再接入网页搜索。'
+            + `当前状态：${probe.state}${probe.error ? `（${probe.error}）` : ''}`,
+          );
+        }
+      }
+      const ready = config.autoStart
+        ? await supervisor.ensure({ readyTimeoutMs: config.autoStartTimeoutMs })
+        : { ok: true, state: 'running' };
       if (!ready.ok) throw new Error(ready.error || ready.state || 'bridge is not ready');
       /*
        * 只保留**第一次接入前**的快照：用户点“重新接入”时不能把原始配置覆盖掉。

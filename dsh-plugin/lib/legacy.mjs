@@ -108,6 +108,27 @@ function providersIsEmpty(lines, providersLine, indent) {
 
 /**
  * 从一份文件文本里移除 `providers.<provider>` 段。
+ *
+ * ## ⚠️ 空 `providers:` 必须**按行号**改写，不能用 `replace(/^.../m)` （实测缺陷）
+ *
+ * 原先这一行是：
+ *
+ *     out = out.replace(/^([ \t]*)providers:\s*$/m, '$1providers: {}');
+ *
+ * `providersIsEmpty()` 判的是 `hit.providersLine` **那个** `providers:`，
+ * 而 `replace` 命中的是**全文第一个**匹配行。两个位置一旦不是同一行（很常见：
+ * 文件里在本插件段之前还有别的 `xxx:\n  providers:`），后果是两个：
+ *
+ *   ① 把**别人**的 `providers:` 改成 `{}`，把它下面的子键全变成非法缩进；
+ *   ② 自己那个空 `providers:` 仍是裸的（YAML 里是 null），其后兄弟键缩进非法。
+ *
+ * 实测（`.tmp-audit2/t18-legacy-invalid-yaml.mjs`）：清理后的文件用宿主自带的
+ * `yaml` 解析器直接报 `All mapping items must start at the same column` ——
+ * 也就是说**下一次 dsh 启动读配置就抛错**。备份文件还在，但用户只会看到启动失败。
+ *
+ * 现在：先删段，再**按行号**把那一行改写成 `providers: {}`（用同样的缩进），
+ * 其余行一个字都不动。
+ *
  * @returns {{changed: boolean, text: string}}
  */
 export function stripProviderBlock(text, provider = 'workbuddy') {
@@ -115,11 +136,20 @@ export function stripProviderBlock(text, provider = 'workbuddy') {
   if (!hit) return { changed: false, text };
   const lines = text.split(/\r?\n/);
   const kept = [...lines.slice(0, hit.start), ...lines.slice(hit.end)];
-  let out = kept.join('\n');
-  if (providersIsEmpty(kept, hit.providersLine, indentOf(kept[hit.providersLine]))) {
-    // 空映射在 YAML 里是 null，部分消费者会因此报错；显式写成 {}
-    out = out.replace(/^([ \t]*)providers:\s*$/m, '$1providers: {}');
+  /*
+   * `hit.providersLine` 是**删除前**的行号；删掉的段在它之后（start > providersLine），
+   * 所以删除后它前面的行没有位移 —— 索引仍然有效。
+   */
+  if (providersIsEmpty(kept, hit.providersLine, indentOf(kept[hit.providersLine] ?? ''))) {
+    const idx = hit.providersLine;
+    if (idx >= 0 && idx < kept.length && /^([ \t]*)providers:\s*$/.test(kept[idx])) {
+      const indent = /^([ \t]*)/.exec(kept[idx])[1];
+      // 空映射在 YAML 里是 null，部分消费者会因此报错；显式写成 {}。
+      // 只改这**一行**，缩进沿用原值。
+      kept[idx] = `${indent}providers: {}`;
+    }
   }
+  let out = kept.join('\n');
   if (!out.endsWith('\n')) out += '\n';
   return { changed: true, text: out };
 }
@@ -185,7 +215,18 @@ export function cleanLegacyRoutes({ settingsPath, patchPath, provider = 'workbud
   return {
     changed: files.some((f) => f.changed),
     files,
-    found: files.some((f) => f.reason === 'no-legacy-route' ? true : f.changed),
+    /*
+     * `found` = **确实发现了旧路由**（并因此改动了文件）。
+     *
+     * 原先写的是 `f.reason === 'no-legacy-route' ? true : f.changed` ——
+     * 判据正好反了：`no-legacy-route` 的意思是"没找到旧路由"，却返回 true，
+     * 于是面板上的「发现遗留配置」提示**永远亮着**（实测 `.tmp-audit2/t7`：
+     * 两个文件都没有旧路由时 `found = true`）。而且首个文件命中
+     * `no-legacy-route` 就短路成 true，连第二个文件的真实结果都不看。
+     *
+     * 正确口径：任一文件 `changed` 才是"找到了并清理了"。
+     */
+    found: files.some((f) => f.changed === true),
   };
 }
 

@@ -432,6 +432,13 @@ export class BridgeSupervisor {
     this.lastStartAt = null;
     /** 正在进行的 ensure()，避免并发重复拉起。 */
     this.pendingEnsure = null;
+    /**
+     * 正在进行的 **restart** 任务（与 `pendingEnsure` 分开）。
+     *
+     * 并发 restart 必须合并成一次 —— 否则 N 个请求 = N 个真桥进程，
+     * 前几个成了孤儿（实测 3 个）。见 {@link ensure} 的长注释。
+     */
+    this.pendingRestart = null;
   }
 
   get baseUrl() {
@@ -548,21 +555,53 @@ export class BridgeSupervisor {
 
   /**
    * 保证桥可用：活着就复用，否则按配置拉起并等待就绪。
-   * @param {{ restart?: boolean, signal?: AbortSignal, readyTimeoutMs?: number }} [options]
-   * @returns {Promise<{ok: boolean, started: boolean, reused: boolean, state: string, health?: object, error?: string}>}
+   *
+   * ## 并发 restart 必须**合并**，不能"等它结束再开一个"（实测缺陷，2026-11-06）
+   *
+   * 原先是：
+   *
+   *     if (!restart) return this.pendingEnsure;
+   *     await this.pendingEnsure.catch(() => {});
+   *     return this.ensure({ restart: true, ... });   // ← 递归开一个新的
+   *
+   * 于是 N 个并发 `ensure({restart:true})` = N 次 stop+start，每次 start 都
+   * `spawn` 一个 detached 进程：前一个刚起来、后一个又把它停掉再起。
+   * 实测（`.tmp-audit2/t8-restart-storm-real.mjs`，真进程）：
+   *
+   *   并发 3 次 ensure({restart:true}) → 被拉起的桥进程数 = **3**，
+   *   三个调用都报 ok:true，但只有最后那个 pid 在服务，前两个成了孤儿。
+   *
+   * 现在用一个**独立的 restart 队列**：并发请求共享同一个 restart 任务。
+   * 语义仍然是「这之后桥上跑的是新配置」，但只停/起一次。
    */
   async ensure({ restart = false, signal, readyTimeoutMs = 30000, authFile } = {}) {
-    if (this.pendingEnsure) {
+    if (restart) {
       /*
-       * 在途的 ensure() 如果没有 restart，它可能只是「复用已有桥」—— 直接
-       * 返回它会让调用方以为「已经按新配置重启了」，实际桥根本没动。
-       * 等它结束后再补一次真正的重启。
+       * 串行化 restart：后到的调用者**合并**到在途的那一次，而不是再排一次。
+       *
+       * 为什么合并是安全的：restart 的语义是「保证桥上跑的是当前配置」——
+       * 一次成功的 restart 之后，后面排队者的目标已经达成，不需要再来一次。
+       * （若期间配置真的又变了，调用方会带新的 authFile 再调一次，那时
+       *   pendingRestart 已经是 null，会正常开新一轮。）
        */
-      if (!restart) return this.pendingEnsure;
-      await this.pendingEnsure.catch(() => {});
-      return this.ensure({ restart: true, signal, readyTimeoutMs, authFile });
+      if (this.pendingRestart) return this.pendingRestart;
+      /*
+       * 若有非 restart 的 ensure 在途，等它结束（它可能正在开始一个进程）。
+       * 这里的 `await` 不需要额外守卫：waiters 共享的是同一个 pendingRestart，
+       * 不会因此多开一个进程。
+       */
+      const prior = this.pendingEnsure;
+      const run = (async () => {
+        if (prior) await prior.catch(() => {});
+        return this.#ensure({ restart: true, signal, readyTimeoutMs, authFile });
+      })();
+      this.pendingRestart = run.finally(() => {
+        if (this.pendingRestart === run) this.pendingRestart = null;
+      });
+      return this.pendingRestart;
     }
-    this.pendingEnsure = this.#ensure({ restart, signal, readyTimeoutMs, authFile })
+    if (this.pendingEnsure) return this.pendingEnsure;
+    this.pendingEnsure = this.#ensure({ restart: false, signal, readyTimeoutMs, authFile })
       .finally(() => { this.pendingEnsure = null; });
     return this.pendingEnsure;
   }
@@ -633,6 +672,26 @@ export class BridgeSupervisor {
       if (!stopped.ok) return { ok: false, started: false, reused: false, state: 'running', error: stopped.error };
     }
 
+    /*
+     * ## `autoStart: false` 必须真的拦住 spawn（实测缺陷，2026-11-06）
+     *
+     * `this.autoStart = options.autoStart` 在构造函数里赋了值，但**全文件没有任何
+     * 读取点** —— 也就是说这个配置从来没生效过（实测 `.tmp-audit2/t5` B 段：
+     * `autoStart=false` 调 ensure() → `{"ok":true,"started":true}`，start 调用 1 次）。
+     *
+     * 这里补上唯一的读取点：「要 spawn 了」的那一刻。停桥/复用都不受影响 ——
+     * 用户关掉的是"自动起"，不是"自动停"。
+     */
+    if (this.autoStart === false) {
+      return {
+        ok: false,
+        started: false,
+        reused: false,
+        state: status.state || 'stopped',
+        error: 'autoStart 已关闭：不会自动拉起桥进程。请手动启动桥，或把 autoStart 设回 true。',
+      };
+    }
+
     const start = await this.start({ signal, authFile });
     if (!start.ok) return { ok: false, started: false, reused: false, state: 'stopped', error: start.error };
 
@@ -684,7 +743,9 @@ export class BridgeSupervisor {
     try {
       mkdirSync(dirname(this.logPath), { recursive: true });
       // 只在**本次真的要拉起新进程**时滚动：桥还活着时上面已经 return 了。
-      rotateLogIfNeeded(this.logPath);
+      const rotation = rotateLogIfNeeded(this.logPath);
+      // 滚动失败不能吞掉：那意味着日志会无限增长（长期才看得出来）。走 onLog 留痕。
+      if (rotation.error) this.onLog(`bridge log rotate failed: ${rotation.error}`);
       logFd = openSync(this.logPath, 'a');
     } catch { /* 日志打不开不该阻止桥启动 */ }
 
@@ -716,15 +777,52 @@ export class BridgeSupervisor {
         windowsHide: true,
       });
       child.unref();
-      this.spawnedPid = child.pid ?? null;
+      /*
+       * ⚠️ `error` 监听必须**在任何早退之前**挂上。
+       *
+       * `spawn` 失败时不抛异常，而是异步 emit `error`。如果先判断 `!child.pid`
+       * 就直接 return，那个 `error` 事件**没有任何监听者** → 变成未捕获异常
+       * （uncaughtException），在 dsh 宿主里可能直接带走进程。
+       * 这正是本文件修「spawn 失败报 ok:true」时踩到的坑（用 `brokenSpawnError`
+       * 判定顺序修掉）：先挂监听，再决定返回什么。
+       */
+      let brokenSpawnError = null;
+      child.on('error', (error) => {
+        brokenSpawnError = String(error?.message || error);
+        this.lastStartError = brokenSpawnError;
+        // pid 已经不可信了：清掉归属，避免后续 stop() 按这个 pid 去 kill 别人
+        if (this.spawnedPid === child.pid) this.spawnedPid = null;
+        this.onLog(`bridge spawn error: ${brokenSpawnError}`);
+      });
+      /*
+       * `child.pid` 为空 = spawn 根本没成功（EMFILE / EACCES / nodePath 不存在等）。
+       * Node 的 `spawn` 对多数失败**不抛异常**，而是把错误从 `error` 事件异步送来
+       * —— 所以这里必须自己判：`pid` 有值才算拉起来了。
+       *
+       * 原先无论 `child.pid` 是什么都 `return { ok: true }`，于是 `ensure → routes →
+       * 面板` 全都看到"成功"，实际没有任何进程。实测（`.tmp-audit2/t4`）：
+       *   start() = {"ok":true,"pid":null}  而 lastStartError = "spawn ... ENOENT"
+       */
+      if (!child.pid) {
+        this.spawnedPid = null;
+        /*
+         * `error` 事件可能比这里晚一拍。等一个宏任务，让 ENOENT 之类的失败
+         * 有机会把原因填进 `brokenSpawnError` —— 否则用户只看到
+         * "spawn 没有返回 pid"，而真正的原因（哪个路径不存在）在日志里。
+         * 这只是**为了把原因带出去**，`pid` 为空本身已经足以判定失败。
+         */
+        await new Promise((resolve) => { setTimeout(resolve, 0); });
+        return {
+          ok: false,
+          pid: null,
+          error: brokenSpawnError || 'spawn 没有返回 pid（桥进程没起来，原因见日志）',
+        };
+      }
+      this.spawnedPid = child.pid;
       this.lastStartAt = Date.now();
       this.lastStartError = null;
       this.onLog(`bridge spawned pid=${child.pid} ${this.baseUrl}`);
-      child.on('error', (error) => {
-        this.lastStartError = String(error?.message || error);
-        this.onLog(`bridge spawn error: ${this.lastStartError}`);
-      });
-      return { ok: true, pid: child.pid ?? null, reused: false };
+      return { ok: true, pid: child.pid, reused: false };
     } catch (error) {
       this.lastStartError = String(error?.message || error);
       return { ok: false, pid: null, error: this.lastStartError };
@@ -733,19 +831,47 @@ export class BridgeSupervisor {
     }
   }
 
-  /** 停掉桥：只停 /health 报出的那个 pid（本机回环，不会误伤别的服务）。 */
+  /**
+   * 停掉桥。
+   *
+   * ## 为什么必须先证明"这个 pid 真是我们的桥"（实测缺陷，2026-11-06）
+   *
+   * 原先只做两件事：`probe()` 认领了对面、取 `health.pid` 就 `process.kill`。
+   * 而 `probe()` 认领一个服务只靠 **body 形状**（`payload.ok === false` +
+   * `authFile`/`login` 字样），完全不看 build、不看令牌是否被对端校验过。
+   * 于是端口上任何一个本地 HTTP 服务，只要回
+   * `{"ok":true,"pid":N}` 或 `{ok:false, authFile:"x", pid:N}`，
+   * 就能让插件 **SIGTERM 掉本机任意进程**（N 可以是任何 pid）。
+   *
+   * 实测（`.tmp-audit2/t2-kill-foreign-pid.mjs` / `t22-kill-via-503.mjs`）：
+   * 假服务回 `{"ok":true,"pid":19280}`，19280 是个无关 node 进程 →
+   * `stop()` 之后「无辜进程还活着？false」。更糟的是 `stop()` 同时**报失败**
+   * （它靠"端口不再应答"判断成功），调用方以为没杀掉，进程其实已经死了。
+   *
+   * ## 现在的判据（必须有**正向证据**才 kill）
+   *
+   *   ① 这个 pid 是我们**亲手 spawn** 的（`spawnedPid`）→ 直接可信；
+   *   ② 或者 `/health` 报的 `build` **非空且**等于当前磁盘脚本的指纹
+   *      （`expectedBuild()`）—— 别人的服务不可能猜到我们的构建哈希；
+   *   ③ 两者都不成立 → 拒绝，并把原因说清楚。
+   *
+   * 只走 ② 而不额外要求令牌，是因为「桥用旧令牌跑着」正是要能停的场景
+   * （见 consoleStop.test.mjs 那条用例）；build 指纹已经足以区分"自家"与"别人"。
+   */
   async stop(signal) {
     const status = await this.probe(signal);
     if (status.state === 'aborted') return { ok: false, stopped: false, error: status.error };
     if (status.state === 'stopped') return { ok: true, stopped: false, reason: 'bridge was not running' };
     /*
-     * 未登录 / 凭据异常时桥仍然是我们的进程：503 body 现在带 pid，可以正常停止。
-     * 只有 foreign / unauthorized（没有可信 pid）才拒绝。
+     * 未登录 / 凭据异常时桥仍然是我们的进程：503 body 现在带 pid 与 build。
+     * foreign / unauthorized 没有可信 pid，直接拒绝。
      */
     const pid = status.health?.pid;
     if (!['running', 'degraded', 'unauthenticated'].includes(status.state) || !Number.isFinite(pid)) {
       return { ok: false, error: status.error || status.state };
     }
+    const owned = this.ownsPid(pid, status.health);
+    if (!owned.ok) return { ok: false, stopped: false, pid, error: owned.reason };
     try {
       process.kill(pid, 'SIGTERM');
     } catch (error) {
@@ -763,6 +889,45 @@ export class BridgeSupervisor {
       }
     }
     return { ok: false, error: `pid ${pid} 在 8 秒内没有退出` };
+  }
+
+  /**
+   * 这个 pid 是不是**我们的**桥进程？返回 `{ok, reason}`。
+   *
+   * 见 {@link stop} 的长注释：这里存在的唯一目的是"杀之前先证明归属"。
+   * 判据刻意只有两条正向证据（自己 spawn 的 / 构建指纹相符），
+   * **不**接受"它回了 401"或"它的 body 里有 authFile 字段"这类形状证据 ——
+   * 那些别人的服务也能伪造。
+   *
+   * @param {number} pid
+   * @param {object} [health] `/health`（或 503）的响应体
+   */
+  ownsPid(pid, health) {
+    if (Number.isFinite(this.spawnedPid) && this.spawnedPid === pid) {
+      return { ok: true, reason: '' };
+    }
+    const expected = this.expectedBuild();
+    const actual = String(health?.build || '');
+    /*
+     * 本地脚本读不出（测试桩 / 脚本丢了）时不拿构建比对 —— 此时没有可比对的
+     * 基准，唯一可信的来源就只剩"我们亲手 spawn 过它"。这也是刻意保守的：
+     * 宁可报「无法确认」，也不按一个可能被伪造的 pid 去 kill。
+     */
+    if (!expected) {
+      return {
+        ok: false,
+        reason: '无法确认端口上的进程是不是 workbuddy-bridge（本地桥脚本读不出构建指纹，'
+          + '且这个进程不是本插件拉起的），为避免误杀无关进程，已放弃结束它。'
+          + '请手动确认该进程后再处理。',
+      };
+    }
+    if (actual && actual === expected) return { ok: true, reason: '' };
+    return {
+      ok: false,
+      reason: `端口上的进程（PID ${pid}）不是 workbuddy-bridge：`
+        + `它的构建指纹是 ${actual || '（未上报）'}，当前脚本是 ${expected}。`
+        + '为避免误杀无关进程，已放弃结束它。',
+    };
   }
 
   /**

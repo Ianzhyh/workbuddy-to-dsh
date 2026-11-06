@@ -62,13 +62,58 @@ function findChrome() {
 }
 
 /**
+ * 探一个端口上到底是什么，**三态**（与 `probePortPid` 同一套纪律）：
+ *
+ *   `devtools` —— 是 Chrome DevTools（`/json/version` 给了 webSocketDebuggerUrl）
+ *   `foreign`  —— 有 HTTP 服务在答，但不是 DevTools（或答了但不回话/超时）
+ *   `absent`   —— 连不上（ECONNREFUSED 等），**可以放心在上面起实例**
+ *
+ * 为什么必须分开：早先 `devtoolsPages()` 只做"轮询 /json/list 直到有 page"，
+ * 于是端口被**别的** HTTP 服务占着时，它会老老实实轮询满 60×250ms=15 秒再抛
+ * 「无法连接 DevTools」—— 那句话把"端口冲突"说成了"浏览器起不来"，而且紧接着
+ * 又在这个端口上 spawn 一个 Chrome（绑定必失败），再轮询 15 秒，共 31.5 秒，
+ * 还把那个注定失败的 Chrome 进程留在后台（实测泄漏 3 个无头实例）。
+ */
+async function probeCdp(port, timeoutMs = 1200) {
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/json/version`, {
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    const body = await res.json().catch(() => null);
+    const ws = body && typeof body.webSocketDebuggerUrl === 'string' ? body.webSocketDebuggerUrl : '';
+    return ws
+      ? { state: 'devtools', detail: '', ws }
+      : { state: 'foreign', detail: `HTTP ${res.status} 但不是 DevTools`, ws: '' };
+  } catch (error) {
+    const text = `${error?.cause?.code || ''} ${error?.code || ''} ${error?.message || ''}`;
+    if (error?.name === 'TimeoutError' || error?.name === 'AbortError') {
+      // 有人在听但不回话：同样不能当成"空着"
+      return { state: 'foreign', detail: '端口无响应（可能被别的程序占用）', ws: '' };
+    }
+    if (/ECONNREFUSED|ECONNRESET|EAI_AGAIN|fetch failed|EPIPE/i.test(text)) {
+      return { state: 'absent', detail: '', ws: '' };
+    }
+    return { state: 'absent', detail: String(error?.message || error), ws: '' };
+  }
+}
+
+/**
  * 端口上的**全部** page 目标（含 ws），供 openPage 判断"实例是否已在跑"。
  *
  * 注意它只用来**判断实例存在**，不再拿它挑"第一张页面"来用 ——
  * 复用旧页面会把上一个脚本的注入脚本、localStorage、对话框处理器一起带过来
  * （详见 `openPage` 里 `newTarget` 的说明）。
+ *
+ * 端口被**别的程序**占着时立刻抛 `CDP_PORT_FOREIGN`，不要白等 15 秒：
+ * 那不是"浏览器起不来"，换端口就能好（见 {@link openPage} 的自动改端口）。
  */
 async function devtoolsPages(port) {
+  const probe = await probeCdp(port);
+  if (probe.state === 'foreign') {
+    const err = new Error(`端口 ${port} 被别的程序占着（${probe.detail}），不能当 DevTools 端口`);
+    err.code = 'CDP_PORT_FOREIGN';
+    throw err;
+  }
   for (let i = 0; i < 60; i += 1) {
     try {
       const res = await fetch(`http://127.0.0.1:${port}/json/list`);
@@ -78,7 +123,47 @@ async function devtoolsPages(port) {
     } catch { /* 还没起来 */ }
     await sleep(250);
   }
-  throw new Error('无法连接 DevTools');
+  throw new Error(`端口 ${port} 上 15 秒内没有出现任何 DevTools 页面`);
+}
+
+/**
+ * 让系统分配一个空闲端口。
+ *
+ * 只用于"端口冲突时换一个"这条兜底路径 —— 平时由调用方显式传端口，
+ * 便于失败时按端口定位。
+ *
+ * ## 为什么优先从 20000–29999 里挑
+ *
+ * 本机 `netsh int ipv4 show dynamicport tcp` 是 **1024–15000**，而 `listen(0)`
+ * 拿到的正是这一段。把它交给 Chrome 的 `--remote-debugging-port` 有 TOCTOU：
+ * 我们 close 之后、Chrome bind 之前，任何一次出站连接都可能把它占走，于是
+ * 「Chrome 起不来」以 15 秒超时的形式出现。项目里 `tools/dev/bridge-ports.mjs`
+ * 早就为桥定下了这条规矩（20000–29999：高于 Windows 动态段、低于 Linux 临时段），
+ * 这里对齐同一口径，先在这一段里试，全被占了才退回 `listen(0)`。
+ *
+ * @returns {Promise<number>}
+ */
+export async function freePort() {
+  const { BRIDGE_PORT_MIN, BRIDGE_PORT_MAX } = await import('./bridge-ports.mjs');
+  const tryBind = (port) => new Promise((resolve) => {
+    const srv = createServer();
+    srv.once('error', () => resolve(false));
+    srv.listen(port, '127.0.0.1', () => srv.close(() => resolve(true)));
+  });
+  for (let i = 0; i < 40; i += 1) {
+    const span = BRIDGE_PORT_MAX - BRIDGE_PORT_MIN + 1;
+    const port = BRIDGE_PORT_MIN + Math.floor(Math.random() * span);
+    if (await tryBind(port)) return port;
+  }
+  // 兜底：让系统给（可能落在动态段，但至少是当下真的空的）
+  const srv = createServer();
+  await new Promise((resolve, reject) => {
+    srv.once('error', reject);
+    srv.listen(0, '127.0.0.1', resolve);
+  });
+  const { port } = srv.address();
+  await new Promise((resolve) => srv.close(resolve));
+  return port;
 }
 
 /** 极简 CDP 客户端。 */
@@ -363,30 +448,67 @@ export async function openPage(url, routes, { cdpPort = 9333, width = 1440, heig
     }
   };
 
-  try {
-    const pages = await devtoolsPages(cdpPort);
-    void pages;
-    const fresh = await newTarget(cdpPort);
-    if (fresh && fresh.webSocketDebuggerUrl) {
-      wsUrl = fresh.webSocketDebuggerUrl;
-      createdTargetId = fresh.id || null;
-    } else {
-      /*
-       * 拿不到 /json/new（老版本只认 GET、或发行版禁了该接口）时退回复用现有页面。
-       * 这条路**可能带着上一轮的注入** —— 所以把话说明白，别让它以"随机红"的形式出现。
-       */
-      const left = await devtoolsPages(cdpPort);
-      wsUrl = left[0].webSocketDebuggerUrl;
-      process.stderr.write('[ui-harness] 提示：/json/new 不可用，本次复用了已有页面；'
-        + '若断言莫名其妙地失败，先怀疑跨脚本残留状态\n');
+  /*
+   * 起/复用实例。**端口冲突要立刻换端口**，不要在这个端口上白等两轮 15 秒。
+   *
+   * 早先的行为（实测 `.tmp-audit/probe-cdp-occupied.mjs`）：端口被别的 HTTP 服务
+   * 占着 → `devtoolsPages()` 轮询 15 秒 → 抛「无法连接 DevTools」→ catch 里**照样**
+   * 在这个端口 spawn 一个 Chrome（绑定必失败）→ 再轮询 15 秒 → 抛出。合计 31.5 秒，
+   * 而且那个注定失败的 Chrome 进程被留在后台（本机实测残留 3 个无头实例，
+   * 每个带着几十个 renderer —— 后续脚本于是越来越容易超时）。
+   *
+   * 现在：先探一次端口身份；`foreign` 直接换一个系统分配的端口，并且**只在
+   * 真的需要冷启动时才 spawn**；spawn 之后如果连不上，把进程收掉再报错。
+   */
+  let usingPort = cdpPort;
+  let coldStart = false;
+  for (let attempt = 0; ; attempt += 1) {
+    const probe = await probeCdp(usingPort);
+    if (probe.state === 'devtools') {
+      try {
+        const fresh = await newTarget(usingPort);
+        if (fresh && fresh.webSocketDebuggerUrl) {
+          wsUrl = fresh.webSocketDebuggerUrl;
+          createdTargetId = fresh.id || null;
+        } else {
+          /*
+           * 拿不到 /json/new（老版本只认 GET、或发行版禁了该接口）时退回复用现有页面。
+           * 这条路**可能带着上一轮的注入** —— 所以把话说明白，别让它以"随机红"的形式出现。
+           */
+          const left = await devtoolsPages(usingPort);
+          wsUrl = left[0].webSocketDebuggerUrl;
+          process.stderr.write('[ui-harness] 提示：/json/new 不可用，本次复用了已有页面；'
+            + '若断言莫名其妙地失败，先怀疑跨脚本残留状态\n');
+        }
+        break;
+      } catch (error) {
+        // DevTools 在、但拿不到页面：当成冲突，换端口重来
+        if (attempt >= 2) throw error;
+        usingPort = await freePort();
+        continue;
+      }
     }
-  } catch {
+    if (probe.state === 'foreign') {
+      if (attempt >= 2) {
+        throw new Error(`连续 3 个端口都被别的程序占着，无法启动 DevTools（最后一个是 ${usingPort}：${probe.detail}）`);
+      }
+      const next = await freePort();
+      process.stderr.write(`[ui-harness] 端口 ${usingPort} 被别的程序占着（${probe.detail}），改用 ${next}\n`);
+      usingPort = next;
+      continue;
+    }
+    // absent：这里才是"该冷启动"的时机
+    coldStart = true;
+    break;
+  }
+
+  if (coldStart) {
     const exe = findChrome();
     if (!exe) throw new Error('找不到 Chrome/Edge，请设置 CHROME_PATH');
     profileDir = mkdtempSync(join(tmpdir(), 'wb-cdp-'));
     chrome = spawn(exe, [
       '--headless=new',
-      `--remote-debugging-port=${cdpPort}`,
+      `--remote-debugging-port=${usingPort}`,
       `--user-data-dir=${profileDir}`,
       '--no-first-run',
       '--no-default-browser-check',
@@ -395,9 +517,27 @@ export async function openPage(url, routes, { cdpPort = 9333, width = 1440, heig
       'about:blank',
     ], { stdio: 'ignore', detached: true });
     chrome.unref();
-    const pages = await devtoolsPages(cdpPort);
-    wsUrl = pages[0].webSocketDebuggerUrl;
+    try {
+      const pages = await devtoolsPages(usingPort);
+      wsUrl = pages[0].webSocketDebuggerUrl;
+    } catch (error) {
+      /*
+       * 起不来就把进程与临时 profile 收掉再报错。
+       *
+       * 不收的话它会在后台活着（Chrome 绑定失败后未必立刻退出），下一个脚本
+       * 又会 spawn 一个 —— 实测泄漏到 3 个无头实例、几十个 renderer，
+       * 后续用例开始 180s 超时，而错误信息只说「无法连接 DevTools」。
+       */
+      try { chrome.kill(); } catch { /* 已经退出 */ }
+      chrome = null;
+      try { rmSync(profileDir, { recursive: true, force: true }); } catch { /* 忽略 */ }
+      profileDir = null;
+      throw new Error(`Chrome 在端口 ${usingPort} 上没能起来：${error.message}`
+        + '（端口可能刚被别的程序抢走；重跑一次，或换 CDP 端口）', { cause: error });
+    }
   }
+  /** 实际使用的调试端口（自动换过端口时与入参不同）。 */
+  const debugPort = usingPort;
 
   const cdp = connect(wsUrl);
   await cdp.ready;
@@ -555,7 +695,8 @@ export async function openPage(url, routes, { cdpPort = 9333, width = 1440, heig
      */
     if (createdTargetId) {
       try {
-        fetch(`http://127.0.0.1:${cdpPort}/json/close/${createdTargetId}`).catch(() => {});
+        // 必须用**实际**调试端口：端口冲突时这里会自动换过（见上面的 usingPort）
+        fetch(`http://127.0.0.1:${debugPort}/json/close/${createdTargetId}`).catch(() => {});
       } catch { /* 忽略 */ }
     }
     if (chrome) { try { chrome.kill(); } catch { /* 忽略 */ } }
@@ -564,6 +705,8 @@ export async function openPage(url, routes, { cdpPort = 9333, width = 1440, heig
   return {
     cdp,
     close,
+    /** 实际使用的 CDP 端口（入参被占时会自动换一个）。 */
+    cdpPort: debugPort,
     /**
      * 最近一次确认框的文案。**要 `await`。**
      *

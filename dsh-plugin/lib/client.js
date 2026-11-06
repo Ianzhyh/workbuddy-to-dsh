@@ -8199,8 +8199,17 @@ body.dark .wb-root,
               value: activeModel,
               onChange: (e) => setModel(e.target.value),
               options: shown.map((m) => {
-                // 与 dsh 模型选择器同一口径：倍率直接跟名字走，免费模型标「免费」。
-                const credits = Number(m.credits);
+                /*
+                 * 与 dsh 模型选择器同一口径：倍率直接跟名字走，免费模型标「免费」。
+                 *
+                 * ⚠️ **不能写 `Number(m.credits) === 0`**：目录里 `credits: null`
+                 * 的语义是「上游没给倍率」（`toDirectory` 对缺失字段给 null），
+                 * 而 `Number(null)` 恰好是 0 —— 于是「不知道多少钱」被显示成
+                 * 「免费」。实测（`.tmp-audit/probe-credits-null.mjs`）同一张目录里
+                 * glm-5.3 在下拉里写「免费」、在「可用模型」表格里写「—」，两处自相矛盾。
+                 * 免费只认显式标记：`free === true`，或**数值型**的 credits 等于 0。
+                 */
+                const credits = typeof m.credits === 'number' ? m.credits : null;
                 const cost = m.free === true || credits === 0 ? '免费'
                   : (Number.isFinite(credits) && credits > 0 ? '×' + credits : '');
                 return {

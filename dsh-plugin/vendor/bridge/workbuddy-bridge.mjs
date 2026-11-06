@@ -5922,11 +5922,44 @@ function businessCodeOf(parsed) {
 }
 
 /** 上游错误里**给人看**的句子：displayMsg/displayTips 优先，协议 msg 兜底。 */
+/**
+ * 上游错误体里的凭据字段一律抹掉。
+ *
+ * ## 为什么必须有（实测缺陷，2026-11-06）
+ *
+ * {@link upstreamHumanText} 在 `displayMsg` / `msg` 都缺失时会**回退到响应体原文**，
+ * 而这条文本会进两处：客户端看到的 `error.message`，以及 `bridge.log` 的
+ * `log('upstream error', …)`。上游 401/400 的调试信封里带
+ * `data.accessToken` / `data.refreshToken` 时，凭据就同时出现在**响应**和**日志**里。
+ *
+ * 文件头写着「never logs or persists a token」，`doRefreshAuth` 那边也专门为
+ * 「绝不打印响应体全文」写了长注释 —— 这条通用兜底路径把它绕过去了。
+ * 实测：客户端 message 里直接出现 `SECRET-ACCESS-abc`。
+ *
+ * 做法是**替换而不是丢弃整段**：错误原文对排查仍然有用（code、requestId、
+ * 中文提示都在里面），只是把像凭据的键值抹成 `<redacted>`。
+ */
+function redactSecrets(text) {
+  const s = String(text ?? '');
+  if (!s) return s;
+  return s
+    // JSON 键值：accessToken / refreshToken / idToken / apiKey / secret / password …
+    .replace(/("(?:[A-Za-z0-9_]*(?:access|refresh|id|session|auth)?_?[Tt]oken|[A-Za-z0-9_]*[Aa]pi[_-]?[Kk]ey|[A-Za-z0-9_]*[Ss]ecret|[Pp]assword|[Pp]asswd|[Cc]redential)"\s*:\s*")[^"]*"/g, '$1<redacted>"')
+    // Authorization: Bearer xxx
+    .replace(/\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]{8,}/gi, '$1 <redacted>')
+    // 裸的 JWT（三段 base64url）—— 上游有时把它塞在字符串里而不是键值里
+    .replace(/\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g, '<redacted-jwt>');
+}
+
 function upstreamHumanText(parsed, raw, res) {
   const display = parsed?.displayMsg?.zh || parsed?.displayMsg?.en
     || parsed?.displayTips?.zh || parsed?.displayTips?.en;
   const msg = parsed?.error?.message || parsed?.msg || parsed?.message;
-  const detail = String(display || msg || raw || `upstream HTTP ${res?.status || 0}`).trim();
+  /*
+   * `raw` 是**响应体原文**：只有前面几项全缺失时才会用到。用之前必须过
+   * {@link redactSecrets} —— 这条文本会进客户端响应与 bridge.log（见那里的注释）。
+   */
+  const detail = String(display || msg || (raw ? redactSecrets(raw) : '') || `upstream HTTP ${res?.status || 0}`).trim();
   // `msg` 常是协议短语（如 `request illegal`），displayMsg 才有操作含义；
   // 两者不同时把 msg 附在后面，保留上游原话便于对照。
   const extra = display && msg && !detail.includes(String(msg)) && String(msg).length <= 160
@@ -6841,6 +6874,56 @@ function estimateRequestTokens(body) {
   const tools = Array.isArray(body?.tools) ? body.tools : [];
   for (const t of tools) {
     total += estimateTokens(t?.name) + estimateTokens(t?.description) + estimateTokens(JSON.stringify(t?.input_schema || {}));
+  }
+  return Math.max(1, total);
+}
+
+/**
+ * Responses 请求体的输入 token 估算（`/v1/responses` 专用）。
+ *
+ * ## 为什么不能复用 {@link estimateRequestTokens}
+ *
+ * 那个函数按 **Anthropic** 的形状读 `body.system` / `body.messages` / `body.tools`，
+ * 而 Responses 请求的输入在 `body.instructions` 与 `body.input[]`。三个字段全不存在
+ * → 只累加 `Math.max(1, total)` 的 **1**。
+ *
+ * 实测（`.tmp-audit3/t2-responses-est-and-body.mjs`）：同一段 20000 字符正文，
+ * Anthropic 路径估出 5004，Responses 路径估出 **1**。这个数直接喂给 Codex 算
+ * 上下文占用与自动压缩阈值 —— 报 1 等于告诉它"这一轮什么都没吃"，于是
+ * **永不触发自动压缩**，最后撞上游 400 `prompt is too long`（用户看到的是
+ * 聊着聊着突然全红，且找不到原因）。
+ *
+ * 只估"会被上游计入 prompt 的文本"：instructions、input 里的消息文本 /
+ * 工具调用参数 / 工具输出、以及工具定义。图片按常数（与 Anthropic 侧同一口径）。
+ *
+ * @param {any} body `/v1/responses` 的请求体
+ * @returns {number} 至少 1
+ */
+function estimateResponsesTokens(body) {
+  let total = estimateTokens(body?.instructions);
+
+  const items = Array.isArray(body?.input) ? body.input : [];
+  for (const item of items) {
+    if (!item || typeof item !== 'object') continue;
+    total += 4; // 每条的封装开销（与 Anthropic 侧同口径）
+    /*
+     * `input` 既可能是 Responses 的条目数组，也可能被客户端直接塞成
+     * Anthropic/OpenAI 风格的消息（`{role, content}`）—— 两种都收：
+     * `content` 走结构化估算（能认出图片与嵌套块），`output`/`arguments`
+     * 是工具结果与工具调用参数。
+     */
+    total += estimateStructuredTokens(item.content);
+    total += estimateStructuredTokens(item.output);
+    total += estimateStructuredTokens(item.arguments);
+    // function_call_output 的 output 可能是字符串，estimateStructuredTokens 已覆盖；
+    // 这里再兜住 `text` 字段（部分网关的形状）
+    if (typeof item.text === 'string') total += estimateTokens(item.text);
+  }
+
+  const tools = Array.isArray(body?.tools) ? body.tools : [];
+  for (const t of tools) {
+    total += estimateTokens(t?.name) + estimateTokens(t?.description);
+    total += estimateStructuredTokens(t?.parameters || t?.input_schema || {});
   }
   return Math.max(1, total);
 }
@@ -11055,6 +11138,18 @@ async function fetchQuota(auth, { timeoutMs = QUOTA_TIMEOUT_MS } = {}) {
 const MAX_BODY_BYTES = numEnv('WORKBUDDY_MAX_BODY_BYTES', 32 * 1024 * 1024, { min: 1024 });
 
 /**
+ * 单个 SSE 事件块的字符上限（超了就当协议错误，而不是截断）。
+ *
+ * 为什么是 32MB：正常的"大块"确实存在 —— 长 base64 图、一次吐完的超长
+ * tool arguments、整段代码。给它足够余量，只有真的**从不发空行**的流才会命中。
+ * 上限的意义只是"别让缓冲无限增长"，不是"限制正文大小"。
+ *
+ * 为什么不能截断：见流式 chat 循环里的长注释（截断会丢掉 `data:` 前缀，
+ * 残片被原样转发、正文静默丢失而账本记成功）。
+ */
+const SSE_BLOCK_LIMIT_CHARS = numEnv('WORKBUDDY_SSE_BLOCK_LIMIT_CHARS', 32 * 1024 * 1024, { min: 64 * 1024 });
+
+/**
  * 读取请求体，超过 MAX_BODY_BYTES 立刻失败。
  *
  * **超限时既不在这里 destroy，调用方也不 destroy** —— 这是两次实测才定下来的：
@@ -11151,6 +11246,48 @@ function rejectTooLarge(
     : { error: { type: 'payload_too_large', message, ...(code ? { code } : {}) } };
   json(res, 413, body);
   req.resume();
+}
+
+/**
+ * 读 JSON 请求体，**超限走 413 而不是被当成"JSON 写错"**。
+ *
+ * ## 为什么必须收口（实测缺陷，2026-11-06）
+ *
+ * 管理端点原先各自写 `try { body = JSON.parse(await readBody(req)); } catch { body = null; }`。
+ * `readBody` 超限抛的是 `code='BODY_TOO_LARGE'`，那个 catch 把它和"JSON 语法错"
+ * 归成同一件事，于是三个后果一起发生：
+ *
+ *   1. **真因被掩盖**：超限被报成 `uid is required` / `source must be one of …` /
+ *      `body must be a JSON object` —— 调用方永远看不到"请求太大"。
+ *   2. **`/v1/auth/device` 会真的发起登录**：`body = null` 后 `region` 落到默认
+ *      `'cn'`，于是超限请求反而向上游申请了一次设备码（有副作用，且花配额）。
+ *   3. **keep-alive 连接被永久卡死**：`readBody` 超限只 `pause()`，只有
+ *      `rejectTooLarge()` 会 `resume()`。走 catch 的路径没人恢复读流，这条 socket
+ *      停在暂停状态，下一条复用它的请求一直等不到响应（实测 6s 后 ECONNRESET）。
+ *
+ * 收口成一个函数：超限 → `rejectTooLarge()`（写 413 + resume），返回 `{ok:false}`；
+ * 其余解析失败 → `{ok:true, body:null}`，保持各端点原有的"body 缺失"语义。
+ *
+ * @returns {Promise<{ok: true, body: any} | {ok: false}>}
+ */
+async function readJsonBody(req, res, protocol = 'openai') {
+  let text;
+  try {
+    text = await readBody(req);
+  } catch (e) {
+    if (e?.code === 'BODY_TOO_LARGE') {
+      rejectTooLarge(req, res, protocol);
+      return { ok: false };
+    }
+    // 客户端半路断开：socket 没了，写响应没有意义
+    if (isClientAbortError(e)) return { ok: false };
+    throw e;
+  }
+  try {
+    return { ok: true, body: JSON.parse(text) };
+  } catch {
+    return { ok: true, body: null };
+  }
 }
 
 /**
@@ -11721,8 +11858,10 @@ async function handleRequest(req, res) {
     }
 
     if (url.pathname === '/v1/models/default' && req.method === 'POST') {
-      let body;
-      try { body = JSON.parse(await readBody(req)); } catch { body = null; }
+      // 超限必须回 413（原先被 catch 吞成 "body must be a JSON object"，见 readJsonBody）
+      const parsedBody = await readJsonBody(req, res);
+      if (!parsedBody.ok) return undefined;
+      const body = parsedBody.body;
       if (!body || typeof body !== 'object') {
         return json(res, 400, { ok: false, error: 'body must be a JSON object' });
       }
@@ -11796,8 +11935,10 @@ async function handleRequest(req, res) {
     }
 
     if (url.pathname === '/v1/auth/source' && req.method === 'POST') {
-      let body;
-      try { body = JSON.parse(await readBody(req)); } catch { body = null; }
+      // 超限回 413（原先被吞成 "source must be one of …"；连接也会被 pause 卡死）
+      const parsedBody = await readJsonBody(req, res);
+      if (!parsedBody.ok) return undefined;
+      const body = parsedBody.body;
       try {
         await setSourcePreference(body?.source);
         return json(res, 200, { ok: true, ...await credentialStatus() });
@@ -11833,8 +11974,10 @@ async function handleRequest(req, res) {
     }
 
     if (url.pathname === '/v1/auth/active' && req.method === 'POST') {
-      let body;
-      try { body = JSON.parse(await readBody(req)); } catch { body = null; }
+      // 超限回 413（原先被吞成 "uid is required"）
+      const parsedBody = await readJsonBody(req, res);
+      if (!parsedBody.ok) return undefined;
+      const body = parsedBody.body;
       if (!body || typeof body.uid !== 'string' || !body.uid) {
         return json(res, 400, { ok: false, error: 'uid is required' });
       }
@@ -11847,8 +11990,16 @@ async function handleRequest(req, res) {
     }
 
     if (url.pathname === '/v1/auth/device' && req.method === 'POST') {
-      let body;
-      try { body = JSON.parse(await readBody(req)); } catch { body = null; }
+      /*
+       * 超限回 413，且**绝不带着默认值继续**。
+       *
+       * 原先 `body = null` 之后 `region` 落到默认 `'cn'`，于是一个超限请求反而
+       * 向上游申请了一次设备码 —— 有副作用（花配额、可能弹出授权页）而且用户
+       * 完全不知道这次登录从哪来。
+       */
+      const parsedBody = await readJsonBody(req, res);
+      if (!parsedBody.ok) return undefined;
+      const body = parsedBody.body;
       const region = body?.region || process.env.WORKBUDDY_LOGIN_REGION || 'cn';
       try {
         const started = await startDeviceLogin(region);
@@ -12431,7 +12582,8 @@ async function handleRequest(req, res) {
         const fallbackInfo = channelAttemptMeta(attempt, up);
         if (attempt.fallback) res.setHeader(CHANNEL_FALLBACK_HEADER, attempt.fallback);
         if (!up.ok) {
-          log('upstream error', up.status, text.slice(0, 300));
+          // 日志里绝不能出现上游凭据（见 redactSecrets 的注释）
+          log('upstream error', up.status, redactSecrets(text).slice(0, 300));
           const channelRejected = attempt.channelRejected === true;
           const authFailure = upstreamAuthFailure(up, parsed);
           const verdict = classifyUpstreamFailure({
@@ -12648,8 +12800,24 @@ async function handleRequest(req, res) {
               const blocks = sseBuf.split('\n\n');
               sseBuf = blocks.pop() ?? '';
               for (const block of blocks) await handleBlock(block);
-              // 上游若不按空行收尾，别让缓冲无限增长（异常流保护）
-              if (sseBuf.length > 200000) sseBuf = sseBuf.slice(-4096);
+              /*
+               * 上游不按空行收尾时的保护 —— **不能截断后继续**。
+               *
+               * 原先写的是 `sseBuf = sseBuf.slice(-4096)`：保留的是**块尾** 4096 字节，
+               * 丢掉的正是 `data: {...}` 前缀。这个残片随后被 `handleBlock` 当成
+               * 一个完整 SSE block 原样转发（`normalizeBlock` 里 JSON.parse 失败会
+               * 直接 `return block`），客户端收到一段不以 `data:` 开头的裸文本，
+               * 解析器整段丢弃；真正的正文一个字都没到。而后面还有正常的
+               * finish_reason 帧与 `[DONE]`，`sawFinish`/`sawDone` 都为真 →
+               * 账本记 **ok:true**，客户端也不知道自己被截了。
+               * （实测：上游正文 400000 字符 → 客户端收到 0 字符、账本 ok:true。）
+               *
+               * 正确做法是把它当**协议错误**：抛出去走下面已有的
+               * `streamError` 分支 —— 客户端会收到 error 帧、账本记 ok:false。
+               */
+              if (sseBuf.length > SSE_BLOCK_LIMIT_CHARS) {
+                throw new Error(`upstream SSE block exceeded ${SSE_BLOCK_LIMIT_CHARS} chars without a blank-line terminator`);
+              }
             }
             // 最后一个块可能没有结尾空行
             if (sseBuf.trim()) await handleBlock(sseBuf);
@@ -13071,7 +13239,7 @@ async function handleRequest(req, res) {
           });
           const extCode = upstreamDetailCode(parsed);
           const message = failureMessage(verdict, up.status, { authFailure, channelRejected, attempt });
-          log('upstream error (anthropic)', up.status, text.slice(0, 300));
+          log('upstream error (anthropic)', up.status, redactSecrets(text).slice(0, 300));
           recordRequest({
             model,
             stream: wantStream,
@@ -13330,7 +13498,7 @@ async function handleRequest(req, res) {
         const fallbackInfo = channelAttemptMeta(attempt, up);
         if (attempt.fallback) res.setHeader(CHANNEL_FALLBACK_HEADER, attempt.fallback);
         if (!up.ok) {
-          log('upstream error (responses)', up.status, text.slice(0, 300));
+          log('upstream error (responses)', up.status, redactSecrets(text).slice(0, 300));
           const authFailure = upstreamAuthFailure(up, parsed);
           const channelRejected = attempt.channelRejected === true;
           const verdict = classifyUpstreamFailure({
@@ -13435,7 +13603,9 @@ async function handleRequest(req, res) {
           }
           const r = await relayResponsesStream(up, res, model, routes, {
             forwardReasoning: wantsReasoning,
-            estInputTokens: estimateRequestTokens(body),
+            // 必须用 Responses 形状的估算：Anthropic 那个只读 system/messages，
+            // 在 Responses 请求上恒得 1（详见 estimateResponsesTokens）
+            estInputTokens: estimateResponsesTokens(body),
           });
           if (r.streamError && !ac.signal.aborted) {
             recordRequest({ model, stream: true, ms: Date.now() - startedAt, ok: false, status: 0, code: null, error: r.streamError.message, ...fallbackInfo });
@@ -13476,7 +13646,7 @@ async function handleRequest(req, res) {
           ...usageOf(aggregated.usage),
           ...fallbackInfo,
         });
-        return json(res, 200, openAIToResponsesResponse(aggregated, model, routes, estimateRequestTokens(body)));
+        return json(res, 200, openAIToResponsesResponse(aggregated, model, routes, estimateResponsesTokens(body)));
       } catch (e) {
         if (handleUpstreamTimeout(res, 'responses', e)) {
           recordRequest({

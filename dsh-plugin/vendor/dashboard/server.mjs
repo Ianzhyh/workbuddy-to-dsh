@@ -401,7 +401,15 @@ function startBridge(opts = {}) {
     ? String(opts.followUid || '')
     : String(readState().authFileDesktopUid || '');
 
-  rotateLogIfNeeded(config.paths.bridgeLog);
+  /*
+   * 滚动结果必须能被看见：`rotateLogIfNeeded` 现在会返回 `{rotated, to, error}`。
+   * 早先它把失败吞在 catch 里，而失败的样子是「日志继续无限增长」——
+   * 一年后才会有人发现。这里把失败写进控制台日志，成功则不动声色（常规路径）。
+   */
+  const rotation = rotateLogIfNeeded(config.paths.bridgeLog);
+  if (rotation.error) {
+    console.warn(`桥日志滚动失败（${config.paths.bridgeLog}）：${rotation.error}`);
+  }
   const logPath = config.paths.bridgeLog;
   const logOffset = existsSync(logPath) ? statSync(logPath).size : 0;
   const logFd = openSync(logPath, 'a');
@@ -458,16 +466,26 @@ async function isOurBridge(port) {
       signal: AbortSignal.timeout(3000),
     });
     /*
-     * 401 必须单独处理：那说明**这确实是我们的桥**，只是我们手里的令牌跟它不一致
-     * （典型场景：桥是用另一套配置/更早的令牌起来的，或用户改过 .env）。
+     * 401：可能是"我们的桥但令牌不一致"，也可能是**别人的**带鉴权服务。
      *
-     * 若在这里一律 `return false`（"不是桥"），会同时造成两个错误后果：
-     *   ① 用户看到「端口上的进程不是 workbuddy-bridge」——**这条诊断是假的**，
-     *      他会去找一个不存在的进程冲突，而真正的问题（令牌不一致）被掩盖；
-     *   ② 想停掉这个自己人反而停不了，只能去开任务管理器。
-     * 所以 401 → 仍判为"是自己的桥，可以停"。
+     * 原先这里直接 `return true`（"是我们的桥，可以停"）。实测后果很严重：
+     * 用户自己的 dev server / API mock / 代理占着 8790 并回 401 时，点一下
+     * 「停止桥服务」就会 `taskkill /F` 掉那个**完全无关的进程** ——
+     * 这是本文件里唯一会主动破坏用户环境的行为，而它藏在一个标注为"安全"的
+     * 守卫里（`.tmp-audit/p3-401-kill.mjs` 实测：无关服务被杀死、exitCode=1）。
+     *
+     * 401 本身**不含任何身份信息**，所以必须再要一份**正向证据**才敢认领：
+     *   ① 桥的错误体有固定形状（`unauthorizedBody()`：`{ok:false, error, hint}`，
+     *      且 error 里带 `workbuddy-bridge` 字样 / 提到本地令牌）；
+     *   ② 或者它至少回了一个**能认出来源**的响应头。
+     * 拿不到证据就判 `false`（确认不是），把决定权交回用户 —— 误判"不是桥"的
+     * 代价只是"停不掉，请手动关"，误判"是桥"的代价是杀掉别人的进程。
      */
-    if (res.status === 401) return true;
+    if (res.status === 401 || res.status === 403) {
+      const text = await res.text().catch(() => '');
+      if (looksLikeOurBridgeBody(text)) return true;
+      return false;
+    }
     if (!res.ok) return false;
     const body = await res.json().catch(() => null);
     // 注意：必须显式 `=== true` 再转布尔。写成 `return body && body.ok === true && ...`
@@ -477,6 +495,31 @@ async function isOurBridge(port) {
   } catch {
     return undefined;
   }
+}
+
+/**
+ * 401/403 的响应体是否**确实来自 workbuddy-bridge**。
+ *
+ * 桥自己的 401 是 `unauthorizedBody()` 造的，形状固定：
+ * `{ error: { message, type: 'invalid_api_key', code: 'invalid_api_key' } }`，
+ * 其中 message 以 `workbuddy-bridge: bad or missing token` 开头、并提到
+ * `WORKBUDDY_LOCAL_TOKEN` / `.bridge-token`。
+ *
+ * 这里只认**能唯一指向本项目**的字符串，不认"任意带 error 的 JSON"——
+ * 那等于没校验（别人的 401 也长这样）。
+ */
+function looksLikeOurBridgeBody(text) {
+  const s = String(text || '');
+  if (!s) return false;
+  let parsed = null;
+  try { parsed = JSON.parse(s); } catch { return false; }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return false;
+  const err = parsed.error;
+  const hay = [
+    typeof err === 'string' ? err : (err && typeof err === 'object' ? `${err.message || ''} ${err.code || ''}` : ''),
+    parsed.hint, parsed.message,
+  ].join(' ');
+  return /workbuddy[- ]bridge|WORKBUDDY_LOCAL_TOKEN|\.bridge-token|本地回环令牌|本地令牌/i.test(hay);
 }
 
 async function stopBridge(port = config.bridge.port) {
@@ -1170,9 +1213,21 @@ function serveStatic(res, pathname) {
     res.end('404');
     return;
   }
-  // resolve 后再比对，`..` 与符号链接都被规范化掉；加分隔符避免 public-x 这类同前缀目录被放行
+  /*
+   * `resolve(base, rel)` 再比对，`..` 与符号链接都被规范化掉；加分隔符避免
+   * public-x 这类同前缀目录被放行。
+   *
+   * ⚠️ **`full === base` 必须拒绝**（实测缺陷，2026-11-06）：`GET /%2f` 的
+   * `pathname` 是 `/%2f`（URL 解析器不把 `%2f` 当分隔符），`decodeURIComponent`
+   * 得到 `//`，`replace(/^\/+/,'')` 得到**空串**，于是 `resolve(base, '')` 正是
+   * `base` 本身 —— 目录。原判据 `full !== base && !startsWith(...)` 因为
+   * `full !== base` 为 false 而放行，接着 `readFileSync(目录)` 抛 EISDIR，
+   * 而 200 的响应头**已经发出去了**，外层 catch 再 writeHead 触发
+   * ERR_HTTP_HEADERS_SENT → 未捕获拒绝 → **整个控制台进程退出**。
+   * 一条无认证的 GET 就能打死控制台，用户看到的是页面白屏 + 插件反复重启。
+   */
   const full = resolve(base, rel);
-  if (full !== base && !full.startsWith(base + sep)) {
+  if (full === base || !full.startsWith(base + sep)) {
     res.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8' });
     res.end('403');
     return;
@@ -1194,12 +1249,26 @@ function serveStatic(res, pathname) {
     return;
   }
   const ext = full.slice(full.lastIndexOf('.'));
-  res.writeHead(200, {
-    'Content-Type': MIME[ext] || 'application/octet-stream',
-    'Cache-Control': 'no-store',
-    ...SECURITY_HEADERS,
-  });
-  let body = readFileSync(full);
+  /*
+   * **先读文件，再发响应头。**
+   *
+   * 原顺序是 `writeHead(200)` → `readFileSync(full)`。文件在两步之间读失败
+   * （被杀软独占、编辑器原子保存的那一瞬间、权限问题）时，异常冒到外层 catch，
+   * 那里再 `sendJson(...)` 就会二次 `writeHead` → ERR_HTTP_HEADERS_SENT →
+   * 未捕获拒绝 → 进程退出。实测：锁住 index.html 请求一次即崩。
+   *
+   * 读失败是**可恢复的常规故障**，应当回 503（或 404），而不是让整个控制台陪葬。
+   */
+  let body;
+  try {
+    body = readFileSync(full);
+  } catch (error) {
+    if (res.headersSent) { try { res.end(); } catch { /* 已断开 */ } return; }
+    const code = error?.code === 'ENOENT' ? 404 : 503;
+    res.writeHead(code, { 'Content-Type': 'text/plain; charset=utf-8' });
+    res.end(code === 404 ? '404' : '503 静态文件暂时读不出来（被占用或权限不足），刷新重试');
+    return;
+  }
   /*
    * 首页注入构建指纹。旧进程的页面没有这个标记（或标记不同），插件据此
    * 判断 8792 上的是不是当前代码，并在升级后自动重启控制台。
@@ -1210,6 +1279,11 @@ function serveStatic(res, pathname) {
       body = Buffer.from(body.toString('utf8').replace('__WB_BUILD__', build), 'utf8');
     }
   }
+  res.writeHead(200, {
+    'Content-Type': MIME[ext] || 'application/octet-stream',
+    'Cache-Control': 'no-store',
+    ...SECURITY_HEADERS,
+  });
   res.end(body);
 }
 
@@ -1285,7 +1359,26 @@ const server = createServer(async (req, res) => {
     activeRequests -= 1;
   };
   res.once('close', release);
-  const url = new URL(req.url, config.dashboard.url);
+  /*
+   * URL 解析必须**在 try 里面**。
+   *
+   * `new URL(req.url, base)` 对 `GET //`（以及其它畸形请求行）会抛
+   * ERR_INVALID_URL。原先这一行在 try 之外，异常从 async handler 里逃成
+   * 未捕获拒绝 → **进程直接退出**（实测：`GET //` → ECONNRESET + exit 1，
+   * 之后再请求就是 ECONNREFUSED）。一条无认证的请求不该能打死控制台。
+   */
+  let url;
+  try {
+    url = new URL(req.url, config.dashboard.url);
+  } catch {
+    release();
+    if (!res.headersSent) {
+      try { res.writeHead(400, { 'Content-Type': 'text/plain; charset=utf-8' }); res.end('400 无法解析的请求地址'); } catch { /* 已断开 */ }
+    } else {
+      try { res.end(); } catch { /* 已断开 */ }
+    }
+    return undefined;
+  }
   const route = url.pathname;
 
   try {
@@ -2342,6 +2435,27 @@ function isMainModule() {
 function startConsoleServer() {
   startIdleExitWatchdog();
   startAccountFailoverWatchdog();
+  /*
+   * 端口被占用时必须给**人话**，不能让 Node 以裸栈崩掉。
+   *
+   * 「旧实例还在」是最常见的启动场景（插件拉起的控制台 + 用户双击 `启动.cmd`，
+   * 或升级后旧进程没退），而原先没有 `server.on('error')`，用户看到的是
+   * `throw er; // Unhandled 'error' event` 加一整屏 Node 内部栈 —— 完全看不出
+   * "控制台已经在运行了"这件简单事实。
+   */
+  server.once('error', (error) => {
+    const err = /** @type {NodeJS.ErrnoException} */ (error);
+    if (err.code === 'EADDRINUSE') {
+      console.error(`✖ 端口 ${config.dashboard.port} 已被占用 —— 控制台可能已经在运行了。`);
+      console.error(`  直接打开 ${config.dashboard.url} 看看；要换端口请改 .env 的 DASHBOARD_PORT。`);
+    } else if (err.code === 'EACCES') {
+      console.error(`✖ 没有权限监听 ${config.dashboard.host}:${config.dashboard.port}（EACCES）。`);
+      console.error('  该端口可能被系统保留或被安全软件拦截，换一个 DASHBOARD_PORT 再试。');
+    } else {
+      console.error(`✖ 控制台启动失败：${err.message}`);
+    }
+    process.exit(1);
+  });
   server.listen(config.dashboard.port, config.dashboard.host, async () => {
     console.log(`WorkBuddy 控制台  ->  ${config.dashboard.url}`);
     console.log(`登录文件          ->  ${effectiveAuthFile()}`);

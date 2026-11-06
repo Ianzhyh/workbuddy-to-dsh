@@ -19,6 +19,7 @@ import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { connect } from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -173,6 +174,45 @@ test('安全：控制台拒绝外来 Origin、拒绝备份文件、带基础安�
       const n = (j.lines || []).length;
       assert.ok(n <= limit, `${q} 返回了 ${n} 行，超过上限 ${limit}（参数没有被 clamp）`);
     }
+
+    /*
+     * ⑦ **畸形请求行不得打死控制台**（2026-11-06 审计修复）。
+     *
+     * 实测过的两条真实崩溃路径：
+     *   · `GET //` —— `new URL(req.url, base)` 抛 ERR_INVALID_URL，而那一行原先在
+     *     try 之外，异常从 async handler 逃成未捕获拒绝 → 进程 exit 1；
+     *   · `GET /%2f` —— `decodeURIComponent` 得到 `//`、去掉前导斜杠得空串，
+     *     `resolve(base,'')` 正是**目录本身**，路径校验因 `full !== base` 为 false
+     *     而放行，`readFileSync(目录)` 抛 EISDIR，此时 200 响应头已发出 →
+     *     外层 catch 二次 writeHead → ERR_HTTP_HEADERS_SENT → 进程退出。
+     *
+     * 一条无认证的 GET 就能打死控制台，用户看到的是白屏 + 插件反复重启。
+     * 这里直接走 socket 发**原始请求行**（fetch 会规范化 URL，测不到这两种形状）。
+     */
+    const rawRequest = (line) => new Promise((resolve) => {
+      const sock = connect(port, '127.0.0.1', () => {
+        sock.write(`${line}\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n`);
+      });
+      let buf = '';
+      sock.on('data', (d) => { buf += d; });
+      sock.on('error', (e) => resolve(`ERR ${e.code || e.message}`));
+      sock.on('close', () => resolve(buf.split('\r\n')[0] || ''));
+      setTimeout(() => { try { sock.destroy(); } catch { /* 忽略 */ } resolve(buf.split('\r\n')[0] || ''); }, 5000);
+    });
+    const malformed = await Promise.all([
+      rawRequest('GET // HTTP/1.1'),
+      rawRequest('GET /%2f HTTP/1.1'),
+      rawRequest('GET /%2F HTTP/1.1'),
+    ]);
+    for (const [i, line] of ['GET //', 'GET /%2f', 'GET /%2F'].entries()) {
+      assert.ok(/^HTTP\/1\.1 (400|403|404)/.test(malformed[i]),
+        `${line} 应被明确拒绝（4xx），实际响应行：${malformed[i]}`);
+    }
+    // 关键断言：打完这些之后控制台**还活着**（进程没退出、还能正常服务）
+    const alive = await fetch(`${base}/api/version`).catch(() => null);
+    assert.equal(alive?.ok, true, '畸形请求之后控制台必须仍然存活（不能让一条 GET 打死进程）');
+    const version = await alive.json();
+    assert.equal(typeof version.pid, 'number', '控制台应仍能正常响应 /api/version');
   } finally {
     child.kill();
     await sleep(200);

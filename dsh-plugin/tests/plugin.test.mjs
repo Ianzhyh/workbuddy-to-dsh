@@ -99,6 +99,22 @@ test('数据面的方法 / 权限矩阵：只读路由拒绝写方法，写路�
     assert.equal(quota.body.bridgeAccount, null);
   }
 
+  /*
+   * 日志路由的 GET 也必须要求面板头（2026-11-06 审计修复）。
+   *
+   * 桥在未显式配置令牌时会把 `WORKBUDDY_LOCAL_TOKEN=<值>` 打进启动 banner，
+   * 而 stdout 就是 bridge.log。原先 GET 没有任何校验 —— 同机任何进程、
+   * 以及**任意网页**（无自定义头的 fetch 是简单请求，不触发 CORS 预检）
+   * 都能直接读到明文令牌。
+   */
+  {
+    const noHeader = await run('/workbuddy/log', 'GET');
+    assert.equal(noHeader.status, 403,
+      `无面板头的 GET /workbuddy/log 必须 403（日志里可能有本地令牌），实际 ${noHeader.status}`);
+    const withHeader = await run('/workbuddy/log', 'GET', { 'x-workbuddy-panel': '1' });
+    assert.equal(withHeader.status, 200, '面板调用照常可读日志');
+  }
+
   // 写路由：没有面板头一律 403；带上正确头才放行
   const writes = [
     ['/workbuddy/bridge', 'POST'],

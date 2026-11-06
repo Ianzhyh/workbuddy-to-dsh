@@ -163,6 +163,53 @@ test('折扣解析与分组：0x / 0.50x / factor，同模型多规则', () => {
   assert.equal(grouped.get('m2').length, 1);
 });
 
+/*
+ * 回归：`Number(null) === 0` 会把「没写 factor」读成「免费」。
+ *
+ * 上游把"没有折扣、只是展示活动名"序列化成 `factor: null` / `''` / `false`
+ * 是常态（JSON.stringify 一个 undefined 字段的结果、后端语言默认值等）。
+ * 实测缺陷：这些写法都被算成 factor 0 → 倍率 0 → `free: true` → 模型在选择器里
+ * 白纸黑字写「免费」，而实际照价扣费。
+ */
+test('factor 写成 null / 空串 / false 不能当成免费', () => {
+  for (const empty of [null, '', false, '   ']) {
+    assert.equal(promotionFactor({ factor: empty, discountedCredits: '0.80x' }), 0.8,
+      `factor=${JSON.stringify(empty)} 应回落到 discountedCredits`);
+    assert.equal(promotionFactor({ factor: empty }), null,
+      `factor=${JSON.stringify(empty)} 且没有 discountedCredits 时应判"没有折扣"`);
+  }
+  // 合法值不受影响
+  assert.equal(promotionFactor({ factor: 0 }), 0, '显式 factor:0（真免费）必须保留');
+  assert.equal(promotionFactor({ factor: '0' }), 0, '数字字符串 0 同样保留');
+  assert.equal(promotionFactor({ factor: 0.5 }), 0.5);
+
+  // 端到端：这条规则只展示活动名，绝不能改倍率
+  const marketingOnly = normalizePromotion({
+    enabled: true,
+    badge: { label: '错峰使用' },
+    discount: { factor: null, discountedCredits: '0.80x' },
+    schedule: { daily: [{ start: '00:00', end: '23:59' }], timezone: 'Asia/Shanghai' },
+  });
+  const out = applyPromotion({ baseCredits: 1, promotions: [marketingOnly], now: at('2026-10-25T10:00:00+08:00') });
+  assert.equal(out.free, false, 'null factor 不能被当成免费');
+  assert.equal(out.credits, 0.8, '应使用 discountedCredits 的 0.8，而不是 0');
+});
+
+/*
+ * 回归：baseCredits 为 null / '' / false / [] 时 `Number()` 都是 0，
+ * 于是「上游没给倍率」被当成「倍率 0 = 免费」。缺报 ≠ 免费。
+ */
+test('baseCredits 缺失或非数字时不得报 free', () => {
+  for (const base of [null, '', false, [], 'abc', undefined]) {
+    const out = applyPromotion({ baseCredits: base, promotions: [], now: at('2026-10-25T10:00:00+08:00') });
+    assert.equal(out.free, false, `baseCredits=${JSON.stringify(base)} 不能判成免费`);
+    assert.equal(out.credits, undefined, `baseCredits=${JSON.stringify(base)} 应判"未知"（undefined）`);
+  }
+  // 数字与数字字符串照旧
+  assert.equal(applyPromotion({ baseCredits: 0, promotions: [] }).free, true);
+  assert.equal(applyPromotion({ baseCredits: '0.5', promotions: [] }).credits, 0.5);
+});
+
 test('选择规则：免费优先于折扣，生效折扣优先于仅展示的规则', () => {
   const free = rule();
   const discount = normalizePromotion({

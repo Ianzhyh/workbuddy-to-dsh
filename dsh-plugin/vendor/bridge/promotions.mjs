@@ -107,10 +107,30 @@ export function isPromotionActive(promotion, now = new Date()) {
   return false;
 }
 
-/** 折扣因子：`{factor:0.5}` 或 `{discountedCredits:'0.50x'}` → 0.5；没有折扣 → null。 */
+/**
+ * 折扣因子：`{factor:0.5}` 或 `{discountedCredits:'0.50x'}` → 0.5；没有折扣 → null。
+ *
+ * ⚠️ **不能直接 `Number(discount.factor)`**。`Number()` 会把 `null` / `''` /
+ * `false` / `[]` 一律变成 **0**，而 0 在这里的语义是「**免费**」—— 于是上游只要
+ * 把"没有折扣"写成 `factor: null`（很常见的 JSON 序列化结果），一个仅用于展示
+ * 活动名的规则就会把模型标成免费、倍率算成 0。
+ *
+ * 实测（`.tmp-audit/probe-promo2.mjs`）：
+ *
+ *   factor 缺失        → 0.8（正确回落到 discountedCredits）
+ *   factor: null      → 0   ← 错，应为 0.8
+ *   factor: ''        → 0   ← 错
+ *   factor: false     → 0   ← 错
+ *
+ * 现在的判据：只有**数字**或**非空数字字符串**才算给出了 factor；其余一律视为
+ * "没写"，继续看 `discountedCredits`。合法的 `factor: 0`（真免费）仍然照旧生效。
+ */
 export function promotionFactor(discount) {
   if (!discount || typeof discount !== 'object') return null;
-  const direct = Number(discount.factor);
+  const raw = discount.factor;
+  let direct = null;
+  if (typeof raw === 'number') direct = raw;
+  else if (typeof raw === 'string' && raw.trim() !== '') direct = Number(raw);
   if (Number.isFinite(direct) && direct >= 0) return direct;
   const text = String(discount.discountedCredits || '').trim().toLowerCase();
   const match = /^([0-9]*\.?[0-9]+)x$/.exec(text);
@@ -219,7 +239,9 @@ export function selectPromotion(promotions, now = new Date()) {
  * 计算某模型当前对外展示的倍率 / 免费状态 / 活动信息。
  *
  * @param {object} [deps]
- * @param {number|undefined} [deps.baseCredits] 上游基础倍率
+ * @param {number|string|null} [deps.baseCredits] 上游基础倍率。**允许脏值**：
+ *   上游可能给 `"x0.03"` 这类字符串，也可能给 null（缺报）—— 缺报必须判"未知"
+ *   而不是"0 = 免费"，所以这里刻意把类型放宽到 number|string|null。
  * @param {object[]} [deps.promotions] 该模型的促销规则
  * @param {Date} [deps.now] 用于测试的时钟
  * @returns {{
@@ -229,7 +251,18 @@ export function selectPromotion(promotions, now = new Date()) {
  * }}
  */
 export function applyPromotion({ baseCredits, promotions, now = new Date() } = {}) {
-  const base = Number.isFinite(Number(baseCredits)) ? Number(baseCredits) : undefined;
+  /*
+   * 基础倍率同样**只认数字**（或非空数字字符串）。
+   *
+   * 这里原先写 `Number.isFinite(Number(baseCredits))` —— `Number(null)` 与
+   * `Number('')` 都是 0，于是「上游没给倍率」（`creditsOf()` 返回 undefined 的
+   * 兄弟情形：null / 空串）会被当成「倍率 0 = 免费」，进而 `free: true`。
+   * 与 `promotionFactor` 是同一个坑，见那里的注释。
+   */
+  const baseRaw = typeof baseCredits === 'number'
+    ? baseCredits
+    : (typeof baseCredits === 'string' && baseCredits.trim() !== '' ? Number(baseCredits) : null);
+  const base = Number.isFinite(baseRaw) ? baseRaw : undefined;
   const selection = selectPromotion(promotions, now);
   const rule = selection.rule;
 

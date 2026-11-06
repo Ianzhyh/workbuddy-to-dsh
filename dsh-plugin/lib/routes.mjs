@@ -85,6 +85,29 @@ export function createRouteTable(deps) {
   const guard = (req) => req.headers['x-workbuddy-panel'] === '1';
 
   /**
+   * 日志行脱敏 —— 令牌可能就写在日志里。
+   *
+   * 桥在未显式配置令牌时会把 `WORKBUDDY_LOCAL_TOKEN=<值>` 打进启动 banner，
+   * 而 stdout 就是 `bridge.log`。面板确实需要看日志，但**不需要看凭据本身**；
+   * 把它回给前端等于凭据多了一份可被读取的副本（浏览器扩展、截图、报错上报）。
+   *
+   * 只处理**三种确定是凭据**的形态，其余一律不动 —— 过度脱敏会让日志失去排查价值。
+   * 与桥侧 `redactSecrets()` 同一套判据（那边管 JSON 错误体，这边管纯文本日志行）。
+   */
+  const redactLogLines = (payload) => {
+    if (!payload || !Array.isArray(payload.lines)) return payload;
+    const scrub = (line) => String(line)
+      // WORKBUDDY_LOCAL_TOKEN=abc / --token abc / "token": "abc"
+      .replace(/\b(WORKBUDDY_LOCAL_TOKEN|WORKBUDDY_CREDENTIAL_KEY|token|api[_-]?key|secret|password)(\s*[:=]\s*)(["']?)[^\s"',}]{8,}\3/gi,
+        (_m, key, sep, quote) => `${key}${sep}${quote}<redacted>${quote}`)
+      // Authorization: Bearer xxx
+      .replace(/\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]{8,}/gi, '$1 <redacted>')
+      // 裸 JWT
+      .replace(/\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g, '<redacted-jwt>');
+    return { ...payload, lines: payload.lines.map(scrub) };
+  };
+
+  /**
    * 凭据/账号变了：目录属于旧账号，必须重取，并通知 dsh 的模型选择器。
    * dsh 不轮询目录，只认 `llm/adapters-updated`；只 invalidate 不通知的话，
    * 用户登录成功、模型其实已经可用，选择器里却还是旧清单（看起来像没登录）。
@@ -679,9 +702,30 @@ export function createRouteTable(deps) {
               return sendJson(res, 500, { ok: false, cleared: false, error: String(error?.message || error) });
             }
           }
+          /*
+           * ## GET 也必须要求面板头（实测缺陷，2026-11-06）
+           *
+           * 原先这里只给 DELETE 加了 `guard`，GET 什么都没有 —— 而同文件所有写路由
+           * 都要 `x-workbuddy-panel: 1`、所有读路由都走 `readOnly()`。这一条两样都缺。
+           *
+           * 后果不是"多读了点日志"：桥在**未显式配置令牌**时会把
+           * `WORKBUDDY_LOCAL_TOKEN=<值>` 打到 stdout（见 workbuddy-bridge.mjs 的启动
+           * banner），而 stdout 正是 `bridge.log`。于是同机任何进程、以及**任意网页**
+           * （`fetch('http://127.0.0.1:PORT/workbuddy/log')` 是简单请求，不触发 CORS
+           * 预检）都能直接读到明文令牌，拿到它就能调用桥、白嫖账号额度。
+           *
+           * 实测（`.tmp-audit2/t9b`）：无头 GET → 200，body 里直接是
+           * `WORKBUDDY_LOCAL_TOKEN=SECRET-TOKEN-FROM-LOG-...`。
+           *
+           * 现在：非面板调用一律 403，与 DELETE 同口径。
+           */
+          if (!guard(req)) return sendJson(res, 403, { ok: false, error: 'missing x-workbuddy-panel header' });
           const url = new URL(req.url, 'http://127.0.0.1');
           const lines = Math.min(Math.max(Number(url.searchParams.get('lines')) || 200, 1), 2000);
-          sendJson(res, 200, { ok: true, ...supervisor.readLog({ lines }) });
+          sendJson(res, 200, {
+            ok: true,
+            ...redactLogLines(supervisor.readLog({ lines })),
+          });
         } catch (error) {
           sendJson(res, 200, { ok: false, error: String(error?.message || error) });
         }
