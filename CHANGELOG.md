@@ -17,6 +17,172 @@
 
 只支持最近 2 个 minor 版本。
 
+## [1.22.6] - 2026-11-06
+
+### Fixed
+
+**控制台（`dashboard/server.mjs`）—— 一条无认证的 GET 就能打死进程**
+
+- **`GET //` 让控制台进程直接退出**：`new URL(req.url, base)` 对畸形请求行抛
+  `ERR_INVALID_URL`，而这一行在 `try` 之外 —— 异常从 async handler 逃成未捕获拒绝，
+  进程 exit 1（实测：之后所有请求 ECONNREFUSED）。现在解析放进 `try`，回 400。
+- **`GET /%2f` 同样打死进程**：URL 解析器不把 `%2f` 当分隔符，
+  `decodeURIComponent` 后去掉前导斜杠得到**空串**，`resolve(base,'')` 正是目录本身；
+  路径校验因 `full !== base` 为 false 而放行，`readFileSync(目录)` 抛 EISDIR，
+  而 200 响应头**已经发出**，外层 catch 二次 `writeHead` → `ERR_HTTP_HEADERS_SENT`
+  → 进程退出。现在 `full === base` 直接 403。
+- **静态文件读失败（被占用 / 权限）也会崩**：原顺序是 `writeHead(200)` 再
+  `readFileSync`。现在**先读文件再发头**，读失败回 404/503 —— 杀软扫描、编辑器
+  原子保存那一瞬间不再是致命故障。
+- **端口被占用时以裸栈崩溃**：补 `server.once('error')`，`EADDRINUSE` / `EACCES`
+  给可读结论（「控制台可能已经在运行了，直接打开 …」）而不是 Node 内部栈。
+- **归属校验把「任何回 401 的服务」认成自己的桥，随后 `taskkill /F` 杀掉**：
+  401/403 现在必须再要一份**正向证据**（响应体是本项目 `unauthorizedBody()` 的形状，
+  含 `workbuddy-bridge` / `WORKBUDDY_LOCAL_TOKEN` 等唯一标识）才认领。实测过：
+  用户自己的 dev server 占着 8790 并回 401 时，点「停止桥服务」会把那个**完全无关的
+  进程**杀掉。误判"不是桥"的代价只是"停不掉，请手动关"；误判"是桥"的代价是毁掉别人的进程。
+- **桥日志滚动失败被静默吞掉**：`.1` 被别的句柄打开时 Windows 的 `rename` 覆盖抛
+  EPERM，原先整次滚动失败、`bridge.log` 停在 2MB 继续无限增长且无任何痕迹。现在
+  失败时往后找可用序号（上限 `.9`，满了回收最老的一份），并把 `{rotated, to, error}`
+  返回给调用方（控制台写 `console.warn`，插件走 `onLog`）。
+
+**桥（`bridge/workbuddy-bridge.mjs`）**
+
+- **单个 SSE 块超限时被截断，正文静默丢失而账本记成功**：
+  `sseBuf = sseBuf.slice(-4096)` 保留的是**块尾**，丢掉的正是 `data:` 前缀；残片被
+  当作完整 block 原样转发，客户端解析器整段丢弃。因为后面还有 `finish_reason` 与
+  `[DONE]`，账本记 `ok:true`。实测：上游正文 400000 字符 → **客户端收到 0 字符**、
+  账本 `ok:true`。现在超限即当协议错误（发 error 帧 + 记 `ok:false`），上限 32MB
+  （可用 `WORKBUDDY_SSE_BLOCK_LIMIT_CHARS` 覆盖），正常大块不受影响。
+- **四个管理端点把「请求太大」伪装成参数错误**：`catch { body = null; }` 吞掉了
+  `BODY_TOO_LARGE`，于是超限被报成 `uid is required` / `source must be one of …` /
+  `body must be a JSON object`；`/v1/auth/device` 更严重 —— `region` 落到默认 `cn`，
+  超限请求反而**真的发起了一次设备码登录**（有副作用、花配额）。同时 `readBody` 超限
+  只 `pause()`，走 catch 的路径没人 `resume()`，**这条 keep-alive 连接被永久卡死**
+  （实测下一条 6s 后 ECONNRESET）。现在收口成 `readJsonBody()`：超限一律 413 + resume。
+- **Responses 的 `input_tokens` 恒为 1**：用了 Anthropic 形状的
+  `estimateRequestTokens()`（只读 `system`/`messages`/`tools`），而 Responses 的输入在
+  `instructions`/`input` —— 三个字段全不存在，只剩 `Math.max(1, …)`。实测同一段
+  20000 字符正文：Anthropic 路径 5004，Responses 路径 **1**。Codex 用这个数算自动压缩
+  阈值，报 1 等于「这一轮什么都没吃」，**永不压缩**，最后撞上游 `prompt is too long`。
+  新增 `estimateResponsesTokens()` 按 Responses 形状估算。
+- **上游错误体原文（含 `accessToken`/`refreshToken`）被回给客户端，也整段写进日志**：
+  `upstreamHumanText()` 在 `displayMsg`/`msg` 都缺失时回退到响应体原文，而这条文本
+  同时进 `error.message` 与 `bridge.log`。实测客户端 message 里直接出现
+  `SECRET-ACCESS-abc`。新增 `redactSecrets()`（键值 / Bearer / 裸 JWT 三类），
+  三处上游日志出口一并过它。
+
+**状态与展示**
+
+- **`.state.json` 多写者互相覆盖，写入被静默吞掉**：原先 `writeState()` 用**本进程的
+  内存镜像**整体覆盖文件，而这份状态实际有多个写者（控制台、插件拉起的控制台、
+  `npm run connect` / `tools/doctor.mjs` 这类 CLI、账号钉住校正）。后写方拿着自己的
+  旧镜像覆盖，先写方的键凭空消失，两边都返回「写成功」。三进程各写 300 个键的实测：
+  磁盘只剩 300 个（期望 900）。表现为「刚钉住的账号过一会儿又变回去」「体检结论时有时无」。
+  现在写路径按 `缓存 → 磁盘现状 → 本次 patch` 合并（删键仍优先，不会被磁盘旧值复活）。
+  同批修掉：中转文件名从固定的 `<state>.tmp` 改成带 pid + 序号（固定名会被并发写者
+  互相搬走，`rename` 直接 ENOENT）；写盘失败不再连错误对象一起吞掉 —— 新增
+  `stateWriteHealth()` 暴露 `{ok, code, reason}`。
+- **「上游没给倍率」被显示成「免费」**：`Number(null) === 0`，而目录层把「缺报」
+  表示成 `credits: null`。于是 dsh 模型选择器里一个照价扣费的模型被写成「免费」
+  （面板对话下拉同病，且与「可用模型」表格的「—」自相矛盾）。判据收口到
+  `modelCostLabel()`：免费只认 `free === true` 或**数值型** credits 为 0。
+- **促销 `factor: null` / `''` / `false` 被算成 0 = 免费**：上游把"没有折扣、只展示
+  活动名"序列化成 `null` 是常态，而 `Number(null)` 是 0，于是展示型规则把模型标成
+  免费并把倍率算成 0。现在只认数字或非空数字字符串，其余回落到 `discountedCredits`。
+  `applyPromotion()` 的 `baseCredits` 同批收口（缺报必须判「未知」而不是「免费」）。
+
+**验收骨架（`tools/dev/ui-harness.mjs`）**
+
+- **端口冲突时白等 31.5 秒 + 泄漏无头浏览器**：CDP 端口被别的程序占着时，
+  `devtoolsPages()` 会轮询满 15 秒再抛「无法连接 DevTools」，`catch` 里又**照样**在该
+  端口 spawn 一个 Chrome（绑定必失败），再轮询 15 秒。实测残留 3 个无头实例、几十个
+  renderer，后续用例开始 180s 超时。现在先探端口身份（`devtools`/`foreign`/`absent`
+  三态），冲突时换一个系统分配的空闲端口（优先 20000–29999，与
+  `tools/dev/bridge-ports.mjs` 同一口径），冷启动失败时把进程与临时 profile 收掉再报错。
+  实测：31.5 秒 → **680ms**，且自动改端口成功。
+
+**插件侧会破坏用户环境 / 写坏用户配置的缺陷（第三轮审计）**
+
+- **`BridgeSupervisor.stop()` 会 SIGTERM 掉本机任意进程**：它只凭 `probe()`
+  认领了对面、取 `/health` 里的 `pid` 就 `process.kill`，而 `probe()` 认领一个服务
+  只看 **body 形状**（`{ok:true,pid}` 或 `{ok:false,authFile:...}`）—— 端口上任何
+  本地服务都能让插件杀掉一个无关进程（实测：假服务回 `{"ok":true,"pid":19280}`，
+  19280 是个无关 node 进程，`stop()` 之后它死了；更糟的是 `stop()` 同时**报失败**，
+  调用方以为没杀掉）。现在必须有**正向证据**才 kill：① pid 是本插件亲手 spawn 的，
+  或 ② `/health` 的 `build` 非空且等于当前磁盘脚本指纹。两者都不成立就拒绝
+  并说明原因（"宁可报无法确认，也不按一个可能被伪造的 pid 去 kill"）。
+- **并发 `ensure({restart:true})` 会拉起 N 个真桥进程**：原 restart 分支是
+  "等前一个结束再递归开一个新的"，于是并发 3 次 = 3 次 stop+start，每次 spawn 一个
+  detached 进程，前两个成孤儿（实测 3 个 pid，三个调用都报成功）。现在用一个
+  独立的 restart 队列**合并**并发请求：语义仍是"这之后桥上跑的是新配置"，
+  但只停/起一次。
+- **`start()` 把 spawn 失败报成 `ok:true`**：`spawn` 对多数失败不抛异常，错误从
+  `error` 事件异步来，而原实现无论 `child.pid` 是什么都返回成功 —— 面板显示"桥已就绪"，
+  实际没有任何进程（实测 `{"ok":true,"pid":null}` + `lastStartError = ENOENT`）。
+  现在 `pid` 为空即判失败并把原因带出去；`error` 监听改到**任何早退之前**挂上
+  （否则那个事件没有监听者，会变成 uncaughtException 带走宿主进程）。
+- **`autoStart: false` 从来没生效**：`this.autoStart` 赋值后全文件没有读取点，
+  而启动路径 `maybeAutoConfigureWebSearch('startup')` 刻意放在 `if (config.autoStart)`
+  分支之外 —— 于是 `autoStart=false` 仍会 spawn 一个桥（实测 ensure 被调用 1 次）。
+  现在在 `#ensure` 的 spawn 点补上唯一读取点，`enableWebSearch` 也只在桥已运行时才继续。
+- **legacy 清理会改坏别人的配置段，并写出语法非法的 YAML**：`providersIsEmpty()`
+  判的是目标 provider 那个 `providers:`，而 `replace(/^([ \t]*)providers:\s*$/m, ...)`
+  命中的是**全文第一个**匹配行。两处不是同一行时，别人的 `providers:` 被改成 `{}`
+  并把其子键缩进全废掉，自己的空 `providers:` 留成悬空（YAML 里是 null）——
+  实测清理后的文件用宿主 `yaml` 解析直接报 `All mapping items must start at the same column`，
+  也就是**下次 dsh 启动读配置就抛错**。现在按**行号**精确改写那一行。
+  同批修掉 `cleanLegacyRoutes().found`：`reason === 'no-legacy-route'`（没找到）
+  却返回 `true`，导致面板「发现遗留配置」提示永远亮着。
+- **`/workbuddy/log` 的 GET 没有面板头校验 → 可读到日志里的本地令牌**：桥在未显式
+  配置令牌时把 `WORKBUDDY_LOCAL_TOKEN=<值>` 打进启动 banner，stdout 正是 `bridge.log`。
+  同机任何进程、以及**任意网页**（无自定义头的 `fetch` 是简单请求、不触发 CORS 预检）
+  都能直接读到明文令牌。现在 GET 与 DELETE 同口径要求 `x-workbuddy-panel: 1`，
+  并且**回给前端的内容也脱敏**（键值 / Bearer / 裸 JWT 三类，与桥侧 `redactSecrets` 同判据）。
+
+**插件侧「静默给出错值」的配置缺陷（第三轮审计）**
+
+- **`asBool('')` 返回 `true`**：`.env` 里 `WORKBUDDY_AUTO_CHECKIN=` 这种留空行会被
+  当成"开"，于是留空反而**打开了**自动签到（用户本意是"跟随面板"）。现在空串按
+  "未设置"处理，回退默认；`autoCheckin` 的 `fallback` 也从 `true` 改成 `undefined`
+  （否则"没设置"会被强行变成"开"）。
+- **非法端口/主机直接拼进 URL**：`bridgePort` 用 `Number(x) || DEFAULT`，只挡 0/NaN，
+  `-1` / `99999` 全放行，拼出 `http://127.0.0.1:-1` 让 `fetch` 抛 parse 错 → `probe()`
+  归成 `stopped`、`ensure()` 永远在"启动中"失败（用户只看到"桥拉不起来"）。
+  `bridgeHost` 只做字符串化，`127.0.0.1:8790` 这种常见误写得到双端口 URL。
+  现在新增 `asPort()` / `asHost()` 收口，非法值回退默认。
+- **`Number(x) || DEFAULT` 让「0 = 关闭/关闭缓存」无法生效**：`catalogTtlMs` /
+  `bridgeAliveTtlMs` / `autoStartTimeoutMs` 的 0 都被换成默认值，想"每次都重取"
+  "每次都快探一遍"的人配了等于没配。现在 TTL 走 `asMs`（0 合法），
+  超时类走 `asPositiveMs`（0 无意义、回退默认）—— 两者语义相反，不能混用一个函数。
+- **`streamIdleTimeoutMs` 的非法值悄悄变成 0（= 关掉流卡死看门狗）**：`"5m"` /
+  `"300000ms"` / `true` 经 `Number()` 得 NaN、`NaN > 0` 为 false → 0。用户写 `5m`
+  的本意是"5 分钟"，实际把保护彻底关了且无提示。现在非法值回退默认，显式 0 仍表示关闭。
+- **`modelAllow` 写成 YAML mapping 时模型选择器变 0 个**：`String({...})` 得到
+  `"[object Object]"`，allow 集合里只有一个不存在的 id → 所有模型被过滤掉，
+  且不报错。现在 mapping 取**键名**（值为 `false` 视为显式排除）。
+- **`reconcile` 绕过 `resolveConfig` 的枚举校验**：`credentialSource` / `loginRegion`
+  等在 `resolveConfig` 里被限制在固定枚举，而 `reconcile` 在**校验之后**用原始字符串
+  覆盖（`WORKBUDDY_LOGIN_REGION=us` → 桥真的收到 `us`）。现在每个键都带 `coerce`，
+  枚举走 `asEnum`。
+- **同一环境变量在两处优先级相反**：`collectBridgeSecretEnv` / `collectBridgeExtraEnv`
+  注入子进程时是 `projectEnv ?? env`（`.env` 优先），而 `reconcile` 决定插件自己连
+  哪个地址时是 `process.env ?? projectEnv`（进程环境优先）。同一个 `WORKBUDDY_CREDENTIAL_KEY`
+  会让"插件用新 key、桥用旧 key"，看起来正常但凭据读不出。现在三处统一为
+  **进程环境 > .env**（与 `config.mjs` 的 `loadDotEnv` 同规则）。
+- **`ensureReady` 的 `readyPromise` 在 `await probe()` 之后才赋值**：中间那个 `await`
+  让并发调用全部看到 `null`、全部走 probe、全部 ensure → 一次会话两条消息同时发就
+  拉起**多个真桥进程**（实测 spawn 计数 2，前一个成孤儿）。现在先挂 promise 再进内部 await。
+- **`ensureReady` 忽略 `probe.staleBuild`**：桥是当前账号的、但跑的是旧脚本时，
+  原分支直接 `return client`，`staleBuild` 被丢掉 —— 用户升级插件后一直被旧逻辑服务，
+  且**永不重启**。现在把判定交给 `#ensure`（它本来就有构建比对）。
+
+**仓库卫生**
+
+- **`.gitignore` 漏掉轮转日志**：`*.log` 只匹配结尾是 `.log` 的名字，`bridge.log.1`
+  不匹配 —— 本机跑过一次滚动后 `git status` 就多出一个未跟踪文件，里面含账号 session
+  UUID 与本机路径，`git add -A` 会把它带进仓库。补 `*.log.[0-9]*`。
+
 ## [1.22.5] - 2026-11-05
 
 ### Fixed
