@@ -114,6 +114,26 @@ async function devtoolsPages(port) {
     err.code = 'CDP_PORT_FOREIGN';
     throw err;
   }
+  return waitForPages(port);
+}
+
+/**
+ * 单纯等端口上出现 page 目标（最多 15 秒），**不做** foreign 判定。
+ *
+ * ## 为什么必须与 {@link devtoolsPages} 分开（实测缺陷，CI run 42241477770）
+ *
+ * 冷启动有一个窗口：Chrome 的 DevTools HTTP 服务**已经开始监听**，但 `/json/version`
+ * 还没准备好（返回 200 但没有 `webSocketDebuggerUrl`，或返回 404/500）。
+ * 此时 `probeCdp` 会把它判成 `foreign`（"有 HTTP 服务但不是 DevTools"）——
+ * 而那个服务正是**我们刚 spawn 的 Chrome 自己**。
+ *
+ * 于是 `coldStartOn` → `devtoolsPages` → 抛 `CDP_PORT_FOREIGN` → catch 里
+ * 把自己刚拉起来的 Chrome **杀掉**，然后报「15 秒内没有出现任何 DevTools 页面」。
+ * 症状是 CI 上第一次冷启动必挂、本地却常常能过（本地机器快，抢不进那个窗口）。
+ *
+ * 冷启动路径只该**等**，不该判"这是不是别人"。归属判定属于复用分支。
+ */
+async function waitForPages(port) {
   for (let i = 0; i < 60; i += 1) {
     try {
       const res = await fetch(`http://127.0.0.1:${port}/json/list`);
@@ -330,6 +350,70 @@ export function fetchStubSource(routes) {
 }
 
 /**
+ * 在指定端口冷启动一个无头 Chrome 并等它出页面。
+ *
+ * ## 为什么单独抽出来，而不是内联在 `openPage` 的那段里
+ *
+ * 冷启动失败必须**能换端口重试**：探测到 `absent` 与 Chrome 真正 `bind` 之间有一个
+ * 窗口（TOCTOU），端口可能刚被别的程序抢走。原先冷启动失败就一路抛错 ——
+ * CI run 42241477770 就死在这里，报的是「15 秒内没有出现任何 DevTools 页面」，
+ * 而真因（bind 失败 / profile 建不出来）完全看不到，重跑一次要十几分钟。
+ *
+ * ## 两处「静默失效」一起修
+ *
+ *   ① **Chrome 的 stderr 不能丢**。失败形态往往只有 Chrome 自己说得清：
+ *      `bind() failed: Permission denied`、`Cannot create user data directory`、
+ *      `DevToolsActivePort file doesn't exist`。原先 `stdio: 'ignore'` 把它们
+ *      全丢了，于是所有原因都被说成"超时"。
+ *   ② **`error` 事件必须挂监听**。spawn 失败（ENOENT / EACCES / EMFILE）不抛异常，
+ *      而是异步 emit —— 没监听就是未捕获异常，整个验收脚本被带走。
+ *
+ * @returns {Promise<{ok: true, wsUrl: string} | {ok: false, detail: string, error?: any}>}
+ */
+async function coldStartOn(port, { width, height }) {
+  const exe = findChrome();
+  if (!exe) throw new Error('找不到 Chrome/Edge，请设置 CHROME_PATH');
+  const profileDir = mkdtempSync(join(tmpdir(), 'wb-cdp-'));
+  let chromeStderr = '';
+  const child = spawn(exe, [
+    '--headless=new',
+    `--remote-debugging-port=${port}`,
+    `--user-data-dir=${profileDir}`,
+    '--no-first-run',
+    '--no-default-browser-check',
+    '--disable-gpu',
+    `--window-size=${width},${height}`,
+    'about:blank',
+  ], { stdio: ['ignore', 'ignore', 'pipe'], detached: true });
+  child.unref();
+  let spawnError = null;
+  child.on('error', (error) => { spawnError = String(error?.message || error); });
+  child.stderr?.on('data', (chunk) => {
+    if (chromeStderr.length < 8192) chromeStderr += String(chunk);
+  });
+  const detail = () => [spawnError, chromeStderr.trim().split('\n').filter(Boolean).slice(-4).join(' / ')]
+    .filter(Boolean).join(' | ');
+
+  try {
+    /*
+     * 冷启动路径用 `waitForPages`（只等、不判定归属）：
+     * 这个端口的 Chrome 是我们**刚 spawn 的**，窗口期里 probeCdp 会把它的
+     * 未就绪响应误判成 foreign（详见 waitForPages 的注释）。
+     */
+    const pages = await waitForPages(port);
+    return { ok: true, wsUrl: pages[0].webSocketDebuggerUrl, chrome: child, profileDir };
+  } catch (error) {
+    /*
+     * 收掉进程与临时 profile 再返回。不收的话它会在后台活着（bind 失败后未必
+     * 立刻退出），下一个脚本又 spawn 一个 —— 实测泄漏到 3 个无头实例。
+     */
+    try { child.kill(); } catch { /* 已经退出 */ }
+    try { rmSync(profileDir, { recursive: true, force: true }); } catch { /* 忽略 */ }
+    return { ok: false, detail: detail() || String(error?.message || error), error };
+  }
+}
+
+/**
  * 启动（或复用）无头 Chrome，打开打桩后的页面。
  * 返回 { cdp, chrome, profileDir, close() }。
  *
@@ -461,7 +545,6 @@ export async function openPage(url, routes, { cdpPort = 9333, width = 1440, heig
    * 真的需要冷启动时才 spawn**；spawn 之后如果连不上，把进程收掉再报错。
    */
   let usingPort = cdpPort;
-  let coldStart = false;
   for (let attempt = 0; ; attempt += 1) {
     const probe = await probeCdp(usingPort);
     if (probe.state === 'devtools') {
@@ -497,44 +580,28 @@ export async function openPage(url, routes, { cdpPort = 9333, width = 1440, heig
       usingPort = next;
       continue;
     }
-    // absent：这里才是"该冷启动"的时机
-    coldStart = true;
-    break;
-  }
-
-  if (coldStart) {
-    const exe = findChrome();
-    if (!exe) throw new Error('找不到 Chrome/Edge，请设置 CHROME_PATH');
-    profileDir = mkdtempSync(join(tmpdir(), 'wb-cdp-'));
-    chrome = spawn(exe, [
-      '--headless=new',
-      `--remote-debugging-port=${usingPort}`,
-      `--user-data-dir=${profileDir}`,
-      '--no-first-run',
-      '--no-default-browser-check',
-      '--disable-gpu',
-      `--window-size=${width},${height}`,
-      'about:blank',
-    ], { stdio: 'ignore', detached: true });
-    chrome.unref();
-    try {
-      const pages = await devtoolsPages(usingPort);
-      wsUrl = pages[0].webSocketDebuggerUrl;
-    } catch (error) {
-      /*
-       * 起不来就把进程与临时 profile 收掉再报错。
-       *
-       * 不收的话它会在后台活着（Chrome 绑定失败后未必立刻退出），下一个脚本
-       * 又会 spawn 一个 —— 实测泄漏到 3 个无头实例、几十个 renderer，
-       * 后续用例开始 180s 超时，而错误信息只说「无法连接 DevTools」。
-       */
-      try { chrome.kill(); } catch { /* 已经退出 */ }
-      chrome = null;
-      try { rmSync(profileDir, { recursive: true, force: true }); } catch { /* 忽略 */ }
-      profileDir = null;
-      throw new Error(`Chrome 在端口 ${usingPort} 上没能起来：${error.message}`
-        + '（端口可能刚被别的程序抢走；重跑一次，或换 CDP 端口）', { cause: error });
+    /*
+     * absent：这里才是"该冷启动"的时机。
+     *
+     * 冷启动也放进这个循环里，而不是循环外单独一段 —— 因为**bind 失败要继续换端口**：
+     * 探测到 absent 与 Chrome 真正 bind 之间有一个窗口（TOCTOU），端口可能刚被
+     * 别的程序抢走。原先冷启动失败就直接抛错（CI run 42241477770 就死在这里，
+     * 报的是「15 秒内没有出现任何 DevTools 页面」，看不出真因）。
+     */
+    if (attempt >= 2) {
+      throw new Error(`连续 3 个端口都起不来 Chrome（最后一个是 ${usingPort}）`);
     }
+    const started = await coldStartOn(usingPort, { width, height });
+    if (started.ok) {
+      wsUrl = started.wsUrl;
+      // 记住进程与 profile：`close()` 要按它们清理
+      chrome = started.chrome;
+      profileDir = started.profileDir;
+      break;
+    }
+    process.stderr.write(`[ui-harness] Chrome 在端口 ${usingPort} 上没起来`
+      + `${started.detail ? `（${started.detail}）` : ''}，换端口重试\n`);
+    usingPort = await freePort();
   }
   /** 实际使用的调试端口（自动换过端口时与入参不同）。 */
   const debugPort = usingPort;
