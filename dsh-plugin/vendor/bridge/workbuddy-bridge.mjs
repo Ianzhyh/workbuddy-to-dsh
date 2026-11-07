@@ -10794,6 +10794,56 @@ function fallbackCatalogEntry(id, region = '') {
 }
 
 /**
+ * 点名清单里**被丢掉**了哪些，以及各自为什么。
+ *
+ * ## 为什么需要它（2026-11-07 实机发现）
+ *
+ * `defaultViewModels()` 对点名清单与目录求交集：用户勾选时它在目录里，
+ * 之后上游下架了就不该继续冒充"可用"（客户端会拿着它去调，必然 404）。
+ * 那个过滤本身是对的，但它是**静默**的。
+ *
+ * 实机：保存了 `glm-5.1 / kimi-k3.1-pro / kimi-k3-1` 三个，`/v1/models` 只回 2 个。
+ * `/health` 里 `ids` 有 3 个、`count` 是 2 —— 线索都在，但**必须自己比对两个
+ * 数组**才能发现少了一个，而且完全看不出少的是谁、为什么。用户只会觉得
+ * "我明明勾了三个"。
+ *
+ * 这里把那句话直接算好放进去：`{ id, reason }`。`reason` 只做事实判断、不猜：
+ *   · `not-in-catalog` —— 上游目录里没有它（下架 / 改名 / 不属于当前区域）；
+ *   · `not-delivered`  —— 目录里有却没给出去（理论上不该发生，出现即是缺陷）。
+ *
+ * @param {{ mode?: string, ids?: string[] } | null} current
+ * @param {Array<{ id: string }>} catalog
+ * @param {Array<{ id: string }>} delivered 实际给出的模型
+ * @returns {Array<{ id: string, reason: string }>}
+ */
+function droppedFromIds(current, catalog, delivered) {
+  if (!current || current.mode !== 'ids' || !Array.isArray(current.ids)) return [];
+  /*
+   * 目录为空时**一律不报**。
+   *
+   * `/health` 只读缓存、不 await 上游（它有 4 秒超时约束，慢探测会让控制台
+   * 把桥误判成"未运行"）。所以冷启动第一次进来时目录往往是空的 ——
+   * 此时"在不在目录里"**无从判断**。
+   *
+   * 实测踩过：复现脚本里目录还没加载，这条规则把 present-model / another-model
+   * **全部**标成 `not-in-catalog`，而同一时刻 `/v1/models` 明明正常返回了它们
+   * （那条路径会 await 目录）。凭空指控比静默更坏：用户会去查一个不存在的问题。
+   *
+   * 目录空这件事本身已有信号（`catalogSize: 0` / `catalogAt: null` /
+   * `count: 0`），不需要再用一个假的 dropped 重复表达。
+   */
+  if (!Array.isArray(catalog) || catalog.length === 0) return [];
+  const given = new Set((delivered || []).map((m) => m.id));
+  const inCatalog = new Set((catalog || []).map((m) => m.id));
+  return current.ids
+    .filter((id) => !given.has(id))
+    .map((id) => ({
+      id,
+      reason: inCatalog.has(id) ? 'not-delivered' : 'not-in-catalog',
+    }));
+}
+
+/**
  * 默认视图（不带 `all=1`）到底给哪些模型。
  *
  * `/v1/models` 与 `/health.modelsDefault.count` **必须**走同一个函数 —— 否则
@@ -12062,6 +12112,11 @@ async function handleRequest(req, res) {
       }
       const catalog = catalogCache.models;
       const dv = defaultViewModels(catalog, region);
+      /*
+       * 点名清单里谁被丢掉了（上游下架导致的静默少给）。
+       * 只算一次，下面 `modelsDefault` 直接引用。
+       */
+      const dropped = droppedFromIds(effectiveModelsDefault(), catalog, dv);
       return json(res, 200, {
         ok: true,
         pid: process.pid,
@@ -12124,6 +12179,14 @@ async function handleRequest(req, res) {
           total: catalog.length || fallbackCatalog(region).length,
           /** 客户端不带参数时（`GET /v1/models`）实际会拿到几个。 */
           count: dv.length,
+          /*
+           * 点名清单里被丢掉的那些（通常因为上游下架）。**只在非空时出现**，
+           * 这样正常状态下 `/health` 不会多出一个恒为空的字段。
+           *
+           * 有了它，面板就能直接说「glm-5.1 已不在目录里，所以你没看到它」，
+           * 而不是让用户对着"我明明勾了三个"自己猜。
+           */
+          ...(dropped.length ? { dropped } : {}),
         },
         catalogSize: catalog.length,
         catalogAt: catalogCache.at ? new Date(catalogCache.at).toISOString() : null,

@@ -349,7 +349,22 @@ async function startStubUpstream(models = ['stub-model'], opts = {}) {
     if (path === '/v3/config') {
       catalogSeen.push({ path, headers: req.headers });
       res.writeHead(200, { 'content-type': 'application/json' });
-      return res.end(JSON.stringify({ code: 0, data: { models: [] } }));
+      /*
+       * 默认回空数组：早期用例要的是"v3 空 → 退到 v2"这条路径。
+       * `opts.v3Models` 显式给了就照给 —— 「点名清单里有已下架模型」那条
+       * 用例需要一份**非空**目录，否则连"在不在目录里"都判断不了。
+       */
+      const v3Models = Array.isArray(opts.v3Models) && !opts.emptyModels ? opts.v3Models : [];
+      return res.end(JSON.stringify({
+        code: 0,
+        data: {
+          models: v3Models.map((id) => ({
+            id,
+            maxInputTokens: 128000,
+            maxOutputTokens: 4096,
+          })),
+        },
+      }));
     }
     if (path === '/v2/chat/completions') {
       let body = '';
@@ -3111,6 +3126,109 @@ test('桥：6004 账号用量上限 —— 不等待重试、按 insufficient_qu
     await bridge.stop();
     stub.close();
     rmSync(bridge.dir, { recursive: true, force: true });
+  }
+});
+
+test('桥：点名清单里的模型被上游下架时，/health 要说出少了谁、为什么', { timeout: 90_000 }, async () => {
+  /*
+   * 实机（2026-11-07）：用户保存了 glm-5.1 / kimi-k3.1-pro / kimi-k3-1 三个，
+   * 但 /v1/models 只回 2 个 —— glm-5.1 已不在上游目录里。
+   *
+   * 过滤本身是对的（下架还继续冒充"可用"，客户端拿去调必然 404）。
+   * 问题是**静默**：/health 里 ids 有 3 个、count 是 2，线索都在，
+   * 但必须自己比对两个数组才能发现，而且看不出少的是谁。
+   *
+   * 现在 modelsDefault.dropped 直接给出 { id, reason }。
+   */
+  const stub = await startStubUpstream(['present-model', 'another-model'], {
+    v3Models: ['present-model', 'another-model'],
+  });
+  /*
+   * 必须先于启动就位：桥把偏好缓存在内存里（`/v1/models` 是高频路径），
+   * 起完再写文件不会生效。而 `startBridge` 会把
+   * `WORKBUDDY_MODELS_DEFAULT_FILE` 钉到它的临时目录，所以只能写那里。
+   */
+  const seedDir = mkdtempSync(join(tmpdir(), 'wb-models-default-'));
+  writeFileSync(join(seedDir, 'models-default.json'),
+    JSON.stringify({ ids: ['present-model', 'gone-model', 'another-model'] }), 'utf8');
+  const bridge = await startBridge({
+    CODEBUDDY_ENDPOINT: stub.base,
+    WORKBUDDY_SKIP_MODEL_PREFLIGHT: '1',
+    WORKBUDDY_MODELS_DEFAULT_FILE: join(seedDir, 'models-default.json'),
+  }, { auth: READABLE_FAKE_AUTH });
+  try {
+    /*
+     * 先等目录就绪。`/health` 只读缓存、绝不 await 上游（它有 4 秒超时约束），
+     * 所以冷启动第一次探测时 catalog 往往是空的 —— 那时"在不在目录里"
+     * 无从判断，桥会刻意不报 dropped（见 droppedFromIds 的注释）。
+     * `/v1/models` 会 await 目录，拿它当就绪信号最直接。
+     */
+    let catalogReady = false;
+    for (let i = 0; i < 50; i += 1) {
+      const m = await (await fetch(bridge.baseUrl + '/v1/models', { headers: auth })).json();
+      if ((m.data || []).length > 0) { catalogReady = true; break; }
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    assert.ok(catalogReady, '目录必须能在 5 秒内就绪，否则这条用例测不到东西');
+    const health = await (await fetch(bridge.baseUrl + '/health', { headers: auth })).json();
+    const md = health.modelsDefault;
+    assert.ok(md, '/health 必须有 modelsDefault 段');
+
+    assert.deepEqual(md.ids, ['present-model', 'gone-model', 'another-model'],
+      '要如实回显保存的点名清单');
+    assert.equal(md.count, 2, '实际只给 2 个（gone-model 不在目录里）');
+
+    assert.ok(Array.isArray(md.dropped), '必须带上 dropped，不能静默少给');
+    assert.equal(md.dropped.length, 1, '只少了 1 个');
+    assert.equal(md.dropped[0].id, 'gone-model', '要点名是哪一个');
+    assert.equal(md.dropped[0].reason, 'not-in-catalog',
+      'reason 要说清是"上游目录里没有"，而不是含糊的"没给"');
+  } finally {
+    await bridge.stop();
+    stub.close();
+    rmSync(bridge.dir, { recursive: true, force: true });
+    rmSync(seedDir, { recursive: true, force: true });
+  }
+});
+
+test('桥：清单全部命中时 /health 不出现恒为空的 dropped 字段', { timeout: 90_000 }, async () => {
+  /*
+   * 反向护栏：正常状态下不该多一个恒为空的字段。
+   * 恒空字段的坏处是"看起来永远没问题"—— 用户和面板都会忽略它，
+   * 于是真出问题时同样看不见。只在非空时出现，才有信号价值。
+   */
+  const stub = await startStubUpstream(['only-model'], { v3Models: ['only-model'] });
+  const seedDir = mkdtempSync(join(tmpdir(), 'wb-models-default-ok-'));
+  writeFileSync(join(seedDir, 'models-default.json'),
+    JSON.stringify({ ids: ['only-model'] }), 'utf8');
+  const bridge = await startBridge({
+    CODEBUDDY_ENDPOINT: stub.base,
+    WORKBUDDY_SKIP_MODEL_PREFLIGHT: '1',
+    WORKBUDDY_MODELS_DEFAULT_FILE: join(seedDir, 'models-default.json'),
+  }, { auth: READABLE_FAKE_AUTH });
+  try {
+    /*
+     * 先等目录就绪。`/health` 只读缓存、绝不 await 上游（它有 4 秒超时约束），
+     * 所以冷启动第一次探测时 catalog 往往是空的 —— 那时"在不在目录里"
+     * 无从判断，桥会刻意不报 dropped（见 droppedFromIds 的注释）。
+     * `/v1/models` 会 await 目录，拿它当就绪信号最直接。
+     */
+    let catalogReady = false;
+    for (let i = 0; i < 50; i += 1) {
+      const m = await (await fetch(bridge.baseUrl + '/v1/models', { headers: auth })).json();
+      if ((m.data || []).length > 0) { catalogReady = true; break; }
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    assert.ok(catalogReady, '目录必须能在 5 秒内就绪，否则这条用例测不到东西');
+    const health = await (await fetch(bridge.baseUrl + '/health', { headers: auth })).json();
+    assert.equal(health.modelsDefault.count, 1);
+    assert.equal(Object.prototype.hasOwnProperty.call(health.modelsDefault, 'dropped'), false,
+      '没有缺失时不得出现 dropped 键');
+  } finally {
+    await bridge.stop();
+    stub.close();
+    rmSync(bridge.dir, { recursive: true, force: true });
+    rmSync(seedDir, { recursive: true, force: true });
   }
 });
 
