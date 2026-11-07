@@ -2406,9 +2406,17 @@ const server = createServer(async (req, res) => {
 
     if (route === '/api/probe' && req.method === 'POST') {
       try {
-        const { model } = JSON.parse(await readBody(req));
+        const body = JSON.parse(await readBody(req));
+        const { model, inputTokens } = body || {};
         if (typeof model !== 'string' || !model) throw new Error('缺少 model');
-        sendJson(res, 200, await probeModel(model));
+        /*
+         * `inputTokens` 可选：不传就用默认档。
+         *
+         * 体检必须发**真实体积**才能回答"我这个长对话能不能过"（上游按体积
+         * 限流）。档位由 `resolveProbeInputTokens()` 归一 —— 传 25000 会按
+         * 20000 跑，而不是报错：这是诊断动作，能跑出结果比让人先改配置有用。
+         */
+        sendJson(res, 200, await probeModel(model, { inputTokens }));
       } catch (err) {
         if (err.code === 'BODY_TOO_LARGE') return bodyTooLarge(req, res);
         sendJson(res, 400, { model: null, ok: false, error: err.message });

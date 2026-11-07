@@ -1261,6 +1261,17 @@ const I18N_EN = {
   '上游未回报该模型的负载，或本区域没有此接口':
     'Upstream did not report load for this model, or this region has no such endpoint',
 
+  /*
+   * ---- 体检体积档位 ----
+   *
+   * 这一组的存在理由和「拥堵」那组一样：新增中文文案必须同时进词条表，
+   * 否则英文模式下会残留中文（UI 门禁的 test-i18n 会直接红）。
+   */
+  '体积': 'Input size',
+  '体检发出的输入体积。上游按请求体积限流，所以体积太小的体检无法代表长对话；体积越大越接近真实使用，也越贵。':
+    'Input volume sent by the probe. Upstream rate-limits by REQUEST SIZE, so a tiny probe cannot represent a long conversation; '
+    + 'a larger volume is closer to real use and also costs more.',
+
   // ---- 签到面板 ----
   '每日签到': 'Daily check-in',
   '今天已签': 'Signed in today',
@@ -2110,6 +2121,50 @@ function applyTerms(s) {
  * 词条表只能命中**完整**文本节点。规则层让「渲染代码一行不改」也能出英文。
  * ------------------------------------------------------------------------- */
 const I18N_RULES_EN = [
+  /*
+   * 体检成本提示（动态拼接，只能靠规则翻）。
+   *
+   * 形状有两种：
+   *   「约 0.45 积分/个」                              —— 没选范围时
+   *   「约 0.45 积分/个 · 本次 4 个 ≈ 1.8 积分」        —— 有范围时
+   *
+   * 必须**整串**匹配：只替换「积分/个」会把中文语序留下来
+   * （'约 0.45 Credits/model · 本次 4 个 ≈ 1.8 积分' 那种半句英文）。
+   * 数字原样带过 —— 它们不是文案。
+   */
+  [/^约 ([\d.]+) 积分\/个 · 本次 (\d+) 个 ≈ ([\d.]+) 积分$/,
+    (m, unit, count, total) => `~${unit} credits each · ${count} models ≈ ${total} credits`],
+  [/^约 ([\d.]+) 积分\/个$/, (m, unit) => `~${unit} credits each`],
+  /*
+   * 体检结论的 title 现在只剩「测得时间 <fmtAgo 的中文>」。
+   *
+   * 体积已经**移到可见文本**里（见 renderProbe 的注释）：它是"这条结论有多真"
+   * 的唯一证据，藏在悬停里等于没给。同时这也消掉了一个 i18n 坑 ——
+   * title 里拼中文时，内层的 `fmtAgo()` 会产出「34 天前」，
+   * 而整串规则没法可靠地把内层再翻一次（实测残留
+   * `Size 未知（旧记录）; measured （34 天前）`）。
+   */
+  [/^测得时间\s*(.+)$/, (m, when) => `Measured ${translateText(when)}`],
+  /*
+   * 体检结论（可见文本，动态拼接）。
+   *
+   * 形状：
+   *   「可用 880ms · 扣 0.02 · 体积 10k（实算 10072）」
+   *   「可用 880ms · 体积未知」                     —— 旧记录没有体积字段
+   *   「不可用」/「不可用 · 10k」
+   *
+   * 必须**整串**匹配：只替换「可用」会留下「Available 880ms · 扣 0.02」这种
+   * 半句英文。数字与单位（ms / 10k）原样带过 —— 它们不是文案。
+   */
+  [/^可用 (\d+)ms · 扣 ([\d.]+) · 体积未知$/, (m, ms, credit) => `Available ${ms}ms · ${credit} credits · size unknown`],
+  [/^可用 (\d+)ms · 扣 ([\d.]+) · (.+)$/, (m, ms, credit, size) => `Available ${ms}ms · ${credit} credits · ${translateText('体积' + size)}`],
+  [/^可用 (\d+)ms · 体积未知$/, (m, ms) => `Available ${ms}ms · size unknown`],
+  [/^可用 (\d+)ms · (.+)$/, (m, ms, size) => `Available ${ms}ms · ${translateText('体积' + size)}`],
+  [/^不可用 · (.+)$/, (m, size) => `Unavailable · ${translateText('体积' + size)}`],
+  [/^体积 (.+?)（实算 (\d+)）$/, (m, plan, actual) => `size ${plan} (actual ${actual})`],
+  [/^体积未知$/, 'size unknown'],
+
+  [/^按实测单价估算；实际扣费由上游决定$/, 'Estimated from measured unit prices; actual charge is decided upstream'],
   /* -------------------------------------------------------------------------
    * 0. 复制到剪贴板的文本（诊断报告 / 接入信息）—— **必须排最前**
    *
@@ -3647,12 +3702,32 @@ function renderProbe(id) {
   const r = probeResults[id];
   if (!r) return '<span class="tag">未测</span>';
   const when = r.at ? '　（' + fmtAgo(r.at) + '）' : '';
+  /*
+   * 把**实测体积**显示出来。
+   *
+   * 为什么必须显示：体检的价值全在"它测的是真实体积"。若不写出体积，
+   * 用户无法区分"这条结论是在 20 token 上得的（几乎无意义）"还是
+   * "在 10k token 上得的（能代表长对话）"—— 那正是旧版最大的问题。
+   * 同时给出上游实算的 `promptTokens`，让"档位"这个承诺可被核对。
+   */
+  const size = probeSizeLabel(r);
   if (r.ok) {
     const credit = typeof r.credit === 'number' ? ' · 扣 ' + r.credit : '';
+    /*
+     * 体积跟在结论后面**可见**：它是"这条结论有多真"的唯一证据 ——
+     * 「在 20 token 上测的」和「在 10k token 上测的」是完全不同的结论。
+     *
+     * 为什么不再塞进 `title`：title 里拼中文会撞 i18n —— 内层的 `fmtAgo()`
+     * 自己就产出「34 天前」，而 title 的翻译走**整串**规则，没法把内层可靠翻掉
+     * （实测残留 `Size 未知（旧记录）; measured （34 天前）`）。移到可见文本后，
+     * title 只剩「测得时间 …」一种形状，规则能干净处理。
+     */
+    const sizeText = size || '体积未知';
     return '<span class="tag ok" title="' + escapeAttr('测得时间' + when) + '">'
-      + '可用 ' + r.ms + 'ms' + credit + '</span>';
+      + '可用 ' + r.ms + 'ms' + credit + ' · ' + sizeText + '</span>';
   }
-  return '<span class="tag fail" title="' + escapeAttr((r.error || '') + when) + '">不可用</span>';
+  return '<span class="tag fail" title="' + escapeAttr((r.error || '') + when) + '">'
+    + '不可用' + (size ? ' · ' + size : '') + '</span>';
 }
 
 function refreshProbeCells() {
@@ -3674,6 +3749,87 @@ function syncProbeRowState(tr) {
   tr.dataset.probeMs = r && Number.isFinite(Number(r.ms)) ? String(Number(r.ms)) : '';
 }
 
+/**
+ * 当前选中的体检体积档位（token）。
+ *
+ * 控件缺失时回落到后端默认档（不传就由后端归一）——
+ * 这样旧页面/被裁剪的 DOM 也不会把体检打回"20 token"那种伪探针。
+ */
+function probeInputTokensValue() {
+  const el = $('probeInputTokens');
+  const n = el ? Number(el.value) : NaN;
+  return Number.isFinite(n) && n > 0 ? n : undefined;
+}
+
+/**
+ * 刷新「这次体检大概花多少」的提示。
+ *
+ * 为什么必须显示：体检是**真花钱**的动作（10k 档约 0.45 积分/模型，
+ * 「全部」跑 56 个模型约 25 积分）。只在点了之后才看到扣多少，用户会不敢用它 ——
+ * 而这个功能的价值恰恰在于"能放心地点"。
+ *
+ * ## 为什么系数写在前端而不是问后端
+ *
+ * 每换一次档都打一次网络只为算个数，不值得。但**两处口径必须一致**：
+ * 这里的 ANCHORS 是 `lib/diagnostics.mjs` 里 `estimateProbeCredits()` 的
+ * 实测锚点的副本 —— 改那边就要改这里。为了不让它静默漂移，
+ * `lib/diagnostics.test.mjs` 有一条用例把两边的表钉在一起。
+ */
+function refreshProbeCostHint() {
+  const el = $('probeCostHint');
+  if (!el) return;
+  const tokens = probeInputTokensValue();
+  if (!tokens) { el.textContent = ''; return; }
+  /*
+   * 实测锚点（与后端 estimateProbeCredits 同一张表）：
+   *   5,050→0.26 ｜ 10,072→0.45 ｜ 11,269→1.86 ｜ 30,160→4.91 ｜ 50,248→8.16
+   * 10k 与 12k 之间是**上游的计价分界**（1.2k token 差异让费用涨 4 倍），
+   * 所以必须分段而不是乘单价。
+   */
+  const ANCHORS = [[5000, 0.26], [10000, 0.45], [12000, 1.86], [20000, 3.30], [30000, 4.91], [50000, 8.16]];
+  let unit;
+  if (tokens <= ANCHORS[0][0]) {
+    unit = (tokens / ANCHORS[0][0]) * ANCHORS[0][1];
+  } else {
+    unit = (tokens / ANCHORS[ANCHORS.length - 1][0]) * ANCHORS[ANCHORS.length - 1][1];
+    for (let i = 1; i < ANCHORS.length; i += 1) {
+      if (tokens <= ANCHORS[i][0]) {
+        const [x1, y1] = ANCHORS[i - 1];
+        const [x2, y2] = ANCHORS[i];
+        unit = y1 + ((tokens - x1) / (x2 - x1)) * (y2 - y1);
+        break;
+      }
+    }
+  }
+  // 这次要测几个：直接用体检自己的范围判定，**不另写一套**
+  // （「全部体检」点下去走的也是 probeScopeIds，两处数字必须一致，
+  //  否则提示说 20 个、实际跑 56 个）
+  let scope = 0;
+  try {
+    const sel = $('probeScope');
+    const mode = sel ? sel.value : 'all';
+    const ids = probeScopeIds(mode).ids;
+    scope = Array.isArray(ids) ? ids.length : 0;
+  } catch {
+    scope = 0;
+  }
+  const one = unit.toFixed(2);
+  el.textContent = scope > 0
+    ? `约 ${one} 积分/个 · 本次 ${scope} 个 ≈ ${(unit * scope).toFixed(1)} 积分`
+    : `约 ${one} 积分/个`;
+}
+
+/** 把"这一格体检是在多大体积上测的"显示出来。 */
+function probeSizeLabel(r) {
+  const t = Number(r && r.inputTokens);
+  if (!Number.isFinite(t) || t <= 0) return '';
+  const k = t >= 1000 ? `${Math.round(t / 1000)}k` : String(t);
+  const actual = Number(r && r.promptTokens);
+  // 上游实际算出的 token 与我们的档位并列给出：两者不一致是正常的（估算 vs 计费），
+  // 但用户需要看到"实际发了多少"，否则档位就只是个无法验证的承诺。
+  return Number.isFinite(actual) && actual > 0 ? `${k}（实算 ${actual}）` : k;
+}
+
 async function probeOne(id, signal) {
   probePending.add(id);
   refreshProbeCells();
@@ -3684,7 +3840,12 @@ async function probeOne(id, signal) {
       method: 'POST',
       // 面板头是后端对写操作的硬要求（拒绝跨站请求），漏了会 403
       headers: { 'Content-Type': 'application/json', 'x-workbuddy-panel': '1' },
-      body: JSON.stringify({ model: id }),
+      /*
+       * 带上体积档位：体检必须发**真实体积**才能回答"长对话能不能过"
+       * （上游按请求体积限流）。不传时后端用默认档，这里显式传是为了
+       * 「用户选了什么就测什么」——档位控件就在旁边，改了必须生效。
+       */
+      body: JSON.stringify({ model: id, inputTokens: probeInputTokensValue() }),
       signal,
     });
     r = await res.json();
@@ -3754,7 +3915,9 @@ async function probeAll() {
   probeAborted = false;
   btn.disabled = true;
   if (cancelBtn) cancelBtn.hidden = false;
-  if (msg) { msg.className = 'msg'; msg.textContent = '开始测试 ' + ids.length + ' 个模型…（会消耗少量额度）'; }
+  if (msg) { msg.className = 'msg'; msg.textContent = '开始测试 ' + ids.length + ' 个模型…（'
+    + `每个发 ${Math.round((probeInputTokensValue() || 10000) / 1000)}k token 的输入，`
+    + '会消耗额度）'; }
 
   const startedAt = Date.now();
   let ok = 0;
@@ -6962,6 +7125,26 @@ function renderModelTable(models, registered) {
             '<option value="all">全部</option>' +
           '</select></label>' +
         '<button id="probeAllBtn">测试可用性</button>' +
+        /*
+         * 体检体积档位。
+         *
+         * 为什么必须让用户看见体积：上游限流**按请求体积**判定，发 20 token
+         * 的探针无法代表"我这个长对话能不能过"。但体积越大越贵，所以档位
+         * 必须可选、且旁边直接写清预估花费 —— 否则用户点一下才发现扣了积分。
+         *
+         * 默认 10k（约 0.45 积分/模型）：覆盖多数真实对话体积，成本可接受。
+         */
+        '<label class="check" id="probeSizeWrap" title="体检发出的输入体积。'
+          + '上游按请求体积限流，所以体积太小的体检无法代表长对话；'
+          + '体积越大越接近真实使用，也越贵。">体积' +
+          '<select id="probeInputTokens">' +
+            '<option value="5000">5k</option>' +
+            '<option value="10000" selected>10k</option>' +
+            '<option value="20000">20k</option>' +
+            '<option value="30000">30k</option>' +
+            '<option value="50000">50k</option>' +
+          '</select></label>' +
+        '<span class="filterinfo" id="probeCostHint" title="按实测单价估算；实际扣费由上游决定"></span>' +
         '<button id="probeCancelBtn" hidden>取消测试</button>' +
         '<button id="probeClearBtn" hidden>清除体检</button>' +
         '<button id="exportModelsBtn">导出 CSV</button>' +
@@ -7049,7 +7232,19 @@ function renderModelTable(models, registered) {
       e.target.dataset.touched = '1'; // 用户手动选过：之后不再套「有勾选就测勾选的」默认
       probeScope = e.target.value;
       updateProbeScopeUI();
+      // 范围变了，预估总额跟着变（同一次渲染里算，避免两处数字打架）
+      refreshProbeCostHint();
     };
+    /*
+     * 体积档位：改了就重算预估花费。
+     *
+     * 必须在**同一次渲染**里绑定（表格每次重建都会重新走这段），
+     * 否则换档后提示还停在旧数字上 —— 那正是"说一套做一套"。
+     */
+    if ($('probeInputTokens')) {
+      $('probeInputTokens').onchange = () => refreshProbeCostHint();
+    }
+    refreshProbeCostHint();
     $('probeAllBtn').onclick = probeAll;
     $('probeCancelBtn').onclick = () => { probeAborted = true; if (probeCtrl) probeCtrl.abort(); };
     $('probeClearBtn').onclick = clearProbeResults;

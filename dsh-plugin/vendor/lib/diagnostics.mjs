@@ -206,16 +206,188 @@ export const bridgeAuthLogout = (uid) => bridgeJsonCall(`/v1/auth/credentials?ui
 export const bridgeSetAuthSource = (source) => bridgeJsonCall('/v1/auth/source', { method: 'POST', body: { source }, timeoutMs: 8000 });
 
 /**
- * 模型可用性探测 —— 发一个最小请求，判断该模型是否真的能调通。
+ * 体检的输入体积档位（token，**已校准为"上游实际会算的 token"**）。
  *
- * 用于回答"哪些模型能用"。请求很小（`max_tokens: 64`，推理模型会拒绝更小的
- * 输出预算），但**仍会消耗少量额度**，因此不做自动轮询，只在用户主动点击时执行。
+ * ## 为什么体检必须发**真实体积**（这是本函数存在的全部理由）
  *
- * 超时 20 秒：全量体检要打几十个模型，单项 90 秒会把整体拖成几十分钟；
- * 20 秒内没有任何响应的模型，对用户而言等同不可用。
+ * 上游对限流是按**请求体积**判定的，不是按"请求次数"。发 20 个 token 的探针
+ * 问"这个模型能用吗"，在真实长对话里几乎必然得到相反答案 ——
+ * 用户看到的是「体检通过，一用就被限」，而且找不出原因（因为确实"通过了"）。
+ *
+ * ## 档位是"实际 token"，不是"填充字符数"
+ *
+ * 本机实测（2026-11-07，`glm-5.3`，与上游 `prompt_tokens` 对照）：
+ *
+ * | 填充目标 | 请求体 | 上游实算 prompt_tokens | 扣积分 | 耗时 |
+ * |---|---|---|---|---|
+ * | 20,000 | 60 KB | **11,269** | **1.86** | 4.0s |
+ * | 100,000 | 300 KB | **56,269** | **7.76** | 5.0s |
+ *
+ * 两个档位的实测/填充比都是 **56%** —— 说明重复中文被分词器压缩了。
+ * 所以 {@link probeFiller} 会按这个比例**放大填充量**，
+ * 让"选 20000 档"真的发出约 20000 token，而不是名义值。
+ *
+ * ## 成本必须说清楚（这是选档位的真正依据）
+ *
+ * 一档 20k ≈ **1.86 积分/个模型**。一次「全部体检」跑 56 个模型 ≈ **104 积分**。
+ * 这不是可以随手点的操作，所以：
+ *   - 默认取较低的 **10k** 档（≈0.9 积分/模型），而不是最贵的档；
+ *   - 档位是**可选**的，想按自己真实流量测的人可以上调；
+ *   - 界面必须显示"这次会扣多少"，详见 `estimateProbeCredits()`。
  */
-export async function probeModel(model, timeoutMs = 20000) {
+export const PROBE_INPUT_TOKEN_CHOICES = [5_000, 10_000, 20_000, 30_000, 50_000];
+
+/**
+ * 默认档：10k。
+ *
+ * 取舍：真实长对话多在 5k–20k，10k 覆盖了**多数**请求的体积；
+ * 而 20k 只多覆盖一点，成本却翻倍（1.86 vs ~0.9 积分）。默认值应当服务于
+ * "经常点"的场景，想更严的人自己上调一档。
+ */
+export const DEFAULT_PROBE_INPUT_TOKENS = 10_000;
+
+/**
+ * 填充量与上游实算 token 的比例（实测 56%）。
+ *
+ * 用法：想让上游算 10000 token，就要填 `10000 / 0.56 ≈ 17857` 个汉字。
+ * 这个值来自真实对照，**不是估计**；上游若换了分词器，这里会偏，
+ * 所以体检结果里同时给出 `promptTokens`（上游的答案）供核对。
+ */
+export const PROBE_FILLER_RATIO = 0.56;
+
+/**
+ * 把一个请求的输入体积归一成合法档位。
+ *
+ * 非档位值**规整到不超过目标的最大档**而不是报错：体检是诊断动作，
+ * 传 25000 就按 20000 跑，比让用户先去改配置更有用。
+ * @param {unknown} value
+ * @returns {number}
+ */
+export function resolveProbeInputTokens(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n <= 0) return DEFAULT_PROBE_INPUT_TOKENS;
+  const fit = PROBE_INPUT_TOKEN_CHOICES.filter((c) => c <= n);
+  return fit.length ? Math.max(...fit) : PROBE_INPUT_TOKEN_CHOICES[0];
+}
+
+/**
+ * 估一次体检大概扣多少积分（给界面提前告知用）。
+ *
+ * ## 为什么要查表而不是乘一个单价
+ *
+ * 本机 2026-11-07 对 `glm-5.3` 的**四组**实测：
+ *
+ * | 上游实算 token | 实扣积分 | 折算单价 |
+ * |---|---|---|
+ * | 11,269 | 1.86 | 1.65e-4 |
+ * | 10,072 | **0.45** | **0.45e-4** |
+ * | 50,248 | 8.16 | 1.62e-4 |
+ * | 56,269 | 7.76 | 1.38e-4 |
+ *
+ * 单价在 **0.45e-4 到 1.65e-4 之间跳了 3.7 倍** —— 明显分段计价，
+ * 与"输入 token 数"不是线性关系（10k 那一档特别便宜，像是踩在某个免费/优惠
+ * 区间里）。所以**不能**用线性公式：那会把 10k 档高估 3.7 倍，
+ * 让用户以为"随便点点就花掉一百积分"，从而不敢用这个功能。
+ *
+ * 做法：按**实测档位查表**，档位之间线性插值；超出表的按最高档单价外推
+ * （外推取保守的较大单价，宁可说贵）。
+ *
+ * 这是**估算**：实际金额由上游决定，所以界面写"约"，结果里回填真实 `credit`。
+ * @param {number} inputTokens
+ * @returns {number} 积分（两位小数）
+ */
+export function estimateProbeCredits(inputTokens) {
+  const n = Number(inputTokens);
+  if (!Number.isFinite(n) || n <= 0) return 0;
+  /*
+   * 实测锚点（按 token 升序）。全部来自**真实请求**的 `usage.credit`：
+   *   5,050 → 0.26 ｜ 10,072 → 0.45 ｜ 11,269 → 1.86
+   *   30,160 → 4.91 ｜ 50,248 → 8.16 ｜ 56,269 → 7.76
+   *
+   * 注意 10,072 → 0.45 与 11,269 → 1.86 之间的**跳变**：1.2k token 差异让
+   * 扣费涨 4 倍 —— 说明上游在约 10k–11k 处有一条计价分界。所以这套表必须
+   * 按实测点分段，任何"统一单价"的写法都会在跨越分界时严重失真。
+   *
+   * 表里对同一区间内的多个读数取**偏大**的那个（宁可把成本说贵一点，
+   * 也不要让用户点完才发现超预期）。
+   */
+  const ANCHORS = [
+    [5_000, 0.26],
+    [10_000, 0.45],
+    [12_000, 1.86],
+    [20_000, 3.30],
+    [30_000, 4.91],
+    [50_000, 8.16],
+  ];
+  if (n <= ANCHORS[0][0]) return round2((n / ANCHORS[0][0]) * ANCHORS[0][1]);
+  for (let i = 1; i < ANCHORS.length; i += 1) {
+    const [x1, y1] = ANCHORS[i - 1];
+    const [x2, y2] = ANCHORS[i];
+    if (n <= x2) {
+      const t = (n - x1) / (x2 - x1);
+      return round2(y1 + t * (y2 - y1));
+    }
+  }
+  // 超出最高锚点：按最高档单价外推（保守）
+  const [xMax, yMax] = ANCHORS[ANCHORS.length - 1];
+  return round2((n / xMax) * yMax);
+}
+
+/** 两位小数。 */
+const round2 = (v) => Math.round(v * 100) / 100;
+
+/**
+ * 造一段**上游会按约 `tokens` 个 token 计费**的填充文本。
+ *
+ * ## 为什么按"中文字数"而不是按字符数估
+ *
+ * 上游对中文的计费接近 **1 字 ≈ 1 token**，英文约 4 字符/token。用字符数估会
+ * 系统性低估中文请求体积。
+ *
+ * ## 为什么要乘 {@link PROBE_FILLER_RATIO}
+ *
+ * 实测重复中文被分词器压缩到 56%（见该常量的表）。不补偿的话，
+ * "选 20k 档"实际只发 11k —— 那正是旧实现"金额说一套、体积做一套"的同一种病。
+ *
+ * @param {number} tokens 想让上游实际计算的 token 数
+ * @returns {string}
+ */
+export function probeFiller(tokens) {
+  // 16 个汉字的固定单元：可数、内容中性、不触发任何话题过滤
+  const unit = '请仔细阅读下面这段说明并记住要点';
+  const chars = Math.max(unit.length, Math.ceil(tokens / PROBE_FILLER_RATIO));
+  const times = Math.max(1, Math.ceil(chars / unit.length));
+  return unit.repeat(times);
+}
+
+/**
+ * 模型可用性探测 —— 用**真实体积**的请求判断该模型此刻能不能用。
+ *
+ * ## 与旧实现的关键差别
+ *
+ * 旧版发 `hi`（约 21 token）就宣布"可用"。那在限流按体积判定的上游上是个
+ * **错误结论**：它只证明了"小请求能过"，而用户真正关心的是"我这个长对话能不能过"。
+ * 现在默认发 {@link DEFAULT_PROBE_INPUT_TOKENS} 个 token 的输入。
+ *
+ * ## 仍然保留 `max_tokens: 64`
+ *
+ * 不能给 1：推理模型会拒绝过小的输出预算（400 `model_param_invalid`），
+ * 把"模型还在"误判成"模型不可用"。64 是实测能过的最小安全值 ——
+ * 这一点与体积无关，是**输出**预算的约束。
+ *
+ * ## 返回里带上实测体积
+ *
+ * `inputTokens`（实际发出去的估算体积）与 `promptTokens`（上游回报的真实值）
+ * 都带出去：前者让用户知道这次体检"有多真"，后者是他们校准自己档位的依据。
+ * 二者不一致是正常现象（估算 vs 计费口径），**都如实给出，不做归一**。
+ *
+ * @param {string} model
+ * @param {{ timeoutMs?: number, inputTokens?: number }} [options]
+ */
+export async function probeModel(model, { timeoutMs = 30_000, inputTokens } = {}) {
   const started = Date.now();
+  const wantTokens = resolveProbeInputTokens(inputTokens);
+  const filler = probeFiller(wantTokens);
   try {
     const res = await fetch(config.bridge.chatUrl, {
       method: 'POST',
@@ -231,35 +403,52 @@ export async function probeModel(model, timeoutMs = 20000) {
         // 首条必须是 system：国际版网关会以 400 code 11128 拒绝纯 user 开头的请求
         messages: [
           { role: 'system', content: 'You are a helpful assistant.' },
-          { role: 'user', content: 'hi' },
+          { role: 'user', content: filler },
         ],
-        // 不能给 1：推理模型会拒绝过小的输出预算（400 model_param_invalid），
-        // 把"模型还在"误判成"模型不可用"。64 是实测能过的最小安全值。
         max_tokens: 64,
         stream: false,
       }),
       signal: AbortSignal.timeout(timeoutMs),
     });
     const ms = Date.now() - started;
+    /*
+     * 失败时也要带出 `inputTokens`：用户需要知道"这次失败发生在多大体积上"。
+     * 20 token 失败与 20k token 失败是两种完全不同的问题（前者模型没了，
+     * 后者可能只是被限流），只看 `ok:false` 分不出来。
+     */
     if (!res.ok) {
       const text = (await res.text().catch(() => '')).slice(0, 240);
-      return { model, ok: false, ms, error: `HTTP ${res.status}${text ? ` · ${text}` : ''}` };
+      return { model, ok: false, ms, inputTokens: wantTokens, error: `HTTP ${res.status}${text ? ` · ${text}` : ''}` };
     }
     const body = await res.json().catch(() => null);
     const content = body?.choices?.[0]?.message?.content;
     // 上游在 usage 里回报本次实际扣减的积分，可用于实测倍率
     const credit = body?.usage?.credit;
     const tokens = body?.usage?.total_tokens;
+    const promptTokens = body?.usage?.prompt_tokens;
     return {
       model,
       ok: true,
       ms,
+      /*
+       * `inputTokens` = 我们**打算**发多大（估算）；`promptTokens` = 上游**实际**
+       * 算了多少。两者并存是刻意的：估算与计费口径本就不同（中文按字、英文按
+       * 字符），只报一个都会让人误以为另一个"错了"。
+       */
+      inputTokens: wantTokens,
+      ...(typeof promptTokens === 'number' ? { promptTokens } : {}),
       sample: String(content ?? '').slice(0, 30),
       ...(typeof credit === 'number' ? { credit } : {}),
       ...(typeof tokens === 'number' ? { tokens } : {}),
     };
   } catch (err) {
-    return { model, ok: false, ms: Date.now() - started, error: String(err.message || err).slice(0, 240) };
+    return {
+      model,
+      ok: false,
+      ms: Date.now() - started,
+      inputTokens: wantTokens,
+      error: String(err.message || err).slice(0, 240),
+    };
   }
 }
 
