@@ -3114,6 +3114,137 @@ test('桥：6004 账号用量上限 —— 不等待重试、按 insufficient_qu
   }
 });
 
+test('桥：已知配额耗尽后，下一个请求不再白撞上游（快速拒绝）', { timeout: 90_000 }, async () => {
+  /*
+   * 实测缺口（2026-11-07，假上游）：第 1 次被 6004 拒，`/health` 立刻报出
+   * resetAt（数小时后）。第 2 次请求仍被原样发往上游、又吃一次同样的 6004 ——
+   * 那一个往返是**纯浪费**，因为结果在发出前就已经确定。
+   *
+   * 根因：桥把 6004 / 11140 记进内存表，但那些表**只被 `rateLimitSummary()` 读**
+   * （供 /health 展示），请求路径从不看它们。
+   *
+   * 现在：命中「已知失败且有未来恢复时刻」就直接拒，不打上游。
+   * 报文必须**明说自己没打上游** —— 不能让用户以为这是刚被上游拒的。
+   */
+  const resetAtMs = Math.floor((Date.now() + 20 * 3_600_000) / 1000) * 1000;
+  const resetWall = new Date(resetAtMs + 8 * 3_600_000);
+  const pad = (n) => String(n).padStart(2, '0');
+  const resetStamp = `${resetWall.getUTCFullYear()}-${pad(resetWall.getUTCMonth() + 1)}-${pad(resetWall.getUTCDate())}`
+    + ` ${pad(resetWall.getUTCHours())}:${pad(resetWall.getUTCMinutes())}:${pad(resetWall.getUTCSeconds())}`;
+  const stub = await startStubUpstream(['known-model'], {
+    chatSequence: [{
+      status: 429,
+      type: 'application/json',
+      raw: JSON.stringify({
+        code: 6004,
+        msg: `usage exceeds frequency limit, your usage will reset at ${resetStamp} UTC+8`,
+      }),
+    }],
+  });
+  const bridge = await startBridge({
+    CODEBUDDY_ENDPOINT: stub.base,
+    WORKBUDDY_SKIP_MODEL_PREFLIGHT: '1',
+  }, { auth: READABLE_FAKE_AUTH });
+  const hits = () => stub.seen.filter((x) => JSON.parse(x.body || '{}').model === 'known-model').length;
+  const send = () => fetch(bridge.baseUrl + '/v1/chat/completions', {
+    method: 'POST',
+    headers: { ...auth, 'content-type': 'application/json' },
+    body: JSON.stringify({ model: 'known-model', messages: [{ role: 'user', content: 'hi' }], max_tokens: 8 }),
+    signal: AbortSignal.timeout(20_000),
+  });
+  try {
+    // ── 第 1 次：真的打上游，被 6004 拒 ──
+    const first = await send();
+    const firstBody = await first.json();
+    assert.equal(first.status, 429);
+    assert.equal(firstBody.error?.code, 6004);
+    assert.equal(hits(), 1, '第 1 次必须真的打上游');
+
+    // ── 第 2 次：同一账号同一模型，已确认不可用 ──
+    const t0 = Date.now();
+    const second = await send();
+    const secondBody = await second.json();
+    const elapsed = Date.now() - t0;
+
+    assert.equal(hits(), 1, '★ 已知配额耗尽后不得再打上游');
+    assert.equal(second.status, 429, '状态码仍如实反映"用不了"');
+    assert.equal(secondBody.error?.type, 'insufficient_quota',
+      '分类必须与真实拒绝一致，客户端才会按"等重置/换号"处理');
+    assert.equal(secondBody.error?.code, 6004, 'code 也要一致，便于对照');
+    assert.ok((secondBody.error?.message || '').includes('未发往上游'),
+      `报文必须明说没打上游，否则用户会以为是刚被上游拒的：${secondBody.error?.message}`);
+    assert.ok(elapsed < 2000, `快速拒绝不该慢（实际 ${elapsed}ms）`);
+
+    /*
+     * 账本必须把这次也记成"配额、不可重试、等重置" —— 与真实被上游拒绝时
+     * **完全一致**。这证明快速拒绝只是省掉了网络往返，没有改变下游语义。
+     */
+    await new Promise((r) => setTimeout(r, 100));
+    const ledger = readFileSync(join(bridge.dir, 'usage.jsonl'), 'utf8')
+      .trim().split('\n').map((line) => JSON.parse(line));
+    const last = ledger.at(-1);
+    assert.equal(last.failureKind, 'quota', '账本仍按额度归因');
+    assert.equal(last.retryable, false, '仍标记为不可重试');
+    assert.equal(last.failureAction, 'wait-reset', '动作仍是等重置');
+  } finally {
+    await bridge.stop();
+    stub.close();
+    rmSync(bridge.dir, { recursive: true, force: true });
+  }
+});
+
+test('桥：没有恢复时刻的瞬时 429 不能被"已知失败"拦下（否则一次抖动变成自我封锁）', { timeout: 90_000 }, async () => {
+  /*
+   * 这是上一条的**反向护栏**，比正例更重要。
+   *
+   * 「已知失败快速拒绝」只对"上游给了明确恢复时刻"的失败成立。
+   * 若把无 resetAt 的瞬时 429 也拦下来，那么一次偶发限流会让桥在接下来
+   * 一段时间里对**所有**同类请求直接拒 —— 用户明明额度充足却完全用不了，
+   * 而且完全无法自行恢复。那是比"多一个往返"严重得多的故障。
+   *
+   * 判据 therefore 是 resetAt > now：解析不出时刻 ⇒ 不拒。
+   */
+  const stub = await startStubUpstream(['transient-model'], {
+    chatSequence: [
+      { status: 429, type: 'application/json', raw: JSON.stringify({ code: 14003, msg: 'too many requests' }) },
+      {
+        status: 200,
+        type: 'text/event-stream',
+        raw: 'data: {"id":"x","object":"chat.completion.chunk","created":1,"model":"transient-model","choices":[{"index":0,"delta":{"role":"assistant","content":"ok"},"finish_reason":null}]}\n\n'
+          + 'data: {"id":"x","object":"chat.completion.chunk","created":1,"model":"transient-model","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":1,"total_tokens":4}}\n\n'
+          + 'data: [DONE]\n\n',
+      },
+    ],
+  });
+  const bridge = await startBridge({
+    CODEBUDDY_ENDPOINT: stub.base,
+    WORKBUDDY_SKIP_MODEL_PREFLIGHT: '1',
+  }, { auth: READABLE_FAKE_AUTH });
+  const hits = () => stub.seen.filter((x) => JSON.parse(x.body || '{}').model === 'transient-model').length;
+  const send = () => fetch(bridge.baseUrl + '/v1/chat/completions', {
+    method: 'POST',
+    headers: { ...auth, 'content-type': 'application/json' },
+    body: JSON.stringify({ model: 'transient-model', messages: [{ role: 'user', content: 'hi' }], max_tokens: 8 }),
+    signal: AbortSignal.timeout(20_000),
+  });
+  try {
+    const first = await send();
+    await first.text();
+    assert.equal(first.status, 429);
+    assert.equal(hits(), 1);
+
+    // 第 2 次必须**照常打上游**，并拿到那条 200
+    const second = await send();
+    const secondText = await second.text();
+    assert.equal(hits(), 2, '★ 无 resetAt 的瞬时 429 不得触发快速拒绝');
+    assert.equal(second.status, 200, `第 2 次应正常成功，实际 ${second.status}：${secondText.slice(0, 160)}`);
+  } finally {
+    await bridge.stop();
+    stub.close();
+    rmSync(bridge.dir, { recursive: true, force: true });
+  }
+});
+
 test('桥：14018 积分耗尽也不能落成可重试的瞬时限流', { timeout: 90_000 }, async () => {
   /*
    * 14018（Credits exhausted）是**确定的账号额度耗尽**，与 6004 同一类：

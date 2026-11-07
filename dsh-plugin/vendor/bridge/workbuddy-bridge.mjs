@@ -5432,6 +5432,75 @@ function noteQuotaReset(auth, model, text, now = Date.now()) {
   }
 }
 
+/**
+ * 查「这个账号 + 这个模型」是不是已经处在**已知的、短期内不会恢复**的失败里。
+ *
+ * ## 为什么需要它（实测缺口）
+ *
+ * 桥早就把 6004 配额上限、11140 账号风控记进了 `quotaResetStats` /
+ * `accountRestrictedStats`，但那些表**只在 `rateLimitSummary()` 里被读** ——
+ * 也就是只用于 `/health` 展示。请求路径从不查它们。
+ *
+ * 实测（假上游，2026-11-07）：第 1 次请求被 6004 拒，`/health` 立刻报出
+ * `resetAt=2026-11-30`（即"这个账号到月底都废了"）；第 2 次请求仍被原样发往
+ * 上游、又吃一次同样的 6004。那个往返是**纯浪费**：结果在发出前就已经知道。
+ *
+ * ## 只对"等待能解决问题"的失败生效
+ *
+ * 只在**上游给了明确恢复时刻、且还没到**时才拒。理由是这三类的区别：
+ *   · 6004 配额上限 → 上游写了重置时刻 → 到点前发多少次都是同一个答案；
+ *   · 11140 账号风控 → 同样账号级、等待才有出路；
+ *   · 瞬时 429 / 模型繁忙 → **不进这里**（它们由 opt-in 的等待与切号处理，
+ *     把它们也拒掉会让一次偶发限流变成一个长达十分钟的自我封锁）。
+ *
+ * 没解析出 `resetAt` 的一律**不拒**：没有恢复时刻就没有依据说"现在发了也白发"。
+ *
+ * @param {{ source?: string, uid?: string, userId?: string } | null} auth
+ * @param {string} model
+ * @param {number} [now]
+ * @returns {{ reason: string, resetAt: number } | null}
+ */
+/**
+ * 造一个与真实上游**同形**的响应（`shimResponse` 的形状），供"已知失败快速拒绝"用。
+ *
+ * 为什么必须同形、而不是直接在上层写一个 `json(res, 429, …)`：
+ * `callUpstream()` 的返回被三条协议（chat / messages / responses）共用，
+ * 下游还要走账本、错误分类、`x-should-retry` 头、协议翻译。
+ * 只要形状一致，**下游逻辑一行都不用改** —— 它根本不知道这个响应没经过网络。
+ *
+ * @param {number} status
+ * @param {string} bodyString 上游格式的 JSON（`{code,msg}`），让分类器走同一条路
+ * @param {Record<string,string>} [extraHeaders]
+ */
+function syntheticUpstreamResponse(status, bodyString, extraHeaders = {}) {
+  const buf = Buffer.from(String(bodyString), 'utf8');
+  return {
+    ok: false,
+    status,
+    headers: { 'content-type': 'application/json', ...extraHeaders },
+    text: async () => String(bodyString),
+    body: new ReadableStream({
+      start(controller) {
+        controller.enqueue(buf);
+        controller.close();
+      },
+    }),
+  };
+}
+
+function knownUnavailable(auth, model, now = Date.now()) {
+  const key = rateLimitKey(auth, model);
+  const quota = quotaResetStats.get(key);
+  if (quota && quota.resetAt && quota.resetAt > now) {
+    return { reason: 'quota', resetAt: quota.resetAt };
+  }
+  const restricted = accountRestrictedStats.get(key);
+  if (restricted && restricted.resetAt && restricted.resetAt > now) {
+    return { reason: 'account_restricted', resetAt: restricted.resetAt };
+  }
+  return null;
+}
+
 /** 账号风控（11140）：账号级，开启自动切号时一次即切。 */
 const accountRestrictedStats = new Map();
 /** 模型繁忙（14003/6003）：模型级，仅展示，不参与账号切号。 */
@@ -5705,6 +5774,54 @@ async function callUpstream(bodyString, model, conversationId, clientSignal, { s
       throw error;
     }
   };
+
+  /*
+   * ## 已知失败：直接拒，不再打上游（实测缺口，2026-11-07）
+   *
+   * 桥早就把 6004 配额上限 / 11140 账号风控记进了内存表，但那些表**只被
+   * `rateLimitSummary()` 读**（供 `/health` 展示）—— 请求路径从不看它们。
+   *
+   * 实测（假上游）：第 1 次被 6004 拒，`/health` 立刻报出 `resetAt=2026-11-30`，
+   * 即"这个账号到月底都废了"；第 2 次请求仍被原样发往上游、又吃一次同样的 6004。
+   * 那一个往返是**纯浪费** —— 结果在发出前就已经确定。
+   *
+   * 只在「上游给了明确恢复时刻且还没到」时才拒（见 `knownUnavailable` 的注释）：
+   * 瞬时 429 / 模型繁忙不在此列，把它们也拒掉等于把一次偶发限流变成自我封锁。
+   */
+  const known = knownUnavailable(auth, model);
+  if (known) {
+    const when = new Date(known.resetAt).toISOString();
+    log(`known failure (${known.reason}) — skipping upstream until ${when}`);
+    /*
+     * 报文用上游的 `{code,msg}` 形状，让分类器产出与真实拒绝**完全一样**的
+     * `type` / `code`（6004 → insufficient_quota，11140 → account_restricted）。
+     * 措辞里明确说"这是记忆中的结论"，而不是伪装成刚刚被拒 ——
+     * 用户看到的是可据以行动的信息（何时恢复），不是一次假装的失败。
+     */
+    const code = known.reason === 'account_restricted' ? 11140 : 6004;
+    const body = JSON.stringify({
+      code,
+      msg: `该账号在此模型上已确认不可用（恢复时间 ${when}），本次请求未发往上游` ,
+    });
+    /*
+     * ⚠️ 必须返回 `{ res, bodyText, upstreamStartedAt }` 这层**包装**，
+     * 不能直接返回裸响应：`callUpstreamWithChannelFallback` 的 `readFailure()`
+     * 读的是 `attempt.res.ok`。直接返回裸响应会得到
+     * `Cannot read properties of undefined (reading 'ok')` → 500，
+     * 而那个 500 看起来像"桥坏了"，掩盖了真正的原因（实测踩过一次）。
+     */
+    return {
+      /*
+       * 刻意**不加自定义响应头**：桥会重建给客户端的响应头（安全头 +
+       * `deterministicErrorHeaders`），上游头并不透传 —— 加了也不会到达客户端，
+       * 那就是死代码。可判读的信息全部放在 `msg` 里（见下），
+       * 面板/账本读报文即可，不需要第二套信号。
+       */
+      res: syntheticUpstreamResponse(429, body),
+      bodyText: body,
+      upstreamStartedAt: upEnter,
+    };
+  }
 
   let res = await attemptWithStaleRetry(auth);
   if (auth.source !== 'api-key' && (res.status === 401 || res.status === 403) && auth.refresh) {
