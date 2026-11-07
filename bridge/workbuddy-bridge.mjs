@@ -37,6 +37,10 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { spawn } from 'node:child_process';
 import { waitDrain } from './wait-drain.mjs';
 import { applyPromotion, groupPromotions } from './promotions.mjs';
+import {
+  BUSY_TTL_MS, BUSY_TIMEOUT_MS,
+  fetchBusyLevels, probeableModelIds, busyLabel, isBusyLevel,
+} from './busy.mjs';
 import { submitVideo, queryVideo, MioraVideoError, MAX_VIDEO_WAIT_MS } from './miora-video.mjs';
 import { submitImage, queryImage } from './miora-image.mjs';
 import { configureSubmissionStore, isFailedMediaStatus, isTerminalMediaStatus, publicHttpsUrl } from './miora-media-core.mjs';
@@ -9844,6 +9848,142 @@ let catalogNextRetryAt = 0;
 let catalogGeneration = 0;
 
 /**
+ * 模型拥堵等级缓存（`POST /v2/chat/busy`，实现见 `busy.mjs`）。
+ *
+ * ## 为什么单独一份缓存，而不是塞进 `catalogCache.models`
+ *
+ * 目录是**可以落盘、可以活过重启**的事实（模型 id、价格、上下文长度），
+ * 而拥堵是**这一分钟**的事实。混在一起会让人把"上次运行时的负载"当成现在的，
+ * 于是用户看着一个"空闲"的徽标去选模型、然后被 429。
+ *
+ * 所以这里只放内存，TTL 也很短（`BUSY_TTL_MS`）。`/health` 与 `/v1/models`
+ * 在**输出时**才把它并进响应，磁盘上没有它的任何副本。
+ *
+ * ## 失败是常态，不是异常
+ *
+ * 国际区上游根本没有这个端点（实测 404，同一凭据读 `/v3/config` 正常）。
+ * 所以探测失败只记一行日志、保留上一份数据（若还没过期），
+ * **绝不影响目录与 `/health` 的可用性**。
+ */
+let busyCache = {
+  /** 上次成功探测的时刻 */
+  at: 0,
+  /** modelId → 等级 */
+  levels: new Map(),
+  /** 上次失败的原因（诊断用；成功时清空） */
+  error: '',
+  /** 上次失败的时刻 */
+  errorAt: 0,
+  /** 实测里是否确认过"这个区域没有这个端点"——有的话就别每轮都问 */
+  unsupported: false,
+};
+/** 在飞的探测（并发调用合并成一次）。 */
+let busyRefreshing = null;
+
+/**
+ * 探测一次模型拥堵；并发合并，失败降级。
+ *
+ * @param {{ force?: boolean }} [options] `force` 忽略 TTL（手动刷新时用）
+ * @returns {Promise<void>} 永不 reject —— 失败只更新缓存里的 error
+ */
+function refreshBusyLevels({ force = false } = {}) {
+  if (busyRefreshing) return busyRefreshing;
+  if (busyCache.unsupported && !force) return Promise.resolve();
+  const age = Date.now() - busyCache.at;
+  if (!force && age < BUSY_TTL_MS) return Promise.resolve();
+
+  const modelIds = probeableModelIds(catalogCache.models);
+  if (!modelIds.length) return Promise.resolve();
+
+  busyRefreshing = (async () => {
+    let auth = await resolveAuth();
+    const doFetch = async (path, { body }) => {
+      let res = await fetch(`${auth.endpoint}${path}`, {
+        method: 'POST',
+        headers: buildCatalogHeaders(auth),
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(BUSY_TIMEOUT_MS),
+      });
+      // 令牌过期：刷新一次再试（与目录同一条链路口径）
+      if (res.status === 401 || res.status === 403) {
+        const refreshed = await refreshAuth(auth).catch(() => null);
+        if (refreshed) {
+          auth = refreshed;
+          res = await fetch(`${auth.endpoint}${path}`, {
+            method: 'POST',
+            headers: buildCatalogHeaders(auth),
+            body: JSON.stringify(body),
+            signal: AbortSignal.timeout(BUSY_TIMEOUT_MS),
+          });
+        }
+      }
+      const text = await res.text().catch(() => '');
+      let json = null;
+      try { json = JSON.parse(text); } catch { /* 非 JSON：交给上层判 ok */ }
+      return { ok: res.ok, status: res.status, json, text };
+    };
+
+    try {
+      const { levels } = await fetchBusyLevels({ fetchJson: doFetch, modelIds });
+      busyCache = {
+        at: Date.now(),
+        levels,
+        error: '',
+        errorAt: 0,
+        unsupported: false,
+      };
+      const counts = {};
+      for (const level of levels.values()) counts[level] = (counts[level] || 0) + 1;
+      log('busy probe ok', `${levels.size} models`, JSON.stringify(counts));
+    } catch (error) {
+      const status = Number(error?.status) || 0;
+      /*
+       * 404/400 = 这个区域没有这个端点。**记住**它，别每轮刷新都白打一次
+       * （国际区每次都是 404；不记住的话每次目录刷新都多一个无用往返）。
+       * 但 `force` 会忽略这个记忆 —— 上游哪天补上了，用户点一次刷新就能拿到。
+       */
+      /*
+       * ⚠️ 失败时必须**清空旧等级**，只保留"这次失败了"这件事。
+       *
+       * 拥堵是"这一分钟"的事实。保留上一轮的值会让用户看着一个几分钟前的
+       * 「空闲」去选模型 —— 那比不显示更糟，因为它看起来是当前数据。
+       * 这与目录缓存的策略**刻意相反**：目录陈旧还有价值（至少模型还在），
+       * 负载陈旧就是误导。`at` 归零后 `currentBusyLevels()` 会如实报
+       * `ageMs: -1`，面板显示「—」。
+       *
+       * 实测过：探针从中断恢复后如果沿用旧 map，`/v1/load` 会一边报错
+       * 一边给出三个"当前等级"，而它们其实来自上一次成功。
+       */
+      busyCache = {
+        at: 0,
+        levels: new Map(),
+        error: String(error?.message || error),
+        errorAt: Date.now(),
+        unsupported: status === 404 || status === 400,
+      };
+      log('busy probe failed', busyCache.error, busyCache.unsupported ? '(region has no busy endpoint)' : '');
+    }
+  })().finally(() => { busyRefreshing = null; });
+  return busyRefreshing;
+}
+
+/**
+ * 当前的拥堵数据（给输出层用）。
+ * @returns {{ at: number, ageMs: number, stale: boolean, levels: Map<string,string>, error: string, unsupported: boolean }}
+ */
+function currentBusyLevels() {
+  const age = busyCache.at ? Date.now() - busyCache.at : Infinity;
+  return {
+    at: busyCache.at,
+    ageMs: Number.isFinite(age) ? age : -1,
+    stale: busyCache.at > 0 && age >= BUSY_TTL_MS,
+    levels: busyCache.levels,
+    error: busyCache.error,
+    unsupported: busyCache.unsupported,
+  };
+}
+
+/**
  * 换号 / 换凭据来源后，模型目录可能属于另一个账号或另一个区域：清空并后台重取。
  * 不能在旧目录上继续做预校验，否则会把新账号可用的模型误杀。
  */
@@ -10400,6 +10540,14 @@ async function fetchCatalog(generation = catalogGeneration) {
         // 原始计数留在诊断口径里，/health 的 upstreamShape 能直接看到
         upstreamModelsSeen: upstreamModelCount,
       };
+      /*
+       * 目录到手后**后台**探一次拥堵（fire-and-forget）。
+       *
+       * 绝不能 await：负载数据回答的是"现在"，而目录是"有哪些" —— 让目录刷新
+       * 等一个负载探针，等于让可用性最好的那条路径去陪跑。探到之后由
+       * `currentBusyLevels()` 在输出层并进响应。
+       */
+      refreshBusyLevels().catch(() => {});
       }
     } else if (hardError) {
       catalogNextRetryAt = Date.now() + CATALOG_RETRY_MS;
@@ -11780,6 +11928,34 @@ async function handleRequest(req, res) {
         auth,
         // 最近 10 分钟「最终返回给客户端的 429」按账号+模型计数（runtime only）
         rateLimit: rateLimitSummary(auth ? { source: auth.source, uid: auth.userId } : null),
+        /*
+         * 拥堵：**主动探测**到的当前负载（`POST /v2/chat/busy`，见 busy.mjs）。
+         *
+         * 与 `rateLimit.modelBusy` 是两件事，刻意分开放：
+         *   - `rateLimit.modelBusy`：从真实的 429 里学到的"刚才是哪个模型忙"（事后）
+         *   - `load`              ：现在各个模型挤不挤（事前探测，30 秒 TTL）
+         * 面板该同时显示两者：一个回答"为什么刚才失败"，一个回答"现在该选谁"。
+         *
+         * 区域没有这个端点时只有 `unsupported: true` —— 绝不编造等级。
+         */
+        load: (() => {
+          const snapshot = currentBusyLevels();
+          const counts = {};
+          for (const level of snapshot.levels.values()) counts[level] = (counts[level] || 0) + 1;
+          const warnings = [...snapshot.levels.entries()]
+            .filter(([, level]) => isBusyLevel(level))
+            .map(([model, level]) => ({ model, level, label: busyLabel(level) }));
+          return {
+            at: snapshot.at ? new Date(snapshot.at).toISOString() : '',
+            ageMs: snapshot.ageMs,
+            stale: snapshot.stale,
+            known: snapshot.levels.size,
+            counts,
+            warnings,
+            ...(snapshot.unsupported ? { unsupported: true } : {}),
+            ...(snapshot.error ? { error: snapshot.error } : {}),
+          };
+        })(),
         authFile: AUTH_PATH,
         ...(AUTH_PATH !== AUTH_PINNED_PATH ? { authFilePinned: AUTH_PINNED_PATH, authFollow: true } : {}),
         credential,
@@ -12027,6 +12203,52 @@ async function handleRequest(req, res) {
       return json(res, 200, { ok: true });
     }
 
+    /*
+     * `GET /v1/load` —— 当前各模型的拥堵程度（只读、免费）。
+     *
+     * 为什么单独开一个端点而不是只塞在 /v1/models 里：
+     *   1. 拥堵的 TTL（30s）比目录（5min）短得多，把两者绑在一起会让用户
+     *      要么拿到过期负载、要么为了刷新负载把整份目录也重取一遍；
+     *   2. 面板/CLI 想显示"现在挤不挤"时不需要模型清单；
+     *   3. `?refresh=1` 的语义干净：只强制重探负载。
+     *
+     * 区域没有这个端点时（国际区实测 404）返回 200 + `unsupported: true`，
+     * **不是错误** —— 那不是调用方的问题，也不该让面板显示一个红叉。
+     */
+    if (url.pathname === '/v1/load') {
+      const wantRefresh = url.searchParams.get('refresh') === '1';
+      if (wantRefresh || !busyCache.at) {
+        // 冷启动时目录可能还没取过：先确保有模型 id 可问
+        if (!catalogCache.models.length) {
+          await refreshCatalog().catch(() => {});
+        }
+        await refreshBusyLevels({ force: wantRefresh }).catch(() => {});
+      }
+      const snapshot = currentBusyLevels();
+      const models = [];
+      for (const [model, level] of snapshot.levels) {
+        models.push({
+          model,
+          level,
+          label: busyLabel(level),
+          warning: isBusyLevel(level),
+        });
+      }
+      // 忙的排前面：面板/CLI 最想知道"哪些现在别选"
+      models.sort((a, b) => Number(b.warning) - Number(a.warning));
+      return json(res, 200, {
+        ok: true,
+        at: snapshot.at ? new Date(snapshot.at).toISOString() : '',
+        ageMs: snapshot.ageMs,
+        stale: snapshot.stale,
+        ttlMs: BUSY_TTL_MS,
+        known: snapshot.levels.size,
+        models,
+        ...(snapshot.unsupported ? { unsupported: true } : {}),
+        ...(snapshot.error ? { error: snapshot.error } : {}),
+      });
+    }
+
     if (url.pathname === '/v1/models') {
       const all = url.searchParams.get('all') === '1';
       // refresh=1：强制重取上游目录。失败**不清空旧缓存**——宁可给一份标了
@@ -12092,6 +12314,14 @@ async function handleRequest(req, res) {
       // 促销是否生效按“现在”算，而不是目录抓取那一刻：夜间免费/折扣在
       // 23:00、08:00 切换时，只要客户端重新拉目录就能看到新价格。
       const promoNow = new Date();
+      /*
+       * 拥堵等级（这一分钟的事实，不落盘）。
+       *
+       * 只在**输出时**并入：目录条目本身不带它，所以它不会有磁盘副本 ——
+       * 一个能活过重启的"空闲"徽标就是假话。
+       * 探针没答的模型保持不出现该字段（`unknown` 是上游的明确回答，不混为一谈）。
+       */
+      const busySnapshot = currentBusyLevels();
       const list = models.map((m) => {
         const promo = applyPromotion({
           baseCredits: creditsOf(m),
@@ -12129,6 +12359,13 @@ async function handleRequest(req, res) {
           object: 'model',
           created: Math.floor(Date.now() / 1000),
           owned_by: 'workbuddy',
+          ...(busySnapshot.levels.get(m.id) && busySnapshot.levels.get(m.id) !== 'unknown'
+            ? {
+              busy_level: busySnapshot.levels.get(m.id),
+              busy_label: busyLabel(busySnapshot.levels.get(m.id)),
+              ...(isBusyLevel(busySnapshot.levels.get(m.id)) ? { busy_warning: true } : {}),
+            }
+            : {}),
           ...(m.name ? { name: m.name } : {}),
           ...(contextWindow ? { context_window: contextWindow } : {}),
           // 官方 GUI 的上下文档位（默认 + 可选）；dsh 只消费 context_window，

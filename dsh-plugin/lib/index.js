@@ -36,7 +36,7 @@ import { fileURLToPath } from 'node:url';
 
 import { BridgeClient, BridgeSupervisor, BRIDGE_SCRIPT_REL } from './bridge.mjs';
 import { ConsoleSupervisor } from './console.mjs';
-import { failoverSignal, pickAccountFailoverTarget } from '../vendor/lib/failover.mjs';
+import { failoverSignal, pickAccountFailoverTarget, pickFailoverTarget } from '../vendor/lib/failover.mjs';
 import { WorkBuddyAdapter } from './adapter.mjs';
 import { toDirectory, pickDefaultModel } from './models.mjs';
 import { createTools } from './tools.mjs';
@@ -2497,7 +2497,7 @@ export function apply(ctx, rawConfig = {}) {
         signal: AbortSignal.timeout(10_000),
       })
         .then((r) => r.json()).catch(() => null);
-      const target = pickAccountFailoverTarget(listed?.accounts, health?.auth?.userId || '');
+      const target = pickFailoverTarget(listed?.accounts, health?.auth?.userId || '');
       const why = signal.reason === 'quota'
         ? `账号用量已达上限（${signal.model || '?'}${signal.resetAt ? `，上游提示 ${signal.resetAt} 重置` : ''}）`
         : signal.reason === 'account_restricted'

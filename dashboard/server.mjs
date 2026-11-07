@@ -62,7 +62,7 @@ import {
   verifyWritten,
 } from '../lib/client-connect.mjs';
 import { effectiveAuthFile, readState, writeAccountAlias, writeAccountHidden, writeAccountOrder, writeState, writeStateStrict } from '../lib/state.mjs';
-import { failoverSignal, pickAccountFailoverTarget } from '../lib/failover.mjs';
+import { failoverSignal, pickAccountFailoverTarget, pickFailoverTarget } from '../lib/failover.mjs';
 
 // ── 基础工具 ────────────────────────────────────────────────────────────
 
@@ -1022,7 +1022,7 @@ async function maybeAutoSwitchAccount() {
     if (!signal) return;
     lastAccountFailoverAt = Date.now();
     const listed = await listAccounts();
-    const target = pickAccountFailoverTarget(listed.accounts, health.body?.auth?.userId || '');
+    const target = pickFailoverTarget(listed.accounts, health.body?.auth?.userId || '');
     const why = signal.reason === 'quota'
       ? `账号用量已达上限（${signal.model || '?'}${signal.resetAt ? `，上游提示 ${signal.resetAt} 重置` : ''}）`
       : signal.reason === 'account_restricted'
@@ -2069,8 +2069,64 @@ const server = createServer(async (req, res) => {
        */
       const pin = await reconcileAccountPin();
       const correction = await applyAccountPinCorrection(pin);
+      const listed = await listAccounts();
+      /*
+       * 给账号条目附上**积分包**，供切号排序判断"有没有临期积分"。
+       *
+       * ## 三条约束（每条都关系到这个接口能不能用）
+       *
+       * 1. **只取一次，且只给"正在服务"的那个账号**：`/v1/quota` 走的是当前登录
+       *    凭据，要给别的账号取就得多起 N 次桥 —— 代价远超"省下几笔临期积分"，
+       *    而且这条路径绝不能停桥。
+       * 2. **并行，不串行**：quota 与 health 互不依赖。串行时最坏是 8s + 8s，
+       *    而这个接口是 8 秒轮询的 —— 一次慢请求会叠加下一次，越拖越长。
+       * 3. **任何失败都不影响主响应**：这是附加信息，不是接口的语义。失败就不设
+       *    这个字段（而不是给空数组）：`expiringCredits()` 用 `known` 区分
+       *    "没有到期信息"与"零积分"，编一个空数组会把后者说成前者。
+       */
+      try {
+        /*
+         * 先花 1.2 秒确认桥活着，再决定要不要问它要数据。
+         *
+         * 为什么需要这一步：桥**没在跑**时，Windows 上连"连接被拒"都要等满
+         * 每个请求自己的超时（实测让首个 `/api/accounts` 拖到 4.5 秒）。而这条
+         * 接口是 8 秒轮询的，一次慢请求会与下一次叠加。
+         * 一次快速探活把"桥不在"这个最常见的情况变成 1.2 秒内结束，
+         * 而不是等两个请求各自超时。
+         */
+        const alive = await bridgeHealth(1200);
+        if (alive?.running === true) {
+          const [quotaNow, health] = await Promise.all([
+            fetch(`${config.bridge.url}/v1/quota`, {
+              headers: { Authorization: `Bearer ${config.bridge.token}` },
+              signal: AbortSignal.timeout(5000),
+            }).then((r) => (r.ok ? r.json() : null)).catch(() => null),
+            /*
+             * 「正在服务的是哪个账号」以**桥自己的回答**为准，不用 `.state.json`
+             * 里的钉住项：桌面端换号后桥可能已经跟随到别的文件，钉住项会过期
+             * （与 `pickAccountFailoverTarget` 的注释同一条理由）。
+             */
+            Promise.resolve(alive.body || null),
+          ]);
+          const serving = String(health?.auth?.userId || '');
+          if (quotaNow && Array.isArray(quotaNow.packages) && Array.isArray(listed?.accounts)) {
+            for (const a of listed.accounts) {
+              if (!a || typeof a !== 'object') continue;
+              const id = String(a.userId || a.account || '');
+              if (id && serving && id === serving) a.quota = { packages: quotaNow.packages };
+            }
+          }
+        }
+      } catch (error) {
+        /*
+         * 附加信息拿不到 = 少一列数据，不是接口失败。
+         * 记一行日志便于排查，但**绝不能**让它变成 500 ——
+         * 面板的账号表会因为一行"积分包"而整块消失。
+         */
+        console.warn(`账号积分包附加失败（不影响账号列表）：${error?.message || error}`);
+      }
       sendJson(res, 200, {
-        ...(await listAccounts()),
+        ...listed,
         pin: {
           followedDesktop: pin.changed === true,
           reason: pin.reason || '',

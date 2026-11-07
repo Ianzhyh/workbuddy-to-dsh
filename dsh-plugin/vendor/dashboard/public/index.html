@@ -1236,6 +1236,31 @@ const I18N_EN = {
   'dsh': 'dsh',
   '可用性': 'Availability',
 
+  /*
+   * ---- 模型表的「拥堵」列 ----
+   *
+   * 标签用 Idle / Busy 而不是字面翻译「轻微拥堵」：这一列很窄，
+   * `Slightly congested` 会折行；完整含义放在 title 里。
+   * 「极度拥堵」保留 `Extremely congested` —— 那是最需要看清的一档。
+   */
+  '拥堵': 'Load',
+  '空闲': 'Idle',
+  // 刻意**不用**「正常」：本页 `'正常'` 在诊断报告那组里已定义为 Healthy
+  // （指桥是否健康），同一个中文 key 后定义会静默覆盖前面的。
+  // 这里说的是**模型负载**，用无歧义的词，语义也更准。
+  '负载正常': 'Normal load',
+  '轻微拥堵': 'Busy',
+  '极度拥堵': 'Extremely congested',
+  // '不可用' 在本表更早处已定义（账号可用性那组），不重复 ——
+  // 同一个中文 key 出现两次时，后者会静默覆盖前者，两处译文也可能漂移。
+  // 表头 title：完整口径说明（悬停可见，属于用户看得见的文案）
+  '上游 /v2/chat/busy 实时探测（只读免费）：空闲=现在选它最划算，轻度/极度拥堵=可能要等，不可用=现在别选。无数据=上游未回报或该区域没有此接口':
+    'Live probe from upstream /v2/chat/busy (read-only, free): Idle = best pick now, '
+    + 'Busy / Extremely congested = you may wait, Unavailable = avoid. '
+    + 'No data = upstream did not report it, or this region has no such endpoint',
+  '上游未回报该模型的负载，或本区域没有此接口':
+    'Upstream did not report load for this model, or this region has no such endpoint',
+
   // ---- 签到面板 ----
   '每日签到': 'Daily check-in',
   '今天已签': 'Signed in today',
@@ -6815,6 +6840,48 @@ const COPY_ICON = '<svg class="copyicon" viewBox="0 0 16 16" fill="none" stroke=
   + '<path d="M10.5 5.5V3.5a1 1 0 0 0-1-1h-6a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h2"/></svg>';
 
 /** 渲染模型表格（含工具栏）。只在数据变化时调用，避免冲掉用户操作。 */
+/**
+ * 拥堵单元格。
+ *
+ * 数据来自桥的 /v1/models.busy_level（上游 POST /v2/chat/busy 的实时探测）。
+ * 三条铁律，都来自"不能替上游编事实"：
+ *   1. 没有 busy_level → 显示「—」。**不显示「正常」**：那会把"没数据"
+ *      说成"一切良好"，而这两件事完全不同（国际区根本拿不到这个数据）。
+ *   2. unknown → 也显示「—」。上游明确说了"不知道"，同样不是一个负载结论。
+ *   3. normal 显示「正常」但用弱样式：它是真实结论，只是不需要用户做决定。
+ */
+/**
+ * 拥堵单元格。
+ *
+ * 数据来自桥的 /v1/models.busy_level（上游 POST /v2/chat/busy 的实时探测）。
+ *
+ * ## 四条铁律
+ *
+ * 1. **没有 busy_level → 显示「—」**。不显示「正常」：那会把"没数据"说成
+ *    "一切良好"，而这两件事完全不同（国际区根本拿不到这个数据）。
+ * 2. **unknown → 也显示「—」**。上游明确说了"不知道"，同样不是一个负载结论。
+ * 3. **文案由前端出，不用桥给的 `busy_label`**。桥回的是固定中文；直接用它会让
+ *    英文模式下这一列**永远是中文**（i18n 表按中文原文查表，桥的译名不在表里）。
+ *    所以这里只认 level，词从下面的表里取，写进 DOM 后由全局 i18n 翻译。
+ * 4. **`normal` 的文案用「负载正常」而不是「正常」**。本页 `'正常'` 这个 key
+ *    在诊断报告那组里已有另一个译文（Healthy，指桥的健康状态），同一个 key
+ *    后定义会静默覆盖前面的 —— 用更长、无歧义的词既避免冲突，语义也更准
+ *    （这里说的是模型负载，不是桥是否健康）。
+ */
+function renderBusy(m) {
+  const level = typeof m.busy_level === 'string' ? m.busy_level : '';
+  if (!level || level === 'unknown') {
+    return '<span class="busy-none" title="上游未回报该模型的负载，或本区域没有此接口">—</span>';
+  }
+  const cls = level === 'congested' || level === 'unavailable' ? 'fail'
+    : (level === 'busy' ? 'warn' : (level === 'idle' ? 'ok' : ''));
+  const text = {
+    idle: '空闲', normal: '负载正常', busy: '轻微拥堵', congested: '极度拥堵', unavailable: '不可用',
+  }[level] || level;
+  return '<span class="tag busy ' + cls + '" title="上游实时探测：' + escapeAttr(text) + '">'
+    + escapeAttr(text) + '</span>';
+}
+
 function renderModelTable(models, registered) {
   {
     // 整表即将重建：旧的详情行会一起消失，状态也要跟着清掉
@@ -6859,7 +6926,7 @@ function renderModelTable(models, registered) {
         '<td class="name" data-i18n-skip>' + escapeAttr(m.name || '—') + '</td>' +
         '<td class="mono num" title="' + escapeAttr(fmtNum(m.context_window || 0)) + '">' + escapeAttr(fmtCompact(m.context_window)) + '</td>' +
         '<td class="mono num" title="' + escapeAttr(fmtNum(m.max_output_tokens || 0)) + '">' + escapeAttr(fmtCompact(m.max_output_tokens)) + '</td>' +
-        '<td class="mono num">' + rateCell + '</td>' +
+        '<td class="mono num">' + rateCell + '</td>' +'<td class="busy">' + renderBusy(m) + '</td>' +
         '<td class="mono num" data-cost="' + escapeAttr(m.id) + '" title="正在计算…">—</td>' +
         '<td>' + (on ? '<span class="tag ok">已注册</span>' : '<span class="tag">未注册</span>') + '</td>' +
         '<td data-probe="' + escapeAttr(m.id) + '">' + renderProbe(m.id) + '</td>' +
@@ -6927,7 +6994,7 @@ function renderModelTable(models, registered) {
         '<span class="filterinfo" id="modelDefaultInfo"></span>' +
       '</div>' +
       '<div class="tablewrap" id="modelTableWrap"><table id="modelTable"><thead><tr>' +
-      '<th style="width:38px"></th><th>模型 id</th><th>显示名</th><th class="num">上下文</th><th class="num">最大输出</th><th class="num">倍率</th>'
+      '<th style="width:38px"></th><th>模型 id</th><th>显示名</th><th class="num">上下文</th><th class="num">最大输出</th><th class="num">倍率</th><th class="busy" title="上游 /v2/chat/busy 实时探测（只读免费）：空闲=现在选它最划算，轻度/极度拥堵=可能要等，不可用=现在别选。无数据=上游未回报或该区域没有此接口">拥堵</th>'
       + '<th class="num" title="账本最近 N 天：扣分合计 ÷ token 合计 × 1000，只含成功且回报了扣分的调用">实测成本</th><th>dsh</th>' +
       '<th class="th-probe" id="probeSortTh" title="点击切换排序：可用优先 / 耗时升序 / 耗时降序">可用性'
         + '<span class="sortmark" id="probeSortMark"></span> <span class="stamp" id="probeStamp"></span></th>' +

@@ -1615,6 +1615,24 @@ body.dark .wb-root,
       '勾选 = 出现在 dsh 的模型选择器里（保存后生效）': 'Checked = appears in the dsh model picker (takes effect after saving)',
       '上下文 / 输出': 'Context / output',
       '倍率': 'Rate',
+      /*
+       * 「拥堵」列的英文词条。
+       *
+       * 标签用 Idle / Busy 而不是字面翻译「轻微拥堵」：这一列很窄，
+       * `Slightly congested` 会折行；完整含义放在 title 里。
+       * 「极度拥堵」保留 `Extremely congested` —— 它是最需要看清的一档。
+       */
+      '拥堵': 'Load',
+      '空闲': 'Idle',
+      '正常': 'Normal',
+      '轻微拥堵': 'Busy',
+      '极度拥堵': 'Extremely congested',
+      // '不可用' 已在本表更早处（账号可用性那组）定义过，这里不再重复：
+      // 重复键会让 lint 的 no-dupe-keys 直接报错，而且两处译文可能漂移。
+      '上游 /v2/chat/busy 实时探测（只读免费）：空闲=现在选它最划算，轻度/极度拥堵=可能要等，不可用=现在别选。无数据=上游未回报或该区域没有此接口':
+        'Live probe from upstream /v2/chat/busy (read-only, free): Idle = best pick now, Busy / Extremely congested = you may wait, Unavailable = avoid. No data = upstream did not report it, or this region has no such endpoint',
+      '上游未回报该模型的负载，或本区域没有此接口': 'Upstream did not report load for this model, or this region has no such endpoint',
+      '上游实时探测': 'Live upstream probe',
       '体检': 'Probe',
       '已显示在 dsh 选择器': 'Shown in the dsh picker',
       '已隐藏（保存后 dsh 选择器不再出现）': 'Hidden (will disappear from the dsh picker after saving)',

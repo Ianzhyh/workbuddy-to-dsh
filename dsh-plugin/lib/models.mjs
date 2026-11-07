@@ -106,6 +106,42 @@ export function modelCostLabel(model) {
 }
 
 /**
+ * 拥堵徽标 —— 放在模型名后面的那几个字符（含前导空格），不该画时返回空串。
+ *
+ * ## 为什么值得画
+ *
+ * 「这个模型现在挤不挤」是选模型时最想知道的一件事，而目录里一个字都没有。
+ * 用户只能挑一个、等 429、再换 —— 徽标把这次失败**提前到选择之前**。
+ *
+ * ## 为什么只有几个字符
+ *
+ * DSH 的模型选择器把 `name` **逐字渲染**，没有单独的徽标槽位、不支持标记，
+ * 所以负载只能跟在名字后面。用字符而不是词：选择器很窄，写「轻微拥堵」
+ * 会让整行读起来像一句话（这条结论来自 dsh-connect-workbuddy 的实测）。
+ *
+ * ## 为什么大多数等级都不画
+ *
+ * 实测国内区 56 个模型里 18 个空闲、34 个 unknown。每一行都挂徽标就成了装饰，
+ * 用户会开始无视它。所以只画**需要用户做决定**的那些：
+ *   - `congested` / `busy` / `unavailable`：现在别选它
+ *   - `idle`：现在选它最划算（这是好消息，不是噪音）
+ * `normal` 不画 —— 那是健康默认值；`unknown` 更不画 —— 上游没说，不能替它说。
+ *
+ * @param {object} model 桥上 `/v1/models` 的一项
+ * @returns {string}
+ */
+export function modelBusyLabel(model) {
+  const level = typeof model?.busy_level === 'string' ? model.busy_level : '';
+  switch (level) {
+    case 'congested': return ' 🧍🧍🧍';
+    case 'busy': return ' 🧍🧍';
+    case 'unavailable': return ' 🚫';
+    case 'idle': return ' 🚀';
+    default: return '';
+  }
+}
+
+/**
  * 桥的一个模型对象翻译成 dsh 适配器的模型元数据。
  *
  * 能力字段来自桥 `/v1/models`（OpenAI 模型对象 + 项目自加的字段）：
@@ -131,6 +167,13 @@ export function toAdapterModel(model, options = {}) {
     : null;
   const baseName = String(model.name || id);
   const cost = modelCostLabel(model);
+  /*
+   * 拥堵徽标接在倍率之后：`GLM-5.3 · ×0.79 🧍🧍🧍`。
+   *
+   * 顺序是刻意的 —— 价格是**稳定**信息，拥堵是**这一分钟**的；把会变的那段
+   * 放最后，用户扫视时价格那一列仍然对得齐。
+   */
+  const busy = modelBusyLabel(model);
   const contextWindowDefault = Number(model.context_window_default) || undefined;
   const contextWindowMax = Number(model.context_window_max) || undefined;
   const contextWindowOptions = Array.isArray(model.context_window_options)
@@ -138,7 +181,7 @@ export function toAdapterModel(model, options = {}) {
     : undefined;
   return {
     id,
-    name: cost ? baseName + ' · ' + cost : baseName,
+    name: `${baseName}${cost ? ' · ' + cost : ''}${busy}`,
     ...(describeModel(model, options.contextWindow)
       ? { description: describeModel(model, options.contextWindow) }
       : {}),

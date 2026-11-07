@@ -1633,6 +1633,31 @@ button.tag { border-radius: var(--radius-sm); }
   color: var(--fail);
   border-color: var(--fail-border);
 }
+/*
+ * 拥堵标签（模型表的「拥堵」列）。
+ *
+ * 色板复用项目已有的 ok / warn / fail —— 不新增颜色，否则整页会出现第二套
+ * 语义色，用户得重新学一遍。语义映射：
+ *   idle      → ok   （现在选它最划算，是好消息）
+ *   normal    → 默认 grey（真实结论，但不需要你做决定）
+ *   busy      → warn （可能要等）
+ *   congested → fail （现在就别选）
+ *   unavailable → fail
+ * 没有数据 → .busy-none（一个「—」），**绝不用 grey 标签冒充「正常」**。
+ */
+.tag.busy {
+  /* 这一列在窄屏要能压到 4 个字：「极度拥堵」正好占满，不换行 */
+  white-space: nowrap;
+}
+td.busy {
+  /* 和倍率列同为数值侧栏，字号跟随表格正文 */
+  white-space: nowrap;
+}
+.busy-none {
+  color: var(--muted);
+  /* 破折号比文字轻：它表达"没有数据"，不该抢注意力 */
+  opacity: 0.7;
+}
 .tag.promo {
   background: var(--promo-soft);
   color: var(--promo);

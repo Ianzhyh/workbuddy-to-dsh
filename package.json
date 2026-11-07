@@ -26,6 +26,7 @@
     "bridge/miora-media-core.mjs",
     "bridge/wait-drain.mjs",
     "bridge/promotions.mjs",
+    "bridge/busy.mjs",
     "bridge/launch.mjs",
     "bridge/start-bridge.cmd",
     "bridge/start-bridge.sh",
