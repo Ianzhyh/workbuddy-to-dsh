@@ -3313,12 +3313,20 @@ function localDateStr(d = new Date()) {
   return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate());
 }
 
-/** 启动时把三类本地标记读回来。 */
+/** 启动时把本地标记读回来（三类原有标记 + 体检体积档位）。 */
 function initAlerts() {
   const ts = Number(lsGet('wb.failSeenTs', '0'));
   failSeenTs = Number.isFinite(ts) && ts > 0 ? ts : 0;
   tokenMuted = lsGet('wb.muted.token', '') === '1';
   checkinMutedDate = lsGet('wb.muted.checkin', '');
+  /*
+   * 体检体积档位：用户选 30k 通常是因为"我的真实对话就这么长"，
+   * 刷新一次就回默认等于替他把这个判断丢掉 —— 而且他不会注意到，
+   * 于是下一次体检会安静地按更小的体积跑。所以这个枚举值得记住。
+   * 只接受档位表里的值：旧版本遗留或被手改的非法值一律回默认。
+   */
+  const size = Number(lsGet(PROBE_SIZE_LS_KEY, ''));
+  if (PROBE_SIZE_CHOICES.includes(size)) probeInputTokens = size;
 }
 
 /**
@@ -3596,6 +3604,26 @@ const probePending = new Set();
 const probeDirty = new Set();
 /** 体检范围：'checked' | 'registered' | 'all'。默认「有勾选就测勾选的」。 */
 let probeScope = 'checked';
+/**
+ * 体检体积档位（token）。
+ *
+ * ⚠️ 必须是**模块级**状态，不能只放在 DOM 的 `<select>` 上。
+ *
+ * 工具栏随 `renderModelTable` 每 8 秒重建一次，`<select>` 会跟着回到 HTML 里的
+ * `selected` 默认值。**危害方向要说准**：取值读的是模块变量，所以体检仍会按
+ * 用户选的 30k 跑；但下拉已经显示回 10k —— 于是**界面写着 10k、实际花 30k 的钱**。
+ * 这比"按 10k 跑"更糟：用户按显示的价格判断值不值，而他判断错了。
+ *
+ * 实测（变异验证）：删掉"重建后套用模块状态"那一行，`value` 立刻变 10000，
+ * 而 `probeInputTokens` 仍是 30000 —— 两者不一致正是这条缺陷的特征。
+ *
+ * `probeScope` 早就用同样的方式处理（模块级 + `dataset.touched`），这里对齐。
+ */
+let probeInputTokens = 10000;
+/** 档位在 localStorage 里的键。存的是**枚举值**，符合本项目"只存时间戳/日期/枚举"的规则。 */
+const PROBE_SIZE_LS_KEY = 'wb.probeInputTokens';
+/** 合法档位（与桥侧 `PROBE_INPUT_TOKEN_CHOICES` 同源；`lib/probe-volume.test.mjs` 钉住一致性）。 */
+const PROBE_SIZE_CHOICES = [5000, 10000, 20000, 30000, 50000];
 /** 服务端记录的本轮体检范围（probe.lastRun）：{ scope, count } | null。 */
 let probeLastRun = null;
 /** 本次运行要随结果一起提交的范围（供防抖落盘与收尾落盘共用）。 */
@@ -3756,8 +3784,14 @@ function syncProbeRowState(tr) {
  * 这样旧页面/被裁剪的 DOM 也不会把体检打回"20 token"那种伪探针。
  */
 function probeInputTokensValue() {
-  const el = $('probeInputTokens');
-  const n = el ? Number(el.value) : NaN;
+  /*
+   * 读**模块变量**而不是 DOM。
+   *
+   * 两条理由：①DOM 每 8 秒被重建，"只存在下拉里"的状态会丢；
+   * ②真实体积决定花多少钱，必须以模块状态（唯一的真相）为准，
+   * 不能以一个可能正显示着旧值的控件为准。
+   */
+  const n = Number(probeInputTokens);
   return Number.isFinite(n) && n > 0 ? n : undefined;
 }
 
@@ -7242,7 +7276,18 @@ function renderModelTable(models, registered) {
      * 否则换档后提示还停在旧数字上 —— 那正是"说一套做一套"。
      */
     if ($('probeInputTokens')) {
-      $('probeInputTokens').onchange = () => refreshProbeCostHint();
+      const sel = $('probeInputTokens');
+      const opts = Array.from(sel.options).map((o) => o.value);
+      /* 每次重建后都要套用，否则用户的选择活不过一次轮询刷新 */
+      if (opts.includes(String(probeInputTokens))) sel.value = String(probeInputTokens);
+      sel.onchange = (e) => {
+        const v = Number(e.target.value);
+        /* 只接受枚举值：非法值不写进状态，也不落盘 */
+        if (!opts.includes(String(v))) return;
+        probeInputTokens = v;
+        lsSet(PROBE_SIZE_LS_KEY, String(v));
+        refreshProbeCostHint();
+      };
     }
     refreshProbeCostHint();
     $('probeAllBtn').onclick = probeAll;

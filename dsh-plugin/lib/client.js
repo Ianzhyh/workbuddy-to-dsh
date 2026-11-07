@@ -1811,6 +1811,11 @@ body.dark .wb-root,
       '模型列表来自桥的动态目录，不需要勾选或保存：选模型时 provider 选 “WorkBuddy” 就能看到全部。体检结论存在 .state.json 的 probe 字段，与控制器共用一份。':
         'The model list comes from the bridge\'s live catalog — no checking or saving needed: pick "WorkBuddy" as the provider when choosing a model and you will see them all. Probe results live in the probe field of .state.json, shared with the controller.',
       '实测扣分': 'Measured credit',
+      /*
+       * 体检体积。控制台那张表里已有同名条，但插件用的是**自己这张表** ——
+       * 两张表各管一个界面，只加一边会让另一边在英文模式残留中文。
+       */
+      '体积': 'Input size',
       '厂商标识': 'Vendor code',
       '上游返回的厂商代码（单字母），不是厂商名': 'The vendor code returned by the upstream (a single letter), not the vendor name',
       '计费倍率': 'Billing rate',
@@ -7213,7 +7218,47 @@ body.dark .wb-root,
           : '体检结果保存失败：' + (saved.data?.error || saved.status));
         reloadProbes();
       };
-      const probeOne = async (id) => {
+      /**
+ * 体检体积的短标签：`10k（实算 10072）`。
+ *
+ * 为什么必须显示体积：体检的价值全在"它测的是真实体积"。
+ * 同样显示「可用」，在 21 token 上测出来的和在 10k 上测出来的是两种结论 ——
+ * 前者几乎无意义（上游按请求体积限流）。不标体积，用户就无法区分这两者。
+ *
+ * 没有体积的旧记录返回空串（调用方据此不显示，而不是替它编一个）。
+ * @param {{ inputTokens?: number, promptTokens?: number }} probe
+ */
+function probeSizeText(probe) {
+  const plan = Number(probe && probe.inputTokens);
+  if (!Number.isFinite(plan) || plan <= 0) return '';
+  const k = plan >= 1000 ? `${Math.round(plan / 1000)}k` : String(plan);
+  const actual = Number(probe && probe.promptTokens);
+  // 上游实算值与档位并列：两者不一致属正常（估算 vs 计费口径），但都要能看见
+  return Number.isFinite(actual) && actual > 0 ? `${k}（实算 ${actual}）` : k;
+}
+
+/**
+ * 体检结论的完整文字（表格 title / 按钮 title / 详情行共用）。
+ *
+ * 为什么必须是**共享**的：同一个结论有三处渲染。各写一份的话，加一项信息
+ * 就会只加到其中一两处 —— 同一份数据在两个地方强度不同，用户无法判断该信哪个。
+ *
+ * 顺序：时长 → 扣分 → 体积 → 错误。体积放在错误之前，因为错误往往很长，
+ * 排在它后面会被截断，而体积恰恰是判断这条结论可信度的关键。
+ * @param {{ ok?: boolean, ms?: number, credit?: number, error?: string, inputTokens?: number, promptTokens?: number }} probe
+ */
+function probeResultText(probe) {
+  if (!probe) return '';
+  const parts = [];
+  if (Number.isFinite(Number(probe.ms))) parts.push(`${probe.ms}ms`);
+  if (typeof probe.credit === 'number') parts.push(`${t('实测扣分')} ${probe.credit}`);
+  const size = probeSizeText(probe);
+  if (size) parts.push(size);
+  if (probe.error) parts.push(probe.error);
+  return parts.join(' · ');
+}
+
+const probeOne = async (id) => {
         setWorking(id);
         try {
           const res = await postJson(CONSOLE_API + '/probe', { model: id });
@@ -7531,16 +7576,23 @@ body.dark .wb-root,
                     // 表格里只放短状态，毫秒/错误放悬停与详情：`可用 · 253ms` 比
                     // 「未测」长得多，会让这一列在体检后突然变宽、把右侧裁掉。
                     text: probe.ok ? '可用' : '不可用',
-                    title: t(probe.ok ? '可用' : '不可用') + ' · ' + probe.ms + 'ms'
-                      + (probe.error ? ' · ' + probe.error : '')
-                      + (typeof probe.credit === 'number' ? ' · ' + t('实测扣分') + ' ' + probe.credit : ''),
+                    /*
+                     * 用共享的完整串：体积必须出现在这里 ——
+                     * 「可用」在 21 token 上和 10k token 上是两种结论，
+                     * 而表格里只放得下两个字，体积只能靠悬停交代。
+                     */
+                    title: t(probe.ok ? '可用' : '不可用') + ' · ' + probeResultText(probe),
                   })
                   : h('span', { className: 'wb-note', style: { margin: 0 } }, '未测')),
                 h('td', { className: 'wb-actions-col' },
                   h(Btn, {
                     disabled: !!working || !consoleReady,
                     onClick: () => probeOne(m.id),
-                    title: probe?.error || (probe && typeof probe.credit === 'number' ? '实测扣分 ' + probe.credit : ''),
+                    /*
+                     * 原先这里只显示错误或扣分，**没有体积** —— 于是同一个结论
+                     * 在表格里能看到体积、在按钮上却看不到，取决于用户悬停在哪。
+                     */
+                    title: probeResultText(probe),
                     'aria-label': t('体检') + ' ' + m.id,
                   }, working === m.id ? '测…' : '测'),
                   h(Btn, {
@@ -7918,10 +7970,12 @@ body.dark .wb-root,
                           : null,
                         h(DetailItem, {
                           label: '体检',
+                          /*
+                           * 详情行是**唯一有空间完整陈述**的地方，所以体积在这里最该出现：
+                           * 用户点开详情，通常就是想确认"这条结论到底有多可信"。
+                           */
                           value: probe
-                            ? (probe.ok ? `可用 · ${probe.ms}ms` : `不可用 · ${probe.ms}ms`)
-                              + (probe.error ? ' · ' + probe.error : '')
-                              + (typeof probe.credit === 'number' ? ` · 实测扣分 ${probe.credit}` : '')
+                            ? (probe.ok ? '可用' : '不可用') + ' · ' + probeResultText(probe)
                             : '未测',
                         }),
                         h(DetailItem, { label: '标签', value: tagsOf(m).join(' · ') || '—' })),
