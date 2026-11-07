@@ -59,12 +59,54 @@ export const BUSY_BATCH_SIZE = 50;
 export const BUSY_TIMEOUT_MS = 5_000;
 
 /**
- * 堵的数据多久算过期。
+ * 拥堵数据多久算过期。
  *
  * 30 秒：比一次对话的间隔略长，又不至于让用户盯着一个十分钟前的"空闲"做决定。
- * 过期后重新探测，但**不阻塞**请求 —— 先回旧值并后台刷新。
+ *
+ * ⚠️ 过期后**不交旧值**，只后台重探（见 gatedBusyLevels）。
+ * 早先这里是"先回旧值并后台刷新"，实测证明那是错的：输出层只有"有没有等级"
+ * 这一个信号，旧值和刚探到的值长得一模一样，用户无法分辨自己看的是 30 秒前
+ * 的数据还是现在的 —— 于是"实时负载"会静默变成"上一分钟的负载"。
  */
 export const BUSY_TTL_MS = 30_000;
+
+/**
+ * 一份拥堵缓存的新鲜度。
+ *
+ * 纯函数、无 IO：过期判定是这条特性里**唯一**会被算错的地方
+ * （算错的表现是"把旧值当新值"，而它在界面上看不出来），所以单独抽出来
+ * 让单测直接钉住。
+ *
+ * @param {number} at 上次探测成功的时刻（0 = 从没探过）
+ * @param {number} [now]
+ * @param {number} [ttl]
+ * @returns {{ ageMs: number, stale: boolean, probed: boolean }}
+ *   ageMs 在"从没探过"时是 **-1**（不是 0）：0 会让调用方以为"刚刚探过"。
+ */
+export function busyFreshness(at, now = Date.now(), ttl = BUSY_TTL_MS) {
+  const probed = Number.isFinite(at) && at > 0;
+  if (!probed) return { ageMs: -1, stale: false, probed: false };
+  const ageMs = now - at;
+  return { ageMs, stale: ageMs >= ttl, probed: true };
+}
+
+/**
+ * 输出层该用的等级 —— **过期就交空**。
+ *
+ * 这是"不替上游编事实"在这条特性上的落点：过期数据不是"稍微旧一点的真相"，
+ * 而是一条**看起来像现在**的假信息。界面拿到空 Map 会显示「—」，
+ * 那是诚实的（"这会儿没有数据"）。
+ *
+ * @param {ReadonlyMap<string, string>} levels
+ * @param {number} at
+ * @param {number} [now]
+ * @param {number} [ttl]
+ * @returns {ReadonlyMap<string, string>}
+ */
+export function gatedBusyLevels(levels, at, now = Date.now(), ttl = BUSY_TTL_MS) {
+  const { stale } = busyFreshness(at, now, ttl);
+  return stale ? new Map() : levels;
+}
 
 /**
  * 规范化一个 `busy_level`。枚举外的值一律 `unknown`（不丢条目：

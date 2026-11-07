@@ -129,6 +129,60 @@ test('拥堵：媒体模型不进负载探针', () => {
   assert.deepEqual(ids, ['chat-a']);
 });
 
+test('拥堵：过期判定 —— 从没过是 -1 而不是 0，刚好到期就算过期', () => {
+  /*
+   * ageMs 的两条口径必须钉住：
+   *   · 从没探过 → ageMs = -1。用 0 会让调用方以为"刚刚探过"，
+   *     于是"没有数据"会被读成"新鲜的数据"；
+   *   · 边界用 >= 而不是 >：TTL 是"最多信这么久"，30 秒整就该算过期。
+   */
+  assert.equal(busy.busyFreshness(0).probed, false);
+  assert.equal(busy.busyFreshness(0).ageMs, -1, '从没探过必须是 -1');
+  assert.equal(busy.busyFreshness(0).stale, false, '没有数据不等于过期');
+
+  const now = 1_000_000;
+  const fresh = busy.busyFreshness(now - 1_000, now, busy.BUSY_TTL_MS);
+  assert.equal(fresh.probed, true);
+  assert.equal(fresh.ageMs, 1_000);
+  assert.equal(fresh.stale, false, '1 秒前的数据是新鲜的');
+
+  const edge = busy.busyFreshness(now - busy.BUSY_TTL_MS, now, busy.BUSY_TTL_MS);
+  assert.equal(edge.stale, true, '刚好到期即过期（>= 不是 >）');
+
+  const old = busy.busyFreshness(now - busy.BUSY_TTL_MS - 1, now, busy.BUSY_TTL_MS);
+  assert.equal(old.stale, true);
+  assert.ok(old.ageMs > busy.BUSY_TTL_MS);
+});
+
+test('拥堵：过期时输出层必须交空 —— 绝不把旧值当新值', () => {
+  /*
+   * 这是 2026-11-07 实测发现的真缺陷：
+   * /health.load 报 stale=true（ageMs 从 48s 一路涨到 64s），
+   * 而 /v1/models 的 22 个 busy_level 一直挂着、值一模一样。
+   *
+   * 为什么必须交空、而不是"先回旧值再后台刷新"：输出层只有"有没有等级"
+   * 这一个信号，旧值与刚探到的值在界面上完全相同 —— 用户会拿"上一分钟"的
+   * 负载做"现在"的决定。那是一段**看起来像真相的假信息**，比"没有数据"糟得多。
+   */
+  const levels = new Map([['glm-5.3', 'idle'], ['hy3', 'congested']]);
+  const now = 1_000_000;
+
+  const fresh = busy.gatedBusyLevels(levels, now - 1_000, now, busy.BUSY_TTL_MS);
+  assert.equal(fresh.size, 2, '新鲜时必须原样交出');
+  assert.equal(fresh.get('glm-5.3'), 'idle');
+
+  const stale = busy.gatedBusyLevels(levels, now - busy.BUSY_TTL_MS, now, busy.BUSY_TTL_MS);
+  assert.equal(stale.size, 0, '过期必须交空 —— 界面显示「—」才是诚实的');
+
+  /*
+   * 从没探过（at=0）**不构成过期**：
+   * 那一天的"有没有数据"由 known/unsupported 判定，不是由新鲜度判定。
+   * 把两者混起来会让"区域不支持"被误报成"数据过期"。
+   */
+  const never = busy.gatedBusyLevels(levels, 0, now, busy.BUSY_TTL_MS);
+  assert.equal(never.size, 2, 'at=0 不算过期（语义上是"还没探过"，由调用方另外判定');
+});
+
 // ── 端到端：真桥 + 假上游 ─────────────────────────────────────────────
 
 const stubState = { busyMode: 'ok', busyHits: 0 };

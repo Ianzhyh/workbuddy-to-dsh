@@ -40,6 +40,8 @@ import { applyPromotion, groupPromotions } from './promotions.mjs';
 import {
   BUSY_TTL_MS, BUSY_TIMEOUT_MS,
   fetchBusyLevels, probeableModelIds, busyLabel, isBusyLevel,
+  /* 新鲜度判定抽成纯函数：过期是这条特性唯一会算错且看不出来的地方 */
+  busyFreshness, gatedBusyLevels,
 } from './busy.mjs';
 import { submitVideo, queryVideo, MioraVideoError, MAX_VIDEO_WAIT_MS } from './miora-video.mjs';
 import { submitImage, queryImage } from './miora-image.mjs';
@@ -9865,6 +9867,15 @@ let catalogGeneration = 0;
  * 所以探测失败只记一行日志、保留上一份数据（若还没过期），
  * **绝不影响目录与 `/health` 的可用性**。
  */
+/**
+ * @type {{
+ *   at: number,
+ *   levels: ReadonlyMap<string, string>,
+ *   error: string,
+ *   errorAt: number,
+ *   unsupported: boolean,
+ * }}
+ */
 let busyCache = {
   /** 上次成功探测的时刻 */
   at: 0,
@@ -9969,15 +9980,30 @@ function refreshBusyLevels({ force = false } = {}) {
 
 /**
  * 当前的拥堵数据（给输出层用）。
- * @returns {{ at: number, ageMs: number, stale: boolean, levels: Map<string,string>, error: string, unsupported: boolean }}
+ * @returns {{ at: number, ageMs: number, stale: boolean, levels: ReadonlyMap<string,string>, error: string, unsupported: boolean }}
  */
-function currentBusyLevels() {
-  const age = busyCache.at ? Date.now() - busyCache.at : Infinity;
+function currentBusyLevels(now = Date.now()) {
+  const { ageMs, stale } = busyFreshness(busyCache.at, now, BUSY_TTL_MS);
+  /*
+   * ## 过期就**不交出等级**（实测缺陷，2026-11-07）
+   *
+   * 原先这里只算出 stale 标志，但输出层（/v1/models）从不看它 —— 于是目录
+   * 刷新（5 分钟）触发的探测过期后（TTL 30 秒），/v1/models 会**一直**把几十秒
+   * 甚至几分钟前的等级当当前值输出。实测：ageMs 从 48s 一路涨到 64s，
+   * 而 22 个模型的 busy_level 一直挂着。
+   *
+   * 用户据此选模型 = 用"上一分钟"的负载做"现在"的决定。所以过期时交空 map，
+   * 界面显示「—」，那是诚实的（"这会儿没有数据"）。
+   *
+   * 同时**后台补一次**：fire-and-forget，绝不阻塞这次响应 ——
+   * 否则一次过期就要让 /v1/models 等 5 秒的上游探测（实测修复后仍 3-5ms）。
+   */
+  if (stale && !busyRefreshing) refreshBusyLevels({ force: true }).catch(() => {});
   return {
     at: busyCache.at,
-    ageMs: Number.isFinite(age) ? age : -1,
-    stale: busyCache.at > 0 && age >= BUSY_TTL_MS,
-    levels: busyCache.levels,
+    ageMs,
+    stale,
+    levels: gatedBusyLevels(busyCache.levels, busyCache.at, now, BUSY_TTL_MS),
     error: busyCache.error,
     unsupported: busyCache.unsupported,
   };
