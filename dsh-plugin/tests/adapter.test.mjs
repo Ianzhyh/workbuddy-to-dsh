@@ -72,17 +72,18 @@ async function startStub({ sseFrames = [], status = 200, errorBody = null, captu
   return { server, baseUrl: `http://127.0.0.1:${port}`, close: () => new Promise((r) => server.close(r)) };
 }
 
-function makeAdapter(baseUrl, capture) {
+function makeAdapter(baseUrl, capture, overrides = {}) {
   const client = new BridgeClient({ baseUrl, token: 't', timeoutMs: 15000 });
   return new WorkBuddyAdapter({
     provider: 'workbuddy',
     displayName: 'WorkBuddy',
     client,
     ensureReady: async () => client,
-    resolveImage: async () => 'data:image/png;base64,AAAA',
+    resolveImage: async (ref) => `data:image/png;base64,${ref?.attachmentId ?? 'AAAA'}`,
     log: () => {},
     filter: { allow: [], deny: [] },
     catalogTtlMs: 0,
+    ...overrides,
   });
 }
 
@@ -1097,6 +1098,136 @@ test('图片：同一附件跨轮次只读一次、并发只读一次，多图�
     // 第二轮重发同一份历史：全部命中缓存，不再读盘
     await drain();
     assert.deepEqual([...reads.values()], [1, 1, 1], '跨轮次必须命中缓存');
+  } finally { await stub.close(); }
+});
+
+/**
+ * 工具结果里的图必须送出去（2026-11-08 修）。
+ *
+ * ## 这条为什么值得单独钉
+ *
+ * `read_image` 返回的就是 `[文字信封, {type:'image'}]` 两段。旧实现只收
+ * `type === 'text'`，图被静默丢掉 —— 模型只看到
+ * "image/png image, 800x300 px, 2158 bytes"，然后**照着这句话瞎编**。
+ * 全程不报错，所以只能靠测试守。
+ *
+ * 同时钉住两个实现细节：
+ *   1. 图**不能**留在 tool 消息里（`role:'tool'` 的 content 必须是字符串，
+ *      塞数组是非法形状，换端点就 400）；
+ *   2. 合成 user 消息要**紧跟那串 tool 结果**，不能飘到请求末尾 ——
+ *      否则上一轮的截图会被当成这一问的附件。
+ */
+test('wire 请求：tool 结果里的图片必须搬到合成 user 消息，且紧跟在工具结果之后', async () => {
+  const capture = {};
+  const stub = await startStub({
+    sseFrames: [delta({ content: 'ok' }), { choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] }],
+    capture,
+  });
+  try {
+    const adapter = makeAdapter(stub.baseUrl);
+    for await (const _ of adapter.stream({
+      provider: 'workbuddy',
+      model: 'stub-model',
+      messages: [
+        { role: 'user', content: [{ type: 'text', text: '读一下这张图' }] },
+        {
+          role: 'assistant',
+          content: [
+            { type: 'tool-call', id: 'c1', name: 'read_image', arguments: '{"file_path":"a.png"}' },
+            { type: 'tool-call', id: 'c2', name: 'read_image', arguments: '{"file_path":"b.png"}' },
+          ],
+        },
+        {
+          role: 'tool',
+          toolCallId: 'c1',
+          content: [
+            { type: 'text', text: '<path>a.png</path>\n<content>image/png image, 8x8 px</content>' },
+            { type: 'image', attachment: { attachmentId: 'img-a', mediaType: 'image/png' } },
+          ],
+        },
+        {
+          role: 'tool',
+          toolCallId: 'c2',
+          content: [
+            { type: 'text', text: '<path>b.png</path>' },
+            { type: 'image', attachment: { attachmentId: 'img-b', mediaType: 'image/png' } },
+          ],
+        },
+        { role: 'user', content: [{ type: 'text', text: '这两张图有什么区别？' }] },
+      ],
+    })) { /* drain */ }
+
+    const body = capture.body;
+    const roles = body.messages.map((m) => m.role);
+    assert.deepEqual(roles, ['user', 'assistant', 'tool', 'tool', 'user', 'user'],
+      '两条 tool 之后必须紧跟一条携带图片的合成 user 消息');
+
+    const [toolA, toolB] = [body.messages[2], body.messages[3]];
+    assert.equal(typeof toolA.content, 'string', 'tool 消息的 content 必须是字符串（数组是非法形状）');
+    assert.equal(typeof toolB.content, 'string');
+    assert.doesNotMatch(JSON.stringify(toolA), /img-a/, '私有暂存键不得漏给上游');
+    assert.equal(Object.keys(toolA).sort().join(','), 'content,role,tool_call_id', 'tool 消息不得多出内部字段');
+
+    const synthetic = body.messages[4];
+    assert.equal(synthetic.role, 'user');
+    const imgs = synthetic.content.filter((p) => p.type === 'image_url').map((p) => p.image_url.url);
+    assert.deepEqual(imgs, ['data:image/png;base64,img-a', 'data:image/png;base64,img-b'],
+      '两张图都要在，顺序与工具结果顺序一致');
+    assert.equal(body.messages[5].content, '这两张图有什么区别？', '真正的用户提问必须留在合成消息之后');
+  } finally { await stub.close(); }
+});
+
+test('wire 请求：纯文字工具结果不产生多余的合成 user 消息', async () => {
+  const capture = {};
+  const stub = await startStub({
+    sseFrames: [delta({ content: 'ok' }), { choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] }],
+    capture,
+  });
+  try {
+    const adapter = makeAdapter(stub.baseUrl);
+    for await (const _ of adapter.stream({
+      provider: 'workbuddy',
+      model: 'stub-model',
+      messages: [
+        { role: 'user', content: [{ type: 'text', text: '读文件' }] },
+        { role: 'assistant', content: [{ type: 'tool-call', id: 'c1', name: 'read', arguments: '{}' }] },
+        { role: 'tool', toolCallId: 'c1', content: [{ type: 'text', text: 'file body' }] },
+      ],
+    })) { /* drain */ }
+
+    assert.deepEqual(capture.body.messages.map((m) => m.role), ['user', 'assistant', 'tool'],
+      '没图就不许凭空插一条 user 消息（会污染历史、也可能被上游判成非法轮次）');
+  } finally { await stub.close(); }
+});
+
+test('wire 请求：孤儿工具结果被剔除时，它的图也不能漏出去', async () => {
+  const capture = {};
+  const stub = await startStub({
+    sseFrames: [delta({ content: 'ok' }), { choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] }],
+    capture,
+  });
+  try {
+    const adapter = makeAdapter(stub.baseUrl);
+    for await (const _ of adapter.stream({
+      provider: 'workbuddy',
+      model: 'stub-model',
+      messages: [
+        { role: 'user', content: [{ type: 'text', text: '第一问' }] },
+        // 这条 tool 结果没有对应的 assistant.tool_calls 声明 → sanitizeWire 会剔掉它
+        {
+          role: 'tool',
+          toolCallId: 'orphan-1',
+          content: [
+            { type: 'text', text: '孤儿结果' },
+            { type: 'image', attachment: { attachmentId: 'img-orphan', mediaType: 'image/png' } },
+          ],
+        },
+        { role: 'user', content: [{ type: 'text', text: '第二问' }] },
+      ],
+    })) { /* drain */ }
+
+    assert.doesNotMatch(JSON.stringify(capture.body), /img-orphan/,
+      '被剔除的工具结果，它挂的图也必须一起消失（否则上游会看到没有来源的图片消息）');
   } finally { await stub.close(); }
 });
 

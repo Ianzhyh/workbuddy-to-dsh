@@ -359,6 +359,76 @@ function imageCacheKey(ref) {
 }
 
 /**
+ * tool 消息暂存图片用的私有键。
+ *
+ * 用 Symbol 而不是普通字符串字段：`JSON.stringify` 会**自动忽略** Symbol 键，
+ * 所以哪怕有人漏了 {@link collectToolImages} 直接序列化，也不会把内部字段
+ * 漏给上游（普通字段会变成 illegal property，上游可能直接 400）。
+ * 另外它不会与 OpenAI 的任何既有字段撞名。
+ */
+const TOOL_IMAGES = Symbol('workbuddy.toolImages');
+
+/**
+ * 把 tool 消息里暂存的图片**搬**成一条合成 user 消息。
+ *
+ * ## 为什么不能直接塞进 tool 消息
+ *
+ * OpenAI 的 `role:'tool'` 消息 `content` 只有字符串一种合法形状。图片要发出去
+ * 只能借 `role:'user'` 的多段内容 —— 这正是 pi-ai 的做法
+ * （`pi-ai-openai-completions.js:1062-1122`：走完一串 toolResult 后，若其中有图，
+ * 就补一条 `{role:'user', content:[{type:'text',text:'Attached image(s) from tool result:'}, ...image_urls]}`）。
+ *
+ * ## 插在哪
+ *
+ * **紧跟在那一串 tool 消息之后**，而不是整个请求的末尾。agent 循环里上一轮
+ * 往往是「assistant(tool_calls) → tool(结果) → 下一轮」，图若被挪到末尾就会
+ * 跟当前这一问混在一起，模型会把"上一轮看到的截图"当作"这一问的附件"。
+ *
+ * ## 非视觉模型
+ *
+ * 不在这里判断：桥侧 {@link degradeImagesForModel} 会把 `image_url` 换成文字占位
+ * 并记账，比在这里静默丢掉更容易解释（面板能看到 "图片被忽略" 的次数）。
+ *
+ * @param {object[]} messages 已净化的 wire 消息
+ * @returns {Promise<object[]>} 插好合成消息的新数组（不改动入参）
+ */
+async function collectToolImages(messages) {
+  const out = [];
+  /** 当前这串连续 tool 消息累积的图片（Promise 数组，保持出现顺序）。 */
+  let pending = [];
+
+  const flush = async () => {
+    if (!pending.length) return;
+    const urls = (await Promise.all(pending)).filter((url) => typeof url === 'string' && url);
+    pending = [];
+    if (!urls.length) return;
+    out.push({
+      role: 'user',
+      content: [
+        { type: 'text', text: 'Attached image(s) from tool result:' },
+        ...urls.map((url) => ({ type: 'image_url', image_url: { url } })),
+      ],
+    });
+  };
+
+  for (const message of messages) {
+    const images = message?.[TOOL_IMAGES];
+    if (Array.isArray(images) && images.length) {
+      // 摘掉私有键：Symbol 虽然不会被序列化，但留着会让对象形状不干净
+      const rest = { ...message };
+      delete rest[TOOL_IMAGES];
+      out.push(rest);
+      pending.push(...images);
+      continue;
+    }
+    if (message?.role !== 'tool') await flush();  // 这串 tool 结束了，先把图发出去
+    out.push(message);
+  }
+  await flush();
+  return out;
+}
+
+/**
  * 一条 dsh 消息 → 一条 OpenAI wire 消息。
  *
  * @param {object} message dsh Message（system/developer/user/assistant/tool）
@@ -417,14 +487,39 @@ async function toWireMessage(message, resolveImage) {
 
   if (role === 'tool') {
     const parts = [];
+    /*
+     * ⚠️ tool 结果里的**图片块**也必须带出去（2026-11-08 修）。
+     *
+     * 原先这里只收 `type === 'text'`，`type === 'image'` 被**静默丢弃**。
+     * 而 dsh 的 `read_image`（`@deepseek-ai/dsh-tool-fs`）返回的正是两段：
+     *   [{type:'text', text:'<path>…</path>\n<type>image</type>\n<content>…' },
+     *    {type:'image', attachment:{…}}]
+     * 于是模型只收到一句"这里有一张 png，720x240"，**图本身没了** ——
+     * 表现是"模型看不见图却硬答"，或直接说读不到；全程不报错。
+     * 同一族的洞此前只修了 user / assistant 两侧，tool 侧漏了。
+     *
+     * OpenAI wire 里 tool 消息的 content 只能是字符串，图**塞不进去**
+     * （实测：桥接受 `content:[{type:'text'},{type:'image_url'}]` 的 tool 消息，
+     * 但那是非标形状，其它兼容端点会 400）。所以按 pi-ai 的做法：
+     * tool 消息只留文字，随后**追加一条合成的 user 消息**统一携带这些图。
+     * 合成消息由 {@link collectToolImages} 在「这一串 tool 结果之后」插入
+     * （不是挪到请求末尾 —— 那样上一轮的截图会被当成这一问的附件）。
+     */
+    const imageRefs = [];
     for (const block of blocks) {
       if (block?.type === 'text') parts.push(block.text || '');
+      else if (block?.type === 'image' && block.offloaded !== true) {
+        imageRefs.push(resolveImage(block.attachment).catch(() => null));
+      }
     }
-    return {
+    const out = {
       role: 'tool',
       tool_call_id: String(message.toolCallId || ''),
       content: parts.join('') || '(no output)',
     };
+    // 非标准字段，只在本地传递：进入 payload 前会被 collectToolImages 摘掉。
+    if (imageRefs.length) out[TOOL_IMAGES] = imageRefs;
+    return out;
   }
 
   if (role === 'assistant') {
@@ -1210,7 +1305,13 @@ export class WorkBuddyAdapter {
         (options.messages || []).map((message) => toWireMessage(message, resolveImage)),
       );
       messages.push(...converted);
-      payload = { model, messages: sanitizeWire(messages), stream: true };
+      /*
+       * 顺序是刻意的：先 sanitizeWire 剔掉孤儿 tool 结果与空助手轮，再搬图。
+       * 反过来的话，一条**随后会被剔掉**的孤儿 tool 结果也会附上合成 user 消息，
+       * 于是上游看到一条"凭空多出来的图片消息"，却找不到对应的 tool_call。
+       */
+      const sanitized = sanitizeWire(messages);
+      payload = { model, messages: await collectToolImages(sanitized), stream: true };
       const tools = toWireTools(options);
       if (tools.length) payload.tools = tools;
       // 参数优先级：调用方显式给的 > 该模型自己的默认 > 插件全局默认 > 不发。

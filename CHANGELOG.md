@@ -19,7 +19,37 @@
 
 ## [Unreleased]
 
+## [1.23.1] - 2026-11-08
+
 ### Fixed
+
+- **工具结果里的图片被整段丢掉 —— 模型"看不见图却硬答"（第三处同族漏洞）。**
+
+  实机（2026-11-08）：在 dsh 里让模型 `read_image` 读一张图，模型回一句
+  "图里有一个 png，1536x864"，然后**照着这句话编内容**。全程不报错。
+
+  根因在 `lib/adapter.mjs` 的 `toWireMessage`：`role === 'tool'` 分支只收
+  `type === 'text'`，`type === 'image'` **静默丢弃**。而 dsh 的 `read_image`
+  （`@deepseek-ai/dsh-tool-fs/lib/index.js:966-974`）返回的正是两段：
+  `[文字信封, {type:'image', attachment}]` —— 图正好落在被丢的那一段里。
+  同一族的洞此前修过两次（user 侧 / assistant 侧），tool 侧漏了。
+
+  修法按 pi-ai 的既定做法（`pi-ai-openai-completions.js:1062-1122`）：
+  `role:'tool'` 的 `content` 只能是字符串，图塞不进去，所以把图**搬到紧跟在
+  那串 tool 结果之后的合成 user 消息**
+  （`{role:'user', content:[{type:'text',text:'Attached image(s) from tool result:'}, ...image_urls]}`）。
+  **位置不能挪到请求末尾**：否则上一轮的截图会被模型当成这一问的附件。
+
+  三个顺带守住的口径（各有回归）：
+  - 私有暂存用 `Symbol` 键，`JSON.stringify` 天然忽略，绝不会把内部字段漏给上游；
+  - 先 `sanitizeWire` 再搬图 —— 被剔掉的孤儿工具结果，它挂的图必须一起消失；
+  - 纯文字工具结果不产生多余的合成 user 消息（凭空多一轮会被上游判非法）。
+
+  端到端实测（真桥 + 真图 `fig-f1-1.png`）：修前模型编内容，修后回答
+  "三个并排的盒子，中间的盒子前有个黑色圆头小人抱着小方块，上方红色手写'核心'"
+  —— 与原图一致。3 条新回归 + 全量 35 条适配器用例 / 278 条插件 / 348 条桥测试全绿。
+
+### Changed
 
 - **点名清单里的模型被上游下架时，桥静默少给，且不说少了谁。**
 
@@ -39,6 +69,7 @@
   `/v1/models` 明明正常返回了它们（那条路径会 `await` 目录，`/health` 只读缓存）。
   凭空指控比静默更坏：用户会去查一个不存在的问题。目录为空即无语义，
   现在一律不报（目录空这件事本身已有 `catalogSize: 0` / `catalogAt: null` 两个信号）。
+
 ## [1.23.0] - 2026-11-07
 
 ### Added
