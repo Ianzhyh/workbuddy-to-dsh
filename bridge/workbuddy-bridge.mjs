@@ -29,7 +29,7 @@ import { createServer, request as httpRequest } from 'node:http';
 import { request as httpsRequest } from 'node:https';
 import { Agent as HttpAgent } from 'node:http';
 import { Agent as HttpsAgent } from 'node:https';
-import { join, dirname, isAbsolute } from 'node:path';
+import { join, dirname, isAbsolute, basename, resolve } from 'node:path';
 import { homedir, userInfo, tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { createCipheriv, createDecipheriv, createHash, randomBytes, randomUUID, scryptSync, timingSafeEqual } from 'node:crypto';
@@ -1906,6 +1906,32 @@ function isEncryptedField(value) {
     && value.$wbEncrypted === 1 && typeof value.envelope === 'string';
 }
 
+/**
+ * 把明文重新封成客户端能解开的字段 —— {@link openAuthField} 的逆运算。
+ *
+ * 存在理由只有一条：**客户端换号会原地覆盖同名登录文件**（不是登出，不留快照），
+ * 于是上一个账号在登录目录里一点痕迹都不剩，面板里那一行直接消失。而插件凭据
+ * 里仍握着该账号完整的 access + refresh，完全可以反向补一份合法的登录快照。
+ *
+ * `keyId` 参与 AAD，所以必须用**目标域名对应的那个 build** 的密钥；错了客户端
+ * 读回来是「信封属于另一把钥」，等于把账号写成不可用 —— 调用方写完必须回读校验。
+ */
+function sealAuthField(plain, key, suite = 1) {
+  const keyId = atRestKeyId(key);
+  const nonce = randomBytes(12);
+  const cipher = createCipheriv('aes-256-gcm', key, nonce, { authTagLength: 16 });
+  cipher.setAAD(atRestFieldAad(keyId, suite));
+  const ciphertext = Buffer.concat([cipher.update(String(plain), 'utf8'), cipher.final()]);
+  const envelope = JSON.stringify({
+    suite,
+    keyId,
+    nonce: nonce.toString('base64'),
+    authTag: cipher.getAuthTag().toString('base64'),
+    ciphertext: ciphertext.toString('base64'),
+  });
+  return { $wbEncrypted: 1, envelope: Buffer.from(envelope, 'utf8').toString('base64') };
+}
+
 /** Plaintext of an auth field, transparently opening the 5.6+ envelope. */
 async function openAuthField(value, label) {
   if (typeof value === 'string') return value; // pre-5.6 plaintext, or a refreshed value
@@ -2794,6 +2820,602 @@ async function listPluginCredentials() {
   return all
     .map((c) => ({ ...publicCredential(c), active: c.uid === active }))
     .sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)));
+}
+
+// ── 账号存档 / 重建：登录就应该保存 ──────────────────────────────────────
+/*
+ * ## 这份逻辑存在的唯一理由
+ *
+ * WorkBuddy 客户端有两条处理登录态的路，后果天差地别：
+ *
+ *   1. **登出**：把 `workbuddy-desktop.info` 改名成
+ *      `workbuddy-desktop.<时间戳>.info` 留在同目录 —— 账号还在，只是不再生效。
+ *   2. **换号 / 重新登录**：直接用新账号**原地覆盖**同名文件 ——
+ *      上一个账号在这个目录里**一点痕迹都不剩**。
+ *
+ * 第 2 条是真实事故（2026-11-10）：用户在国内版换号后，原来的 `17****0068`
+ * 账号从面板整行消失，只剩它早先用浏览器登录留下的插件凭据。桥自己的日志就是
+ * 证据：`desktop login identity changed; catalog invalidated 7c43a818… -> 1df8ca6b…`
+ * 而登录目录里当时已没有 7c43a818 的任何 `.info`。
+ *
+ * 所以这里做两件事：
+ *   - **存档**：每读到一份能解开的登录文件，就把**原始字节**复制进
+ *     `~/.workbuddy-bridge/account-archive/<uid>/<内容哈希>.info`。存的是客户端
+ *     自己写的密文，不新增任何明文令牌落盘；哈希去重，不会把磁盘写爆。
+ *   - **重建**：某个账号只剩插件凭据时，用该域名对应 build 的 AtRest 密钥把
+ *     access/refresh 反向封成一份合法 `.info` 快照，让它重新出现在账号列表里。
+ *
+ * ## 红线（与 docs/SECURITY.md 一致）
+ *   - **绝不覆盖活动登录文件**：只写 `<base>.<时间戳>.info` 形态的新快照；
+ *   - **不写明文**：重建出来的字段一律走 `$wbEncrypted` 信封；
+ *   - **不删任何文件**：恢复只是"再放一份回去"，回滚 = 删掉我们放的那份。
+ */
+const ACCOUNT_ARCHIVE_DIR = (() => {
+  const raw = String(process.env.WORKBUDDY_ACCOUNT_ARCHIVE_DIR || '').trim();
+  if (raw) return isAbsolute(raw) ? raw : join(process.cwd(), raw);
+  return join(RUNTIME_DATA_DIR, 'account-archive');
+})();
+
+/**
+ * 这个登录目录是不是"临时夹具"，因而不该往真实存档里写东西？
+ *
+ * ## 为什么必须有这道闸
+ *
+ * 存档功能上线后实测踩到：项目自带的测试大量用 `mkdtempSync` 造临时登录目录
+ * （`fake-auth.info`、`uid-1`、`catalog-a` 这些假账号），但它们**不隔离存档目录** ——
+ * 于是跑一次 `npm run test:bridge`，这些假账号就被写进了使用者真实的
+ * `~/.workbuddy-bridge/account-archive`。那是把测试垃圾混进"账号备份"里，
+ * 而备份是用户会拿来回滚账号的东西：里面出现 `catalog-a` 这种名字，等于让
+ * 人在最需要信任它的时候不敢信。
+ *
+ * 判据只用**登录目录的位置**：系统临时目录下的登录目录一律视为夹具。
+ * 显式设置了 `WORKBUDDY_ACCOUNT_ARCHIVE_DIR` 时视为"调用方已经隔离过"，
+ * 照常工作（本项目的 `account-archive.test.mjs` 正是这么做的）。
+ */
+const ARCHIVE_DISABLED_REASON = (() => {
+  if (String(process.env.WORKBUDDY_ACCOUNT_ARCHIVE || '').trim() === '0') return 'disabled by WORKBUDDY_ACCOUNT_ARCHIVE=0';
+  if (String(process.env.WORKBUDDY_ACCOUNT_ARCHIVE_DIR || '').trim()) return '';
+  const tmp = tmpdir();
+  const dirs = [(() => { try { return dirname(AUTH_PATH); } catch { return ''; } })(), ...loginScanDirsSafe()];
+  for (const dir of dirs) {
+    if (!dir) continue;
+    const norm = dir.replace(/[\\/]+$/u, '').toLowerCase();
+    if (norm.startsWith(tmp.replace(/[\\/]+$/u, '').toLowerCase())) {
+      return `login directory is inside the system temp dir (${dir}); set WORKBUDDY_ACCOUNT_ARCHIVE_DIR to archive from fixtures`;
+    }
+  }
+  return '';
+})();
+
+/** `loginScanDirs` 在模块加载早期还不能安全调用（AUTH_DIRS 可能尚未就绪）。 */
+function loginScanDirsSafe() {
+  try { return loginScanDirs(); } catch { return []; }
+}
+
+/**
+ * 存档目录名 / 文件名只允许这组字符。
+ *
+ * ## 为什么必须收紧
+ *
+ * 原先用 `replace(/[^0-9a-zA-Z._-]/gu, '_')` 洗一遍就拼接，**但 `.` 被放行了** ——
+ * 于是 `key=".."` 原样通过，`join(存档根, '..')` 直接跳回 `~/.workbuddy-bridge`：
+ * `restore` 的 `file` 随之可以读到任意路径（实测能读到 `credentials/store.key`、
+ * `state.json`），再被复制进登录目录；`writeArchiveMeta` 还会往上一层写 `meta.json`。
+ * 这是本项目里"用户可控字符串 -> join 成路径"的第二次踩坑（第一次是
+ * `AUTH_DIRS[0] || '.'` 拼出相对路径），所以这次把判据写成**白名单 + 显式拒绝点号**。
+ *
+ * @param {unknown} value
+ * @returns {string} 安全的单个路径段；不安全时返回空串（调用方必须当成错误）
+ */
+function safeArchiveSegment(value) {
+  const text = String(value ?? '').trim();
+  if (!text || text === '.' || text === '..') return '';
+  // 只允许字母数字与 _ -，**点号整体不允许**：合法 uid / uin 里没有点，
+  // 而点号是所有路径穿越的入口（`..`、`...`、Windows 的 `a.` 尾点归一化）。
+  if (!/^[0-9a-zA-Z_-]{1,128}$/u.test(text)) return '';
+  return text;
+}
+
+const archiveKeyOf = (uid, uin, name) => safeArchiveSegment(uid)
+  || safeArchiveSegment(uin)
+  || safeArchiveSegment(name)
+  || '';
+
+function archiveFileHash(path) {
+  try {
+    return createHash('sha256').update(readFileSync(path)).digest('hex').slice(0, 16);
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * 写存档元数据（合并语义）。
+ *
+ * **身份字段的空值不许覆盖已有值** —— 这条是实测踩出来的：重建流程先读 meta
+ * 拿到这个号的 uin，紧接着 `archiveOneLoginFile()` 又用 `uin: ''`（重建出来的
+ * 文件本来就没有 uin）写回去，于是刚读到的 uin 被自己抹掉了，账号列表里
+ * 那一行仍然显示 uid 而不是原来的 `330126184144`，用户起过的名字也贴不上。
+ *
+ * @param {string} key 存档目录名（uid / uin）
+ * @param {Record<string, any> & {file?: string}} patch 要合并进去的字段
+ */
+function writeArchiveMeta(key, patch) {
+  const dir = join(ACCOUNT_ARCHIVE_DIR, key);
+  const metaPath = join(dir, 'meta.json');
+  /** @type {Record<string, any>} */
+  let prev = {};
+  try { prev = JSON.parse(readFileSync(metaPath, 'utf8')); } catch { /* 首次 */ }
+  const files = new Set(Array.isArray(prev.files) ? prev.files : []);
+  const { file, ...rest } = patch;
+  if (file) files.add(file);
+  /** @type {Record<string, any>} */
+  const next = { ...prev };
+  for (const [k, v] of Object.entries(rest)) {
+    const isIdentity = k === 'uid' || k === 'uin' || k === 'domain' || k === 'nickname';
+    // 身份字段：空串/缺省一律视为「这次没读到」，保留旧值
+    if (isIdentity && (v === '' || v === null || v === undefined)) continue;
+    next[k] = v;
+  }
+  next.key = key;
+  next.files = [...files];
+  next.lastSeenAt = patch.lastSeenAt || prev.lastSeenAt || new Date().toISOString();
+  try {
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    writeFileSync(metaPath, `${JSON.stringify(next, null, 2)}\n`, 'utf8');
+  } catch { /* 元数据不是关键路径 */ }
+}
+
+/**
+ * 把一个账号的登录文件存一份档（幂等；内容没变就不写）。
+ *
+ * @param {{path: string, name: string, uid?: string, uin?: string, domain?: string}} entry
+ * @returns {{stored: boolean, file?: string, key?: string, reason?: string}}
+ */
+function archiveOneLoginFile(entry) {
+  const path = String(entry?.path || '');
+  const key = archiveKeyOf(entry?.uid, entry?.uin, entry?.name);
+  if (!path || !key || !existsSync(path)) return { stored: false, reason: 'missing' };
+  // 临时目录里的登录文件是测试夹具：不许进真实存档（见 ARCHIVE_DISABLED_REASON）
+  if (ARCHIVE_DISABLED_REASON) return { stored: false, reason: ARCHIVE_DISABLED_REASON, key };
+  const hash = archiveFileHash(path);
+  if (!hash) return { stored: false, reason: 'unreadable' };
+  const file = `${hash}.info`;
+  const target = join(ACCOUNT_ARCHIVE_DIR, key, file);
+  if (existsSync(target)) return { stored: false, file, key, reason: 'already' };
+  try {
+    mkdirSync(join(ACCOUNT_ARCHIVE_DIR, key), { recursive: true, mode: 0o700 });
+    const tmp = `${target}.tmp-${process.pid}`;
+    copyFileSync(path, tmp);
+    renameSync(tmp, target);
+    writeArchiveMeta(key, {
+      uid: String(entry.uid || ''),
+      uin: String(entry.uin || ''),
+      domain: String(entry.domain || ''),
+      latest: file,
+      file,
+      lastSeenAt: new Date().toISOString(),
+    });
+    log('login file archived', `${key} ${file}`);
+    return { stored: true, file, key, reason: 'archived' };
+  } catch (error) {
+    return { stored: false, reason: shortError(error?.message || error, 120), key };
+  }
+}
+
+/**
+ * 该扫哪些目录找登录文件（存档 / 重建共用同一判据）。
+ *
+ * 优先级：显式 `WORKBUDDY_AUTH_DIR`（覆盖语义，与 `readLocalAccounts` 一致）
+ * → `WORKBUDDY_AUTH_FILE` 的所在目录 → 平台兜底链 `AUTH_DIRS`。
+ *
+ * 中间那条**必须有**：测试与便携部署用 `WORKBUDDY_AUTH_FILE` 指向临时目录里的
+ * 一份假登录文件，此时若仍按 `AUTH_DIRS` 扫，就会把**使用者真实目录**里的登录
+ * 文件抄进存档（实测撞到过：沙箱指定了临时文件，却仍扫到真实目录）。存档是
+ * "复制用户凭据"，扫错目录等于把无关账号的登录态也拉进来。
+ */
+function loginScanDirs() {
+  const explicitDir = String(process.env.WORKBUDDY_AUTH_DIR || '').trim();
+  if (explicitDir && isAbsolute(explicitDir)) return [explicitDir];
+  const explicitFile = String(process.env.WORKBUDDY_AUTH_FILE || '').trim();
+  if (explicitFile && isAbsolute(explicitFile)) return [dirname(explicitFile)];
+  return AUTH_DIRS;
+}
+
+/**
+ * 写快照时该落到哪个目录。
+ *
+ * 与 {@link loginScanDirs} 同一判据，但**必须返回一个真实存在的目录**：
+ * 优先当前生效登录文件所在目录（`AUTH_PATH` 的 dirname）—— 那是桥此刻真正
+ * 在读的位置，写回它才能保证"放回去的文件立刻可见"。全都不可用时返回空串。
+ */
+function loginWriteDir() {
+  const candidates = [
+    (() => { try { return dirname(AUTH_PATH); } catch { return ''; } })(),
+    ...loginScanDirs(),
+  ];
+  for (const dir of candidates) {
+    if (dir && existsSync(dir)) return dir;
+  }
+  return '';
+}
+
+/**
+ * 扫一遍登录目录，把每份**能解开**的登录文件存档。带节流：默认 60 秒最多一次。
+ *
+ * 为什么不每请求都扫：`/health` 被面板/插件 8 秒轮询一次，而每次要 open 若干
+ * 信封（AES + 可能的取密钥）。60 秒一次足够 —— 会发生"覆盖"的时机是用户在
+ * 客户端里换号，那时桥自己就读到新账号了；而正因旧文件会被覆盖，才必须**先存**。
+ *
+ * ## 三条并发纪律（第一版全踩了）
+ *
+ * 1. **节流窗口在扫描「完成」后才推进**：原先一进函数就写 `archiveSweepAt`，
+ *    于是第一个请求刚开始扫、第二个请求就被节流挡住并拿到 `{scanned:0}` ——
+ *    面板如实显示「0 个账号」，用户以为存档没工作（实测用 Promise.all 复现）。
+ * 2. **同一时刻只跑一次**：并发调用合并到同一个 Promise，而不是各扫一遍
+ *    （各扫一遍会在同一目录上重复解密，最长 20 秒的取密钥成本翻倍）。
+ * 3. **同步段短**：读文件前先让出事件循环。这段跑在 `/health` 上，
+ *    而控制台的探活超时只有 4 秒 —— 同步读一堆 `.info` 会把探测拖成
+ *    「桥未运行」（本文件对同类问题已有过教训）。
+ */
+let archiveSweepAt = 0;
+let archiveSweepResult = { at: 0, stored: 0, scanned: 0 };
+/** @type {Promise<{at:number, stored:number, scanned:number}> | null} */
+let archiveSweepPending = null;
+async function sweepLoginArchive(force = false) {
+  if (force) {
+    // 强制刷新：已有在跑的扫描就直接复用它的结果，别叠加第二遍
+    if (archiveSweepPending) return archiveSweepPending;
+  } else if (Date.now() - archiveSweepAt < 60_000) {
+    // 节流命中：若有一轮正在跑，把**那一轮**的结果给它（而不是旧的 0）
+    return archiveSweepPending || archiveSweepResult;
+  }
+  if (archiveSweepPending) return archiveSweepPending;
+  archiveSweepPending = (async () => {
+    // 让出一次事件循环：让正在等响应的 /health、流式请求先走完
+    await new Promise((r) => setImmediate(r));
+    const scanDirs = loginScanDirs();
+    let stored = 0;
+    let scanned = 0;
+    for (const dir of scanDirs) {
+      let names = [];
+      try { names = readdirSync(dir).filter((n) => n.endsWith('.info')); } catch { continue; }
+      for (const name of names) {
+        const path = join(dir, name);
+        let raw;
+        try { raw = JSON.parse(readFileSync(path, 'utf8')); } catch { continue; }
+        const field = raw?.auth?.accessToken;
+        if (!field) continue;
+        let access = '';
+        try { access = await openAuthField(field, 'accessToken'); } catch { continue; } // 解不开就不存
+        const claims = decodeJwt(access);
+        if (!claims.sub) continue;
+        scanned += 1;
+        const res = archiveOneLoginFile({
+          path,
+          name,
+          uid: String(claims.sub || ''),
+          uin: String(raw?.account?.uin || ''),
+          domain: String(raw?.auth?.domain || claims.iss || ''),
+        });
+        if (res.stored) stored += 1;
+      }
+    }
+    archiveSweepResult = { at: Date.now(), stored, scanned };
+    // 窗口在**完成时**推进：失败/提前返回都不会把 60 秒白白占掉
+    archiveSweepAt = Date.now();
+    return archiveSweepResult;
+  })();
+  try {
+    return await archiveSweepPending;
+  } finally {
+    archiveSweepPending = null;
+  }
+}
+
+/** 存档清单（不含令牌；只有身份 + 文件名 + 时间）。 */
+function listArchivedAccounts() {
+  let names = [];
+  try { names = readdirSync(ACCOUNT_ARCHIVE_DIR).filter((n) => !n.startsWith('.')); } catch { return []; }
+  const out = [];
+  for (const key of names) {
+    const dir = join(ACCOUNT_ARCHIVE_DIR, key);
+    try { if (!statSync(dir).isDirectory()) continue; } catch { continue; }
+    let meta = {};
+    try { meta = JSON.parse(readFileSync(join(dir, 'meta.json'), 'utf8')); } catch { /* 缺元数据 */ }
+    const files = readdirSync(dir).filter((f) => f.endsWith('.info'));
+    if (!files.length) continue;
+    out.push({
+      key,
+      uid: String(meta.uid || ''),
+      uin: String(meta.uin || ''),
+      domain: String(meta.domain || ''),
+      nickname: String(meta.nickname || ''),
+      lastSeenAt: String(meta.lastSeenAt || ''),
+      latest: String(meta.latest || files.sort().at(-1) || ''),
+      count: files.length,
+      restoredAt: String(meta.restoredAt || ''),
+      rebuiltAt: String(meta.rebuiltAt || ''),
+    });
+  }
+  return out.sort((a, b) => String(b.lastSeenAt).localeCompare(String(a.lastSeenAt)));
+}
+
+/** 取某个域名对应 build 的 AtRest 密钥：能解开该域名现役登录文件的那把。 */
+async function atRestKeyForDomain(domain) {
+  const global = /workbuddy\.ai|workbuddy\.cc|codebuddy\.ai/iu.test(String(domain || ''));
+  const refName = global ? 'workbuddy-desktop-ai.info' : 'workbuddy-desktop.info';
+  for (const dir of AUTH_DIRS) {
+    const ref = join(dir, refName);
+    if (!existsSync(ref)) continue;
+    try {
+      const raw = JSON.parse(readFileSync(ref, 'utf8'));
+      const keyId = fieldKeyIdOf(raw?.auth?.accessToken) || fieldKeyIdOf(raw?.auth?.refreshToken);
+      if (keyId) return await atRestKey(keyId);
+    } catch { /* 这个 build 的参考文件读不动，继续找 */ }
+  }
+  return atRestKey(); // 没有参考文件：退回"第一个能取到密钥的 build"
+}
+
+/**
+ * 用插件凭据反向重建一份客户端能解开的登录快照。
+ *
+ * 只写**新快照**（`.rebuild-<pid>.info`），不碰活动文件；写完立刻回读校验，
+ * 校验不过就报错收工 —— 留一份客户端解不开的文件比不留更糟。
+ *
+ * @param {string} uid
+ * @returns {Promise<{ok: boolean, path?: string, uid?: string, error?: string, verified?: boolean, domain?: string}>}
+ */
+async function rebuildLoginFileFromCredential(uid) {
+  const all = await readAllPluginCredentials();
+  const cred = all.find((c) => String(c.uid) === String(uid));
+  if (!cred) return { ok: false, error: `没有这个账号的插件凭据：${uid}` };
+  if (!cred.accessToken) return { ok: false, error: '凭据里没有 accessToken，无法重建登录文件' };
+  const domain = String(cred.domain || (cred.region === 'global' ? 'www.workbuddy.ai' : 'www.workbuddy.cn'));
+
+  let key;
+  try { key = await atRestKeyForDomain(domain); }
+  catch (e) { return { ok: false, error: `取不到 AtRest 密钥：${shortError(e?.message || e, 200)}` }; }
+
+  const claims = decodeJwt(cred.accessToken);
+  const refreshClaims = decodeJwt(cred.refreshToken || '');
+  const now = Date.now();
+  const accessExp = Number(claims.exp) ? Number(claims.exp) * 1000 : Number(cred.expiresAtMs) || 0;
+  const refreshExp = Number(refreshClaims.exp) ? Number(refreshClaims.exp) * 1000 : 0;
+  /*
+   * 凭据里的 nickname 是上游打过码的（`176****0068`）；原始手机号只存在于 token 的
+   * preferred_username。**不写明文**：按客户端同一格式再打一次码。
+   */
+  const phone = String(claims.preferred_username || '');
+  const phoneLike = /^\d{6,}$/u.test(phone);
+  const maskPhone = (v) => (v.length < 7 ? v : `${v.slice(0, 3)}****${v.slice(-4)}`);
+  const nickname = String(cred.nickname || (phoneLike ? maskPhone(phone) : ''));
+  /*
+   * uin 是客户端侧的账号编号，插件凭据里没有 —— 但**存档里可能有**：
+   * 只要这个号以前在登录目录里出现过，meta.json 就记着它的 uin。
+   *
+   * 为什么不直接留空：账号列表的显示键是 `uin → userId → 文件名`（见
+   * lib/diagnostics.mjs 的 aliasKey），uin 空着时这一行会显示成 uid，
+   * 用户给这个号起过的名字（`.state.json` 的 accountAliases 按 uin 记）
+   * 也就贴不上去 —— 看起来像个陌生账号，而不是"原来那个号回来了"。
+   */
+  const archivedUin = (() => {
+    try {
+      const meta = JSON.parse(readFileSync(join(ACCOUNT_ARCHIVE_DIR, archiveKeyOf(uid), 'meta.json'), 'utf8'));
+      return String(meta.uin || '');
+    } catch { return ''; }
+  })();
+
+  const account = {
+    uid: String(uid),
+    nickname: sealAuthField(nickname, key),
+    uin: archivedUin,
+    type: 'personal',
+    lastLogin: true,
+    isCreator: false,
+    isAdmin: false,
+    pluginEnabled: true,
+    deployStatus: { statusCode: 0, statusMsg: '', detailMsg: '' },
+    accountType: '',
+    sso: { domain: '', domainModifiedTimes: 0 },
+    idp: '',
+    areaInfoComplete: false,
+    oneidAccountId: '',
+    uniqueUserId: `personal_${uid}`,
+    isCurrentOneIdEnterprise: false,
+    isCurrentOneIdPersonal: false,
+    isFirstLogin: false,
+    phoneNumber: phoneLike ? sealAuthField(phone, key) : '',
+    mpOpenId: String(claims.mp_open_id || ''),
+    logOutEnable: false,
+  };
+  const doc = {
+    auth: {
+      accessToken: sealAuthField(cred.accessToken, key),
+      expiresIn: Math.max(0, Math.round((accessExp - now) / 1000)),
+      refreshExpiresIn: refreshExp ? Math.max(0, Math.round((refreshExp - now) / 1000)) : 0,
+      refreshToken: sealAuthField(cred.refreshToken || '', key),
+      tokenType: 'Bearer',
+      sessionState: String(claims.session_state || claims.sid || ''),
+      domain,
+      lastRefreshTime: now,
+      expiresAt: accessExp || now,
+      refreshExpiresAt: refreshExp || 0,
+    },
+    account,
+    accounts: [account],
+    allAccounts: [account],
+  };
+
+  // 回读校验：用同一把钥能解出同一个 sub 才算成功
+  let verifiedUid = '';
+  try {
+    const back = await openAuthField(doc.auth.accessToken, 'accessToken');
+    verifiedUid = String(decodeJwt(back).sub || '');
+  } catch (e) {
+    return { ok: false, error: `重建的登录文件自身无法解开：${shortError(e?.message || e, 200)}` };
+  }
+  if (verifiedUid !== String(uid)) {
+    return { ok: false, error: `重建校验失败：解出的账号是 ${verifiedUid || '(空)'}，不是 ${uid}` };
+  }
+
+  const dir = loginWriteDir();
+  if (!dir) return { ok: false, error: '找不到登录目录' };
+  const stamp = new Date().toISOString().replace(/[-:]/gu, '').replace(/\..+$/u, '');
+  const prefix = /workbuddy\.ai|workbuddy\.cc|codebuddy\.ai/iu.test(domain)
+    ? 'workbuddy-desktop-ai'
+    : 'workbuddy-desktop';
+  const name = `${prefix}.${stamp}.rebuild-${process.pid}.info`;
+  if (ACTIVE_AUTH_NAMES.includes(name)) {
+    return { ok: false, error: '拒绝覆盖客户端正在使用的活动登录文件' };
+  }
+  const target = join(dir, name);
+  try {
+    writeFileSync(target, `${JSON.stringify(doc, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
+  } catch (e) {
+    return { ok: false, error: `写登录文件失败：${shortError(e?.message || e, 200)}` };
+  }
+  /*
+   * 快照已经落盘 —— 从这里往下**不能再"失败返回"**，否则会在登录目录里留下
+   * 一份没人登记的快照（账号列表看得见它，存档里却没有它的血统），
+   * 用户看到"多了一行但说不清是什么"。所以下面全部尽力而为，结果如实带回。
+   */
+  const warnings = [];
+  const stored = archiveOneLoginFile({ path: target, name, uid: String(uid), uin: '', domain });
+  if (!stored.stored && stored.reason && stored.reason !== 'already') {
+    warnings.push(`快照已写入，但未能存档：${stored.reason}`);
+  }
+  try {
+    writeArchiveMeta(archiveKeyOf(uid), {
+      rebuiltAt: new Date().toISOString(),
+      rebuiltFrom: 'plugin-credential',
+      ...(stored.file ? { latest: stored.file, file: stored.file } : {}),
+      lastSeenAt: new Date().toISOString(),
+    });
+  } catch (e) {
+    warnings.push(`快照已写入，但存档元数据没写成：${shortError(e?.message || e, 120)}`);
+  }
+  /*
+   * uin 缺失要说出来：它决定账号列表的显示键，也决定用户起过的别名能否贴上。
+   * 只留空不解释，用户会以为"回来的不是原来那个号"。
+   */
+  if (!archivedUin) {
+    warnings.push('不知这个号的 uin（没有历史存档）：列表里会显示 uid，之前起过的名字也贴不上；在客户端正常登录一次即可补齐');
+  }
+  log('login file rebuilt from plugin credential', `${uid} -> ${name}`);
+  return {
+    ok: true,
+    path: target,
+    uid: String(uid),
+    verified: true,
+    domain,
+    ...(warnings.length ? { warnings } : {}),
+  };
+}
+
+/**
+ * 把存档里的一份登录文件放回登录目录（新快照，不覆盖活动文件）。
+ *
+ * ## 两个参数都必须当"用户输入"校验
+ *
+ * `key` 与 `file` 都直接来自 HTTP 请求体。第一版只用 `archiveKeyOf()` 洗字符，
+ * 而它放行了 `.` —— 实测 `key=".."` 能让 `join` 跳回 `~/.workbuddy-bridge`，
+ * 再让 `file` 读到 `credentials/store.key` / `state.json` 并复制进登录目录。
+ * 现在：`key` 走白名单段校验；`file` 只接受**存档目录里真实存在的文件名**
+ * （纯文件名，不含任何分隔符），并且最终解析出的路径必须仍在存档目录内。
+ */
+function restoreArchivedLoginFile(key, file) {
+  if (ARCHIVE_DISABLED_REASON) return { ok: false, error: ARCHIVE_DISABLED_REASON };
+  const id = archiveKeyOf(key);
+  if (!id) return { ok: false, error: '账号标识不合法：只允许字母、数字、下划线与连字符' };
+  const dir = join(ACCOUNT_ARCHIVE_DIR, id);
+  /*
+   * 目录必须真实存在且确实在存档根之下。`id` 已经过白名单，这一步是**第二道闸**：
+   * 万一以后有人放宽了白名单，这里仍能挡住跳出去（纵深防御，成本只有一次 resolve）。
+   */
+  const rootResolved = resolve(ACCOUNT_ARCHIVE_DIR);
+  const dirResolved = resolve(dir);
+  if (dirResolved !== join(rootResolved, id)) {
+    return { ok: false, error: '存档路径越界：拒绝访问存档目录之外的位置' };
+  }
+  if (!existsSync(dir)) return { ok: false, error: `存档里没有这个账号：${id}` };
+
+  let meta = {};
+  let metaError = '';
+  try {
+    const text = readFileSync(join(dir, 'meta.json'), 'utf8');
+    // 容忍 BOM：这个文件可能被用户的编辑器/脚本改过（实测 PowerShell 默认带 BOM），
+    // 而 JSON.parse 遇到 BOM 直接抛错 —— 那会让"没传 file"的调用变成一句
+    // 毫无线索的「存档里没有这份文件：(空)」。
+    meta = JSON.parse(text.replace(/^\uFEFF/u, ''));
+  } catch (e) {
+    metaError = e?.code === 'ENOENT' ? '' : String(e?.message || e);
+  }
+  const requested = String(file || '').trim();
+  const pick = requested || String(meta.latest || '').trim();
+  if (!pick) {
+    /*
+     * 这里必须区分三种情况，否则用户拿到的都是同一句「(空)」：
+     *   - 元数据损坏 → 告诉他文件坏了、可以显式指定 file；
+     *   - 目录里其实有 .info → 直接把文件名列出来（不问也能救）；
+     *   - 真的空 → 如实说。
+     */
+    let available = [];
+    try { available = readdirSync(dir).filter((f) => f.endsWith('.info')); } catch { /* 读不到 */ }
+    if (metaError) {
+      return {
+        ok: false,
+        error: `存档元数据读不出来（${shortError(metaError, 120)}）；可显式指定 file 重试${available.length ? `，可选：${available.join(', ')}` : ''}`,
+      };
+    }
+    if (available.length === 1) {
+      // 只有一份：直接用，不必让用户去猜文件名
+      return restorePick(id, dir, available[0]);
+    }
+    return {
+      ok: false,
+      error: available.length
+        ? `这个账号有多份存档，请指定 file：${available.join(', ')}`
+        : '这个账号的存档目录里没有任何 .info 文件',
+    };
+  }
+  /*
+   * `file` 只能是**存档目录里的一个纯文件名**。不接受相对路径（`../x`）、
+   * 绝对路径、或任何带分隔符的写法 —— 这些只会是攻击或调用方写错，
+   * 两种都不该被"猜着修"。
+   */
+  if (pick !== basename(pick) || /[\\/]/u.test(pick) || pick === '.' || pick === '..') {
+    return { ok: false, error: '文件名不合法：只能是存档目录里的文件名，不能包含路径' };
+  }
+  return restorePick(id, dir, pick);
+}
+
+/**
+ * 把 `dir` 下的 `pick` 复制进登录目录，生成新快照。
+ *
+ * 与 {@link restoreArchivedLoginFile} 拆开是因为"用户没指定 file、目录里只有一份"
+ * 时也要走这条路 —— 那条分支拿到的文件名来自 `readdirSync`（可信），
+ * 不该被"用户输入校验"重复拦一遍。
+ */
+function restorePick(id, dir, pick) {
+  const source = join(dir, pick);
+  if (!existsSync(source)) return { ok: false, error: `存档里没有这份文件：${pick}` };
+  const authDir = loginWriteDir();
+  if (!authDir) return { ok: false, error: '找不到登录目录' };
+  const stamp = new Date().toISOString().replace(/[-:]/gu, '').replace(/\..+$/u, '');
+  const prefix = /workbuddy-desktop-ai/u.test(pick) ? 'workbuddy-desktop-ai' : 'workbuddy-desktop';
+  const name = `${prefix}.${stamp}.restored-${process.pid}.info`;
+  if (ACTIVE_AUTH_NAMES.includes(name)) {
+    return { ok: false, error: '拒绝覆盖客户端正在使用的活动登录文件' };
+  }
+  try {
+    copyFileSync(source, join(authDir, name));
+  } catch (e) {
+    return { ok: false, error: `恢复失败：${shortError(e?.message || e, 200)}` };
+  }
+  writeArchiveMeta(id, { restoredAt: new Date().toISOString() });
+  log('archived login file restored', `${id} ${pick} -> ${name}`);
+  return { ok: true, path: join(authDir, name), name };
 }
 
 /**
@@ -11967,6 +12589,11 @@ async function handleRequest(req, res) {
        */
       || url.pathname === '/v1/checkin/accounts'
       || url.pathname === '/v1/checkin/all'
+      /*
+       * 账号存档 / 恢复 / 重建：会把登录文件写回磁盘、能列出本机所有账号身份。
+       * 这是管理面动作，client key 一律拒绝（它只用于聊天）。
+       */
+      || url.pathname.startsWith('/v1/accounts/')
       || (url.pathname === '/v1/checkin' && req.method === 'POST');
     if (managementRequest && requestScope.getStore()?.client !== 'local') {
       return json(res, 403, {
@@ -12010,6 +12637,12 @@ async function handleRequest(req, res) {
           const desktop = a.source === 'desktop' ? a : await readStoredAuth();
           desktopUserId = desktop.userId || '';
         } catch { /* 桌面文件读不出：只报桥自己的身份 */ }
+        /*
+         * 顺带存档：这个端点是最勤的（面板 2 秒一次），而"账号消失"的根因是
+         * 客户端**覆盖**了同名登录文件。存档放在这里才可能在覆盖**之前**留下副本。
+         * 内部有 60 秒节流，热路径上几乎没有成本；失败不影响响应。
+         */
+        sweepLoginArchive().catch(() => {});
         return json(res, 200, {
           ok: true,
           pid: process.pid,
@@ -12102,6 +12735,12 @@ async function handleRequest(req, res) {
           credential: await credentialStatus(),
         });
       }
+      /*
+       * 顺带存档（60 秒节流）：`/health` 是面板与插件最勤的端点，
+       * 而"账号消失"的根因是客户端**覆盖**同名登录文件 —— 只有在这之前
+       * 存过副本才救得回来。失败一律不影响健康响应。
+       */
+      sweepLoginArchive().catch(() => {});
       // 这里**绝不能等上游**：控制台的探测超时是 4 秒，冷缓存时抓目录要好几秒，
       // 一旦超时就会被误判成「桥未运行」。有缓存立刻答，没有或过期都只触发后台刷新。
       if (!catalogCache.models.length) {
@@ -12682,6 +13321,109 @@ async function handleRequest(req, res) {
       // 进行中的请求（卡死可见性）：只报告，不干预 —— 本桥没有任何默认超时。
       const active = [...inflight.values()].map((r) => ({ ...r, runningMs: Date.now() - r.startedAt }));
       return json(res, 200, { ok: true, requests: recentRequests(limit), active, activeAlertMs: ACTIVE_ALERT_MS });
+    }
+
+    /*
+     * ── 账号存档 / 重建（管理面，需本地令牌）───────────────────────────
+     *
+     * `GET  /v1/accounts/archive`              存档清单（不含令牌）
+     * `POST /v1/accounts/archive`              立刻扫一遍并保存（`{refresh:true}` 同义）
+     * `POST /v1/accounts/restore`              把存档里的某份放回登录目录 → `{key, file?}`
+     * `POST /v1/accounts/rebuild`              用插件凭据反向重建登录快照 → `{uid}`
+     *
+     * 「登录就应该保存」的落地口：客户端换号是**覆盖**同名登录文件，被覆盖的那个
+     * 账号在磁盘上没有第二份。这三个接口让"丢掉的客户端账号"能自己回来。
+     * 响应里**永不含任何令牌**（存档是原样复制，重建后的凭据只写进登录文件）。
+     */
+    if (url.pathname === '/v1/accounts/archive') {
+      if (req.method === 'GET') {
+        return json(res, 200, {
+          ok: true,
+          dir: ACCOUNT_ARCHIVE_DIR,
+          lastSweepAt: archiveSweepResult.at ? new Date(archiveSweepResult.at).toISOString() : '',
+          scanned: archiveSweepResult.scanned,
+          accounts: listArchivedAccounts(),
+        });
+      }
+      if (req.method === 'POST') {
+        const started = Date.now();
+        const result = await sweepLoginArchive(true);
+        return json(res, 200, {
+          ok: true,
+          dir: ACCOUNT_ARCHIVE_DIR,
+          ms: Date.now() - started,
+          stored: result.stored,
+          scanned: result.scanned,
+          accounts: listArchivedAccounts(),
+        });
+      }
+      return json(res, 405, { ok: false, error: 'method not allowed' });
+    }
+
+    if (url.pathname === '/v1/accounts/restore' && req.method === 'POST') {
+      const parsedBody = await readJsonBody(req, res);
+      if (!parsedBody.ok) return undefined;
+      const body = parsedBody.body || {};
+      const key = typeof body.key === 'string' ? body.key : (typeof body.uid === 'string' ? body.uid : '');
+      if (!key) return json(res, 400, { ok: false, error: 'key (uid / uin) is required' });
+      const result = restoreArchivedLoginFile(key, typeof body.file === 'string' ? body.file : '');
+      if (!result.ok) return json(res, 400, result);
+      // 恢复出来的快照要立刻出现在账号列表里 → 目录与积分都属于账号，作废重取
+      invalidateCatalogCache();
+      return json(res, 200, {
+        ...result,
+        note: '已作为新快照放回登录目录；面板下一次刷新会看到它。切换仍按文件走。',
+      });
+    }
+
+    if (url.pathname === '/v1/accounts/rebuild' && req.method === 'POST') {
+      const parsedBody = await readJsonBody(req, res);
+      if (!parsedBody.ok) return undefined;
+      const body = parsedBody.body || {};
+      /*
+       * uid 省略时：把所有"只剩插件凭据、登录目录里已没有它的文件"的账号都重建一遍。
+       * 这正是用户说「客户端账号不见了」时的最短修复路径 —— 不必先知道 uid。
+       *
+       * 判据必须是**登录目录里有没有它的 .info**，不能是"存档里有没有它"：
+       * 存档只记录"曾经见过"，而事故形态恰恰是文件被覆盖后存档里也没有
+       * （第一次存档发生在覆盖之后）。用存档当判据会漏掉真正该救的那个号。
+       */
+      const wanted = typeof body.uid === 'string' && body.uid ? [body.uid] : null;
+      let targets = wanted;
+      if (!targets) {
+        const here = new Set();
+        for (const dir of loginScanDirs()) {
+          let names = [];
+          try { names = readdirSync(dir).filter((n) => n.endsWith('.info')); } catch { continue; }
+          for (const name of names) {
+            const path = join(dir, name);
+            let raw;
+            try { raw = JSON.parse(readFileSync(path, 'utf8')); } catch { continue; }
+            const field = raw?.auth?.accessToken;
+            if (!field) continue;
+            try {
+              const claims = decodeJwt(await openAuthField(field, 'accessToken'));
+              if (claims.sub) here.add(String(claims.sub));
+            } catch { continue; }
+          }
+        }
+        const creds = await readAllPluginCredentials();
+        targets = creds.map((c) => String(c.uid)).filter((uid) => uid && !here.has(uid));
+      }
+      const results = [];
+      for (const uid of targets) {
+        try {
+          results.push(await rebuildLoginFileFromCredential(uid));
+        } catch (e) {
+          results.push({ ok: false, uid, error: shortError(e?.message || e, 200) });
+        }
+      }
+      if (results.some((r) => r.ok)) invalidateCatalogCache();
+      return json(res, 200, {
+        ok: results.every((r) => r.ok) || results.some((r) => r.ok),
+        results,
+        note: '重建的是登录目录里的**新快照**（*.rebuild-*.info），客户端活动文件未被改动。',
+      });
     }
 
     /*

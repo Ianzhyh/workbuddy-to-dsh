@@ -863,6 +863,14 @@ export const BRIDGE_ENV_PASSTHROUGH = Object.freeze([
   'WORKBUDDY_MEDIA_STORE_FILE',
   'WORKBUDDY_QUOTA_HISTORY_FILE',
   'WORKBUDDY_MODELS_DEFAULT_FILE',
+  /*
+   * 账号存档目录（「登录就应该保存」，见桥的「账号存档 / 重建」段）。
+   * 用户可能把它放到自己的归档盘上 —— 写在 .env 里就必须真的到桥，
+   * 否则他会以为存档挪走了，实际还在 `~/.workbuddy-bridge`。
+   */
+  'WORKBUDDY_ACCOUNT_ARCHIVE_DIR',
+  // 存档总开关（`0` = 完全不写存档，含临时目录夹具场景）
+  'WORKBUDDY_ACCOUNT_ARCHIVE',
   // 超时、连接池、重试
   'WORKBUDDY_TIMEOUT_MS',
   'WORKBUDDY_FIRST_BYTE_TIMEOUT_MS',

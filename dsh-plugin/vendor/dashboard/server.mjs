@@ -30,6 +30,10 @@ import {
   bridgeAuthActive,
   bridgeAuthLogout,
   bridgeSetAuthSource,
+  bridgeAccountsArchive,
+  bridgeAccountsArchiveSweep,
+  bridgeAccountsRestore,
+  bridgeAccountsRebuild,
   credentialStatus,
   diagnose,
   fileBuildHash,
@@ -1427,7 +1431,12 @@ const server = createServer(async (req, res) => {
      * **写 .state.json 并重启桥** —— 属于"会真的干活"的读接口。无 Origin 的
      * 浏览器请求（`<img>`）带不上自定义头，必须和 diagnose 一样挡在这里。
      */
-    const PANEL_ONLY_GET = new Set(['/api/connect', '/api/clients', '/api/diagnose', '/api/accounts']);
+    /*
+     * `PANEL_ONLY_GET`：这些 GET 会带回本机账号身份（uid / uin / 登录目录），
+     * 不能让一个跨站简单请求随随便便读到 —— 所以即使只是读也要求面板头。
+     * `/api/account/archive` 同理：它是账号清单的第二份（含存档时间与路径）。
+     */
+    const PANEL_ONLY_GET = new Set(['/api/connect', '/api/clients', '/api/diagnose', '/api/accounts', '/api/account/archive']);
     const needsPanel = !isRead
       || PANEL_ONLY_GET.has(route)
       || (route === '/api/models' && url.searchParams.get('refresh') === '1');
@@ -2344,6 +2353,72 @@ const server = createServer(async (req, res) => {
         let list = writeAccountHidden(file, hidden);
         for (const name of group) if (name !== file) list = writeAccountHidden(name, hidden);
         sendJson(res, 200, { ok: true, hidden: list, files: group });
+      } catch (err) {
+        if (err.code === 'BODY_TOO_LARGE') return bodyTooLarge(req, res);
+        sendJson(res, 400, { ok: false, error: err.message });
+      }
+      return;
+    }
+
+    /*
+     * ── 账号存档 / 恢复 / 重建 ──────────────────────────────────────────
+     *
+     * `GET  /api/account/archive`   存档清单（不含令牌）
+     * `POST /api/account/archive`   立刻扫一遍登录目录并保存
+     * `POST /api/account/restore`   把存档里的某份放回登录目录 → `{key, file?}`
+     * `POST /api/account/rebuild`   用插件凭据反向重建登录快照 → `{uid?}`
+     *
+     * 为什么要有这一组：客户端**换号**时用新账号原地覆盖 `workbuddy-desktop.info`，
+     * 被覆盖的账号在磁盘上没有第二份（只有「登出」才留快照）。这组接口是
+     * 「账号不见了」时唯一能把它找回来的路径 —— 不需要用户去客户端里重登。
+     *
+     * 全部是管理面动作（会写登录目录），所以只挂在控制台默认的本地回环上。
+     */
+    if (route === '/api/account/archive') {
+      try {
+        if (req.method === 'POST') {
+          const body = await bridgeAccountsArchiveSweep();
+          sendJson(res, 200, { ok: true, ...body });
+          return;
+        }
+        const body = await bridgeAccountsArchive();
+        sendJson(res, 200, { ok: true, ...body });
+      } catch (err) {
+        sendJson(res, 400, { ok: false, error: err.message });
+      }
+      return;
+    }
+
+    if (route === '/api/account/restore' && req.method === 'POST') {
+      try {
+        const { key, file } = JSON.parse(await readBody(req));
+        const id = typeof key === 'string' ? key.trim() : '';
+        if (!id) throw new Error('缺少 key（账号 uid / uin）');
+        const body = await bridgeAccountsRestore(id, typeof file === 'string' ? file : undefined);
+        /*
+         * 放回去的是一份**新快照**：账号相关的缓存（积分、体检、桥的账号钉住）
+         * 都可能已经按"这个号不在"算过，必须作废重取，否则页面还是看不见它。
+         */
+        invalidateQuotaCache();
+        await reconcileAccountPin().catch(() => {});
+        sendJson(res, 200, { ok: true, ...body });
+      } catch (err) {
+        if (err.code === 'BODY_TOO_LARGE') return bodyTooLarge(req, res);
+        sendJson(res, 400, { ok: false, error: err.message });
+      }
+      return;
+    }
+
+    if (route === '/api/account/rebuild' && req.method === 'POST') {
+      try {
+        const parsed = await readBody(req).then((raw) => (raw ? JSON.parse(raw) : {})).catch(() => ({}));
+        const uid = typeof parsed?.uid === 'string' ? parsed.uid.trim() : '';
+        const body = await bridgeAccountsRebuild(uid || undefined);
+        if (body?.ok) {
+          invalidateQuotaCache();
+          await reconcileAccountPin().catch(() => {});
+        }
+        sendJson(res, 200, { ok: body?.ok !== false, ...body });
       } catch (err) {
         if (err.code === 'BODY_TOO_LARGE') return bodyTooLarge(req, res);
         sendJson(res, 400, { ok: false, error: err.message });

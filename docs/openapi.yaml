@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: WorkBuddy 本地 API 桥
-  version: 1.23.1
+  version: 1.23.2
   description: |
     把本机 WorkBuddy 桌面端已登录的模型能力，经本地回环桥暴露为
     OpenAI 兼容与 Anthropic 兼容两套接口。仅监听 127.0.0.1。
@@ -572,6 +572,52 @@ paths:
       responses:
         '200': { description: 当前来源、账号、desktopUserId、构建指纹与 changedAt }
         '503': { description: 凭据读不出来（带错误原因与 pid/build） }
+  /v1/accounts/archive:
+    get:
+      summary: 账号存档清单（不含任何令牌）
+      description: |
+        存档是每份**能解开**的桌面登录文件的原始密文副本，按账号（uid / uin）分目录。
+        存在理由：客户端「换号」会**原地覆盖**同名登录文件（只有「登出」才留快照），
+        被覆盖的账号在本机就没有第二份了。属管理面，`client key` 一律 403。
+      responses:
+        '200': { description: '`dir` / `lastSweepAt` / `scanned` / `accounts[]`（key、uid、uin、domain、latest、count、lastSeenAt、restoredAt、rebuiltAt）' }
+        '403': { description: 非本地令牌 }
+    post:
+      summary: 立刻扫一遍登录目录并保存（`{}` 即可）
+      responses:
+        '200': { description: '`stored`（本次新增份数）/ `scanned` / 最新 `accounts[]`' }
+  /v1/accounts/restore:
+    post:
+      summary: 把存档里的某份登录文件放回登录目录（生成新快照）
+      description: 只写 `<base>.<时间戳>.restored-<pid>.info`；**绝不覆盖**客户端的活动登录文件。
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                key: { type: string, description: 账号 uid 或 uin }
+                file: { type: string, description: 指定存档文件名；省略则用 meta 里最新那份 }
+      responses:
+        '200': { description: '`path` / `name`' }
+        '400': { description: 存档里没有这份文件，或存档被关闭 }
+  /v1/accounts/rebuild:
+    post:
+      summary: 用插件凭据反向重建客户端登录快照
+      description: |
+        把插件凭据里的 access/refresh 用该域名对应 build 的 AtRest 密钥**重新封成**
+        `$wbEncrypted` 字段，写成一份客户端能解开的 `.info`。写完立刻回读校验，
+        解不出同一个 `sub` 就不落盘。`uin` 取自存档元数据（凭据里没有）。
+        `uid` 省略 = 重建所有「只剩插件凭据、登录目录里已没有它的文件」的账号。
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                uid: { type: string }
+      responses:
+        '200': { description: '`results[]` 每项含 ok / path / uid / verified / domain 或 error' }
   /v1/quota:
     get:
       summary: 积分余额（企业/教育号含企业配额与不限量语义；消费端按 WORKBUDDY_QUOTA_TTL_MS 缓存）

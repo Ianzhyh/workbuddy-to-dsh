@@ -35,11 +35,16 @@ vendor 指纹、诊断项与最近失败归因；**不含令牌、密钥、对�
 | `media-tasks.json` | 媒体任务元数据（同步任务重启后仍可查；不含 prompt） |
 | `bridge-token` | 本地回环令牌（旧客户端配置里填的就是它） |
 | `credentials/` | 插件登录凭据（Windows DPAPI / 其他平台文件密钥 + AES-GCM 信封） |
+| `account-archive/` | 账号存档（每份能解开的桌面登录文件的**原始密文副本**，按账号分目录；见下面「客户端账号不见了」） |
 
 可用 `WORKBUDDY_DATA_DIR` 覆盖。旧版把 state/usage/token 放在安装目录里；
 新版首次启动会从旧路径**复制**一份到新目录（旧文件保留作回滚备份），
 所以升级后旧客户端不会突然 401。若发现仍在读旧路径，确认启动桥时注入的
 `WORKBUDDY_DATA_DIR` 与插件/控制台一致。
+
+`account-archive/` 可用 `WORKBUDDY_ACCOUNT_ARCHIVE_DIR` 单独指到别的盘；
+`WORKBUDDY_ACCOUNT_ARCHIVE=0` 可整个关掉。**登录目录位于系统临时目录时存档默认关闭**
+（那是测试夹具，不该写进真实存档），需要时显式设置 `WORKBUDDY_ACCOUNT_ARCHIVE_DIR`。
 
 ### 备份 / 恢复运行期数据
 
@@ -70,6 +75,65 @@ node tools\backup.mjs --restore D:\wb-backup --yes
 ---
 
 ## 按症状定位
+
+### 客户端账号不见了：换号后原来那个号从列表里消失
+
+**症状**：在 WorkBuddy 客户端里换了账号之后，账号页里**原来那个号整行消失**，
+只剩它当年用浏览器登录留下的「插件」凭据行。登录目录里也找不到它的 `.info`。
+
+**原因**（2026-11-10 实机确认）：客户端有两条处理登录态的路，后果不同 ——
+
+| 客户端动作 | 对登录目录的影响 |
+|---|---|
+| **登出** | 把 `workbuddy-desktop.info` 改名成 `workbuddy-desktop.<时间戳>.info` 留在原地 —— 账号还在 |
+| **换号 / 重新登录** | 直接用新账号**原地覆盖**同名文件 —— 上一个账号**一点痕迹都不剩** |
+
+桥自己的日志能证明是第 2 条：
+
+```
+[2026-11-09T14:43:12.506Z] desktop login identity changed; catalog invalidated
+  7c43a818-2c66-4a36-a86e-4ca2d951a3f4 -> 1df8ca6b-1782-4ddd-ac4a-83eb13298ad2
+```
+
+被覆盖的账号**没有被注销**，只是本机不再有它的登录文件。所以两条路都能把它找回来：
+
+**① 从插件凭据重建**（这个号用过浏览器登录时最有效）
+
+账号页 →「备份与找回」→「找回消失的账号」。桥会用该域名对应 build 的 AtRest
+密钥，把插件凭据里的 access/refresh 反向封成一份**合法的登录快照**
+（`workbuddy-desktop.<时间戳>.rebuild-<pid>.info`），写完立刻回读校验。
+
+等价命令：
+
+```cmd
+curl -X POST http://127.0.0.1:8790/v1/accounts/rebuild ^
+  -H "Authorization: Bearer <bridge-token>" -H "content-type: application/json" -d "{}"
+```
+
+`uid` 省略 = 把所有「只剩插件凭据、登录目录里已没有它的文件」的账号都重建一遍。
+
+**② 从存档恢复**（本功能上线后丢的号）
+
+存档在 `%USERPROFILE%\.workbuddy-bridge\account-archive\<uid>\`，是登录文件的
+**原始密文副本**（不含任何新明文）。桥在 `/health`、`/v1/identity` 被轮询时
+自动扫一遍（60 秒节流），也可以手动：
+
+```cmd
+curl -X POST http://127.0.0.1:8790/v1/accounts/restore ^
+  -H "Authorization: Bearer <bridge-token>" -H "content-type: application/json" ^
+  -d "{\"key\":\"<uid 或 uin>\"}"
+```
+
+**边界（刻意如此）**
+
+- 恢复/重建只写**新快照**，绝不覆盖客户端的活动登录文件；改动前不需要关客户端。
+- 重建出的快照里 `uin` 取自存档（凭据里没有 uin）；从没存过档的号只能显示 uid，
+  你给它起的别名也就贴不上去 —— 在客户端里正常登录一次，uin 就会补齐。
+- 拉不到 AtRest 密钥时（客户端未安装 / 装在非常规目录）**不会**写半成品，
+  而是如实报错：写一份客户端解不开的文件比不写更糟。
+- 登录目录在系统临时目录下时，存档默认关闭（那是测试夹具）。
+
+---
 
 ### dsh 启动失败：`workbuddy-to-dsh: import failed`
 

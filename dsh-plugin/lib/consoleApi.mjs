@@ -30,6 +30,15 @@ export const CONSOLE_API_ALLOWLIST = {
   '/account/alias': ['POST'],
   '/account/order': ['POST'],
   '/account/hidden': ['POST'],
+  /*
+   * 账号存档 / 恢复 / 重建（「登录就应该保存」）。
+   *
+   * 会把登录文件写回磁盘，所以必须走控制台：它才是 `.state.json` 的唯一写者，
+   * 也是唯一知道"账号钉住在哪份文件"的一方。插件自己写会让两边的缓存分叉。
+   */
+  '/account/archive': ['GET', 'POST'],
+  '/account/restore': ['POST'],
+  '/account/rebuild': ['POST'],
   '/probe': ['POST'],
   '/probe-results': ['GET', 'POST', 'DELETE'],
   '/checkin': ['GET', 'POST'],

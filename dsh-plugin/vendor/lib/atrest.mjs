@@ -12,7 +12,7 @@
  * the app that wrote the file.
  */
 import { execFile } from 'node:child_process';
-import { createDecipheriv, createHash } from 'node:crypto';
+import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { probeSystemSignalsExe, workBuddyExeCandidates } from './find-workbuddy.mjs';
 
@@ -133,6 +133,44 @@ export function openEncryptedField(field, key) {
     decipher.update(Buffer.from(ciphertext, 'base64')),
     decipher.final(),
   ]).toString('utf8');
+}
+
+/**
+ * 把一段明文封成客户端能解开的 `$wbEncrypted` 字段 —— {@link openEncryptedField} 的逆运算。
+ *
+ * ## 为什么需要「反向」这一半
+ *
+ * 本项目对登录文件原本只有读的需求。但**客户端换号会原地覆盖同名文件**（不是登出，
+ * 不留快照），于是一旦换号，上一个账号在登录目录里**一点痕迹都不剩** —— 面板里那一行
+ * 直接消失，用户看到的就是"账号不见了"。而我们自己手里可能仍握有该账号的插件凭据
+ * （access + refresh 都是明文的），完全可以反向重建一份登录快照让它回来。
+ *
+ * 重建出来的文件**只能由写它的那个 build 解开**：`keyId` 参与 AAD，密钥取自
+ * `fetchKeyFor()`。所以调用方必须用与目标客户端同一个 exe 的密钥（国内版 / 国际版
+ * 各一把），否则客户端读回来是「信封属于另一把钥」。
+ *
+ * @param {string} plain 明文（令牌、昵称、手机号…）
+ * @param {Buffer} key 32 字节字段密钥（来自 {@link deriveAtRestKey}）
+ * @param {{suite?: number}} [options] 与客户端同口径，默认 suite=1
+ * @returns {{$wbEncrypted: 1, envelope: string}} 可直接放进 `.info` 的字段值
+ */
+export function sealEncryptedField(plain, key, { suite = 1 } = {}) {
+  if (!Buffer.isBuffer(key) || key.length !== 32) {
+    throw new Error('sealEncryptedField needs a 32-byte key');
+  }
+  const keyId = deriveAtRestKeyId(key);
+  const nonce = randomBytes(12);
+  const cipher = createCipheriv('aes-256-gcm', key, nonce, { authTagLength: 16 });
+  cipher.setAAD(fieldAad(keyId, suite));
+  const ciphertext = Buffer.concat([cipher.update(String(plain), 'utf8'), cipher.final()]);
+  const envelope = JSON.stringify({
+    suite,
+    keyId,
+    nonce: nonce.toString('base64'),
+    authTag: cipher.getAuthTag().toString('base64'),
+    ciphertext: ciphertext.toString('base64'),
+  });
+  return { $wbEncrypted: 1, envelope: Buffer.from(envelope, 'utf8').toString('base64') };
 }
 
 /**

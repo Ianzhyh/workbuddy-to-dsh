@@ -182,6 +182,20 @@ body.dark .wb-root,
 .wb-row{display:flex;align-items:center;justify-content:space-between;gap:12px;min-height:38px;padding:5px 0;min-width:0}
 .wb-row+.wb-row{border-top:.5px solid var(--dsw-alias-border-l1,light-dark(#0000000a,#ffffff0f))}
 /*
+ * 「需要你动手」的一条待办。
+ *
+ * 为什么不复用 .wb-row：它是 justify-content:space-between + 单行，
+ * 文案一长（例如「当前账号的模型用量已达上限（deepseek-v4.1-flash），预计
+ * 11/10 14:44 恢复；可切换账号或换模型」）就把右侧按钮**挤出卡片边界**
+ * —— 实拍截图里「去账号页」被裁掉一半。待办文案本来就长短不一，
+ * 所以这里给文字 flex:1 + 允许换行，按钮 flex:0 0 auto 永不被压缩。
+ */
+.wb-alert-row{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;min-height:38px;padding:6px 0;min-width:0}
+.wb-alert-row + .wb-alert-row{border-top:.5px solid var(--dsw-alias-border-l1,light-dark(#0000000a,#ffffff0f))}
+.wb-alert-text{flex:1 1 auto;min-width:0;overflow-wrap:anywhere}
+.wb-alert-text .wb-pill{white-space:normal;text-align:left}
+.wb-alert-action{flex:0 0 auto;align-self:center}
+/*
  * 签到/账号区的读数层次：大号数字 + 进度条 + 账号卡块。
  *
  * 原来所有东西都是「label …… value」的 Row：几十行长得一模一样，
@@ -483,6 +497,26 @@ body.dark .wb-root,
 .wb-btn.is-sm{font-size:11.5px;padding:2px 9px;min-height:24px;border-radius:4px;color:var(--dsw-alias-text-weak,light-dark(#3b3f48,#c2c5cc))}
 .wb-btn.is-sm.primary{color:light-dark(#fff,#0f1115)}
 .wb-account-toolbar .wb-input{font-size:12px;padding:3px 8px;min-height:24px}
+
+/*
+ * 生效账号那一行上的「额度上限 + 恢复时间」。
+ *
+ * 用 warn 色而不是普通弱化色：这是一条**会让请求失败**的状态，
+ * 和「剩余 29 天」那种纯信息不是一个重量级。
+ */
+.wb-account-limit{color:var(--dsw-alias-text-warning,light-dark(#9a5b00,#ffc46b));font-weight:500}
+.wb-account-limit-label{font-weight:600}
+
+/*
+ * 「备份与找回」区：与上面的账号列表**视觉上必须是两件事**。
+ *
+ * 第一版把两个按钮直接塞在列表控件后面，实拍截图里它们贴着账号卡片、
+ * 与「刷新」同一重量 —— 用户根本认不出这是另一个功能。所以给它一条
+ * 分隔线 + 小标题 + 自己的呼吸空间。
+ */
+.wb-account-recover{margin-top:14px;padding-top:12px;border-top:1px solid var(--dsw-alias-border-l2,light-dark(#00000014,#ffffff1f))}
+.wb-account-recover-title{margin:0 0 8px;font-size:12px;font-weight:600;color:var(--dsw-alias-text-weak,light-dark(#3b3f48,#c2c5cc))}
+.wb-account-recover-note{margin:6px 0 0}
 
 /* 已隐藏的账号：压暗 + 虚线边，一眼看出它不在默认列表里 */
 .wb-account-hidden{opacity:.62;border-style:dashed}
@@ -1284,6 +1318,22 @@ body.dark .wb-root,
       '仅插件登录': 'Plugin sign-in only',
       '企业版': 'Enterprise',
       '检查状态': 'Check status',
+      // ── 账号存档 / 找回消失的账号 ──
+      '备份与找回': 'Backup & recovery',
+      '找回消失的账号': 'Recover a lost account',
+      '重建中…': 'Rebuilding…',
+      '立即存档登录状态': 'Archive login state now',
+      '存档中…': 'Archiving…',
+      '重建失败：': 'Rebuild failed: ',
+      '存档失败：': 'Archive failed: ',
+      '已从插件凭据重建 ': 'Rebuilt ',
+      '已把登录目录存档（现存 ': 'Archived the login directory (now holding ',
+      '客户端「换号」会用新账号覆盖同名登录文件（只有「登出」才留快照），所以换号后原来的号可能从列表里消失。':
+        'Switching accounts in the desktop app overwrites the login file in place (only signing out leaves a snapshot), so the previous account can disappear from this list.',
+      '点「立即存档」把当前登录目录保存一份；点「找回消失的账号」用插件凭据把消失的号重建回来。':
+        'Use "Archive login state now" to keep a copy of the login directory, and "Recover a lost account" to rebuild a missing account from its plugin credential.',
+      '客户端「换号」会用新账号覆盖同名登录文件（只有「登出」才留快照），所以换号后原来的号可能从列表里消失。点「立即存档」把当前登录目录保存一份；点「找回消失的账号」用插件凭据把消失的号重建回来。':
+        'Switching accounts in the desktop app overwrites the login file in place (only signing out leaves a snapshot), so the previous account can disappear from this list. Use "Archive login state now" to keep a copy of the login directory, and "Recover a lost account" to rebuild a missing account from its plugin credential.',
 
       // ── 用量 ──
       '用量统计': 'Usage',
@@ -4368,13 +4418,13 @@ body.dark .wb-root,
         alerts.length
           ? h('div', { className: 'wb-card' },
             h('h3', null, '需要你动手'),
-            ...alerts.map((a, i) => h('div', { key: i, className: 'wb-row' },
-              h('span', { style: { minWidth: 0 } }, h(Pill, { tone: a.tone, text: a.text })),
-              a.action ? h(Btn, {
+            ...alerts.map((a, i) => h('div', { key: i, className: 'wb-alert-row' },
+              h('span', { className: 'wb-alert-text' }, h(Pill, { tone: a.tone, text: a.text })),
+              a.action ? h('div', { className: 'wb-alert-action' }, h(Btn, {
                 primary: a.action === 'account',
                 disabled: busy || (a.action === 'websearch' && searchBusy),
                 onClick: () => alertAction(a.action),
-              }, ACTION_LABEL[a.action] || '处理') : null)))
+              }, ACTION_LABEL[a.action] || '处理')) : null)))
           : (unauthenticated
             ? null
             : h(Card, { title: '需要你动手' }, h('p', { className: 'wb-note', style: { margin: 0 } }, '没有待办事项。'))),
@@ -5578,6 +5628,26 @@ body.dark .wb-root,
               h('div', { className: 'wb-account-sub' },
                 '剩余 ' + (a.expiresAt ? fmtRemaining(a.expiresAt) : '未知')
                   + ' · 凭据 ' + (a.encrypted ? 'AtRest 信封' : '明文')),
+              /*
+               * 额度上限与恢复时间**写在这一行上**，不只在顶部横幅里。
+               *
+               * 用户反馈（原话）：*"那个 deepseek 上限了在账号那里写一下，还有恢复时间也写一下"* ——
+               * 顶部横幅是概览页的，而用户是在**账号页**判断"该换哪个号"，站在这里
+               * 看不到"为什么这个号现在不能用来跑 deepseek-v4.1-flash、什么时候好"，
+               * 就得来回切页签。徽标只有「额度上限」四个字，恢复时间藏在悬停提示里 ——
+               * 触屏与键盘用户根本拿不到。所以：生效中的那一行多一条独立副行，
+               * 模型名 + 恢复时间全部明文写出，不依赖 tooltip。
+               */
+              (pluginEffective || desktopEffective) && quotaLimit
+                ? h('div', { className: 'wb-account-sub wb-account-limit' },
+                  h('span', { className: 'wb-account-limit-label' }, en ? 'Usage limit' : '额度上限'),
+                  h('span', null, ' · '),
+                  h('span', null, quotaLimit.model || (en ? 'this model' : '当前模型')),
+                  h('span', null, ' · '),
+                  quotaReset
+                    ? h('span', null, (en ? 'resets ' : '恢复 ') + quotaReset)
+                    : h('span', null, en ? 'reset time unknown' : '恢复时间未知'))
+                : null,
               pluginFor
                 ? h('div', { className: 'wb-account-sub' },
                   h('span', null, pluginEffective ? '插件凭据 · ' : '插件凭据（未使用）· '),
@@ -5649,7 +5719,63 @@ body.dark .wb-root,
             h('input', { type: 'checkbox', checked: showHidden, onChange: (e) => setShowHidden(e.target.checked) }),
             '显示已隐藏',
             hiddenCount ? h(Pill, { tone: '', text: String(hiddenCount) }) : null),
-          h(Btn, { onClick: reload }, '刷新'))),
+          h(Btn, { onClick: reload }, '刷新')),
+        /*
+         * 「客户端账号不见了」的修复区 —— **独立一段**，不能和上面的列表控件挤在一起。
+         *
+         * 为什么必须放在账号页：客户端**换号会原地覆盖** `workbuddy-desktop.info`，
+         * 被覆盖的账号在磁盘上没有副本 —— 用户看到的正是"原来那个号整行消失"。
+         * 这两条路是客户端之外唯一能把它找回来的：
+         *   · 从存档恢复：我们读到过它的登录文件（本功能上线后才可能存到）
+         *   · 从插件凭据重建：它还有浏览器登录留下的 access/refresh（事故现场的情况）
+         *
+         * 版式：分隔线 + 小标题 + 按钮行 + 说明。第一版直接塞了两个按钮在卡片末尾，
+         * 实拍截图里它们贴着账号卡片、与「刷新」同一视觉重量，完全看不出是另一件事。
+         */
+        h('div', { className: 'wb-account-recover' },
+          h('p', { className: 'wb-account-recover-title' }, '备份与找回'),
+          h('div', { className: 'wb-actions', style: { marginTop: 0 } },
+            h(Btn, {
+              disabled: working === 'rebuild',
+              onClick: async () => {
+                setWorking('rebuild');
+                setMessage('');
+                const res = await postJson(CONSOLE_API + '/account/rebuild', {});
+                setWorking('');
+                const done = (res.data?.results || []).filter((r) => r.ok);
+                const failed = (res.data?.results || []).filter((r) => !r.ok);
+                if (done.length) {
+                  setMessage('已从插件凭据重建 ' + done.length + ' 个登录快照，账号会重新出现在列表里。'
+                    + (failed.length ? '另有 ' + failed.length + ' 个未能重建：' + (failed[0].error || '未知原因') : ''));
+                  reload();
+                  if (reloadStatus) reloadStatus();
+                  notifyAuthChanged();
+                } else if (res.data?.ok === false || res.status !== 200) {
+                  setMessage('重建失败：' + (res.data?.error || res.status));
+                } else {
+                  setMessage('没有需要重建的账号 —— 每个已登录的插件账号在客户端登录目录里都还有文件。');
+                }
+              },
+            }, working === 'rebuild' ? '重建中…' : '找回消失的账号'),
+            h(Btn, {
+              disabled: working === 'archive-sweep',
+              onClick: async () => {
+                setWorking('archive-sweep');
+                setMessage('');
+                const res = await postJson(CONSOLE_API + '/account/archive', {});
+                setWorking('');
+                if (res.data?.ok) {
+                  const n = Array.isArray(res.data.accounts) ? res.data.accounts.length : 0;
+                  setMessage('已把登录目录存档（现存 ' + n + ' 个账号的快照'
+                    + (res.data.stored ? '，本次新增 ' + res.data.stored + ' 份' : '') + '）。');
+                  reload();
+                } else {
+                  setMessage('存档失败：' + (res.data?.error || res.status));
+                }
+              },
+            }, working === 'archive-sweep' ? '存档中…' : '立即存档登录状态')),
+          h('p', { className: 'wb-note wb-account-recover-note' },
+            '客户端「换号」会用新账号覆盖同名登录文件（只有「登出」才留快照），所以换号后原来的号可能从列表里消失。点「立即存档」把当前登录目录保存一份；点「找回消失的账号」用插件凭据把消失的号重建回来。'))),
         firstRun ? null : loginCard);
     }
 

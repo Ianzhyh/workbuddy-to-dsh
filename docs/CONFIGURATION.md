@@ -29,6 +29,8 @@ copy .env.example .env
 | `WORKBUDDY_HOST` | `127.0.0.1` | 桥绑定地址。**不要改成 `0.0.0.0`** |
 | `WORKBUDDY_PORT` | `8790` | 桥监听端口 |
 | `WORKBUDDY_DATA_DIR` | `%USERPROFILE%\.workbuddy-bridge` | 运行期数据目录（state / usage / 本地令牌 / 媒体任务）。**不要放安装目录**：换 tgz / 重装会丢账号钉住、用量和令牌，旧客户端随之 401 |
+| `WORKBUDDY_ACCOUNT_ARCHIVE_DIR` | `<数据目录>\account-archive` | 账号存档目录：每份能解开的桌面登录文件的**原始密文副本**，按账号（uid / uin）分目录。客户端「换号」是**原地覆盖**登录文件，只有存档能在覆盖前留一份 —— 见 `docs/TROUBLESHOOTING.md` 的「客户端账号不见了」 |
+| `WORKBUDDY_ACCOUNT_ARCHIVE` | 启用 | `0` = 完全不写账号存档。不想保留第二份登录态副本时用它。登录目录位于系统临时目录时存档默认关闭（那是测试夹具） |
 | `WORKBUDDY_LOCAL_TOKEN` | 首次启动随机生成 | 本地回环令牌。仅用于阻止同机其它程序误用该端口，**不是**上游凭据。留空即自动生成并落到 `<WORKBUDDY_DATA_DIR>/bridge-token`（控制台、插件与桥共用同一文件，保证一致）；需与 dsh 的 `WORKBUDDY_BRIDGE_KEY` 值一致 |
 | `WORKBUDDY_TIMEOUT_MS` | `0` | 上游**总**超时（毫秒）。`0` = 不限——长回答需要保持 0；卡死由下面的首字节/排队超时兜底 |
 | `WORKBUDDY_FIRST_BYTE_TIMEOUT_MS` | `120000` | 连接建立后多久没收到第一块响应体就放弃。只抓“上游不说话”，不限制长回答总时长；`0` = 关闭 |

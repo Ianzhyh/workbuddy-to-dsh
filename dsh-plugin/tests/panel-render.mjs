@@ -2427,6 +2427,68 @@ async function verifyRateLimitVisibility() {
     const accountText = await pageLimit.cdp.evaluate("document.querySelector('.wb-root') ? document.querySelector('.wb-root').innerText : ''");
     if (!accountText.includes('当前账号的模型用量已达上限')) problems.push('账号页没有显示账号用量上限提示');
     if (!accountText.includes('额度上限')) problems.push('账号页当前账号没有「额度上限」标记');
+    /*
+     * 用户反馈（2026-11-10，附截图）：*"这个超出了，还有那个 deepseek 上限了在账号那里
+     * 写一下，还有恢复时间也写一下"*。两件事分别落在两页上，各自用机器判据钉住：
+     *
+     *  · **概览页**「需要你动手」：额度提示文案很长，原先放在 `.wb-row`
+     *    （space-between + 单行）里会把右侧按钮挤出卡片边界 —— 实拍图里
+     *    「去账号页」被裁掉一半。
+     *  · **账号页**：恢复时间要写在生效账号那一行上。徽标只有「额度上限」四个字，
+     *    恢复时间藏在 tooltip 里，触屏与键盘用户拿不到；而用户正是在账号页决定换哪个号。
+     */
+    const limitLine = await pageLimit.cdp.evaluate(`(() => {
+      const el = document.querySelector('.wb-account-limit');
+      if (!el) return { ok: false, reason: '生效账号行上没有额度上限副行' };
+      return { ok: true, text: el.innerText || '' };
+    })()`);
+    if (!limitLine.ok) {
+      problems.push(limitLine.reason);
+    } else {
+      if (!/deepseek-v4\.1-flash/u.test(limitLine.text)) problems.push('额度上限副行没写具体模型名：' + limitLine.text);
+      if (!/恢复|resets/u.test(limitLine.text)) problems.push('额度上限副行没写恢复时间：' + limitLine.text);
+    }
+
+    // 概览页：待办行不许溢出卡片、按钮不许被裁或压扁
+    await pageLimit.cdp.evaluate("(() => { const b=[...document.querySelectorAll('.wb-tab')].find(x=>x.textContent==='概览'); if(b) b.click(); return !!b; })()");
+    await sleep(900);
+    const alertOverflow = await pageLimit.cdp.evaluate(`(() => {
+      const rows = [...document.querySelectorAll('.wb-alert-row')];
+      /*
+       * 允许旧的 .wb-row 形态：这条断言的目的是**抓版面越界**，
+       * 不是强制某个类名。若将来有人换回 .wb-row（space-between + 单行），
+       * 只要按钮没被挤出卡片，就不该报错；反之必须报。
+       * 只有"一条待办都没渲染"才单独判失败 —— 那是另一种缺陷。
+       */
+      const candidates = rows.length ? rows : [...document.querySelectorAll('.wb-row')]
+        .filter((r) => r.querySelector('.wb-pill'));
+      if (!candidates.length) return { ok: false, reason: '没有渲染任何待办行' };
+      for (const row of candidates) {
+        const card = row.closest('.wb-card');
+        if (!card) continue;
+        const r = row.getBoundingClientRect();
+        const c = card.getBoundingClientRect();
+        if (r.right > c.right + 1 || r.left < c.left - 1) {
+          return { ok: false, reason: '待办行超出卡片边界：行 ' + Math.round(r.width) + 'px / 卡 ' + Math.round(c.width) + 'px' };
+        }
+        const btn = row.querySelector('button');
+        if (btn) {
+          const b = btn.getBoundingClientRect();
+          if (b.right > c.right + 1) return { ok: false, reason: '按钮被挤出卡片：' + btn.textContent };
+          if (b.width < 20) return { ok: false, reason: '按钮被压扁：' + btn.textContent };
+        }
+      }
+      // 长文案必须能换行：nowrap 的单行 flex 一定把按钮顶出去
+      const textEl = document.querySelector('.wb-alert-text')
+        || candidates[0].querySelector('span');
+      if (textEl) {
+        const style = getComputedStyle(textEl);
+        if (style.whiteSpace === 'nowrap') return { ok: false, reason: '待办文字是 nowrap，长文案必被裁' };
+      }
+      return { ok: true };
+    })()`);
+    if (!alertOverflow.ok) problems.push('「需要你动手」版式：' + alertOverflow.reason);
+
     await pageLimit.cdp.evaluate("(() => { const b=[...document.querySelectorAll('.wb-tab')].find(x=>x.textContent==='模型'); if(b) b.click(); return !!b; })()");
     await sleep(1100);
     const modelText = await pageLimit.cdp.evaluate("document.querySelector('.wb-root') ? document.querySelector('.wb-root').innerText : ''");
