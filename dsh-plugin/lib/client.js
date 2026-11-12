@@ -262,6 +262,10 @@ body.dark .wb-root,
 .wb-chat-quota.busy .wb-chat-quota-dot{animation:wb-quota-blink 1s ease-in-out infinite}
 @media (prefers-reduced-motion: reduce){.wb-chat-quota.busy .wb-chat-quota-dot{animation:none}}
 .wb-turn-cost{font-size:11px;line-height:18px;color:var(--dsw-alias-label-secondary,light-dark(#61666b,#cfd3d6));margin-right:8px;white-space:nowrap}
+/* 读不到本轮扣费：用虚线底边标"这不是一个确切数字"，不占有语义色的红（那表示失败）。 */
+.wb-turn-cost-unknown{color:var(--dsw-alias-label-tertiary,light-dark(#81858c,#adb2b8));border-bottom:1px dashed currentColor;cursor:help}
+/* 正在与账本对账：比终值更淡一档，读作"还没定"，不读作"结果" */
+.wb-turn-cost-pending{color:var(--dsw-alias-label-tertiary,light-dark(#81858c,#adb2b8))}
 .wb-chat-login-inline{display:inline-flex;align-items:center;gap:6px;flex-wrap:wrap;min-width:0}
 .wb-chat-login-link{font-size:11.5px;line-height:18px;color:var(--dsw-alias-brand-primary,#6366f1);text-decoration:none;white-space:nowrap;margin-left:0}
 .wb-chat-login-link:hover{text-decoration:underline}
@@ -8970,7 +8974,7 @@ const probeOne = async (id) => {
              * 取 100 条而不是 1 条：历史会话的最后一轮可能已经被其它窗口的请求
              * 挤出前 20；按 tokens 匹配需要它还在窗口里，否则只能退回估算。
              */
-            const { data } = await getJson('/workbuddy/requests?limit=100');
+            const { data, status } = await getJson('/workbuddy/requests?limit=100');
             if (!alive) return;
             const hit = pickTurnCost(data?.requests, turnUsage, timing, mountAt);
             /*
@@ -8979,7 +8983,28 @@ const probeOne = async (id) => {
              * 没有 usage（旧宿主）时估算就是唯一口径，第一轮就展示。
              */
             if (hit && (hit.exact || !turnUsage || tries >= 2)) { setInfo(hit); return; }
-          } catch (e) { /* 账本读不到就不显示，不影响对话 */ }
+            /*
+             * 三次机会都用完了还什么都没有：**不能装作这一轮没花钱。**
+             *
+             * 三种情况在屏幕上长得一模一样（都不显示），但含义完全不同：
+             *   ① 本轮真的免费（扣 0）→ 有 `credit: 0` 的记录，走上面的分支；
+             *   ② 账本里没有这一轮 → 接口正常、只是没匹配上；
+             *   ③ 账本读失败 → 接口 4xx/5xx。
+             * 后两种必须说出来，否则用户看到"这轮没有扣分提示"会以为免费。
+             */
+            if (tries >= 2 && !hit) {
+              const failed = status >= 400 || data?.ok === false;
+              setInfo({
+                unknown: true,
+                reason: failed ? 'read-failed' : 'not-found',
+                detail: failed ? String(data?.error || ('HTTP ' + status)).slice(0, 120) : '',
+              });
+            }
+          } catch (e) {
+            if (alive && tries >= 2) {
+              setInfo({ unknown: true, reason: 'read-failed', detail: String(e?.message || e).slice(0, 120) });
+            }
+          }
           // 账本落盘/上游 usage 偶尔比 turn/end 晚一两秒：再等两轮。
           if (alive && tries < 2) timer = setTimeout(() => attempt(tries + 1), tries === 0 ? 1200 : 2400);
         };
@@ -8992,7 +9017,50 @@ const probeOne = async (id) => {
       }, [seq, turnId, isLast, usageKey, timingKey]);
 
       if (!isLast || !domLast) return null;
-      if (!info) return h('span', { ref: holder, className: 'wb-turn-cost', style: { display: 'none' } });
+      /*
+       * 还在对账：给一个**看得见**的占位，别让这几秒是空白。
+       *
+       * 时序是 400ms → 1200ms → 2400ms（共约 4 秒才定论）。旧实现这 4 秒里
+       * 屏幕上什么都没有，用户正好奇"这轮扣了多少"；等定论后又要靠一次
+       * 布局变化把字填进来 —— 动静比一个常驻占位更大。
+       * 占位用省略号而不是转圈：它是**几个字**的位置，不是独立卡片。
+       */
+      if (!info) {
+        const pendingText = en ? 'This turn: …' : '本轮积分：…';
+        return h('span', {
+          ref: holder,
+          className: 'wb-turn-cost wb-turn-cost-pending',
+          title: en ? 'Matching this turn against the local request ledger…' : '正在与本地账本核对这一轮的扣费…',
+          'aria-label': pendingText,
+          'data-workbuddy-turn-cost': 'pending',
+        }, pendingText);
+      }
+      /*
+       * 读不到本轮扣费：如实说"没读到"，不要静默消失。
+       *
+       * 为什么必须有一个可见态：静默隐藏时，"本轮免费（扣 0）""账本里没这条"
+       * 与"账本读失败"在屏幕上是同一个样子 —— 用户会按"免费"理解。
+       * 文案区分两种原因：接口失败 vs 接口正常但没有这一轮的记录。
+       */
+      if (info.unknown) {
+        const failed = info.reason === 'read-failed';
+        const text = failed
+          ? (en ? 'This turn: credits unavailable' : '本轮积分：未读到')
+          : (en ? 'This turn: no ledger record' : '本轮积分：账本无记录');
+        const title = (failed
+          ? (en ? 'Could not read the local request ledger, so this turn’s cost is unknown: ' : '本地账本读取失败，因此这一轮花了多少积分未知：')
+          : (en ? 'The ledger has no request matching this turn (it may have been cleared, or the record has not landed yet): ' : '本地账本里没有与这一轮对上的请求（可能刚被清空，或记录还没落盘）：'))
+          + (info.detail || '')
+          + (en ? '\nThe credits shown in the header are still the account balance.' : '\n顶部显示的积分是账号余额，不受影响。');
+        return h('span', {
+          ref: holder,
+          className: 'wb-turn-cost wb-turn-cost-unknown',
+          title,
+          'aria-label': title,
+          'data-workbuddy-turn-cost': 'unknown',
+          'data-turn-cost-reason': info.reason,
+        }, text);
+      }
       const creditText = info.credit === 0
         ? (en ? 'free' : '免费')
         : fmtCreditShort(info.credit) + (en ? ' credits' : ' 积分');

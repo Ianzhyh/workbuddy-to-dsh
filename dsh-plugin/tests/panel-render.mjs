@@ -2051,9 +2051,45 @@ try {
       const oldStaleAfter = oldTail1.textContent;
       oldRoot1.unmount(); oldSession.remove();
 
+      /*
+       * 三种"这一轮花了多少"的状态必须可区分（2026-11-13 实测的静默缺陷：
+       * 旧实现拿不到 info 就渲染 display:none 的空 span —— 免费 / 账本无记录 /
+       * 账本读失败在屏幕上一模一样，用户会一律按"免费"理解）。
+       *
+       * 另外验"对账中"占位：时序是 400ms→1200ms→2400ms，这 4 秒不该是空白。
+       */
+      async function turnCostState(route, waitMs) {
+        window.__setRoute('/workbuddy/requests', route);
+        const host = document.createElement('div');
+        host.setAttribute('data-turn-tail', '1');
+        document.body.appendChild(host);
+        const root = ReactDOM.createRoot(host);
+        root.render(React.createElement(window.__module.ChatTurnCost, { seq: 1 }));
+        const early = await new Promise((resolve) => setTimeout(() => {
+          const el = host.querySelector('.wb-turn-cost');
+          resolve(el ? { text: el.textContent, marker: el.getAttribute('data-workbuddy-turn-cost'), display: getComputedStyle(el).display } : null);
+        }, 250));
+        await new Promise((r) => setTimeout(r, waitMs));
+        const el = host.querySelector('.wb-turn-cost');
+        const out = {
+          early,
+          exists: !!el,
+          display: el ? getComputedStyle(el).display : null,
+          text: el ? el.textContent : '',
+          marker: el ? el.getAttribute('data-workbuddy-turn-cost') : null,
+          reason: el ? el.getAttribute('data-turn-cost-reason') : null,
+          title: el ? (el.getAttribute('title') || '') : '',
+        };
+        root.unmount(); host.remove();
+        return out;
+      }
+      const costReadFailed = await turnCostState({ httpStatus: 500, payload: { ok: false, error: 'ledger unavailable' } }, 5000);
+      const costNotFound = await turnCostState({ ok: true, requests: [] }, 5000);
+      const costFree = await turnCostState({ ok: true, requests: [{ t: Date.now() - 500, model: 'stub-model', ok: true, credit: 0, ms: 800 }] }, 2000);
+
       window.__setRoute('/workbuddy/status', origStatus);
       window.__setRoute('/workbuddy/requests', origRequests);
-      return { login: waiting ? 'ok' : 'no-link', loginType, cancelled, cancelCalls, exact, multi, staleText, fallback, oldStaleBefore, oldStaleAfter };
+      return { login: waiting ? 'ok' : 'no-link', loginType, cancelled, cancelCalls, exact, multi, staleText, fallback, oldStaleBefore, oldStaleAfter, costReadFailed, costNotFound, costFree };
     })()`);
     if (chatBits.login !== 'ok') problems.push('空会话「连接 WorkBuddy」没有进入等待授权/没给授权链接');
     if (chatBits.login === 'ok' && chatBits.loginType !== 'button') {
@@ -2085,6 +2121,24 @@ try {
     }
     if (!/0\.03/.test(chatBits.oldStaleBefore || '')) problems.push(`旧宿主下每轮积分初始没显示：${chatBits.oldStaleBefore || '空'}`);
     if (chatBits.oldStaleAfter) problems.push(`旧宿主追加新回合后旧标签仍残留：${chatBits.oldStaleAfter}`);
+
+    // ── 本轮扣分的三种"没数字"状态必须可区分 ──────────────────────────
+    const rd = chatBits.costReadFailed || {};
+    const nf = chatBits.costNotFound || {};
+    const fr = chatBits.costFree || {};
+    if (!(rd.early && rd.early.marker === 'pending' && rd.early.display !== 'none')) {
+      problems.push(`对账期间没有可见占位（4 秒空白，用户不知道这轮扣了多少）：${JSON.stringify(rd.early)}`);
+    }
+    if (rd.display === 'none' || rd.marker !== 'unknown' || rd.reason !== 'read-failed') {
+      problems.push(`账本读失败被静默隐藏（与「本轮免费」不可区分）：display=${rd.display} marker=${rd.marker} reason=${rd.reason}`);
+    }
+    if (!/账本读取失败|未知/.test(rd.title || '')) problems.push(`账本读失败的 tooltip 没说明原因：${String(rd.title).slice(0, 50)}`);
+    if (nf.display === 'none' || nf.marker !== 'unknown' || nf.reason !== 'not-found') {
+      problems.push(`账本无记录没有与「读失败」区分：display=${nf.display} marker=${nf.marker} reason=${nf.reason}`);
+    }
+    if (fr.display === 'none' || fr.marker !== '0' || !/免费/.test(fr.text || '')) {
+      problems.push(`「本轮免费」被误判成未读到：marker=${fr.marker} text=${fr.text}`);
+    }
   }
 
   if (problems.length) {
