@@ -92,6 +92,7 @@
     "verify:release": "node tools/dev/verify-release.mjs",
     "publish:npm": "npm run release:check && npm publish --access public",
     "check:i18n": "node tools/dev/check-i18n-coverage.mjs",
+    "check:ports": "node --test tools/dev/test-port-bands.test.mjs",
     "check:opencode": "node tools/check-opencode-config.mjs"
   },
   "keywords": [

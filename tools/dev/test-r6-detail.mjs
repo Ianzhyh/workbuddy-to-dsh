@@ -145,8 +145,16 @@ try {
 
     // Esc 关闭
     await q(cdp, `(document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })), true)`);
-    await sleep(200);
-    if (await detailRows() === 0) pass('R6.1-1 Esc 可关闭详情');
+    /*
+     * **必须 waitFor，不能用 sleep(200)。**
+     *
+     * 详情行的退场是 190ms 的高度补间，`tr.remove()` 由 `setTimeout(…, 190)` 触发 ——
+     * 固守 200ms 就只有 10ms 余量。整套跑（39 个用例连着起 Chrome、机器被压满）时
+     * 定时器晚到一点就翻红，而单独跑永远绿：**"套件里红、单独绿"是最难查的一类**。
+     * 实测复现：`run-ui-tests` 全量跑必红，`node tools/dev/test-r6-detail.mjs` 必绿。
+     */
+    const closed = await waitFor(cdp, `document.querySelectorAll('#modelTable tr.detail-row').length === 0`, 3000, 'Esc 关闭详情').then(() => true).catch(() => false);
+    if (closed) pass('R6.1-1 Esc 可关闭详情');
     else fail('R6.1-1 Esc 未关闭详情');
 
     // 点空白关闭

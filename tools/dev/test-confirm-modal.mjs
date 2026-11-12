@@ -50,12 +50,35 @@ const URL_ = `http://127.0.0.1:${PORT}/`;
 
   // `appConfirm(` 里含子串 `Confirm(`，先摘掉再找裸的 confirm(
   const stripped = noComments.replace(/appConfirm\s*\(/g, '').replace(/confirmDangerous/g, '');
-  const hits = [...stripped.matchAll(/(^|[^.\w])confirm\s*\(/g)];
-  if (hits.length === 0) pass('源码里没有裸的原生 confirm（全部走 appConfirm）');
+  /*
+   * `window.confirm(` 也算**原生**确认框，必须命中。
+   *
+   * 这条守卫先前写的是 `/(^|[^.\w])confirm\s*\(/` —— 带 `window.` 前缀的写法
+   * 因为 `[^.\w]` 排除了点号而**整条漏掉**（实测：源码里 `window.confirm(`
+   * 出现 1 次，守卫命中 0 次，用例照样绿）。而恰恰是这一处漏掉了 `t()`：
+   * 英文模式下弹出一整句中文，且阻塞主线程 —— 正是这条守卫要防的东西。
+   * 现在两种写法都算命中，并且用"注入后必须变红"的变异自检兜底（见文件末尾）。
+   */
+  const hits = [...stripped.matchAll(/(?:^|[^.\w])(?:window\s*\.\s*)?confirm\s*\(/g)];
+  if (hits.length === 0) pass('源码里没有裸的原生 confirm / window.confirm（全部走 appConfirm）');
   else {
     const at = hits.map((m) => stripped.slice(0, m.index).split('\n').length);
-    fail(`源码里还有 ${hits.length} 处原生 confirm（约在第 ${at.join('、')} 行）—— 会退回浏览器默认样式`);
+    fail(`源码里还有 ${hits.length} 处原生 confirm（约在第 ${at.join('、')} 行）—— 会退回浏览器默认样式且绕过 i18n`);
   }
+
+  /*
+   * 变异自检：守卫必须**真的**能抓住 `window.confirm(`。
+   *
+   * 为什么值得写：上面那条正则曾经因为一个 `[^.\w]` 把带前缀的写法全放过，
+   * 而"用例是绿的"本身就是最强的假象。这里把一份人造样本喂进**同一个**正则，
+   * 抓不到就直接红 —— 于是往后再改这条正则，改坏了当场就会被发现，
+   * 而不是等到某个文案在英文模式下留中文。
+   */
+  const mutation = 'if (!window.confirm(t(\'x\'))) return;\nif (!confirm(\'y\')) return;';
+  const mutationStripped = mutation.replace(/appConfirm\s*\(/g, '').replace(/confirmDangerous/g, '');
+  const mutationHits = [...mutationStripped.matchAll(/(?:^|[^.\w])(?:window\s*\.\s*)?confirm\s*\(/g)];
+  if (mutationHits.length === 2) pass('守卫自检：window.confirm( 与裸 confirm( 都会被抓住');
+  else fail(`守卫自检失败：人造样本里 2 处原生 confirm 只抓到 ${mutationHits.length} 处 —— 正则已经失效`);
 }
 
 const MODAL = `JSON.stringify({

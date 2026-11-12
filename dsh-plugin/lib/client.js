@@ -1049,8 +1049,8 @@ body.dark .wb-root,
         'Host side is still an old build (the auto check-in switch and Last attempt appear after one dsh restart).',
       '自动签到开关由控制台写 .state.json：宿主端还是旧构建，重启一次 dsh 后再改。':
         'The auto check-in switch is written to .state.json by the console: host side is still an old build, change it after one dsh restart.',
-      '自动签到开关存在 .state.json，由控制台负责读写；控制台没跑时这项不可改（可先启动控制台）。签到本身由**桥**执行 —— 只要桥在跑，不开控制台也会自动签。':
-        'The auto check-in switch lives in .state.json and is read/written by the console; it cannot be changed while the console is not running (start the console first). The check-in itself is performed by the **bridge** — as long as the bridge runs, it will auto check in even without the console.',
+      '自动签到开关存在 .state.json，由控制台负责读写；控制台没跑时这项不可改（可先启动控制台）。签到本身由桥执行 —— 只要桥在跑，不开控制台也会自动签。':
+        'The auto check-in switch lives in .state.json and is read/written by the console; it cannot be changed while the console is not running (start the console first). The check-in itself is performed by the bridge — as long as the bridge runs, it will auto check in even without the console.',
 
       // ── 概览 ──
       '插件负责引擎（原生模型路由、桥与控制台的启停），这里提供控制台的全部数据与操作；':
@@ -5441,7 +5441,7 @@ body.dark .wb-root,
       const usePluginAccountOnly = (uid) => activatePluginCredential(uid, '已切换到这个插件账号。');
       const logoutPluginCredential = async (uid) => {
         if (typeof window !== 'undefined' && window.confirm
-          && !window.confirm('确定清除这个插件账号的凭据？不会注销上游账号。')) return;
+          && !window.confirm(t('确定清除这个插件账号的凭据？不会注销上游账号。'))) return;
         setWorking('logout:' + uid);
         setMessage('');
         const res = await postJson('/workbuddy/login/logout', { uid });
@@ -6509,7 +6509,7 @@ body.dark .wb-root,
         autoMismatch
           ? h(Alert, null, '自动签到设置已保存，但桥仍在按旧值运行；重启桥后生效。')
           : null,
-        !consoleReady ? h('p', { className: 'wb-note' }, '自动签到开关存在 .state.json，由控制台负责读写；控制台没跑时这项不可改（可先启动控制台）。签到本身由**桥**执行 —— 只要桥在跑，不开控制台也会自动签。') : null,
+        !consoleReady ? h('p', { className: 'wb-note' }, '自动签到开关存在 .state.json，由控制台负责读写；控制台没跑时这项不可改（可先启动控制台）。签到本身由桥执行 —— 只要桥在跑，不开控制台也会自动签。') : null,
         !consoleReady && cstatus === 404 ? h(Alert, { bad: true }, '宿主端还是旧构建（重启一次 dsh 后，自动签到开关与「上次尝试」才会出现）。') : null,
         h('div', { className: 'wb-actions', style: { marginTop: '10px' } },
           h(Btn, { primary: true, disabled: working || status.todayCheckedIn === true || status.active === false, onClick: claim }, working ? '领取中…' : '立即领取'),
@@ -6817,7 +6817,13 @@ body.dark .wb-root,
         // 展开最后一行时详情可能在滚动区下方：把它带到视口里，避免“点了详情没反应”。
         const row = document.getElementById('wb-model-detail-' + detail);
         if (row && typeof row.scrollIntoView === 'function') {
-          row.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+          /*
+           * **不传 `behavior`**：显式 `'smooth'` **优先于 CSS**，而 reduced-motion
+           * 的兜底正是把 `scroll-behavior` 压成 `auto`（见本文件 CSS 里的
+           * `@media (prefers-reduced-motion: reduce)`）。传了就等于给晕动症用户
+           * 保留一段滚动动画。plans/002 定过这条规矩，这里先前漏了。
+           */
+          row.scrollIntoView({ block: 'nearest' });
         }
       }, [detail]);
       // ── 模型显示偏好：控制哪些模型出现在 dsh 的模型选择器里 ──────────────

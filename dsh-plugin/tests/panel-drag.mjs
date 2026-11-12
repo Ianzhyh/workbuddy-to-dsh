@@ -25,7 +25,7 @@ import { buildRoutes, ensureVendor, harnessHtml, gather } from './_panel-fixture
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const PLUGIN = join(HERE, '..');
-const PORT = 8830;
+const PORT = 8895; // 面板侧统一 8870–8899（见 panel-render.mjs 里的端口区间说明）
 
 async function freeCdpPort() {
   const srv = createServer();

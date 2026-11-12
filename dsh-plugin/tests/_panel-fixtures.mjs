@@ -18,7 +18,24 @@ const VENDOR = join(ROOT, '.tmp-research', 'vendor');
 
 export const LIVE = 'http://127.0.0.1:19387';
 
-const now = Date.now();
+/*
+ * 夹具的时间基准：**不能用 `Date.now()`**。
+ *
+ * 为什么（实测，2026-11-12）：`panel-render.mjs` 的产物 `docs/plugin-panel*.png`
+ * 是**提交进仓库**的。而界面里有几处把时间画成**绝对时刻**
+ * （典型：「上次自检：2026/11/12 23:35:00」）。基准取运行时的当前时间，
+ * 这几处数字每跑一次都不一样 —— 于是 `npm run panel:check` 每次都会改写到入库的
+ * 截图，`git status` 永远脏一片，review 时也分不清"是这次改的还是随机的"。
+ *
+ * 实测证据：连续跑两次 `panel-render`，两张图的像素差 0.0083%，差异**只落在
+ * 那一行时间文本上**（第 709–717 行，共 9 行），其余逐像素一致。
+ *
+ * 取一个**固定的过去时刻**：这样「N 天前 / N 天后」这类相对文案仍然成立
+ * （用户在截图里看到的是合理的时间关系），而画成绝对时刻的地方是常量，
+ * 截图因此可复现。这不是"美化"，是把入库产物的不确定性去掉。
+ */
+export const FIXTURE_NOW = Date.UTC(2026, 10, 12, 10, 0, 0); // 2026-11-12 18:00 +08:00
+const now = FIXTURE_NOW;
 /** 生成 `YYYY-MM-DD HH:mm:ss`，用于“N 天后到期”的样例（固定日期在跑测试那天会变成过去时）。 */
 const stampInDays = (days) => {
   const d = new Date(now + days * 86_400_000);
@@ -309,6 +326,23 @@ export async function ensureVendor() {
  * `addScriptToEvaluateOnNewDocument`）。CDP 那种注入会连 iframe 一起打桩，
  * 而未命中的路径它一律回 `{}` —— 内嵌的真控制台就再也拿不到自己的
  * `/api/overview`，会一直显示「还没取到桥的状态」。装在这里，iframe 走真实网络。
+ *
+ * ## 为什么这里必须冻结页面时钟（`Date.now`）
+ *
+ * 这些截图会**提交进仓库**。而面板里大量时间是**相对量**，渲染那一刻现算：
+ *
+ *   `fmtRemaining(iso)` → `parseDate(iso).getTime() - Date.now()` → 「剩余 约 43 天 23 小时」
+ *   「N 天前」「已运行 X」同理。
+ *
+ * 所以只把**夹具**的时间基准钉成常量是**不够的**：数据不动，页面时钟还在跑，
+ * 读出来的剩余量就会随时钟递减。实测证据（2026-11-12）：连续两次 `panel-render`，
+ * 像素差 0.0352%，差异集中在「剩余 约 43 天 23 小时」→「43 天 18 小时」这类行 ——
+ * 而且每跑一次就旧一点，越走越离谱。
+ *
+ * 冻结方式：把 `Date.now()` 与 `new Date()`（无参）钉到 {@link FIXTURE_NOW}，
+ * 其余 `new Date(x)` 保持真实语义（解析时间戳要用它）。
+ * 只影响外壳页与面板模块；`setTimeout` / `performance.now` 一概不动 ——
+ * 用例依赖它们做轮询与超时。
  */
 export function harnessHtml(fixtures) {
   const routes = JSON.stringify(fixtures);
@@ -317,6 +351,22 @@ export function harnessHtml(fixtures) {
 <style>body{margin:0;background:#0f1115;color:#f9fafb;font-family:"Microsoft YaHei",system-ui,sans-serif}
 #frame{max-width:860px;margin:0 auto;padding:24px 28px 60px;background:#191a1c;min-height:100vh}
 #head{color:#adb2b8;font-size:12px;margin-bottom:16px}</style></head>
+<script>
+/* 冻结页面时钟（见 harnessHtml 的文档注释）。必须最先执行：面板模块一加载就可能读时间。 */
+(function () {
+  var FIXED = ${FIXTURE_NOW};
+  var RealDate = Date;
+  function FrozenDate(...args) {
+    if (!(this instanceof FrozenDate)) return new RealDate(FIXED).toString();
+    return args.length ? new RealDate(...args) : new RealDate(FIXED);
+  }
+  FrozenDate.prototype = RealDate.prototype;
+  FrozenDate.now = function () { return FIXED; };
+  FrozenDate.parse = RealDate.parse;
+  FrozenDate.UTC = RealDate.UTC;
+  window.Date = FrozenDate;
+})();
+</script>
 <body><div id="frame"><div id="head">dsh 设置 → WorkBuddy</div><div id="root"></div></div>
 <script src="/vendor/react.js"></script>
 <script src="/vendor/react-dom.js"></script>

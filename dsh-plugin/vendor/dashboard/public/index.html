@@ -1153,8 +1153,8 @@ const I18N_EN = {
   '· 剩余': ' · remaining',
   '正在切换账号，桥会重启，请稍候…': 'Switching account — the bridge will restart, please wait…',
   '切换失败：': 'Switch failed: ',
-  '切换会自动重启桥，并**清空上一个账号的体检结论**（结论只对被测时的账号成立）。':
-    'Switching restarts the bridge and **clears the previous account\'s probe results** (they only hold for the account they were measured on).',
+  '切换会自动重启桥，并清空上一个账号的体检结论（结论只对被测时的账号成立）。':
+    'Switching restarts the bridge and clears the previous account\'s probe results (they only hold for the account they were measured on).',
   '改名': 'Rename',
   '给这个账号起个名字，便于区分': 'Give this account a name so you can tell them apart',
   '给这个账号起个名字（留空 = 恢复默认显示）': 'Name this account (leave empty to reset)',
@@ -1751,7 +1751,7 @@ const I18N_EN = {
     'Provider ID / display name / base URL / API key / model / headers — every value copies on its own; fill them in and submit.',
   '注意：不是每个表单都有「上下文长度 / 输出上限」这两格 —— opencode 的表单就没有，':
     'Note: not every form has the "context length / max output" fields — opencode\'s does not,',
-  '所以填完会看到「上下文 0」。这不是桥的问题，也不是填错了：上下文只能靠**配置文件**声明。':
+  '所以填完会看到「上下文 0」。这不是桥的问题，也不是填错了：上下文只能靠配置文件声明。':
     'so after filling it in you will see "context 0". That is not a bridge bug and not a typo: context can only be declared in a config file.',
   'opencode 请切到上面的「opencode」页签，那段 opencode.json 里的 limit 就是干这个的。':
     'For opencode, switch to the opencode tab above — the limit in that opencode.json is exactly for this.',
@@ -1771,8 +1771,8 @@ const I18N_EN = {
   '需要 RAG 的客户端请单独配一个 embedding 服务。': 'Clients that need RAG should point at a separate embedding service.',
   '用它的底层 AI SDK（@ai-sdk/openai-compatible）实测：基础生成、工具调用、流式输出三项全通过。':
     'Verified with its underlying AI SDK (@ai-sdk/openai-compatible): basic generation, tool calling and streaming all pass.',
-  '界面表单只填得进 id 和显示名，**上下文长度必须写在 opencode.json 的 limit 里**':
-    'The UI form only takes an id and a display name; **context length must go in the limit field of opencode.json**',
+  '界面表单只填得进 id 和显示名，上下文长度必须写在 opencode.json 的 limit 里':
+    'The UI form only takes an id and a display name; context length must go in the limit field of opencode.json',
   '——不写就会显示「上下文 0」。下面这份已经按上游真实值填好了。':
     ' — leave it out and you get "context 0". The file below is already filled with the real upstream values.',
   '把下面这段写进项目根目录的 opencode.json（表单里填过的模型，limit 要回到这里补）':
@@ -2035,8 +2035,8 @@ const I18N_EN = {
   '要包含哪些模型？': 'Which models should be included?',
   '上游所有可用模型都能加，不限桥默认精选的那几个。勾选后下面的配置片段立刻按你的选择重算。':
     'Every available upstream model can be added — not just the handful the bridge curates by default. The snippets below recompute immediately as you pick.',
-  '用它的底层 AI SDK（@ai-sdk/openai-compatible）实测：基础生成、工具调用、流式输出三项全通过。界面表单只填得进 id 和显示名，**上下文长度必须写在 opencode.json 的 limit 里**——不写就会显示「上下文 0」。下面这份已经按上游真实值填好了。':
-    'Verified with its underlying AI SDK (@ai-sdk/openai-compatible): basic generation, tool calling and streaming all pass. The UI form only takes an id and a display name, so **context length must go in the limit field of opencode.json** — leave it out and you get "context 0". The file below is already filled with the real upstream values.',
+  '用它的底层 AI SDK（@ai-sdk/openai-compatible）实测：基础生成、工具调用、流式输出三项全通过。界面表单只填得进 id 和显示名，上下文长度必须写在 opencode.json 的 limit 里——不写就会显示「上下文 0」。下面这份已经按上游真实值填好了。':
+    'Verified with its underlying AI SDK (@ai-sdk/openai-compatible): basic generation, tool calling and streaming all pass. The UI form only takes an id and a display name, so context length must go in the limit field of opencode.json — leave it out and you get "context 0". The file below is already filled with the real upstream values.',
   '上游 30 个模型全是对话类，没有任何 embedding 模型，所以 /v1/embeddings 会明确返回 501。这里不做「假的向量」——那会让知识库看起来建成了、实际全是噪声，要等检索结果离谱时才发现。需要 RAG 的客户端请单独配一个 embedding 服务。':
     'All 30 upstream models are chat models; there is no embedding model, so /v1/embeddings deliberately returns 501. We do not fake vectors here — that would make a knowledge base look built while being pure noise, and you would only notice when retrieval went badly wrong. Clients that need RAG should point at a separate embedding service.',
 
@@ -3447,7 +3447,15 @@ function renderAlerts() {
           label: '查看积分',
           run: () => {
             switchTab('overview');
-            window.scrollTo({ top: 0, behavior: 'smooth' });
+            /*
+             * **不传 `behavior`**：让 `html { scroll-behavior: smooth }` 决定。
+             * 显式 `'smooth'` 会**优先于 CSS** —— 而 reduced-motion 的兜底正好
+             * 就是把那条 CSS 压成 `auto`（这是浏览器语义，实测过：显式 smooth
+             * 在 `scroll-behavior:auto` 下仍有 21 帧中间位置，不传则 1 帧到位）。
+             * 现在只是因为 `switchTab` 已经先把页面滚到 0 才没露出问题 —— 属于
+             * 「靠调用顺序掩盖」的洞，不该留着。
+             */
+            window.scrollTo(0, 0);
           },
         },
       });
@@ -5442,7 +5450,14 @@ async function cancelPluginLogin() {
 }
 
 async function logoutPluginAccount(uid) {
-  if (!window.confirm('确定清除这个插件账号的凭据？不会注销上游账号。')) return;
+  /*
+   * 走 `appConfirm` 而不是原生 `confirm`：
+   *   1. 原生框**不在 DOM 里**，i18n 的 DOM 扫描层够不着它 —— 实测英文模式下
+   *      这里弹的是一整句中文（其余 52 个确认点早就换过来了，只剩这一处）；
+   *   2. 原生框阻塞主线程，且深色主题下弹出一片亮白。
+   * 传进去的文案已经过 `t()`：`appConfirm` 接的是**翻好的整串**，不再走 DOM 翻译层。
+   */
+  if (!await appConfirm(t('确定清除这个插件账号的凭据？不会注销上游账号。'), { danger: true })) return;
   const r = await api('/api/login/logout', {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ uid }),
   });
@@ -6114,7 +6129,7 @@ async function renameAccount(a) {
 async function switchAccount(file) {
   // 取消 → 直接返回，不重启桥、不清体检结论
   const ok = await confirmDangerous('确定切换到账号 ' + file + '？', [
-    '切换会自动重启桥，并**清空上一个账号的体检结论**（结论只对被测时的账号成立）。',
+    '切换会自动重启桥，并清空上一个账号的体检结论（结论只对被测时的账号成立）。',
     ...probeRunningNote(),
   ]);
   if (!ok) return;
@@ -6627,10 +6642,20 @@ function exportUsageCsv() {
   setMsg('已导出用量 CSV（最近 ' + u.windowDays + ' 天）', 'good');
 }
 
+/**
+ * 取概览并按结果重绘徽章 / 卡片 / 标题 / 提示条。
+ *
+ * **返回是否真的落了地**（`false` = 概览接口自己就失败了，一个控件都没更新）。
+ *
+ * 为什么必须有返回值：`/api/overview` 失败时函数提前 return，于是
+ * 「按桥状态设置 `startBtn.disabled`」这一步被跳过 —— 而调用方（启动按钮）
+ * 正等着它复位。没有这个返回值时，按钮会永久 disabled（见 `startBtn.onclick`
+ * 里的注释与 `.tmp-ux/poc-stuck-button.mjs` 的复现）。
+ */
 async function loadOverview() {
   const d = await api('/api/overview');
   setStamp('overviewStamp');
-  if (d.error) { setBadge('fail', '控制台异常'); return; }
+  if (d.error) { setBadge('fail', '控制台异常'); return false; }
 
   lastOverview = d;
   const b = d.bridge;
@@ -6658,6 +6683,7 @@ async function loadOverview() {
 
   // 日志只在面板展开时读：收起时每 20 秒读一次文件是白费的
   refreshLogIfOpen();
+  return true;
 }
 
 /**
@@ -7960,10 +7986,31 @@ $('modelSearch').oninput = applyModelSearch;
 $('startBtn').onclick = async () => {
   setMsg('正在启动桥服务…');
   $('startBtn').disabled = true;
-  const d = await api('/api/bridge/start', { method: 'POST' });
-  setBridgeMsg(d, '桥已启动');
-  await loadOverview();
-  await loadDiag();
+  /*
+   * 按钮的复位**必须由这里兜底**，不能只指望 `loadOverview()`。
+   *
+   * `loadOverview()` 在概览接口异常时会提前返回（`if (d.error) { ... return false; }`），
+   * 那时它**没有**执行「按桥状态设置 `startBtn.disabled`」那一步 —— 而复位原本
+   * 写在它后面且无分支，于是首次失败就永久锁死。实测复现（`.tmp-ux/poc-stuck-button.mjs`）：
+   * 概览 500 + 启动失败同时发生时，提示条写着「桥已启动失败：port 8790 already in use」，
+   * 而按钮已经点不动 —— 用户唯一的补救动作（改端口后重试）被自己的界面锁死。
+   *
+   * 判据用**启动结果**而不是"跑完了没有"：概览没落地时，只有真的起来了才该禁用；
+   * 失败/异常一律放开，让用户能改配置后重试。
+   */
+  let started = false;
+  try {
+    const d = await api('/api/bridge/start', { method: 'POST' });
+    setBridgeMsg(d, '桥已启动');
+    started = d?.started === true;
+    const overviewOk = await loadOverview();
+    if (!overviewOk) $('startBtn').disabled = started;
+  } catch (err) {
+    setMsg('启动桥失败：' + ((err && err.message) || err), 'err');
+  } finally {
+    if (!started) $('startBtn').disabled = false;
+    await loadDiag();
+  }
 };
 
 $('stopBtn').onclick = async () => {
@@ -10353,7 +10400,7 @@ function renderClients() {
     pane.append(clientCard(
       'opencode', 'ok',
       '用它的底层 AI SDK（@ai-sdk/openai-compatible）实测：基础生成、工具调用、流式输出三项全通过。'
-        + '界面表单只填得进 id 和显示名，**上下文长度必须写在 opencode.json 的 limit 里**'
+        + '界面表单只填得进 id 和显示名，上下文长度必须写在 opencode.json 的 limit 里'
         + '——不写就会显示「上下文 0」。下面这份已经按上游真实值填好了。',
       ['把下面这段写进项目根目录的 opencode.json（表单里填过的模型，limit 要回到这里补）',
         '运行 /connect → 选 Other，provider id 填 workbuddy，API Key 填上面的令牌',
@@ -10411,7 +10458,7 @@ function renderClients() {
     fcard.append(formGuideBox(d));
     fcard.append(appendParts(clientEl('p', 'clientcard-note'), [
       '注意：不是每个表单都有「上下文长度 / 输出上限」这两格 —— opencode 的表单就没有，',
-      '所以填完会看到「上下文 0」。这不是桥的问题，也不是填错了：上下文只能靠**配置文件**声明。',
+      '所以填完会看到「上下文 0」。这不是桥的问题，也不是填错了：上下文只能靠配置文件声明。',
       'opencode 请切到上面的「opencode」页签，那段 opencode.json 里的 limit 就是干这个的。',
     ]));
     pane.append(fcard);

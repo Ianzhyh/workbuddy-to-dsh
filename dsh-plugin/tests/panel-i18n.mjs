@@ -42,7 +42,7 @@ import { FIXTURES, buildRoutes, ensureVendor, harnessHtml } from './_panel-fixtu
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const PLUGIN = join(HERE, '..');
-const PORT = 8820; // 与控制台用例（8774~8798）分开，避免同时跑时抢端口
+const PORT = 8890; // 面板侧统一 8870–8899（见 panel-render.mjs 里的端口区间说明）
 
 let failures = 0;
 const fail = (m) => { console.error('✗ ' + m); failures += 1; };

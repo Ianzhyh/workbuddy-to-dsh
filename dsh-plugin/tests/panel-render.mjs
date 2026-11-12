@@ -40,7 +40,19 @@ const offline = !process.argv.includes('--live');
  */
 const OUT_DIR = offline ? join(ROOT, 'docs') : join(ROOT, 'docs', '_review');
 const OUT = join(OUT_DIR, 'plugin-panel.png');
-const PORT = 8810; // 与控制台用例（8774~8798）分开，避免同时跑时抢端口
+/*
+ * 端口区间划分（2026-11-13 实测踩到一个真冲突后重排）：
+ *
+ *   tools/dev/test-*      8774–8867（含各自的 PORT+N）
+ *   dsh-plugin/tests/     8870–8899（本文件 8870/8871，panel-i18n 8890/8891/8892，panel-drag 8895/8896）
+ *
+ * 为什么必须写下来：`npm run panel:check` 与 `npm run test:ui` 经常**并行**跑，
+ * 而两边各自"看起来不撞"的端口会撞在一起 —— 实测 `test-confirm-modal`（8831）
+ * 与 `panel-drag`（8830+1=8831）同时 listen，前者直接
+ * `EADDRINUSE` 退出，表现为"某个用例莫名红、单独跑又绿"。
+ * `tools/dev/test-port-bands.test.mjs` 会把这份约定钉成断言。
+ */
+const PORT = 8870;
 const LIVE = 'http://127.0.0.1:19387';
 
 /**
