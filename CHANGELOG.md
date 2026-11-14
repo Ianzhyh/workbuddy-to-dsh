@@ -1,4 +1,4 @@
-﻿# Changelog
+# Changelog
 
 本项目所有值得注意的变化都记录在这里。格式参考
 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，

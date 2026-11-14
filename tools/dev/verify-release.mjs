@@ -43,7 +43,19 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(HERE, '..', '..');
 const CACHE = join(ROOT, '.tmp-research', 'release');
 
-const pkg = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8'));
+/*
+ * 读 JSON 时**去掉 BOM**。
+ *
+ * Windows 上 PowerShell 5 的 `Set-Content -Encoding UTF8` 会写入 UTF-8 BOM，
+ * 而 `JSON.parse` 遇到 BOM 直接抛 Unexpected token（实测踩过：
+ * 一次版本号改写就把这个脚本弄崩了）。这里统一兜住，不依赖写文件的工具行为。
+ */
+function readJson(path) {
+  const text = readFileSync(path, 'utf8').replace(/^\uFEFF/, '');
+  return JSON.parse(text);
+}
+
+const pkg = readJson(join(ROOT, 'package.json'));
 const repoUrl = (pkg.repository && pkg.repository.url) || '';
 const m = /github\.com[/:]([^/]+)\/([^/.]+)/.exec(repoUrl);
 if (!m) throw new Error(`package.json 里没有可解析的 repository.url：${repoUrl}`);
@@ -186,12 +198,26 @@ const mirrors = [
   ['package/vendor/bridge/promotions.mjs', 'bridge/promotions.mjs'],
   ['package/vendor/lib/failover.mjs', 'lib/failover.mjs'],
 ];
+/*
+ * 逐字节比对，但**容忍行尾符差异**。
+ *
+ * 为什么必须容忍：npm 打包会把文本文件的 CRLF 归一成 LF，而 Windows 上
+ * `core.autocrlf=true` 的检出是 CRLF。两边内容完全相同，只差 `\r`。
+ * 不做归一的话，这个检查在 Windows 上**永远红**（实测踩过），而它本来要防的是
+ * "打进了旧快照"这种实质差异 —— 行尾符不是那个问题。
+ */
+function sameContent(a, b) {
+  if (a.equals(b)) return true;
+  const norm = (buf) => Buffer.from(buf.toString('utf8').replace(/\r\n/g, '\n'), 'utf8');
+  return norm(a).equals(norm(b));
+}
+
 for (const [inPkg, inRepo] of mirrors) {
   const f = byName.get(inPkg);
   const local = join(ROOT, inRepo);
   if (!f) { bad(`包内缺少 ${inPkg}，无法与仓库比对`); continue; }
   if (!existsSync(local)) { bad(`仓库文件不存在：${inRepo}`); continue; }
-  if (f.body.equals(readFileSync(local))) ok(`${inPkg} 与仓库逐字节一致`);
+  if (sameContent(f.body, readFileSync(local))) ok(`${inPkg} 与仓库一致`);
   else bad(`${inPkg} 与仓库**不一致** —— 可能打进了旧快照，重跑 npm run pack:plugin`);
 }
 
