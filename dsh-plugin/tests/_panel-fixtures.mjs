@@ -380,6 +380,14 @@ window.__dialogs = [];
 window.confirm = function (message) { window.__dialogs.push(String(message)); return window.__confirmAnswer !== false; };
 (function () {
   const ROUTES = ${routes};
+  /*
+   * 把路由表**暴露出去**，让测试能在运行中改某一条响应（例如把签到改成"今日
+   * 已签完"，验证常驻操作条会不会自动消失）。
+   *
+   * 不暴露就只能改测试进程里的 routes 对象 —— 而页面里的路由表是
+   * JSON.stringify 进 HTML 的**副本**，改那边不生效（实测过：断言一直是假失败）。
+   */
+  window.__routes = ROUTES;
   const original = window.fetch;
   window.fetch = function (input, init) {
     const url = typeof input === 'string' ? input : (input && input.url) || '';
@@ -528,6 +536,15 @@ export function buildRoutes(data) {
       };
     })(),
     '/workbuddy/models': data.models,
+    // 右栏「模型」页读的 dsh 默认模型：钉一条在目录里的，好断言"当前默认"那行。
+    '/workbuddy/default-model': {
+      ok: true,
+      provider: 'workbuddy',
+      model: ((data.models && data.models.models) || [{}])[0].id || 'glm-5.3',
+      reasoningEffort: 'high',
+      routable: true,
+      catalogError: '',
+    },
     // 模型显示偏好 + 上下文预算：面板模型页启动时会读它；没有这条时
     // 面板会走 404 兜底（默认值），上下文下拉的初始状态就扫不到。
     '/workbuddy/model-visibility': {
@@ -572,6 +589,38 @@ export function buildRoutes(data) {
     '/workbuddy/usage': (data.usage && data.usage.usage) ? { ok: true, ...data.usage.usage } : data.usage,
     // 签到固定成"今日未签到"（真实数据取决于今天签没签），好让概览待办与签到页都可断言
     '/workbuddy/checkin': { ok: true, status: { todayCheckedIn: false, streakDays: 3, todayCredit: 0 }, auto: { auto: true, lastAt: now - 3600000, lastResult: 'ok', lastError: null, lastSource: 'manual' } },
+    // 多账号签到（右栏「签到」页的第二个卡片读它）：给两个号，一个已签一个无活动，
+    // 好让「N/M 个账号今日已签」与两种胶囊都能进断言。
+    '/workbuddy/checkin/accounts': {
+      ok: true,
+      claim: false,
+      totals: { accounts: 2, claimed: 0, already: 1, failed: 0, skipped: 1, credit: 100 },
+      accounts: [{
+        userId: 'uid-fixture-0001',
+        nickname: 'Fixture',
+        uin: '330101979236',
+        region: 'cn',
+        domain: 'www.workbuddy.cn',
+        authFile: 'workbuddy-desktop.info',
+        current: true,
+        expired: false,
+        expiresAt: now + 30 * 86_400_000,
+        status: { active: true, todayCheckedIn: true, streakDays: 3, dailyCredit: 100, todayCredit: 100 },
+      }, {
+        userId: 'uid-fixture-0002',
+        nickname: 'Fixture Other',
+        uin: '450702422472',
+        region: 'intl',
+        domain: 'www.workbuddy.ai',
+        authFile: 'workbuddy-desktop-ai.info',
+        current: false,
+        expired: false,
+        noActivity: true,
+        expiresAt: now + 300 * 86_400_000,
+        status: { active: false },
+      }],
+    },
+    '/workbuddy/checkin/all': { ok: true, totals: { accounts: 2, claimed: 1, already: 1, failed: 0, skipped: 0, credit: 100 } },
     '/workbuddy/log': data.log,
     // 请求页故意走「首帧 404」：模拟刷新页面时宿主还没挂上路由的窗口期，
     // 面板必须自己重试恢复，而不是把 HTTP 404 红字挂一两分钟。
@@ -610,6 +659,59 @@ export function buildRoutes(data) {
     '/workbuddy/migrate': { ok: true, found: false, files: [], changed: false },
     // 积分刷新（POST）的桩：返回一份"刷新后"的形状
     '/workbuddy/quota': { ok: true, quota: FIXTURES.status.quota, quotaError: '', at: new Date().toISOString(), refreshed: true, bridgeState: 'running' },
+    /*
+     * 用量上限：给**两条不同原因**的条目（额度用尽 + 账号风控），
+     * 好让「换模型或换号」与「重新登录无效」两种建议都能进断言 ——
+     * 只放一条的话，把它们混成同一句话也不会被测试发现。
+     */
+    '/workbuddy/limits': {
+      ok: true,
+      /*
+       * `at` 必须与其它时间戳同一个基准（夹具时钟 now）：前端用
+       * 「resetAt - at」算剩余时长，基准不一致会得到负数，条目一进页面就被
+       * 判成"已过期"（实测踩过：quota 那条直接不显示）。
+       */
+      at: new Date(now).toISOString(),
+      account: 'uid-fixture-0001',
+      accountLabel: 'Fixture',
+      expiredCount: 0,
+      /* 覆盖两个账号 —— 断言会检查说明文字讲的是「所有账号」而不只是当前号 */
+      accountCount: 2,
+      limiting: [
+        {
+          kind: 'quota',
+          model: 'deepseek-v4.1-flash',
+          count: 2,
+          lastAt: new Date(now - 240000).toISOString(),
+          /*
+           * 恢复时间默认给 **10 分钟**（够整个测试跑完）。"到期消失"那条用例
+           * 会临时改成 4 秒 —— 否则前面用例一跑久，这条就被判成已过期，
+           * 后面所有断言都拿不到它（实测踩过）。
+           *
+           * 基准必须是夹具时钟 `now`（FIXTURE_NOW），不能写 `Date.now()`：
+           * 页面里的 `Date` 被钉在 FIXTURE_NOW，两者差一天多。
+           */
+          resetAt: new Date(now + 600000).toISOString(),
+          uid: 'uid-fixture-0001',
+          accountLabel: 'Fixture',
+          isCurrent: true,
+        },
+        {
+          kind: 'account_restricted',
+          model: 'glm-5.3',
+          count: 1,
+          lastAt: new Date(now - 600000).toISOString(),
+          resetAt: '',
+          uid: 'uid-fixture-0002',
+          accountLabel: 'Fixture Other',
+          isCurrent: false,
+        },
+      ],
+      accounts: [
+        { uid: 'uid-fixture-0001', account: '3300000000', label: 'Fixture', current: true, usable: true, quota: null },
+        { uid: 'uid-fixture-0002', account: '4500000000', label: 'Fixture Other', current: false, usable: true, quota: null },
+      ],
+    },
     // 控制台域功能（插件透传）。这些**不依赖**实时抓取，始终用内置样例，
     // 形状与控制台一致。
     '/workbuddy/console-api/overview': FIXTURES.consoleOverview,

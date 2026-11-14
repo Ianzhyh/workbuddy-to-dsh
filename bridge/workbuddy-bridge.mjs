@@ -6246,11 +6246,27 @@ function rateLimitSummary(auth) {
    * 清掉——重置时刻过了还不切号，只会拿一个已经恢复的账号去切走。
    */
   let quota = null;
+  /*
+   * 每条触顶记录的完整信息。
+   *
+   * 上面的 `quota` 只保留**最新一条**（自动切号只要知道"该切了、切哪个"），
+   * 其余条目只累加 count，于是多个模型同时触顶时面板只能看到一个 ——
+   * 用户的原话："我用别的不是 workbuddy 的用量上限怎么又只剩一个了"。
+   * 这里把每条都留下来，`/health.rateLimit.quotaModels` 供面板逐条展示。
+   */
+  const quotaModels = [];
   for (const [key, info] of quotaResetStats) {
     if (!key.startsWith(prefix)) continue;
     const expired = (info.resetAt && info.resetAt <= now) || now - info.lastAt > 24 * 3_600_000;
     if (expired) { quotaResetStats.delete(key); continue; }
     const model = key.slice(prefix.length);
+    quotaModels.push({
+      model,
+      count: 1,
+      lastAt: new Date(info.lastAt).toISOString(),
+      resetAt: info.resetAt ? new Date(info.resetAt).toISOString() : '',
+      lastAtMs: info.lastAt,
+    });
     if (!quota || info.lastAt > quota.lastAtMs) {
       quota = {
         model,
@@ -6264,6 +6280,8 @@ function rateLimitSummary(auth) {
     }
   }
   if (quota) delete quota.lastAtMs;
+  quotaModels.sort((a, b) => b.lastAtMs - a.lastAtMs);
+  for (const q of quotaModels) delete q.lastAtMs;
 
   /** 取某个“带 reset 的失败”表里最新的一条（过期/超过 24h 清掉）。 */
   const latestTimed = (map) => {
@@ -6311,7 +6329,10 @@ function rateLimitSummary(auth) {
     model: top.model,
     lastAt: top.lastAt ? new Date(top.lastAt).toISOString() : '',
     models: models.slice(0, 5),
+    /* 单条 quota 保留给自动切号（它只关心"最新那条"） */
     ...(quota ? { quota } : {}),
+    /* 每条触顶记录的完整列表：面板用它逐条展示，不再被压成一条 */
+    ...(quotaModels.length ? { quotaModels } : {}),
     ...(accountRestricted ? { accountRestricted } : {}),
     ...(modelBusy ? { modelBusy } : {}),
     ...(queue ? { queue } : {}),

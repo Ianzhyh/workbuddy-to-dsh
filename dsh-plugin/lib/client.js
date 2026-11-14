@@ -837,7 +837,321 @@ body.dark .wb-root,
 @media (hover: none){
   .wb-metric:hover,.wb-prop-legend-item:hover .wb-prop-legend-dot,.wb-range::-webkit-slider-thumb:hover{transform:none}
 }
+
+/*
+ * ───────────────── 右侧栏（sidebar.right）的宽度适配 ─────────────────
+ *
+ * 右栏**不是固定宽度**：默认 320px、可拖宽，窄屏下会全屏、还能拖成任意大小的
+ * 浮动面板。同一份内容要在 240px 到 1400px 之间都成立，所以这里按**容器宽度**
+ * 分四档（container query，不是 media query —— 窗口 1400px 时右栏仍可能只有
+ * 320px，看视口会判错）。
+ *
+ *   ≥ 620px   宽（全屏右栏 / 大浮动窗）：清单双栏，控件不再撑满整行
+ *   ≥ 460px   中（拖宽后的停靠栏）：内边距与字号上调，按钮并排
+ *   ≥ 300px   常规（默认停靠宽度 320px）：本文件下面的基线
+ *   <  300px  极窄（拖到最窄 / 小窗浮动）：只做减法 —— 控件铺满、副标题让位
+ *
+ * ## 四个必须这样做、不能"看起来等价"的细节
+ *
+ * 1. **容器必须是 .wb-rail，内边距必须在 .wb-rail-body 上。**
+ *    container-type: inline-size 量的是容器自己的**内容盒**。如果把 padding
+ *    一起写在容器上，320px 的右栏内容盒只有 296px，会掉进"极窄"档；
+ *    更糟的是各档改 padding 会反过来改量到的宽度，档位来回跳（反馈环）。
+ * 2. **滚动条也必须下沉到 .wb-rail-body。**
+ *    实测（本轮）：overflow: auto 写在容器上时，纵向滚动条会占掉内容盒约
+ *    15px —— 拖到 300px 量到 285px，CSS 与 JS 一起判成"极窄"，正好差一档。
+ * 3. **必须显式 padding:0 覆盖 .wb-root。**
+ *    本组件同时挂了 wb-root（拿基础字号与变量）与 wb-rail（当容器）。
+ *    wb-root 带 padding: 4px 2px 28px，同权重、且它在样式表里更靠前 —— 但
+ *    两条规则都命中同一个元素时**后者才生效**，而 wb-rail 早先把 padding
+ *    删了（挪去 body），于是 wb-root 那 2px 左右内边距又回来了：内容盒少 4px。
+ *    实测后果：300 / 460 / 620 三个阈值**全部差一档** —— 拖到 300 还是窄版、
+ *    拖到 620 还没到双栏。容器这一层的内边距必须是 0，一个像素都不能留。
+ * 4. **宽度不只是 CSS 的事。** 极窄档要换的是**文案**（标题太长会挤成省略号），
+ *    这类只能用 JS 判档 —— 见 useRailTier。CSS 管排版，JS 管内容。
+ */
+.wb-rail{
+  container-type:inline-size;
+  container-name:wb-rail;
+  display:flex;flex-direction:column;
+  height:100%;min-height:0;box-sizing:border-box;overflow:hidden;
+  /* 覆盖 wb-root 的 padding：容器留白会把 @container 量到的宽度改小（见上） */
+  padding:0;margin:0;gap:0;
+  font-size:12.5px;
+  /* 字号也跨档变（12 / 12.5 / 13）—— 不插值的话拖宽时文字会"跳一级" */
+  transition:font-size .18s var(--wb-ease);
+}
+.wb-rail-body{
+  display:flex;flex-direction:column;gap:10px;
+  /* 上下边距**各档一致**（12 / 18）：窄档只该收横向留白，纵向留白一缩，
+     内容就贴到 tab 条与底边上了 —— 早先极窄档写成 10/14 就是这个观感问题。 */
+  padding:12px 12px 18px;box-sizing:border-box;flex:1 1 auto;min-height:0;overflow:auto;
+  /* 档位是硬阈值（container query 不插值），所以把**会变的几何量**做成过渡：
+     拖宽跨过 300 / 460 / 620 时不会再"啪"地跳一下。 */
+  transition:padding .18s var(--wb-ease),gap .18s var(--wb-ease);
+}
+/*
+ * 矮面板：body 自己**不再滚动** —— 滚动交给 .wb-rail-scroll，dock 留在
+ * body 的正常流里。两者都 overflow:auto 时，body 会先按内容撑出滚动区，
+ * dock 落在 body 的 padding-bottom 里，被容器的 overflow:hidden 裁掉一半
+ * （实测：dock 上缘可见、按钮只露出几个像素）。
+ */
+@container wb-rail (max-height:419px){
+  .wb-rail-body{overflow:hidden;padding-bottom:8px}
+}
+.wb-rail-inner{display:flex;flex-direction:column;gap:10px;min-width:0;min-height:0;flex:1 1 auto;transition:gap .18s var(--wb-ease),max-width .18s var(--wb-ease)}
+/*
+ * 滚动区 + 常驻操作条。
+ *
+ * .wb-rail-scroll 吃掉剩余高度并自己滚（min-height:0 是关键：flex 子项默认
+ * min-height 等于内容高度，省了它滚动区会被内容顶开、底部条照样被推出视口）。
+ * .wb-rail-dock 不参与压缩，永远贴在面板底部。
+ *
+ * 为什么不用 position:sticky 让卡片里的操作条"贴底"：操作条在卡片内部，粘性
+ * 被卡片边界夹住，滚出卡片就跟着走了（实测无效）。只能真的提到滚动区之外。
+ *
+ * ⚠️ 这条 .wb-rail-page 必须把**几何**写全（flex:1 / min-height:0 / gap），
+ * 因为下面还有一条同名规则专门管**入场动画**。两条规则同权重、后者生效 ——
+ * 早期只在动画那条里写了 display:flex，几何全丢，结果整页按内容撑高，
+ * dock 被推到容器外（实拍：320px 高时底部操作条完全看不见）。
+ */
+/*
+ * 高度链必须**一路不断**：.wb-rail-body → .wb-rail-inner → .wb-rail-page → .wb-rail-scroll。
+ * 每一层都要 min-height:0，否则 flex 子项会按内容高度撑开，整条链就"漏"了 ——
+ * 实测：把内容包进 .wb-rail-inner（宽档限宽需要）之后忘了给 inner 加 min-height:0，
+ * 结果矮面板里内容把容器撑到 640px（可视 300），滚动区与底部条全被顶出去。
+ */
+.wb-rail-page{display:flex;flex-direction:column;gap:0;min-height:0;flex:1 1 auto;min-width:0}
+.wb-rail-scroll{display:flex;flex-direction:column;gap:10px;min-height:0;flex:1 1 auto;overflow:auto;padding-right:2px}
+.wb-rail-scroll>.wb-card{flex:none}
+.wb-rail-dock{
+  flex:none;display:flex;align-items:center;gap:6px;flex-wrap:wrap;
+  /* 下边距给足：dock 是**常驻**的，贴着容器底边会被裁掉一半（实测过） */
+  padding:8px 0 10px;margin-top:2px;
+  border-top:.5px solid var(--dsw-alias-border-l1,light-dark(#00000010,#ffffff1a));
+  background:var(--dsw-alias-bg-module-platform,light-dark(#ffffff,#202226));
+}
+.wb-rail-dock .wb-btn{flex:0 0 auto}
+.wb-rail-dockinfo{
+  flex:1 1 auto;min-width:0;text-align:right;
+  font-size:11px;line-height:16px;color:var(--dsw-alias-label-tertiary,light-dark(#81858c,#adb2b8));
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+}
+.wb-rail-head{display:flex;align-items:center;gap:8px;min-width:0}
+.wb-rail-title{flex:1 1 auto;min-width:0;font-size:13px;font-weight:650;letter-spacing:-.01em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;transition:font-size .18s var(--wb-ease)}
+/*
+ * 切页时的入场：极短、极小位移 —— 只为了"这一页换了"，不是特效。
+ *
+ * 这条**只管动画**：几何（flex / min-height / gap）在上面那条规则里。
+ * 同权重两条规则，后者生效，所以这里绝不能重写 display / gap ——
+ * 早期就是在这里补了 display:flex 却丢了 min-height:0，整页按内容撑高，
+ * 底部常驻操作条被推出容器（实拍：320px 高时完全看不见）。
+ */
+.wb-rail-page{animation:wb-rail-page-in .16s var(--wb-ease) both}
+@keyframes wb-rail-page-in{from{opacity:.45;transform:translate3d(0,2px,0)}to{opacity:1;transform:none}}
+/* 右栏自己的 reduced-motion 兜底：文件末尾那条通用规则只覆盖 .wb-root 及其
+   子元素，而 --wb-ease 在这里是新声明的，动画仍会跑 —— 这里显式关掉。 */
+@media (prefers-reduced-motion: reduce){
+  .wb-rail,.wb-rail *{animation-duration:.01ms!important;transition-duration:.01ms!important}
+  .wb-rail-page{animation:none}
+}
+.wb-rail .wb-card{padding:12px;border-radius:12px;transition:padding .18s var(--wb-ease),border-radius .18s var(--wb-ease),border-color var(--wb-anim-normal),box-shadow var(--wb-anim-normal)}
+.wb-rail .wb-card h3{margin:0 0 10px;font-size:12.5px}
+.wb-rail .wb-row{min-height:30px;padding:3px 0;gap:8px;font-size:12px}
+.wb-rail .wb-stats{gap:16px;margin:8px 0 10px}
+.wb-rail .wb-stat{min-width:64px}
+.wb-rail .wb-stat b{font-size:18px}
+.wb-rail .wb-stat span{font-size:11px;line-height:15px}
+.wb-rail .wb-note{margin:6px 0 0;font-size:11.5px;line-height:17px}
+.wb-rail .wb-alert{margin:0 0 8px;padding:8px 10px;font-size:11.5px;line-height:17px}
+.wb-rail .wb-actions{gap:6px}
+.wb-rail .wb-btn{padding:5px 10px;font-size:12px}
+.wb-rail .wb-input,.wb-rail .wb-select{width:100%;font-size:12px;min-height:30px;padding:5px 9px}
+.wb-rail .wb-segmented-wrap{display:flex;width:100%}
+.wb-rail .wb-segmented{display:flex;width:100%}
+.wb-rail .wb-segmented-item{flex:1 1 0;justify-content:center;text-align:center;padding:4px 8px}
+.wb-rail .wb-dropdown{display:block;width:100%}
+.wb-rail .wb-dropdown-trigger{width:100%;min-height:30px;font-size:12px}
+.wb-rail .wb-dropdown-menu{min-width:100%;max-width:100%;max-height:280px}
+.wb-rail .wb-pill{font-size:11px;padding:1px 8px}
+.wb-rail .wb-acct{padding:8px 10px;border-radius:9px}
+.wb-rail .wb-acct+.wb-acct{margin-top:6px}
+.wb-rail .wb-acct-name{font-size:12px}
+.wb-rail .wb-acct-sub{font-size:11px}
+.wb-rail .wb-meter{margin:0 0 10px}
+/* 行式清单：模型勾选与账号列表共用。滚动交给它自己，卡片高度才稳定 */
+.wb-rail-list{display:flex;flex-direction:column;gap:1px;max-height:238px;overflow:auto;margin:0 -4px;padding:1px 4px}
+.wb-rail-item{display:flex;align-items:center;gap:8px;min-width:0;padding:5px 7px;border-radius:8px;transition:background-color var(--wb-anim-fast),padding .18s var(--wb-ease)}
+.wb-rail-item-name,.wb-rail-item-sub{transition:font-size .18s var(--wb-ease),line-height .18s var(--wb-ease)}
+/* 勾选态：给一个几乎察觉不到的缩放，把"这一行现在被选中了"说清楚 */
+.wb-rail-item>input[type="checkbox"]{transition:transform .14s var(--wb-ease)}
+.wb-rail-item>input[type="checkbox"]:active{transform:scale(0.92)}
+.wb-rail-item:hover{background:var(--dsw-alias-interactive-bg-hover,light-dark(#2631480f,#ffffff14))}
+.wb-rail-item.on{background:var(--dsw-alias-interactive-bg-active,light-dark(#2631481a,#ffffff24))}
+.wb-rail-item-main{flex:1 1 auto;min-width:0;display:flex;flex-direction:column;gap:1px}
+.wb-rail-item-name{font-size:12.5px;font-weight:550;line-height:17px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.wb-rail-item-sub{font-size:10.5px;line-height:14px;color:var(--dsw-alias-label-tertiary,light-dark(#81858c,#adb2b8));font-variant-numeric:tabular-nums;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.wb-rail-item-side{flex:0 0 auto;display:flex;align-items:center;gap:5px}
+.wb-rail-item .wb-check{gap:0}
+.wb-rail-empty{padding:12px 6px;text-align:center;color:var(--dsw-alias-label-secondary,light-dark(#61666b,#cfd3d6));font-size:11.5px;line-height:17px}
+.wb-rail-mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.wb-rail-foot{display:flex;align-items:center;gap:6px;margin-top:9px;flex-wrap:wrap}
+.wb-rail-foot .wb-note{margin:0;flex:1 1 100%}
+/* 卡片标题右侧的次级信息（当前默认模型之类），窄时自动换到下一行 */
+.wb-rail-cardhead{display:flex;align-items:baseline;justify-content:space-between;gap:8px;flex-wrap:wrap;margin:0 0 10px}
+.wb-rail-cardhead h3{margin:0}
+.wb-rail-cardmeta{font-size:11px;line-height:16px;color:var(--dsw-alias-label-tertiary,light-dark(#81858c,#adb2b8));font-variant-numeric:tabular-nums;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* 卡片内的小结行：已选 N/M + 草稿态胶囊。它替代了原来一句长说明，
+   信息密度更高且一眼能看出"改了没保存"。 */
+.wb-rail-sumbar{display:flex;align-items:center;justify-content:space-between;gap:8px;min-width:0;margin:6px 0 2px}
+.wb-rail-count{font-size:11.5px;line-height:16px;color:var(--dsw-alias-label-secondary,light-dark(#61666b,#cfd3d6));font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.wb-rail-sumbar .wb-pill{flex:none}
+
+/* ── 常规档（≥300px，默认停靠 320px）：基线已覆盖，只补列表高度 ── */
+@container wb-rail (min-width:300px){
+  .wb-rail-list{max-height:min(46vh,320px)}
+}
+
+/* ── 中档（≥460px，拖宽后的停靠栏 / 中等浮动窗）──
+   纵向留白保持 12/18（与常规档一致），只放大横向与内部间距：档位切换时
+   内容不该上下"抽动"，那是比宽度跳变更刺眼的抖动。 */
+@container wb-rail (min-width:460px){
+  .wb-rail-body{padding:12px 16px 18px;gap:12px}
+  .wb-rail-inner{gap:12px}
+  .wb-rail{font-size:13px}
+  .wb-rail .wb-card{padding:14px 16px;border-radius:14px}
+  .wb-rail .wb-card h3{font-size:13px}
+  .wb-rail .wb-stat b{font-size:21px}
+  .wb-rail .wb-stat span{font-size:12px;line-height:16px}
+  .wb-rail .wb-stats{gap:22px}
+  .wb-rail-item{padding:6px 8px}
+  .wb-rail-item-name{font-size:13px;line-height:18px}
+  .wb-rail-item-sub{font-size:11px;line-height:15px}
+  .wb-rail-list{max-height:min(48vh,360px)}
+  /* 空间够了：按钮不必再铺满整行（极窄档那条 width:100% 不在此档生效） */
+  .wb-rail-foot .wb-btn,.wb-rail .wb-actions .wb-btn{width:auto}
+}
+
+/* ── 宽档（≥620px，全屏右栏 / 大浮动窗）──
+   两个约束：内容不拉满（一行 900px 读起来很累），只有**长清单**才双栏。 */
+@container wb-rail (min-width:620px){
+  .wb-rail-body{padding:12px 20px 18px;gap:14px}
+  /* 内容跟着居中的最大宽度走；否则 Row 的 space-between 会把 label 和值
+     拉到两端、中间空出一大片。 */
+  .wb-rail-inner{max-width:760px;width:100%;margin:0 auto;display:flex;flex-direction:column;gap:14px}
+  /* 只有模型勾选清单值得双栏（几十项，一列太长）。账号 / 凭据通常 2–5 行，
+     双栏只会把「名字」和「切换按钮」分到两块、读起来要来回扫。 */
+  .wb-rail-list.is-grid{
+    display:grid;
+    grid-template-columns:repeat(2,minmax(0,1fr));
+    column-gap:10px;
+    max-height:min(50vh,420px);
+  }
+  .wb-rail .wb-segmented-wrap{width:auto;max-width:420px;min-width:280px}
+  .wb-rail .wb-segmented{width:100%}
+  .wb-rail .wb-dropdown,.wb-rail .wb-input{max-width:420px}
+  .wb-rail-head{gap:10px}
+  .wb-rail-title{font-size:14px}
+  .wb-rail .wb-dropdown-menu{min-width:0;width:100%;max-width:420px}
+  /*
+   * 宽档里 Row 的 space-between 会把 label 与值拉到卡片两端 —— 中间空出
+   * 一大片，「当前默认」和它的值看着像两件不相关的东西。这里改成一组靠左，
+   * 值与标签之间用固定间距，读起来仍是一句话。
+   */
+  .wb-rail .wb-row{justify-content:flex-start}
+  .wb-rail .wb-value{flex:0 1 auto;text-align:left;margin-left:2px}
+  .wb-rail .wb-row .wb-value{max-width:100%}
+  /* 搜索框跟随卡片宽度（清单是双栏，框只有半宽会显得断掉） */
+  .wb-rail .wb-input{max-width:none}
+}
+
+/* ── 极窄档（<300px，拖到最窄 / 小窗浮动）──
+   只做减法：收横向留白、控件铺满、副标题与说明让位给主值。
+   **纵向留白不动**（仍是 12/18）—— 窄档最不该丢的正是上下呼吸空间。 */
+@container wb-rail (max-width:299px){
+  .wb-rail-body{padding:12px 8px 18px;gap:8px}
+  .wb-rail-inner{gap:8px}
+  .wb-rail{font-size:12px}
+  .wb-rail .wb-card{padding:10px;border-radius:10px}
+  .wb-rail .wb-card h3{margin:0 0 8px}
+  .wb-rail-head{gap:6px}
+  .wb-rail-title{font-size:12.5px}
+  /* 按钮排两列：一列四个按钮在 240px 下要吃掉 4 行高度，
+     两列两行就够，且每个仍有 ~100px 宽、点得到。 */
+  .wb-rail .wb-actions,.wb-rail-foot{gap:5px}
+  .wb-rail-foot .wb-btn,.wb-rail .wb-actions .wb-btn{
+    flex:1 1 calc(50% - 5px);width:auto;min-width:0;text-align:center;
+  }
+  /* 单个按钮（比如「刷新」）独占一行时仍铺满，别缩成一个小方块 */
+  .wb-rail-foot .wb-btn:only-child{flex:1 1 100%}
+  /* Row 改成上下两行：label 与值并排时，值只剩几个字符宽 */
+  .wb-rail .wb-row{flex-direction:column;align-items:flex-start;gap:2px;min-height:0;padding:5px 0}
+  .wb-rail .wb-value{text-align:left;width:100%}
+  .wb-rail .wb-label{white-space:normal}
+  .wb-rail .wb-stats{gap:12px;margin:6px 0 8px}
+  .wb-rail .wb-stat{min-width:0;flex:1 1 40%}
+  .wb-rail .wb-stat b{font-size:17px}
+  /* 副标题（模型 id / 域名 / 有效期）在最窄档只剩三个省略号，让位 */
+  .wb-rail-item-sub{display:none}
+  .wb-rail-item{padding:6px;gap:6px}
+  .wb-rail-item-name{font-size:12px}
+  .wb-rail-item-side{gap:4px}
+  .wb-rail-item-side .wb-pill{font-size:10.5px;padding:1px 6px}
+  .wb-rail-list{max-height:min(44vh,260px);margin:0 -2px;padding:1px 2px}
+  .wb-rail .wb-pill{font-size:10.5px;padding:1px 6px}
+  .wb-rail .wb-segmented-item{padding:4px;font-size:11.5px}
+  .wb-rail .wb-dropdown-trigger,.wb-rail .wb-input,.wb-rail .wb-select{min-height:28px;font-size:11.5px}
+  .wb-rail .wb-alert,.wb-rail .wb-note{font-size:11px;line-height:16px}
+  .wb-rail-empty{padding:10px 2px;font-size:11px}
+  .wb-rail-cardmeta{display:none}
+}
+
+/* ═════════════ 高度档位（右栏也可以被拖矮 / 半屏 / 浮动小窗）═════════════
+ *
+ * 宽度分档解决"横向挤"，高度不够是另一类故障：清单把下面的按钮挤出可视区，
+ * 用户以为"没有保存按钮"。实测过（320px 高、5 个按钮）只有 1 个能滚到 ——
+ * 这就是这一档必须存在的理由。三档与 JS 的 RAIL_HEIGHT_TIERS 同值：
+ *
+ *   short   < 420px  主操作**永远在视口内**：卡片头让位、清单变矮、说明隐去
+ *   normal  ≥ 420px  默认
+ *   tall    ≥ 720px  清单放长，一次看更多
+ *
+ * ## 矮面板的关键做法：让页面自己排成"头 / 可滚 / 操作"三段
+ *
+ * 只把清单压矮是不够的 —— 摘要 + 统计 + 说明叠起来仍然会把操作推出去。所以
+ * 短档把操作条做成粘性：滚动时贴在容器底部，正常高度下仍在卡片原位。
+ */
+@container wb-rail (max-height:419px){
+  /* 矮面板：先把纵向留白收紧（横向不动），再压清单 */
+  .wb-rail-body{padding:8px 12px 12px;gap:6px}
+  .wb-rail-inner{gap:6px}
+  .wb-rail .wb-card{padding:9px 10px;border-radius:10px}
+  .wb-rail .wb-card h3{margin:0 0 6px}
+  .wb-rail .wb-stats{margin:4px 0 6px;gap:12px}
+  .wb-rail .wb-stat b{font-size:16px}
+  .wb-rail .wb-row{min-height:0;padding:4px 0}
+  .wb-rail .wb-note{margin:4px 0 0}
+  /* 清单是吃掉高度的大头：给它一个随容器收缩的上限 */
+  .wb-rail-list{max-height:min(34%, 160px)}
+  .wb-rail-empty{padding:8px 4px}
+}
+@container wb-rail (min-height:720px){
+  /* 高面板：清单可以长一些，一次看更多；卡片间距也舒展一点 */
+  .wb-rail-list{max-height:min(52vh,460px)}
+  .wb-rail .wb-card+.wb-card{margin-top:2px}
+}
+
+/* 矮 + 窄同时成立时（小浮动窗），按钮两列的规则已经够用，这里只补一条：
+   标题行让位给页签 —— 否则两行头把本就不高的可视区吃掉一截。 */
+@container wb-rail (max-height:340px){
+  .wb-rail-head{display:none}
+}
 `;
+
+/* 高度档位的**内容**规则（JS 侧）：
+ *   short  ← 少于 420px
+ * 这里只声明"短档要隐藏的整块"，具体由组件的 heightTier 判断渲染，
+ * CSS 部分在上面（排版层）。两边同值，改一并改。 */
 
     // ─────────────────────────── i18n（中 / 英） ───────────────────────────
     /*
@@ -1536,6 +1850,9 @@ body.dark .wb-root,
       '刷新账号': 'Refresh accounts',
       '无签到活动': 'No activity',
       '未签': 'Not checked in',
+      '登录已过期': 'Session expired',
+      '今日签到完成度': 'Check-in completion today',
+      '（未知账号）': '(unknown account)',
       '当前': 'Current',
       '个': 'accounts',
       '今日已签': 'checked in today',
@@ -1984,6 +2301,93 @@ body.dark .wb-root,
       '导出失败：': 'Export failed: ',
       '复制失败：': 'Copy failed: ',
       '体检完成：': 'Probe finished: ',
+
+      // ── 右侧栏（sidebar.right 里的紧凑版）──
+      '模型、签到与账号': 'Models, check-in, and accounts',
+      '当前默认': 'Current default',
+      '设为默认': 'Set as default',
+      '已设为默认。': 'Set as the default.',
+      '默认模型已失效（不在当前目录里），请重新选一个。':
+        'The default model is gone from the current catalog; pick another one.',
+      '这一版 dsh 没有默认模型服务；仍可在对话页的模型选择器里切换。':
+        'This dsh build has no default-model service; switch models from the composer selector instead.',
+      '在 dsh 选择器中显示': 'Show in the dsh model picker',
+      '只显示勾选的模型；改动立即生效，无需重启。':
+        'Only checked models appear in the picker; changes apply immediately, no restart.',
+      '已保存并即时生效：dsh 选择器现在显示 ': 'Saved and live: the dsh picker now shows ',
+      ' 个模型。': ' models.',
+      '来源': 'Source',
+      '凭据': 'Credential',
+      '连续': 'Streak',
+      '天': 'days',
+      '今日已领': 'Claimed today',
+      '正在读取…': 'Reading…',
+      '没有可切换的账号。': 'No other account to switch to.',
+      '切换账号': 'Switch account',
+      '无可用模型。': 'No model available.',
+      '未设置': 'Not set',
+      '当前使用': 'In use',
+      '刷新模型': 'Refresh models',
+      '有效至': 'Valid until',
+      '个账号': 'accounts',
+      '提交中…': 'Submitting…',
+      '启动中…': 'Starting…',
+      '跟随配置': 'Follow config',
+      '切换桌面账号要写登录文件，由控制台统一负责；插件凭据可以直接切。':
+        'Switching the desktop account writes the login file, which only the console may do; plugin credentials switch directly.',
+      // 本轮：模型页的保存语义 + 检索 + 高度档
+      '改完记得设为默认，否则只影响下次新会话的初值。':
+        'Save it as the default, otherwise it only seeds the next new session.',
+      '已选 ': 'Selected ',
+      '未保存': 'Unsaved',
+      '已生效': 'Live',
+      '没有匹配的模型。': 'No model matches.',
+      '明天再来': 'Come back tomorrow',
+      '今日已领完': 'Claimed today',
+      '换账号': 'Switch account',
+      // 用量上限卡
+      '用量上限': 'Usage limits',
+      '正在读取用量上限…': 'Reading usage limits…',
+      '下面这些账号的模型最近触顶了；换模型或换号可恢复。':
+        'These accounts hit a limit recently; switch model or account to recover.',
+      '账号被风控': 'Account flagged',
+      '额度已用尽': 'Quota exhausted',
+      '触发了限流': 'Rate limited',
+      '重新登录无效，请换号': 'Re-login will not help; switch account',
+      '换模型或换号': 'Switch model or account',
+      '稍等再试': 'Wait and retry',
+      '重新登录无效，请换一个账号。': 'Re-login will not help; switch to another account.',
+      '这个模型的额度用尽了；换模型或换号可继续。':
+        'This model quota is exhausted; switch model or account to continue.',
+      '只是瞬时限流，稍等再试即可。': 'Just a momentary rate limit; retry in a moment.',
+      '没有账号触顶（最近 10 分钟）。': 'No account is limited (last 10 minutes).',
+      '刷新上限': 'Refresh limits',
+      '上游提示 ': 'upstream says ',
+      ' 重置': ' reset',
+      '最近一次 ': 'last ',
+      '重置 ': 'reset ',
+      // 倒计时 / 到期自动消失
+      '还剩 ': 'in ',
+      '10 分钟窗口内': 'within the 10-minute window',
+      '上游未给恢复时间': 'no reset time from upstream',
+      '额度已恢复（刚到期移除）。': 'Quota recovered (expired out just now).',
+      '即将恢复': 'any moment',
+      '不到 1 分钟': 'under a minute',
+      // 跨账号上限
+      '所有账号都已列出，不只当前这个（共 ': 'All accounts are listed, not just the current one (',
+      ' 个账号）。': ' accounts).',
+      '每条到恢复时间会自动消失。': 'Each row disappears at its reset time.',
+      '到恢复时间会自动消失；换模型或换号可恢复。':
+        'Each disappears at its reset time; switch model or account to recover.',
+      // 上下文预算（右栏就地调整）
+      '上下文预算': 'Context budget',
+      '这个模型能接收多少上下文；留空或点「自动」跟随官方默认。':
+        'How much context this model accepts; leave empty (or hit Auto) to follow the official default.',
+      '当前生效': 'In effect',
+      '自动（留空）': 'Auto (leave empty)',
+      '保存上下文': 'Save context',
+      '已设置上下文：': 'Context set: ',
+      '已恢复为自动上下文：': 'Context reverted to automatic: ',
     };
 
     /**
@@ -2413,6 +2817,122 @@ body.dark .wb-root,
     }
     /** 代码里主动拼接的场景（与组件渲染走同一条路径，保证口径一致）。 */
     const t = (s) => translateText(s);
+    /**
+     * 句末标点：中文用「。」，英文用「.」。
+     *
+     * 拼接串（`前缀 + 账号名 + 句号`）里的句号不能写死中文 —— 英文模式下会变成
+     * "... Fixture。" 这种半中半英。翻整串又不行：整串带动态账号名，词条表里
+     * 查不到（`translateText` 先查整串，查不到就原样返回）。
+     */
+    const sentenceEnd = () => (LANG === 'en' ? '.' : '。');
+
+    /**
+     * 剩余时间 → 人话（`1 小时 12 分` / `12 分` / `不到 1 分钟`）。
+     *
+     * 用户要知道的是"还要等多久"，不是"上游说几点几分"—— 后者还得自己心算，
+     * 而且跨时区/跨天时更容易看错。所以用倒计时而不是绝对时刻。
+     *
+     * 传进 `NaN`/非有限值时返回空串：调用方会据此换成"上游未给恢复时间"，
+     * 绝不编造一个时间出来。
+     */
+    /**
+     * 给"用量上限"条目算剩余时间，并在到点时把它们摘掉。
+     *
+     * 抽成**纯函数**是为了能真正测透它。这件事在浏览器里跟轮询时序搏斗极其
+     * 脆弱（实测反复假失败：一会儿读到上一轮的 999ms、一会儿又被重新锚定成
+     * 12000ms），而算法本身很朴素 —— 单独测它只要几毫秒。
+     *
+     * ## 为什么需要"锚点"
+     *
+     * 如果每次都用「本轮的 `resetAt - at` 再减去本轮已过时间」，那么每次轮询
+     * 都会带回一个新 `at`（服务端说"现在还剩 4 秒"），elapsed 归零、倒计时
+     * 永远回到 4 秒 —— 那条记录**永远不会过期**。这就是"到时间也不消失"的根因。
+     *
+     * 所以给每个 resetAt 记一个"本机首次看到它的时刻"：只要 `resetAt` 没变，
+     * 锚点就不动，`now - anchor` 单调增长，剩余时间单调递减，到 0 就摘掉。
+     * `resetAt` 变了（上游延长了恢复时间）才重新锚定。
+     *
+     * @param {object} input
+     * @param {Array} input.raw      服务端返回的 limiting 数组
+     * @param {string} input.at      服务端这份数据的时间戳（ISO）
+     * @param {number} input.now     本机**单调**时钟当前值（毫秒）
+     * @param {Map} input.anchors    锚点表（同一个 Map 跨渲染复用）
+     * @returns {Array} 未过期的条目，每项多出 `leftMs`（剩余毫秒，NaN=上游没给）
+     */
+    function applyLimitAnchors({ raw, at, now, anchors }) {
+      const serverAtMs = at ? Date.parse(at) : NaN;
+      const list = Array.isArray(raw) ? raw : [];
+      const kept = [];
+      const alive = new Set();
+      for (const it of list) {
+        const key = `${it.uid}\0${it.model}\0${it.kind}`;
+        const resetMs = it.resetAt ? Date.parse(it.resetAt) : NaN;
+        /*
+         * 服务端给的「还差多久」= resetAt - at。这是**唯一不依赖本机墙钟**的量，
+         * 所以拿它当真相，只用本机单调时钟去消耗它。
+         */
+        const spanMs = Number.isFinite(resetMs) && Number.isFinite(serverAtMs)
+          ? resetMs - serverAtMs
+          : NaN;
+        const prev = anchors.get(key);
+        const sameTarget = Boolean(prev) && prev.resetAt === it.resetAt;
+        const startAt = sameTarget ? prev.atMs : now;
+        if (!sameTarget) anchors.set(key, { resetAt: it.resetAt, atMs: startAt });
+        const elapsedMs = Math.max(0, now - startAt);
+        const leftMs = Number.isFinite(spanMs) ? spanMs - elapsedMs : NaN;
+        if (Number.isFinite(leftMs) && leftMs <= 0) {
+          /* 到点了：连锚点一起丢掉，免得下次同名条目复用一个陈旧锚点 */
+          anchors.delete(key);
+          continue;
+        }
+        alive.add(key);
+        kept.push({ ...it, leftMs });
+      }
+      /* 清掉不再出现的条目的锚点，避免 Map 无限增长 */
+      for (const key of [...anchors.keys()]) if (!alive.has(key)) anchors.delete(key);
+      return kept;
+    }
+
+    function fmtCountdown(ms) {
+      if (!Number.isFinite(ms)) return '';
+      if (ms <= 0) return LANG === 'en' ? 'any moment' : '即将恢复';
+      /*
+       * 不到 2 分钟时**显示秒**。
+       *
+       * 只用分钟的话，4993ms 会被 `Math.ceil` 成"1 分"，用户盯着它 5 秒
+       * 见不到任何变化，会以为倒计时坏了（实测就被这么反馈过）。
+       * 秒级显示才有"在走"的实感。
+       */
+      if (ms < 120_000) {
+        const sec = Math.max(1, Math.ceil(ms / 1000));
+        return LANG === 'en' ? `${sec}s` : `${sec} 秒`;
+      }
+      const totalMin = Math.ceil(ms / 60000);
+      const d = Math.floor(totalMin / (60 * 24));
+      const h = Math.floor((totalMin % (60 * 24)) / 60);
+      const m = totalMin % 60;
+      const parts = [];
+      if (d) parts.push(LANG === 'en' ? `${d}d` : `${d} 天`);
+      if (h) parts.push(LANG === 'en' ? `${h}h` : `${h} 小时`);
+      /* 有"天/小时"时分钟只在没有更大单位时才显示，
+         否则 `1 天 3 小时 27 分` 太长，右栏放不下 */
+      if (m && !d) parts.push(LANG === 'en' ? `${m}m` : `${m} 分`);
+      return parts.join(' ') || (LANG === 'en' ? 'under a minute' : '不到 1 分钟');
+    }
+
+    /** ISO 时刻 → 本地 `HH:MM`（只用在 title 提示里，不需要秒）。 */
+    function fmtLimitClock(iso) {
+      if (!iso) return '';
+      const ts = Date.parse(iso);
+      if (!Number.isFinite(ts)) return String(iso);
+      try {
+        return new Date(ts).toLocaleTimeString(LANG === 'en' ? 'en-US' : 'zh-CN', {
+          hour: '2-digit', minute: '2-digit',
+        });
+      } catch {
+        return String(iso);
+      }
+    }
 
     // ─────────────────────── 页面可见性门控 ───────────────────────
     /**
@@ -2515,6 +3035,22 @@ body.dark .wb-root,
      * 面板就会挂着一个红字 HTTP 404 —— 而下一个轮询可能要 60~120 秒以后。
      * 所以 404 单独快速重试，把"启动窗口"消化掉。
      */
+    /**
+     * 从响应里判断"这次失败像不像触顶"。
+     *
+     * 只在**像上限**时广播：429 / 6004 / 14018 / 11140 / "恢复时间" / "额度"。
+     * 不能对任何失败都广播 —— 404（插件还没就绪的重试窗口）、500、CORS 之类
+     * 会把上限卡刷成高频无用请求。
+     */
+    function looksLikeLimitHit(status, data) {
+      if (Number(status) === 429) return true;
+      const err = String((data && (data.error || data.message || data.msg)) || '');
+      if (!err) return false;
+      if (/(6004|14018|11140|14003|QUOTA|quota_exceeded|insufficient[_ ]quota)/i.test(err)) return true;
+      if (/恢复时间|用量已达上限|额度|积分不足|rate[_ ]?limit/i.test(err)) return true;
+      return false;
+    }
+
     async function getJson(path, options) {
       const opts = options || {};
       const retries = opts.retries === undefined ? 3 : opts.retries;
@@ -2527,6 +3063,11 @@ body.dark .wb-root,
           await sleep(500 * (attempt + 1)); // 0.5s → 1s → 1.5s
           continue;
         }
+        /*
+         * 读到"像上限"的失败就广播：上限卡立刻重拉，用户不必手动点刷新。
+         * 放在这里而不是各调用点 —— 对话、探测、控制台全都走这个出口。
+         */
+        if (looksLikeLimitHit(res.status, data)) notifyLimitsSuspect();
         return { status: res.status, data };
       }
     }
@@ -2548,6 +3089,8 @@ body.dark .wb-root,
         const text = await res.text();
         let data;
         try { data = JSON.parse(text); } catch (e) { data = { ok: false, error: text.slice(0, 200) }; }
+        /* 与 getJson 同一判据：像上限就广播，让上限卡立刻重拉 */
+        if (looksLikeLimitHit(res.status, data)) notifyLimitsSuspect();
         return { status: res.status, data };
       } catch (error) {
         return { status: 0, data: { ok: false, error: requestErrorMessage(error) } };
@@ -2630,7 +3173,24 @@ body.dark .wb-root,
           const message = failed
             ? (status === 404 ? '插件还没就绪（HTTP 404），正在自动重试…' : String(data?.error || `HTTP ${status}`))
             : '';
-          setState({ data: failed && status === 404 ? null : data, status, error: message, loading: false });
+          /*
+           * `fetchedAtMs`：**收到这份响应的本机时刻**。
+           *
+           * 倒计时不能拿"本机现在"直接减服务端的 `resetAt` —— 本机时钟偏几分钟
+           * 就会多显示/少显示一段。正确做法是用「服务端 at → resetAt」的差，
+           * 再减去「收到响应后本机经过的时间」，而这个"经过"必须有基准点。
+           */
+          setState({
+            data: failed && status === 404 ? null : data,
+            status,
+            error: message,
+            loading: false,
+            /*
+             * 与 `useNowTick` 用**同一个时钟**（单调毫秒），否则下面算
+             * 「已过多久」时两边基准不同，差值会变成天文数字。
+             */
+            fetchedAtMs: nowMs(),
+          });
           if (!failed) { retryCount.current = 0; return; }
           scheduleRetry(forPath);
         } catch (error) {
@@ -2702,7 +3262,20 @@ body.dark .wb-root,
         // 而拿高频轮询去逼近它又要反复打上游计费端点。把"事件"变成依赖项最省。
         // 缺省 undefined 时不影响既有行为（值不变，依赖数组等价于原来）。
       }, [reload, opts.interval, opts.enabled, opts.refreshKey]);
-      return { data: state.data, error: state.error, status: state.status, loading: state.loading, reload };
+      /*
+       * `fetchedAtMs` 必须一起返回：调用方要用它算「这份数据是多久以前拿到的」，
+       * 用于倒计时（服务端 at → resetAt 再减去已过时间）。漏掉的话调用方拿到
+       * 的是 undefined，已过时间恒为 0，倒计时就永远停在第一次的值（实测踩过：
+       * 到点也不消失）。
+       */
+      return {
+        data: state.data,
+        error: state.error,
+        status: state.status,
+        loading: state.loading,
+        fetchedAtMs: state.fetchedAtMs,
+        reload,
+      };
     }
 
     // ─────────────────────────── 格式化 / 导出 ───────────────────────────
@@ -6566,20 +7139,29 @@ body.dark .wb-root,
               'aria-valuenow': pct,
               'aria-valuemin': 0,
               'aria-valuemax': 100,
+              /* aria-label 走 h() 的属性翻译（I18N_PROPS 里有它），传中文原文即可 */
               'aria-label': '今日签到完成度',
             }, h('i', { style: { width: pct + '%' } })),
             h('div', { className: 'wb-acct-wrap' },
               ...rows.map((a) => {
-                const name = a.nickname || String(a.userId || '').slice(0, 8) || '（未知账号）';
+                const name = a.nickname || String(a.userId || '').slice(0, 8) || t('（未知账号）');
                 const tone = a.error ? 'bad' : a.noActivity ? 'warn' : (a.status && a.status.todayCheckedIn) ? 'ok' : 'warn';
-                const text = a.error ? '失败'
-                  : a.noActivity ? '无签到活动'
+                /*
+                 * 胶囊文案必须**逐段 t()**：Pill 的 `text` 不是 h() 的翻译属性
+                 * （只有 title / placeholder / aria-label / alt 会过翻译），
+                 * 而拼好的整串在词条表里查不到 —— 于是英文模式下会留中文。
+                 */
+                const text = a.error ? t('失败')
+                  : a.noActivity ? t('无签到活动')
                     : (a.status && a.status.todayCheckedIn)
-                      ? '已签' + (a.status.todayCredit ? ' +' + a.status.todayCredit : '')
-                      : '未签';
+                      ? t('已签到') + (a.status.todayCredit ? ' +' + a.status.todayCredit : '')
+                      : t('未签');
+                // 日期也跟语言走：英文模式里 `toLocaleDateString('zh-CN')` 会给出中文月份
                 const since = a.expired
-                  ? '登录已过期'
-                  : (a.expiresAt ? '有效至 ' + new Date(a.expiresAt).toLocaleDateString('zh-CN') : '');
+                  ? t('登录已过期')
+                  : (a.expiresAt
+                    ? t('有效至') + ' ' + new Date(a.expiresAt).toLocaleDateString(LANG === 'en' ? 'en-US' : 'zh-CN')
+                    : '');
                 return h('div', { className: 'wb-acct', key: a.userId },
                   h('div', { className: 'wb-acct-main' },
                     h('div', { className: 'wb-acct-name' },
@@ -8600,6 +9182,30 @@ const probeOne = async (id) => {
       }, [fn]);
     }
 
+    /**
+     * "用量上限可能变了"的广播。
+     *
+     * 为什么需要它：上限是**突发事件**。桥在拒绝一个请求的那一刻就知道了，
+     * 但面板只能靠轮询发现 —— 用户看到的顺序是"对话里报 429 → 卡片还是空的
+     * → 手动点刷新才出现"。任何**请求失败**都说明"可能刚触顶"，这时立刻让
+     * 上限卡重拉一次，用户就不必手动点。
+     *
+     * 与 `authChanged` 分开而不是复用：语义不同（一个换号、一个限额），
+     * 混用一个通道会让上限卡在换号时也无谓地重拉两次。
+     */
+    const limitsSuspectSubs = new Set();
+    function notifyLimitsSuspect() {
+      for (const fn of [...limitsSuspectSubs]) {
+        try { fn(); } catch (e) { /* 单个订阅者出错不影响其它组件 */ }
+      }
+    }
+    function useLimitsSuspect(fn) {
+      useEffect(() => {
+        limitsSuspectSubs.add(fn);
+        return () => { limitsSuspectSubs.delete(fn); };
+      }, [fn]);
+    }
+
     function ChatQuotaPill({ useChat } = {}) {
       const { data, reload, loading } = useJson('/workbuddy/quota', { interval: 60000 });
       const { data: requestData, reload: reloadRequests } = useJson('/workbuddy/requests?limit=1', { interval: 15000 });
@@ -9566,6 +10172,1353 @@ const probeOne = async (id) => {
           tab === 'log' ? h(LogPanel, { status }) : null) : null);
     }
 
+    /* ═══════════════════ 右侧栏：模型 / 签到 / 账号 ═══════════════════ */
+
+    /**
+     * 右栏这一格（`sidebar.right.pane.tab`）的 tab 类型标识。
+     *
+     * 为什么要**自己注册一个 tab 类型**，而不是只注册 body：
+     * 右栏的 body 是 keyed 槽，派发键是「tab 类型的 id」；不注册类型就没有任何
+     * 东西会派发到我们的 key，body 永远不会渲染。类型同时提供 chip 标题与
+     * guide 卡片（右栏空着时的那几个入口按钮）。
+     */
+    const RAIL_TAB_ID = 'dsh-plugin-workbuddy/rail';
+    const RAIL_KIND = 'workbuddyRail';
+
+    /**
+     * 右栏的宽度档位。
+     *
+     * 四档与 CSS 的 `@container` 阈值**必须一致**（改一处就得改另一处）：
+     * 排版交给 CSS，**内容**（换文案、少渲染几条）交给 JS —— 极窄档里标题一长
+     * 就只剩省略号，这种事 CSS 解决不了。
+     */
+    const RAIL_TIERS = [
+      { id: 'wide', min: 620 },
+      { id: 'medium', min: 460 },
+      { id: 'regular', min: 300 },
+      { id: 'narrow', min: 0 },
+    ];
+    const railTierOf = (width) => RAIL_TIERS.find((tier) => width >= tier.min) || { id: 'narrow', min: 0 };
+
+    /**
+     * 高度档位：右栏**同时**受高度限制。
+     *
+     * 宽度分档解决"横向挤"，但把面板拖矮（或半屏、浮动小窗）时高度也会不够：
+     * 模型清单、账号清单会把下面的按钮挤出可视区，用户以为"没有保存按钮"。
+     * 这里按容器高度再分三档，与 CSS 的 `@container (min-height: …)` 同值：
+     *
+     *   short   < 420px  只留主操作：清单变矮、说明与副行让位
+     *   normal  ≥ 420px  默认（一般停靠高度都在这档）
+     *   tall    ≥ 720px  清单可以长一些，一次看更多
+     *
+     * 与宽度档一样：CSS 管排版，JS 管**内容**（短档少渲染说明文字 / 少几条清单）。
+     */
+    const RAIL_HEIGHT_TIERS = [
+      { id: 'tall', min: 720 },
+      { id: 'normal', min: 420 },
+      { id: 'short', min: 0 },
+    ];
+    const railHeightTierOf = (height) => (
+      RAIL_HEIGHT_TIERS.find((t) => height >= t.min) || { id: 'short', min: 0 }
+    );
+
+    /**
+     * 每秒推进一次的时钟，只用来重算"还剩多久恢复"。
+     *
+     * 为什么不直接用 `Date.now()` 在 render 里算：那样只有父组件重渲染时才更新，
+     * 倒计时会卡住不动。为什么不 `setState(Date.now())` 每秒：那会让整棵树每秒
+     * 重渲染一次，代价明显。这里返回的是**秒级时间戳**（`Math.floor(now/1000)`），
+     * 它每秒才变一次，React 的 state 相等判断会自然把无变化的更新吞掉。
+     *
+     * 页面不可见时停表：后台标签页里每秒跑一次 setState 纯属浪费（也省电）。
+     */
+    /**
+     * 一个单调递增的"已过毫秒"计数器，每秒推进一次。
+     *
+     * 用它而不是 `Date.now()` 的原因有两个：
+     *
+     * 1. **系统时间会被调整**（NTP 校正、用户改时间、双系统来回切）。用
+     *    `Date.now()` 做倒计时，时间往回跳时倒计时会**倒着走甚至卡住**。
+     *    `performance.now()` 是单调时钟，不跳。
+     * 2. **测试里 `Date` 会被冻结**（夹具为了可复现把 Date 钉死）。此时
+     *    `Date.now()` 永远不变，倒计时就永远不推进、条目永远不消失 ——
+     *    这不是测试的错，而是"用墙钟当计时器"本身不对。
+     *
+     * 退化顺序：`performance.now()` → `Date.now()`。两者都拿不到就返回 0
+     * （倒计时不推进，但不会崩）。
+     */
+    function nowMs() {
+      if (typeof performance !== 'undefined' && typeof performance.now === 'function') {
+        return performance.now();
+      }
+      return Date.now();
+    }
+
+    function useNowTick(intervalMs = 1000) {
+      const [tick, setTick] = useState(() => nowMs());
+      useEffect(() => {
+        if (typeof setInterval !== 'function') return undefined;
+        let timer = null;
+        const start = () => {
+          if (timer !== null) return;
+          timer = setInterval(() => {
+            const next = nowMs();
+            /* 千分之一毫秒级的抖动不算变化，避免每帧都重渲染整棵树 */
+            setTick((prev) => (Math.abs(next - prev) < 250 ? prev : next));
+          }, intervalMs);
+          // Node/测试环境下别把进程挂住（浏览器里没有 unref）
+          if (timer && typeof timer.unref === 'function') timer.unref();
+        };
+        const stop = () => {
+          if (timer === null) return;
+          if (typeof clearInterval === 'function') clearInterval(timer);
+          timer = null;
+        };
+        const onVisibility = () => {
+          if (typeof document !== 'undefined' && document.hidden) stop();
+          else { setTick(nowMs()); start(); }
+        };
+        start();
+        if (typeof document !== 'undefined' && document.addEventListener) {
+          document.addEventListener('visibilitychange', onVisibility);
+        }
+        return () => {
+          stop();
+          if (typeof document !== 'undefined' && document.removeEventListener) {
+            document.removeEventListener('visibilitychange', onVisibility);
+          }
+        };
+      }, [intervalMs]);
+      return tick;
+    }
+
+    /**
+     * 同时观察宽高，返回 `{ tier, heightTier }`。
+     *
+     * 同一个 ResizeObserver 报两件事：拆成两个 observer 会在同一个回调里
+     * 触发两次 setState，React 18 批处理虽然能合并，但读到的尺寸可能一新一旧。
+     */
+    function useRailFit(ref) {
+      const [fit, setFit] = useState({ tier: 'regular', heightTier: 'normal' });
+      useEffect(() => {
+        const el = ref.current;
+        if (!el) return undefined;
+        const apply = (width, height) => {
+          const nextTier = width > 0 ? railTierOf(width).id : 'regular';
+          const nextHeight = height > 0 ? railHeightTierOf(height).id : 'normal';
+          setFit((current) => (
+            current.tier === nextTier && current.heightTier === nextHeight
+              ? current
+              : { tier: nextTier, heightTier: nextHeight }
+          ));
+        };
+        const rect = el.getBoundingClientRect();
+        apply(rect.width, rect.height);
+        if (typeof ResizeObserver !== 'function') {
+          const onResize = () => {
+            const r = el.getBoundingClientRect();
+            apply(r.width, r.height);
+          };
+          window.addEventListener('resize', onResize);
+          return () => window.removeEventListener('resize', onResize);
+        }
+        const ro = new ResizeObserver((entries) => {
+          for (const entry of entries) {
+            // contentRect 是**内容盒**；容器自己零内边距、零边框（见 CSS 注释），
+            // 所以它就等于右栏真实的内框尺寸。
+            apply(entry.contentRect.width, entry.contentRect.height);
+          }
+        });
+        ro.observe(el);
+        return () => ro.disconnect();
+      }, [ref]);
+      return fit;
+    }
+
+    /** chip 标题：短，窄栏里才不会被挤成省略号。 */
+    function WorkBuddyRailTitle() {
+      return h('span', null, 'WorkBuddy');
+    }
+
+    /**
+     * guide 卡片上的字形。
+     *
+     * 不提供 `icon` 时右栏会画一个**默认方块占位**（`CubeGlyph`，颜色是 tertiary
+     * 的弱化墨），在一排真实图标中间看起来就像"加载失败"。所以自己画一个：
+     * 一圈轨道 + 一个实心核，和"模型/网关"的语义对得上，也明显区别于旁边的
+     * 文件夹、终端、地球。
+     *
+     * 尺寸与颜色都由右栏传进来（`size` / `className`），沿用它给的 `currentColor`。
+     */
+    function WorkBuddyRailGlyph(props) {
+      const size = (props && props.size) || 22;
+      return h0('svg', {
+        className: props && props.className,
+        width: size,
+        height: size,
+        viewBox: '0 0 24 24',
+        fill: 'none',
+        stroke: 'currentColor',
+        strokeWidth: 1.7,
+        'aria-hidden': 'true',
+      },
+      h0('circle', { cx: 12, cy: 12, r: 8.2, opacity: 0.42 }),
+      h0('path', { d: 'M12 3.8v2.6M12 17.6v2.6M3.8 12h2.6M17.6 12h2.6', strokeLinecap: 'round', opacity: 0.75 }),
+      h0('circle', { cx: 12, cy: 12, r: 3.4, fill: 'currentColor', stroke: 'none' }));
+    }
+
+    /**
+     * 右栏面板：在 240–1400px 之间任意宽度的一列里回答三个问题 ——
+     *   1. 现在用哪个模型（以及 dsh 的选择器里能看到哪些）；
+     *   2. 今天签到了没、要不要领；
+     *   3. 账本上是哪个号，要换成哪个号。
+     *
+     * 数据面全部复用已有路由（插件自己的 `/workbuddy/*` + 控制台透传），
+     * 所以这里**不新增任何后端**（除了挑默认模型那一条），也就不会出现
+     * "面板说的和控制台说的不一样"。
+     *
+     * 排版按**容器宽度**分四档（CSS `@container`），需要换**文案**的地方才看
+     * `tier`（JS）：窄档里标题太长、副标题只剩省略号，这些 CSS 管不了。
+     * 高度同理分三档（`heightTier`）—— 半屏 / 浮动小窗时高度也会不够。
+     */
+    function WorkBuddyRail() {
+      // 订阅语言：切语言时这一个 hook 让整列重渲染（文案在 render 里现算）。
+      useLang();
+      const rootRef = useRef(null);      const { tier, heightTier } = useRailFit(rootRef);
+      const narrow = tier === 'narrow';
+      const short = heightTier === 'short';
+      /*
+       * 中档以上一行放得下更多信息，所以副行加上下文长度：
+       * 默认 320px 时 `deepseek-v4.1-flash · 300K` 会把 id 本身挤掉一半，
+       * 那时只留 id（上下文在对话页的模型选择器里本来就能看到）。
+       */
+      const roomy = tier === 'wide' || tier === 'medium';
+      const [tab, setTab] = useState('model');
+      const [busy, setBusy] = useState('');
+      const [notice, setNotice] = useState({ text: '', bad: false });
+      const [draftModel, setDraftModel] = useState('');
+      const [filter, setFilter] = useState('');
+      // 勾选清单的草稿：null = 还没动过（显示服务端值）；数组 = 用户改过
+      const [draftVisible, setDraftVisible] = useState(null);
+      /*
+       * 右栏的「上下文预算」草稿（每个模型一条，单位 tokens）。
+       *
+       * 为什么右栏也要一个：上下文长度原本只能在**设置页 → 模型详情**里调，
+       * 那是三级跳（设置 → WorkBuddy → 展开详情）。而它是"这个模型能塞多长
+       * 的上下文"这种**随手就要改**的参数，放在对话旁边最有用。
+       *
+       * 值 0 = 跟随官方默认（与后端 readContextWindow 的语义一致）。
+       */
+      const [ctxDraft, setCtxDraft] = useState({});
+      /*
+       * 一个只用来**重算倒计时**的时钟（每秒一格）。
+       *
+       * 为什么需要它：额度恢复的那一刻必须让条目消失，但接口 60 秒才拉一次 ——
+       * 只靠接口的话，恢复后界面还会挂着"已用尽"最多一分钟，用户以为没恢复
+       * （"怎么还没写恢复时间到时间再消失"）。
+       *
+       * 它是**单调毫秒计数**（performance.now），不是墙钟：系统时间被调整时
+       * 倒计时不会倒着走，测试里 Date 被冻结时它照样推进。
+       */
+      const nowTick = useNowTick(1000);
+
+      const modelsApi = useJson('/workbuddy/models', { interval: 180000 });
+      const prefsApi = useJson('/workbuddy/model-visibility', {});
+      const defaultApi = useJson('/workbuddy/default-model', { interval: 60000 });
+      const checkinApi = useJson('/workbuddy/checkin', {
+        interval: 600000,
+        enabled: tab === 'checkin',
+      });
+      const acctCheckinApi = useJson('/workbuddy/checkin/accounts', {
+        interval: 300000,
+        enabled: tab === 'checkin',
+      });
+      const loginApi = useJson('/workbuddy/login', { interval: 60000, enabled: tab === 'account' });
+      const accountApi = useConsoleApi(CONSOLE_API + '/accounts', {
+        interval: 60000,
+        enabled: tab === 'account',
+      });
+      /*
+       * 用量上限：哪个账号的哪个模型触顶了。
+       *
+       * ## 为什么 15 秒、而且**任何标签页都轮询**
+       *
+       * 上限是**突发事件**：刚还在正常对话，下一个请求就 429 了。早期只在
+       * 账号页 / 模型页拉、且间隔 60 秒 —— 用户看到的现象就是"已经提示上限了，
+       * 卡片里却什么都没有，手动点刷新才出现"（实际就是这么被反馈的）。
+       *
+       * 这张卡回答的是"我现在还能不能继续用"，不该要求用户先切到某个标签页
+       * 才发现。桥那边 `rateLimit` 是**内存表**，读一次不打上游、几乎零成本，
+       * 所以 15 秒轮询的代价可以接受。
+       */
+      const limitsApi = useJson('/workbuddy/limits', { interval: 15000 });
+      /*
+       * 有人报告"可能刚触顶"时立刻重拉 —— 不等下一个 15 秒。
+       *
+       * 触发点见 `notifyLimitsSuspect()`：任何模型请求失败都会广播一次。
+       * 这条通道就是"已经提示上限了，但卡片还是要手动刷新才出现"的解法。
+       */
+      useLimitsSuspect(useCallback(() => { limitsApi.reload(); }, [limitsApi.reload]));
+
+      const models = modelsApi.data?.models || [];
+      const prefs = prefsApi.data && prefsApi.data.ok ? prefsApi.data : null;
+      const current = defaultApi.data && defaultApi.data.ok !== false ? defaultApi.data : null;
+      const effectiveSource = loginApi.data?.effective?.source || '';
+      const effectiveUid = loginApi.data?.effective?.uid || '';
+      const pluginCreds = Array.isArray(loginApi.data?.credentials) ? loginApi.data.credentials : [];
+      /*
+       * 触顶条目：**只取 ok:true 的那份**。桥没跑时接口会回 ok:false + 原因，
+       * 那时把空数组当成"没有账号触顶"就是撒谎 —— 页面会显示"一切正常"，
+       * 而实际是"读不到"。所以这两种情况在渲染层分开处理。
+       *
+       * ## 前端也要按恢复时间过滤（不能只靠后端）
+       *
+       * 后端每次请求都会重算，但**两次请求之间隔 60 秒**：额度恢复的那一刻，
+       * 界面还挂着旧的"已用尽"，用户以为没恢复（"怎么还没写恢复时间到时间再消失"）。
+       * 所以这里用 `nowTick`（每秒一格）重算，`resetAt` 一过就把它摘掉。
+       *
+       * ## 时钟基准用**服务端的时间**，不用本机时间
+       *
+       * 本机时钟可能偏（几分钟很常见，虚拟机/双系统更明显）。如果拿本机时间
+       * 去减服务端给的 `resetAt`，偏慢时会**多显示一段早已过去的等待**，偏快时
+       * 会**提前把还在限制里的条目摘掉** —— 两种都是错的。
+       *
+       * 所以：用服务端 `at` 与 `resetAt` 的差作为"剩余时长"，再减去**本机经过的
+       * 时间**（用 performance.now 更稳，它不受系统时间调整影响；没有就退化为
+       * Date.now 差值）。这样本机时钟偏多少都不影响倒计时。
+       */
+      /*
+       * ## 倒计时的锚点：**首次看到这个 resetAt 的那一刻**
+       *
+       * 早期写法是「本轮的 `resetAt - at`，减去本轮已过时间」。问题很明显：
+       * 每次轮询都会带回一个新的 `at`（服务端说"现在还剩 4 秒"），于是
+       * elapsed 归零、倒计时**永远回到 4 秒**，那条记录永远不过期。
+       *
+       * 现在把算法抽成纯函数 `applyLimitAnchors()`（见下方模块级定义）：
+       *   同一个 resetAt 复用同一个锚点，只有 resetAt 变了才重新锚定。
+       * 这样轮询不会重置倒计时，上游延长恢复时间时也能跟着更新。
+       *
+       * 抽成纯函数是为了**能单元测试**：在浏览器里跟轮询时序搏斗验这件事
+       * 又慢又脆（实测反复假失败），而算法本身几分钟就能测透。
+       */
+      const anchorRef = useRef(new Map());
+      const limits = applyLimitAnchors({
+        raw: limitsApi.data && limitsApi.data.ok === true && Array.isArray(limitsApi.data.limiting)
+          ? limitsApi.data.limiting
+          : [],
+        at: limitsApi.data?.at,
+        now: nowTick,
+        anchors: anchorRef.current,
+      });
+      /*
+       * 这张卡覆盖了几个账号 —— 用来区分「只有当前号触顶」与「历史上攒了几个号」。
+       * 后者才是用户想看的："哪个用完了"。
+       */
+      const limitsAccountCount = new Set(limits.map((it) => it.uid)).size;
+      const desktopAccounts = (() => {
+        /*
+         * 同一账号可能有多份登录文件（切号时只有"退出登录"才留快照，其余是就地覆盖，
+         * 加上历史重启留下的副本）。控制台会合并，但**它可能是旧代码**，而且合并键
+         * 在插件这边也能算 —— 窄列里两行一模一样的号码没有任何意义，所以这里再兜一道。
+         * 保留规则与控制台相同：生效中 > 可用 > 最近修改；顺序按首次出现。
+         */
+        const byKey = new Map();
+        for (const a of accountApi.data?.accounts || []) {
+          if (a.hidden) continue;
+          const key = a.aliasKey || a.account || a.userId || a.name;
+          const kept = byKey.get(key);
+          if (!kept) { byKey.set(key, a); continue; }
+          const better = Number(!!a.active) - Number(!!kept.active)
+            || Number(!!a.usable) - Number(!!kept.usable)
+            || (Number(a.modifiedAt) || 0) - (Number(kept.modifiedAt) || 0);
+          if (better > 0) byKey.set(key, a);
+        }
+        return [...byKey.values()];
+      })();
+      const routingName = (id) => {
+        const found = models.find((m) => m.id === id);
+        return found ? (found.name || found.id) : id;
+      };
+      const modelOptions = models.map((m) => ({
+        value: m.id,
+        /*
+         * 名字 +「免费」标记：窄列里只留最有信息量的后缀，别把描述塞进下拉。
+         * 后缀必须**单独过一次 t()** —— 这个 label 被标成 `raw`（模型名是数据，
+         * 不能过翻译），整串再译会连名字一起改。
+         */
+        label: (m.name || m.id) + (m.free ? ' · ' + t('免费') : ''),
+        raw: true,
+      }));
+
+      /* ── 动作 ─────────────────────────────────────────────────────── */
+
+      const setDefault = async () => {
+        if (!draftModel) return;
+        setBusy('default');
+        setNotice({ text: '', bad: false });
+        const model = models.find((m) => m.id === draftModel);
+        const effort = (model && (model.defaultEffort || (Array.isArray(model.efforts) && model.efforts[0]))) || '';
+        const res = await postJson('/workbuddy/default-model', {
+          model: draftModel,
+          provider: current?.provider || undefined,
+          reasoningEffort: effort || undefined,
+        });
+        setBusy('');
+        if (res.data?.ok) {
+          setNotice({ text: t('已设为默认。'), bad: false });
+          defaultApi.reload();
+          notifyAuthChanged();
+        } else {
+          setNotice({ text: t('保存失败：') + (res.data?.error || res.status), bad: true });
+        }
+      };
+
+      /** 勾选状态：与服务端同一套三种语义（跟随配置 / 全隐藏 / 白名单）。 */
+      const isShown = (m) => {
+        const list = draftVisible;
+        if (list === null) {
+          if (!prefs) return m.official !== false || prefs?.includeUnofficial === true;
+          if (prefs.hideAll) return false;
+          if (!Array.isArray(prefs.visible)) return m.official !== false || prefs.includeUnofficial === true;
+          return prefs.visible.includes(m.id) && (m.official !== false || prefs.includeUnofficial === true);
+        }
+        return list.includes(m.id) && (m.official !== false || prefs?.includeUnofficial === true);
+      };
+      const toggleShown = (m) => {
+        if (m.official === false && prefs?.includeUnofficial !== true) return;
+        const base = draftVisible !== null
+          ? draftVisible
+          : models.filter((x) => isShown(x)).map((x) => x.id);
+        setDraftVisible(base.includes(m.id) ? base.filter((x) => x !== m.id) : base.concat(m.id));
+        setNotice({ text: '', bad: false });
+      };
+      /**
+       * 保存某个模型的上下文预算（tokens）。
+       *
+       * 复用 `/workbuddy/model-visibility` 的「组合」分支（model + contextWindow +
+       * params 一次提交）：后端会**先落盘再应用**，写失败不会留下"内存里已生效、
+       * 重启后又变回去"的状态。
+       *
+       * `tokens = 0` 表示跟随官方默认 —— 与后端 `readContextWindow` 同一语义，
+       * 所以这里不做特殊判断，原样送 0 即可。
+       */
+      const saveContextWindow = async (modelId, tokens) => {
+        if (!modelId) return;
+        setBusy('ctx:' + modelId);
+        setNotice({ text: '', bad: false });
+        const res = await postJson('/workbuddy/model-visibility', {
+          model: modelId,
+          contextWindow: tokens,
+          params: null,
+        });
+        setBusy('');
+        if (res.data?.ok) {
+          /* 成功后清掉这条草稿，让它回落到服务端的实际生效值 */
+          setCtxDraft((prev) => {
+            const next = { ...prev };
+            delete next[modelId];
+            return next;
+          });
+          modelsApi.reload();
+          setNotice({
+            text: tokens > 0
+              ? t('已设置上下文：') + (modelId + ' → ' + fmtContextLength(tokens))
+              : t('已恢复为自动上下文：') + modelId,
+            bad: false,
+          });
+        } else {
+          setNotice({ text: t('保存失败：') + (res.data?.error || res.status), bad: true });
+        }
+      };
+
+      /** 保存「dsh 选择器里显示哪些模型」（三种语义：白名单 / 全隐藏 / 跟随配置）。 */
+      const saveShown = async (mode) => {
+        setBusy('visible');
+        setNotice({ text: '', bad: false });
+        const body = mode === 'all'
+          ? { visible: models.filter((m) => m.official !== false || prefs?.includeUnofficial === true).map((m) => m.id) }
+          : mode === 'none'
+            ? { hideAll: true }
+            : mode === 'unset'
+              ? { unset: true }
+              : { visible: draftVisible || [] };
+        const res = await postJson('/workbuddy/model-visibility', {
+          ...body,
+          includeUnofficial: prefs?.includeUnofficial === true,
+        });
+        setBusy('');
+        if (res.data?.ok) {
+          setDraftVisible(null);
+          prefsApi.reload();
+          setNotice({
+            text: res.data.unset
+              ? t('已恢复：dsh 选择器显示全部模型（跟随配置）。')
+              : res.data.hideAll
+                ? t('已保存：全部隐藏 —— dsh 选择器现在不显示 WorkBuddy 模型。')
+                : t('已保存并即时生效：dsh 选择器现在显示 ') + res.data.count + t(' 个模型。'),
+            bad: false,
+          });
+        } else {
+          setNotice({ text: t('保存失败：') + (res.data?.error || res.status), bad: true });
+        }
+      };
+
+      const claim = async () => {
+        setBusy('claim');
+        setNotice({ text: '', bad: false });
+        // 与控制台同一口径：控制台在就给控制台（它会记 .state.json），否则直接问桥。
+        let res = await postJson(CONSOLE_API + '/checkin', {});
+        if (res.status === 503 || res.status === 404) res = await postJson('/workbuddy/checkin?claim=1', {});
+        setBusy('');
+        const payload = res.data || {};
+        setNotice({
+          text: payload.ok === false
+            ? t('领取失败：') + (payload.error || res.status)
+            : payload.noActivity
+              ? t('该账号没有签到活动')
+              : t('已尝试领取今日签到。'),
+          bad: payload.ok === false,
+        });
+        checkinApi.reload();
+      };
+
+      const claimAll = async () => {
+        setBusy('claimAll');
+        setNotice({ text: '', bad: false });
+        const res = await postJson('/workbuddy/checkin/all', {});
+        setBusy('');
+        const totals = res.data?.totals || null;
+        setNotice({
+          text: res.data?.ok === false
+            ? t('领取失败：') + (res.data?.error || res.status)
+            : t('已尝试领取今日签到。') + (totals ? ` (${totals.claimed}/${totals.accounts})` : ''),
+          bad: res.data?.ok === false,
+        });
+        acctCheckinApi.reload();
+      };
+
+      const startConsole = async () => {
+        setBusy('console');
+        setNotice({ text: '', bad: false });
+        const res = await postJson('/workbuddy/console', { action: 'start' });
+        setBusy('');
+        if (res.data?.ok) {
+          accountApi.probeConsole();
+          accountApi.reload();
+        } else {
+          setNotice({ text: t('控制台启动失败：') + (res.data?.error || res.status), bad: true });
+        }
+      };
+
+      /**
+       * 切桌面账号：桌面登录文件由控制台唯一持有（它同时是 `.state.json` 的
+       * 单写者），所以这一步必须走它。切完再把「凭据来源」切回桌面端 ——
+       * 否则来源还停在 plugin 时，切了也不会生效（面板会显示"已切"却在扣旧号）。
+       */
+      const switchDesktop = async (name) => {
+        if (typeof window.confirm === 'function'
+          && !window.confirm(t('切换账号会重启桥，正在进行的请求会被中断。继续？'))) return;
+        setBusy('switch:' + name);
+        setNotice({ text: '', bad: false });
+        const res = await postJson(CONSOLE_API + '/account/switch', { file: name });
+        if (!res.data?.switched) {
+          setBusy('');
+          setNotice({ text: t('切换失败：') + (res.data?.error || res.status), bad: true });
+          return;
+        }
+        const source = await postJson('/workbuddy/login/source', { source: 'desktop' });
+        setBusy('');
+        const label = res.data?.account?.name || name;
+        setNotice(source.data?.ok
+          // 句号按语言取：`t('已切换到')` 只翻前缀，尾部标点不能跟着中文走。
+          ? { text: t('已切换到') + ' ' + label + sentenceEnd(), bad: false }
+          : { text: t('切换失败：') + (source.data?.error || source.status), bad: true });
+        accountApi.reload();
+        loginApi.reload();
+        /*
+         * 上限数据**属于账号**，换号后必须立刻重取 —— 否则界面还挂着上一个号
+         * 的上限（用户看到的就是"换个账号上限还覆盖显示"）。60 秒轮询要等到
+         * 下一拍，用户在这期间会一直看着别人的数据。
+         */
+        limitsApi.reload();
+        notifyAuthChanged();
+      };
+
+      /** 切到某个插件凭据（不动桌面登录文件，也不重启桥）。 */
+      const switchPlugin = async (uid, nickname) => {
+        setBusy('plugin:' + uid);
+        setNotice({ text: '', bad: false });
+        const active = await postJson('/workbuddy/login/active', { uid });
+        const source = active.data?.ok ? await postJson('/workbuddy/login/source', { source: 'plugin' }) : null;
+        setBusy('');
+        setNotice(active.data?.ok && source?.data?.ok
+          ? { text: t('已切换到') + ' ' + (nickname || uid.slice(0, 8)) + sentenceEnd(), bad: false }
+          : { text: t('切换失败：') + (active.data?.error || source?.data?.error || 'unknown'), bad: true });
+        loginApi.reload();
+        // 同上：上限跟着账号走，换号后立刻重取
+        limitsApi.reload();
+        notifyAuthChanged();
+      };
+
+      /* ── 三个页 ───────────────────────────────────────────────────── */
+
+      const modelPage = () => {
+        const shownList = models.filter((m) => {
+          if (!filter.trim()) return true;
+          const q = filter.trim().toLowerCase();
+          return m.id.toLowerCase().includes(q) || String(m.name || '').toLowerCase().includes(q);
+        });
+        const currentName = current?.model ? routingName(current.model) : '';
+        /*
+         * 窄档（<300px）不显示副行：那里「默认模型用哪个」和「改哪个」两个
+         * 行本来就占满整宽，再挤一行只值几个省略号的元数据没有意义 —— 状态
+         * 已经由下面那个下拉的当前值表达了。
+         */
+        const effort = current?.reasoningEffort ? ' · ' + current.reasoningEffort : '';
+        /*
+         * 下拉里显示的就是**将要保存的值**，所以按钮文案要跟着变：
+         * 只有真的改过才说「设为默认」，否则用户会盯着一个看起来能点、
+         * 点了却什么都不变的按钮（旧实现是禁用它，但禁用不解释原因）。
+         */
+        const picked = draftModel || current?.model || '';
+        const dirty = Boolean(draftModel) && draftModel !== current?.model;
+        const shownCount = models.filter((m) => isShown(m)).length;
+        const hasDraftVisible = draftVisible !== null;
+        return h(Fragment, null,
+          h(Card, { title: t('模型') },
+            /*
+             * 一行式状态：**当前生效的是哪个** + 档位。窄档改成纯文本小字，
+             * 中宽以上用 Row（label 与值左右分开）。两者信息相同，只是排法不同。
+             */
+            narrow || short
+              ? h('p', { className: 'wb-note', title: current?.model || '' },
+                (current?.model ? t('当前默认') + '：' : '') + (current?.model || t('未设置')) + effort)
+              : h(Row, { label: t('当前默认') },
+                current?.model
+                  ? h('span', { className: 'wb-rail-mono', title: current.model }, currentName + effort)
+                  : h('span', null, t('未设置'))),
+            current && current.routable === false
+              ? h(Alert, { bad: true }, t('默认模型已失效（不在当前目录里），请重新选一个。'))
+              : null,
+            current && current.routable === null
+              ? h('p', { className: 'wb-note' }, t('这一版 dsh 没有默认模型服务；仍可在对话页的模型选择器里切换。'))
+              : null,
+            h(DropdownSelect, {
+              value: picked,
+              options: modelOptions,
+              placeholder: t('请选择'),
+              ariaLabel: t('模型'),
+              onChange: (e) => { setDraftModel(e.target.value); setNotice({ text: '', bad: false }); },
+            }),
+            /*
+             * 卡内**不放主操作** —— 有待办时它们升到底部常驻条（同一份 handler），
+             * 同一动作出现两次会让人犹豫该点哪个。
+             *
+             * 但「刷新模型」不是待办，它是这一页唯一的读取入口：没有待办时底部
+             * 那条不显示，所以它必须留在卡里，否则就没了。
+             */
+            dirty
+              ? h('p', { className: 'wb-note' }, t('改完记得设为默认，否则只影响下次新会话的初值。'))
+              : h('div', { className: 'wb-rail-foot' },
+                h(Btn, {
+                  disabled: modelsApi.loading,
+                  onClick: () => { modelsApi.reload(); defaultApi.reload(); },
+                }, t('刷新模型')))),
+          /*
+           * 「上下文预算」：在右栏**就地**调当前模型的上下文长度。
+           *
+           * 这个参数原本只在 设置 → WorkBuddy → 模型 → 详情 里能改（三级跳），
+           * 而它是"这个模型能塞多长的上下文"这种随手要改的东西，放在对话旁边
+           * 最有用。这里只暴露**当前模型**一条，不做成列表 —— 右栏是紧凑面板，
+           * 逐模型编辑属于设置页的活。
+           *
+           * 关掉（跟随默认）用「自动」按钮表达：后端把 0 解释为"跟随官方默认"，
+           * 与设置页滑块里那个"自动"是同一语义，不另造一套。
+           */
+          current?.model
+            ? (() => {
+              const modelId = current.model;
+              const info = models.find((m) => m.id === modelId) || null;
+              const effective = info && info.contextWindow ? info.contextWindow : 0;
+              const draft = ctxDraft[modelId];
+              const editing = draft !== undefined;
+              const shown = editing ? draft : effective;
+              const busyCtx = busy === 'ctx:' + modelId;
+              return h(Card, { title: t('上下文预算') },
+                narrow || short
+                  ? null
+                  : h('p', { className: 'wb-note' },
+                    t('这个模型能接收多少上下文；留空或点「自动」跟随官方默认。')),
+                h(Row, { label: t('当前生效') },
+                  effective > 0
+                    ? h('span', { className: 'wb-rail-mono' }, fmtContextLength(effective))
+                    : h('span', null, t('跟随官方默认'))),
+                /* 档位快选：只列这个模型目录里真实存在的档位，不编造数字 */
+                (() => {
+                  const picks = (Array.isArray(info?.contextWindowOptions) ? info.contextWindowOptions : [])
+                    .filter((n) => Number.isFinite(n) && n > 0)
+                    .slice(0, 5);
+                  if (!picks.length) return null;
+                  return h('div', { className: 'wb-rail-foot' },
+                    picks.map((n) => h(Btn, {
+                      key: 'ctx-' + n,
+                      primary: shown === n,
+                      disabled: busyCtx,
+                      onClick: () => saveContextWindow(modelId, n),
+                    }, fmtContextLength(n))));
+                })(),
+                h('input', {
+                  className: 'wb-input',
+                  style: { marginTop: '6px' },
+                  type: 'number',
+                  min: 0,
+                  step: 1000,
+                  value: shown > 0 ? String(shown) : '',
+                  placeholder: t('自动（留空）'),
+                  'aria-label': t('输入上下文 tokens'),
+                  onChange: (e) => {
+                    const raw = e.target.value;
+                    setCtxDraft((prev) => ({ ...prev, [modelId]: raw === '' ? 0 : Number(raw) }));
+                  },
+                }),
+                h('div', { className: 'wb-rail-foot' },
+                  h(Btn, {
+                    primary: true,
+                    disabled: busyCtx || !editing,
+                    onClick: () => saveContextWindow(modelId, Number(draft) || 0),
+                  }, busyCtx ? t('保存中…') : t('保存上下文')),
+                  h(Btn, {
+                    disabled: busyCtx,
+                    onClick: () => saveContextWindow(modelId, 0),
+                  }, t('自动'))));
+            })()
+            : null,
+          h(Card, { title: t('在 dsh 选择器中显示') },
+            /*
+             * 说明文字在窄档 / 矮面板让位：它占三行、说的是一件点一次就懂的事，
+             * 而「保存/全选/全不选/跟随配置」四个按钮才是最需要空间的东西。
+             */
+            narrow || short
+              ? null
+              : h('p', { className: 'wb-note' }, t('只显示勾选的模型；改动立即生效，无需重启。')),
+            h('div', { className: 'wb-rail-sumbar' },
+              h('span', { className: 'wb-rail-count' },
+                t('已选 ') + shownCount + ' / ' + models.length),
+              /*
+               * 草稿态必须可见：勾了几个而不保存，界面不能装作已经生效 ——
+               * 旧实现里按钮一直是亮的，"保存"与"已保存"没有视觉差别。
+               */
+              hasDraftVisible
+                ? h(Pill, { tone: 'warn', text: t('未保存') })
+                : h(Pill, { tone: 'ok', text: t('已生效') })),
+            models.length
+              ? h('input', {
+                className: 'wb-input',
+                style: { marginTop: '6px' },
+                value: filter,
+                placeholder: t('搜索模型'),
+                onChange: (e) => setFilter(e.target.value),
+                'aria-label': t('搜索模型'),
+              })
+              : null,
+            /* is-grid：唯一值得宽档双栏的清单（几十个模型，一列太长） */
+            h('div', { className: 'wb-rail-list is-grid' + (short ? ' is-short' : '') },
+              shownList.length
+                ? shownList.map((m) => {
+                  const shown = isShown(m);
+                  return h('label', {
+                    className: 'wb-rail-item' + (shown ? ' on' : ''),
+                    key: m.id,
+                    title: String(m.name || m.id) + ' · ' + m.id,
+                  },
+                    h('input', {
+                      type: 'checkbox',
+                      checked: shown,
+                      disabled: m.official === false && prefs?.includeUnofficial !== true,
+                      onChange: () => toggleShown(m),
+                      'aria-label': m.name || m.id,
+                    }),
+                    h('span', { className: 'wb-rail-item-main' },
+                      h('span', { className: 'wb-rail-item-name', 'data-wb-raw': '' },
+                        h(Raw, { text: String(m.name || m.id) })),
+                      // 副行（模型 id + 上下文长度）只在中宽以上显示 —— 极窄档
+                      // CSS 已隐藏，这里连节点都不渲染，省一层无用的树。
+                      narrow
+                        ? null
+                        : h('span', { className: 'wb-rail-item-sub', 'data-wb-raw': '' },
+                          h(Raw, {
+                            text: m.id + (roomy && m.contextWindow ? ' · ' + fmtContextLength(m.contextWindow) : ''),
+                          }))),
+                    /*
+                     * 「免费」在窄档塞不下一行 —— 让位给模型名；信息没丢：
+                     * 它仍在 title 提示里，中宽以上照常显示成胶囊。
+                     */
+                    m.free && !narrow ? h(Pill, { tone: 'ok', text: t('免费') }) : null);
+                })
+                : h('div', { className: 'wb-rail-empty' },
+                  filter.trim() ? t('没有匹配的模型。') : t('无可用模型。'))),
+            /*
+             * 矮面板：这组按钮已由底部常驻操作条承担（保存 / 取消）。
+             * 但「全选 / 全不选 / 跟随配置」是**批量**动作，没有别的地方能放 ——
+             * 它们不是"主操作"，塞进常驻条会把那条撑成两行。所以矮面板里
+             * 只保留这三个批量按钮，主按钮让位给底部那一条。
+             */
+            short
+              ? h('div', { className: 'wb-rail-foot' },
+                h(Btn, { disabled: busy === 'visible', onClick: () => saveShown('all') }, t('全选')),
+                h(Btn, { disabled: busy === 'visible', onClick: () => saveShown('none') }, t('全不选')),
+                h(Btn, { disabled: busy === 'visible', onClick: () => saveShown('unset') }, t('跟随配置')))
+              : h('div', { className: 'wb-rail-foot' },
+                h(Btn, {
+                  primary: true,
+                  disabled: busy === 'visible' || !hasDraftVisible,
+                  onClick: () => saveShown('list'),
+                }, busy === 'visible' ? t('保存中…') : t('保存')),
+                h(Btn, { disabled: busy === 'visible', onClick: () => saveShown('all') }, t('全选')),
+                h(Btn, { disabled: busy === 'visible', onClick: () => saveShown('none') }, t('全不选')),
+                h(Btn, { disabled: busy === 'visible', onClick: () => saveShown('unset') },
+                  narrow ? t('默认') : t('跟随配置')))));
+      };
+
+      const checkinPage = () => {
+        const status = checkinApi.data?.status ? checkinApi.data.status : (checkinApi.data || {});
+        const rows = acctCheckinApi.data?.accounts || [];
+        const signed = rows.filter((a) => a.status && a.status.todayCheckedIn).length;
+        const credited = rows.reduce((sum, a) => sum + (a.status && Number(a.status.todayCredit) || 0), 0);
+        /*
+         * 「还能不能领」决定按钮在哪、写什么：
+         *   - 能领 → 升到底部常驻条（醒目），卡里不重复；
+         *   - 不能领 → 底部条不显示，卡里保留一个禁用的、**写明原因**的按钮
+         *     （「今日已领完」/「无签到活动」）+「刷新」。
+         * 旧实现只是变灰，用户不知道为什么。
+         */
+        const claimable = status.active !== false && status.todayCheckedIn !== true;
+        const claimLabel = status.active === false
+          ? t('无签到活动')
+          : status.todayCheckedIn === true
+            ? t('今日已领完')
+            : (busy === 'claim' ? t('领取中…') : t('立即领取'));
+        /*
+         * 读数块在几档里是几种排法，不是同一排挤小一点：
+         *   wide   一行三个，数字最大（21px）
+         *   medium 一行三个，数字 21px（CSS 中档）
+         *   narrow 两列换行（CSS 极窄档），数字 17px
+         *   short（矮面板）只留前两个，把高度让给按钮
+         * 所以这里控制**渲染几个**：极窄档或矮面板放弃「今日已领」——
+         * 它与「已签到」说的是同一件事的一半信息。
+         */
+        const statCount = [status.streakDays, status.todayCredit].filter((v) => typeof v === 'number' && v > 0).length;
+        const dropCreditStat = (narrow || short) && statCount >= 2;
+        const claimableAll = rows.some((a) => !a.expired && !a.noActivity
+          && !(a.status && a.status.todayCheckedIn));
+        return h(Fragment, null,
+          h(Card, { title: t('每日签到') },
+            checkinApi.error ? h(Alert, { bad: true }, checkinApi.error) : null,
+            isInitialLoading(checkinApi.loading, checkinApi.data, checkinApi.error)
+              ? h(Loading, { text: t('正在读取签到状态…') })
+              : h(Fragment, null,
+                h('div', { className: 'wb-stats' },
+                  h('div', { className: 'wb-stat' },
+                    h('b', null, status.active === false ? t('无活动') : (status.todayCheckedIn ? t('已签到') : t('未签到'))),
+                    h('span', null, t('今日状态'))),
+                  typeof status.streakDays === 'number'
+                    ? h('div', { className: 'wb-stat' },
+                      h('b', null, status.streakDays),
+                      h('span', null, t('连续签到')))
+                    : null,
+                  typeof status.todayCredit === 'number' && status.todayCredit > 0 && !dropCreditStat
+                    ? h('div', { className: 'wb-stat' },
+                      h('b', null, '+' + status.todayCredit),
+                      h('span', null, t('今日已领')))
+                    : null),
+                /*
+                 * 「立即领取 / 刷新」：能领的时候升到底部常驻条（那里更醒目），
+                 * 已签完/无活动时底部条不显示 —— 那就必须留在卡里，否则这一页
+                 * 连"刷新"都没有了。两处共用同一份 handler，不会分叉。
+                 */
+                claimable
+                  ? null
+                  : h('div', { className: 'wb-rail-foot' },
+                    h(Btn, {
+                      primary: false,
+                      disabled: busy === 'claim' || !claimable,
+                      onClick: claim,
+                      title: t('明天再来'),
+                    }, claimLabel),
+                    h(Btn, { disabled: checkinApi.loading, onClick: () => checkinApi.reload() }, t('刷新'))))),
+          h(Card, { title: t('账号签到状态') },
+            isInitialLoading(acctCheckinApi.loading, acctCheckinApi.data, acctCheckinApi.error)
+              ? h(Loading, { text: t('正在读取本机账号…') })
+              : h(Fragment, null,
+                rows.length
+                  ? h('div', { className: 'wb-stats' },
+                    h('div', { className: 'wb-stat' },
+                      h('b', null, signed + '/' + rows.length),
+                      h('span', null, t('个账号今日已签'))),
+                    credited && !short
+                      ? h('div', { className: 'wb-stat' },
+                        h('b', null, '+' + credited),
+                        h('span', null, t('今日共领 Credits')))
+                      : null)
+                  : null,
+                h('div', { className: 'wb-rail-list' + (short ? ' is-short' : '') },
+                  rows.length
+                    ? rows.map((a) => {
+                      const tone = a.error ? 'bad' : a.noActivity ? 'warn' : (a.status && a.status.todayCheckedIn) ? 'ok' : 'warn';
+                      const text = a.error ? t('失败')
+                        : a.noActivity ? t('无签到活动')
+                          : (a.status && a.status.todayCheckedIn)
+                            ? t('已签到') + (a.status.todayCredit ? ' +' + a.status.todayCredit : '')
+                            : t('未签到');
+                      return h('div', {
+                        className: 'wb-rail-item',
+                        key: a.userId || a.authFile,
+                        /*
+                         * 极窄档不渲染副行与「当前」胶囊（两枚胶囊会把名字压没），
+                         * 但信息不丢：地区 / 过期 / 当前 / 错误原因都挂到 title 上。
+                         * 主胶囊（已签 / 未签）永远保留 —— 它是这一行要回答的问题。
+                         */
+                        title: [
+                          narrow ? (a.region === 'intl' ? t('国际版') : t('国内版')) : '',
+                          narrow && a.current ? t('当前') : '',
+                          a.expired ? t('已过期') : '',
+                          a.error || '',
+                        ].filter(Boolean).join(' · ') || undefined,
+                      },
+                        h('span', { className: 'wb-rail-item-main' },
+                          h('span', { className: 'wb-rail-item-name', 'data-wb-raw': '' },
+                            h(Raw, { text: String(a.nickname || String(a.userId || '').slice(0, 8) || '—') })),
+                          narrow || short
+                            ? null
+                            : h('span', { className: 'wb-rail-item-sub' },
+                              (a.region === 'intl' ? t('国际版') : t('国内版'))
+                              + (a.expired ? ' · ' + t('已过期') : ''))),
+                        h('span', { className: 'wb-rail-item-side' },
+                          narrow || !a.current ? null : h(Pill, { tone: 'ok', text: t('当前') }),
+                          h(Pill, { tone, text, title: a.error || undefined })));
+                    })
+                    : h('div', { className: 'wb-rail-empty' }, t('没有找到本机已登录的账号。'))),
+                h('div', { className: 'wb-rail-foot' },
+                  /*
+                   * 「全部领取」以"还有没有人能领"为准：全签完时禁用并说明，
+                   * 而不是点了之后回一句"0 个新领" —— 那让人以为按钮坏了。
+                   * 它是**批量**动作，不属于底部那条（那条管"当前账号"），
+                   * 所以任何高度都留在卡里。
+                   */
+                  h(Btn, {
+                    primary: true,
+                    disabled: busy === 'claimAll' || !claimableAll,
+                    onClick: claimAll,
+                    title: claimableAll ? undefined : t('明天再来'),
+                  }, busy === 'claimAll' ? t('领取中…') : t('全部领取')),
+                  h(Btn, { disabled: acctCheckinApi.loading, onClick: () => acctCheckinApi.reload() }, t('刷新账号')),
+                  // 签到失败最常见的原因是"用的是别的号" —— 就地给一个出口
+                  h(Btn, { onClick: () => { setTab('account'); setNotice({ text: '', bad: false }); } },
+                    t('换账号'))))));
+      };
+
+      const accountPage = () => {
+        const consoleDown = accountApi.availability.state === 'console-down';
+        const rows = desktopAccounts;
+        /**
+         * 桌面账号行的显示名。
+         *
+         * 控制台给的是「登录文件名」，而文件名在真实用户那里是
+         * `workbuddy-desktop.20261110T045735.rebuild-24384.info` 这种东西 —— 窄列里
+         * 只会显示成一串省略号，还认不出是谁。按信息量排序：别名 > 昵称 > 账号数字
+         * （uin / account）> 文件名（去掉 .info 后缀）。
+         */
+        const desktopLabel = (a) => {
+          if (a.alias) return String(a.alias);
+          if (a.nickname) return String(a.nickname);
+          if (a.account) return String(a.account);
+          return String(a.name || '').replace(/\.info$/i, '');
+        };
+        return h(Fragment, null,
+          h(Card, { title: t('切换账号') },
+            h(Row, { label: t('凭据来源') },
+              h(Pill, {
+                tone: effectiveSource ? 'ok' : 'warn',
+                text: effectiveSource ? credentialSourceLabel(effectiveSource) : t('未设置'),
+              })),
+            /*
+             * 当前账号的 uid 有 36 字符，在最窄档必然折成两行还认不出来 ——
+             * 窄档只留「来源」那一行，uid 挂到它自己的 title 上（复制/核对时
+             * 悬停可见）。切换按钮旁边本来就写着是哪个账号，信息不丢。
+             */
+            narrow
+              ? null
+              : h(Row, { label: t('当前使用') },
+                h('span', { className: 'wb-rail-mono', title: effectiveUid },
+                  h(Raw, { text: String(effectiveUid || '—').slice(0, 18) }))),
+            consoleDown
+              ? h(Fragment, null,
+                h(Alert, null, t('切换桌面账号要写登录文件，由控制台统一负责；插件凭据可以直接切。')),
+                h('div', { className: 'wb-rail-foot' },
+                  h(Btn, { disabled: busy === 'console', onClick: startConsole },
+                    busy === 'console' ? t('启动中…') : t('启动控制台'))))
+              : null,
+            isInitialLoading(accountApi.loading, accountApi.data, accountApi.error) && !consoleDown
+              ? h(Loading, { text: t('正在读取…') })
+              : h('div', { className: 'wb-rail-list' },
+                rows.length
+                  ? rows.map((a) => {
+                    /*
+                     * 「使用中」只能有一个：来源是 desktop 时桌面那一行才算在用；
+                     * 来源是 plugin 时，桌面行只是"切过去会选中哪个"，不能也标在用。
+                     */
+                    const active = effectiveSource === 'desktop'
+                      && (a.active === true || (a.userId && a.userId === effectiveUid));
+                    return h('div', {
+                      className: 'wb-rail-item' + (active ? ' on' : ''),
+                      key: a.name,
+                      title: narrow ? [desktopLabel(a), a.domain || '', a.path || ''].filter(Boolean).join(' · ') : undefined,
+                    },
+                      h('span', { className: 'wb-rail-item-main' },
+                        h('span', { className: 'wb-rail-item-name', 'data-wb-raw': '', title: a.path || a.name },
+                          h(Raw, { text: desktopLabel(a) })),
+                        narrow
+                          ? null
+                          : h('span', { className: 'wb-rail-item-sub' },
+                            (a.domain || '') + (a.expired ? ' · ' + t('已过期') : ''))),
+                      h('span', { className: 'wb-rail-item-side' },
+                        active
+                          ? h(Pill, { tone: 'ok', text: t('当前使用') })
+                          : h(Btn, {
+                            sm: true,
+                            disabled: busy === 'switch:' + a.name || consoleDown || a.usable === false,
+                            onClick: () => switchDesktop(a.name),
+                          }, busy === 'switch:' + a.name ? t('切换中…') : t('切换'))));
+                  })
+                  : h('div', { className: 'wb-rail-empty' }, t('没有可切换的账号。'))),
+            /*
+             * 账号页**没有常驻操作条**（这一页没有"待办"，每一行自带「切换 / 使用」），
+             * 所以「刷新」必须留在卡里 —— 否则页面上就没有刷新入口了。
+             */
+            h('div', { className: 'wb-rail-foot' },
+              h(Btn, {
+                disabled: accountApi.loading,
+                onClick: () => { accountApi.reload(); loginApi.reload(); },
+              }, t('刷新')))),
+          /*
+           * 用量上限卡：**哪个账号的哪个模型触顶了**。
+           *
+           * 这份数据一直在桥里（`/health.rateLimit`），但以前只被自动切号用，
+           * 界面上一个字都看不到 —— 用户只能等请求整片变红才发现"这个号的这个
+           * 模型满了"。这里把它显式列出来，并按三种原因给不同处置建议
+           * （换模型 / 换号 / 等一下），因为它们的解法完全不同。
+           */
+          h(Card, { title: t('用量上限') },
+            limitsApi.error ? h(Alert, { bad: true }, limitsApi.error) : null,
+            isInitialLoading(limitsApi.loading, limitsApi.data, limitsApi.error)
+              ? h(Loading, { text: t('正在读取用量上限…') })
+              : limits.length
+                ? h(Fragment, null,
+                  /*
+                   * 这张卡列的是**所有账号**的上限，不只是当前这个 —— 用户的原话：
+                   * "我做这个就是为了看哪个用完了，所以不管我是什么账号都得看得到"。
+                   * 所以说明文字要明确讲清"跨账号"。分两句写，避免
+                   * "共 2 个账号）；到恢复时间…" 这种括号与分号挤在一起的读感。
+                   */
+                  limitsAccountCount > 1
+                    ? h(Fragment, null,
+                      h('p', { className: 'wb-note' },
+                        t('所有账号都已列出，不只当前这个（共 ') + limitsAccountCount + t(' 个账号）。')),
+                      h('p', { className: 'wb-note' }, t('每条到恢复时间会自动消失。')))
+                    : h('p', { className: 'wb-note' }, t('到恢复时间会自动消失；换模型或换号可恢复。')),
+                  h('div', { className: 'wb-rail-list' },
+                    limits.map((l) => {
+                      const tone = l.kind === 'account_restricted' ? 'bad' : 'warn';
+                      const what = l.kind === 'account_restricted'
+                        ? t('账号被风控')
+                        : l.kind === 'quota' ? t('额度已用尽') : t('触发了限流');
+                      const advice = l.kind === 'account_restricted'
+                        ? t('重新登录无效，请换号')
+                        : l.kind === 'quota' ? t('换模型或换号') : t('稍等再试');
+                      /*
+                       * 恢复时间：给**倒计时**，不是给一个绝对时刻。
+                       *
+                       * 用户要回答的是"我还要等多久"，不是"上游说几点几分" ——
+                       * 后者还得自己心算。所以这里显示 `还剩 1 小时 12 分`，
+                       * 并且每秒重算（`nowTick`）；到点这条会被上面的 filter 摘掉。
+                       *
+                       * 上游没给 resetAt 时**不编造**：如实写"上游未给恢复时间"，
+                       * 并说明它会保留到什么时候（桥侧 24 小时兜底）。
+                       */
+                      const countdown = fmtCountdown(l.leftMs);
+                      const resetLine = Number.isFinite(l.leftMs)
+                        ? t('还剩 ') + countdown
+                        : (l.kind === 'rate_limit' ? t('10 分钟窗口内') : t('上游未给恢复时间'));
+                      return h('div', {
+                        className: 'wb-rail-item',
+                        key: l.kind + ':' + l.uid + ':' + l.model,
+                        title: [
+                          l.accountLabel || l.uid,
+                          l.model,
+                          l.resetAt ? t('上游提示 ') + fmtLimitClock(l.resetAt) + t(' 重置') : '',
+                          l.lastAt ? t('最近一次 ') + fmtLimitClock(l.lastAt) : '',
+                        ].filter(Boolean).join(' · '),
+                      },
+                        h('span', { className: 'wb-rail-item-main' },
+                          h('span', { className: 'wb-rail-item-name', 'data-wb-raw': '' },
+                            h(Raw, { text: String(l.model || '—') })),
+                          narrow || short
+                            ? null
+                            : h('span', { className: 'wb-rail-item-sub' },
+                              (l.accountLabel || String(l.uid || '').slice(0, 8)) + ' · ' + resetLine)),
+                        h('span', { className: 'wb-rail-item-side' },
+                          h(Pill, { tone, text: what, title: advice })));
+                    })),
+                  /*
+                   * 结论一句话：用户最想知道"那我该做什么"。只在有多条或原因为
+                   * 账号级时补一句，避免每条都重复同样的话。
+                   */
+                  limits.length === 1
+                    ? h('p', { className: 'wb-note' },
+                      limits[0].kind === 'account_restricted'
+                        ? t('重新登录无效，请换一个账号。')
+                        : limits[0].kind === 'quota'
+                          ? t('这个模型的额度用尽了；换模型或换号可继续。')
+                          : t('只是瞬时限流，稍等再试即可。'))
+                    : null)
+                : h('div', { className: 'wb-rail-empty' },
+                  /*
+                   * 空态要区分"本来就没触顶"和"刚恢复"：
+                   * 后者说明上一秒还在列表里的那条到点消失了，用户不会以为
+                   * "怎么突然没了、是不是出错了"。
+                   */
+                  limitsApi.data?.expiredCount > 0
+                    ? t('额度已恢复（刚到期移除）。')
+                    : t('没有账号触顶（最近 10 分钟）。')),
+            /*
+             * 上限卡不放进常驻操作条：它主要是**读**，唯一动作是刷新，
+             * 而刷新在「切换账号」卡里已经有一个了，重复放会让人以为刷的不是一回事。
+             */
+            h('div', { className: 'wb-rail-foot' },
+              h(Btn, {
+                disabled: limitsApi.loading,
+                onClick: () => limitsApi.reload(),
+              }, t('刷新上限')))),
+          h(Card, { title: t('凭据') },
+            pluginCreds.length
+              ? h('div', { className: 'wb-rail-list' },
+                pluginCreds.map((c) => {
+                  const active = effectiveSource === 'plugin' && c.uid === effectiveUid;
+                  return h('div', {
+                    className: 'wb-rail-item' + (active ? ' on' : ''),
+                    key: c.uid,
+                    title: narrow
+                      ? [String(c.nickname || c.uid.slice(0, 8)),
+                        (c.region === 'global' ? 'global' : 'cn') + ' · ' + (c.domain || '')].join(' · ')
+                      : undefined,
+                  },
+                    h('span', { className: 'wb-rail-item-main' },
+                      h('span', { className: 'wb-rail-item-name', 'data-wb-raw': '', title: c.uid },
+                        h(Raw, { text: String(c.nickname || c.uid.slice(0, 8)) })),
+                      narrow
+                        ? null
+                        : h('span', { className: 'wb-rail-item-sub', 'data-wb-raw': '' },
+                          h(Raw, { text: (c.region === 'global' ? 'global' : 'cn') + ' · ' + (c.domain || '') }))),
+                    h('span', { className: 'wb-rail-item-side' },
+                      active
+                        ? h(Pill, { tone: 'ok', text: t('当前使用') })
+                        : h(Btn, {
+                          sm: true,
+                          disabled: busy === 'plugin:' + c.uid,
+                          onClick: () => switchPlugin(c.uid, c.nickname),
+                        }, busy === 'plugin:' + c.uid ? t('切换中…') : t('使用'))));
+                }))
+              : h('div', { className: 'wb-rail-empty' }, t('没有可切换的账号。'))));
+      };
+
+      const tabs = [
+        { id: 'model', label: t('模型') },
+        { id: 'checkin', label: t('签到') },
+        { id: 'account', label: t('账号') },
+      ];
+
+      /**
+       * 底部常驻操作条：每页**只有那一个主操作**。
+       *
+       * 为什么单独做一条：卡片区会滚（矮面板时尤其明显），主操作跟着滚走就
+       * 等于没有。这里与卡内按钮共用同一份 handler 与同一套 disabled 判据，
+       * 所以两处状态永远一致，不会出现"上面能点、下面不能点"。
+       *
+       * 只放主操作 + 一个次要项：这条要一直占着高度，塞四个按钮等于又回到
+       * "操作条吃掉半屏"的老问题（极窄档按钮两列的教训）。
+       */
+      const primaryActions = () => {
+        if (tab === 'model') {
+          const picked = draftModel || current?.model || '';
+          const dirty = Boolean(draftModel) && draftModel !== current?.model;
+          const hasDraftVisible = draftVisible !== null;
+          /*
+           * 没有待办时**不显示这条**：刷新在卡片的正常位置就够了，底部再挂一条
+           * 「刷新模型 + 当前模型名」只是把已经看得到的信息重复一遍，还会在内容
+           * 与底边之间留一大片空白，看起来像一块漂着的方框（用户直接问了"下面那个
+           * 方方正正的是什么"）。常驻条只在**真有待办**时出现：改了下拉 / 改了勾选。
+           */
+          if (dirty) {
+            return [
+              h(Btn, {
+                primary: true,
+                disabled: busy === 'default',
+                onClick: setDefault,
+              }, busy === 'default' ? t('提交中…') : t('设为默认')),
+              h('span', { className: 'wb-rail-dockinfo' },
+                picked ? routingName(picked) : ''),
+              h(Btn, { disabled: busy === 'default', onClick: () => setDraftModel('') }, t('取消')),
+            ];
+          }
+          if (hasDraftVisible) {
+            return [
+              h(Btn, {
+                primary: true,
+                disabled: busy === 'visible',
+                onClick: () => saveShown('list'),
+              }, busy === 'visible' ? t('保存中…') : t('保存')),
+              h('span', { className: 'wb-rail-dockinfo' },
+                t('已选 ') + models.filter((m) => isShown(m)).length + ' / ' + models.length),
+              h(Btn, { disabled: busy === 'visible', onClick: () => setDraftVisible(null) }, t('取消')),
+            ];
+          }
+          return null;
+        }
+        if (tab === 'checkin') {
+          const status = checkinApi.data?.status ? checkinApi.data.status : (checkinApi.data || {});
+          const claimable = status.active !== false && status.todayCheckedIn !== true;
+          const claimLabel = status.active === false
+            ? t('无签到活动')
+            : status.todayCheckedIn === true
+              ? t('今日已领完')
+              : (busy === 'claim' ? t('领取中…') : t('立即领取'));
+          /*
+           * 签到页的「立即领取」是真主操作，但**只在能领时**才值得占一条常驻条：
+           * 已签完/无活动时它是个禁用按钮，剩下的「刷新」在卡片里就有。
+           * 矮面板例外（见下面 primaryActions 的收尾）—— 那时卡片被压得很矮，
+           * 操作必须在底下那条里。
+           */
+          if (!claimable) return null;
+          return [
+            h(Btn, {
+              primary: true,
+              disabled: busy === 'claim',
+              onClick: claim,
+            }, claimLabel),
+            h(Btn, { disabled: checkinApi.loading, onClick: () => checkinApi.reload() }, t('刷新')),
+          ];
+        }
+        /*
+         * 账号页：卡片里的「刷新」与每一行的「切换 / 使用」已经是完整操作面，
+         * 没有"待办"需要浮到底部。所以这里不显示 —— 早先那条「刷新 + 插件登录」
+         * 既重复又像一块漂着的方框。
+         */
+        return null;
+      };
+
+      /*
+       * 两层的道理（见 CSS 里那段注释）：
+       *   - 外层 `.wb-rail` 只做**容器**：零内边距 + `container-type: inline-size`，
+       *     让 `@container` 量到的就是右栏的真实宽度（内边距写在这层会缩水，
+       *     各档再改内边距就会变成反馈环、档位来回跳）；它同时负责滚动条
+       *     —— 滚动条挂在容器上会吃掉约 15px 内容盒。
+       *   - 内层 `.wb-rail-body` 才是真正的内容盒，padding / gap 都在它身上。
+       *   - 宽档再多一层 `.wb-rail-inner`：把内容限制在 760px 内居中，否则
+       *     900px 的全屏右栏会把每一行拉成一条很长的线。
+       *
+       * ## 常驻操作条（本轮的结构性改动）
+       *
+       * 每页的**主操作**不再跟着卡片一起滚：卡片区 `.wb-rail-scroll` 自己滚，
+       * 主操作固定在下面那条 `.wb-rail-dock` 里。理由是实测的：320px 高时
+       * 5 个按钮只有 1 个滚得到，用户会以为"这页没有保存按钮"。
+       *
+       * 试过 `position: sticky`，不行 —— 操作条在卡片**内部**，粘性被卡片边界
+       * 夹住，滚出卡片它就跟着走了。所以只能真的把它提到滚动区之外。
+       * 卡内仍保留同一组按钮（同一份 handler），这样宽屏下操作就在内容旁边，
+       * 不必低头看底部那条；两条路径共享状态，不会分叉。
+       *
+       * 窄档（<300px）时标题换成短名：`模型、签到与账号` 在那个宽度只剩省略号，
+       * 而它下面紧跟着的三段控件已经说明了这一页是什么。
+       *
+       * 极矮（<340px 高）时整行标题让位给页签（CSS），否则本就不高的可视区
+       * 会被两行头吃掉一截 —— 这里不渲染标题节点，省下边框与间距。
+       */
+      return h('div', {
+        className: 'wb-root wb-rail',
+        'data-workbuddy-rail': '',
+        'data-rail-tier': tier,
+        'data-rail-height': heightTier,
+        /*
+         * ── 验收探针（只读，不参与任何逻辑）──
+         *
+         * `tests/rail-render.mjs` 靠它们读组件**内部**的倒计时状态：
+         *   - `data-now-tick`    单调时钟当前值，判断"时钟在走"
+         *   - `data-limits-left` 有恢复时间的条目里最小剩余毫秒（到点应归零）
+         *   - `data-limits-anchor` 锚点|当前|剩余|at，判断"轮询有没有重置锚点"
+         *   - `data-limits-count` 条目数
+         *
+         * 为什么保留在生产代码里：倒计时是纯前端行为（不发请求、后端也看不到），
+         * 没有这几个值就只能靠"等 N 秒看文字变没变" —— 那既慢又不稳（实测反复
+         * 假失败）。它们只是几个字符串属性，不触发重排、不影响渲染，代价可忽略。
+         */
+        'data-now-tick': String(Math.round(nowTick)),
+        'data-limits-left': (() => {
+          const timed = limits.map((l) => l.leftMs).filter((v) => Number.isFinite(v));
+          return String(timed.length ? Math.min(...timed) : -1);
+        })(),
+        'data-limits-count': String(limits.length),
+        'data-limits-anchor': (() => {
+          const first = limits[0];
+          if (!first) return '';
+          const a = anchorRef.current.get(`${first.uid}\0${first.model}\0${first.kind}`);
+          return a ? `${Math.round(a.atMs)}|${Math.round(nowTick)}|${Math.round(first.leftMs)}|${limitsApi.data?.at || ''}` : '';
+        })(),
+        ref: rootRef,
+      },
+      h('div', { className: 'wb-rail-body' },
+        /*
+         * `.wb-rail-inner` 必须包住**全部内容**（标题 / 页签 / 提示 / 页 / 操作条），
+         * 不能只包标题。
+         *
+         * 它的作用是宽档限宽居中（max-width:760px）。早期只把标题包进去，
+         * 于是宽屏下出现"标题缩进、卡片却拉满整宽"的错位 —— 一眼就看得出没对齐
+         * （用户就是这么发现的："这个宽度适配的也不像啊"）。限宽是**整列**的属性，
+         * 任何一部分漏在外面都会破坏对齐。
+         */
+        h('div', { className: 'wb-rail-inner' },
+          short
+            ? null
+            : h('div', { className: 'wb-rail-head' },
+              h('div', { className: 'wb-rail-title', title: t('模型、签到与账号') },
+                narrow ? 'WorkBuddy' : t('模型、签到与账号'))),
+          h(Segmented, {
+            value: tab,
+            ariaLabel: t('模型、签到与账号'),
+            options: tabs.map((x) => ({ value: x.id, label: x.label })),
+            onChange: (e) => { setTab(e.target.value); setNotice({ text: '', bad: false }); },
+          }),
+          notice.text ? h(Alert, { bad: notice.bad }, notice.text) : null,
+          /*
+           * `key` 让三个页是**三个不同元素**：切页时 React 换掉整棵子树，
+           * 入场动画才会重放（同一元素只改内容的话，animation 不会重跑）。
+           * 动画本身只有 160ms、2px 位移 —— 只为说明"这一页换了"。
+           */
+          h('div', { className: 'wb-rail-page', key: tab },
+            h('div', { className: 'wb-rail-scroll' },
+              tab === 'model' ? modelPage() : null,
+              tab === 'checkin' ? checkinPage() : null,
+              tab === 'account' ? accountPage() : null)),
+          /*
+           * 常驻操作条：只放"这一页此刻**真的有待办**的那个动作"。
+           * `primaryActions()` 返回 null 时整条不渲染 —— 渲染一个空的 .wb-rail-dock
+           * 会留下一条只有上边框的空白带，在内容下面看着像一块漂着的方框。
+           */
+          (() => {
+            const actions = primaryActions();
+            if (!actions || (Array.isArray(actions) && actions.filter(Boolean).length === 0)) return null;
+            return h('div', { className: 'wb-rail-dock' }, actions);
+          })())));
+    }
     /**
      * 客户端插件入口：把一个设置页注册进 `settings.section`。
      *
@@ -9591,6 +11544,115 @@ const probeOne = async (id) => {
           label: 'WorkBuddy',
         }, WorkBuddyPanel));
         /*
+         * 右栏：模型 / 签到 / 账号。
+         *
+         * 右栏的 body 是 **keyed** 槽（派发键 = tab 类型的 id），所以两件事都得做：
+         *   1. 向 `sidebarRightTabs` 注册一个 tab 类型 —— 这是右栏认"这一页存在"
+         *      的唯一途径；它同时给出 chip 标题与空栏里的 guide 卡片；
+         *   2. 注册 body 与 chip 标题两个 keyed 槽，key 用**同一个** id。
+         *
+         * ⚠️ **不能用 `ctx.inject(['sidebarRightTabs'], …)` 拿这个服务。**
+         * 实测（2026-11-13，DSH Desktop 0.2.0-rc.2）：ui-sidebar-right 是用
+         * `ctx.reflect.provide('sidebarRightTabs', tabs)` 挂上去的 —— 那是它自己的
+         * 服务面，**不参与 cordis 的 inject 依赖追踪**。于是 `ctx.inject([...])`
+         * 的回调永远不触发：body 与 chip 都注册成功（它们在 slots 上），只有 tab
+         * 类型没注册，右栏里永远看不到这一页，而且**一个错都不报**。
+         * 所以这里直接 `ctx.get()` 读，读不到就在下一帧重试（最多几次），
+         * 因为两个插件谁先 apply 是不确定的。
+         */
+        const RAIL_TAB_RETRY_MS = 250;
+        const RAIL_TAB_RETRIES = 60; // ≈15s：够跨过 ui-sidebar-right 的 apply
+        let railTabDispose = null;
+        let railTabTries = 0;
+        let railTabTimer = null;
+        const registerRailTab = () => {
+          if (railTabDispose) return true;
+          /*
+           * 只走 `ctx.get()`，**不读 `ctx.sidebarRightTabs` 属性**：
+           * 客户端这半边是受限上下文，未注入的属性读取会直接抛
+           * `cannot get property "…" without inject`（cordis 的代理陷阱），
+           * 而这条抛错会连带把整个 apply 打断 —— 设置页都一起没了。
+           */
+          let tabs;
+          try {
+            tabs = typeof ctx.get === 'function' ? ctx.get('sidebarRightTabs') : undefined;
+          } catch (e) {
+            tabs = undefined;
+          }
+          if (!tabs || typeof tabs.register !== 'function') return false;
+          try {
+            const dispose = tabs.register({
+              id: RAIL_TAB_ID,
+              kind: RAIL_KIND,
+              priority: 'extension',
+              title: () => 'WorkBuddy',
+              // 空右栏会把这些列成入口卡片；description 只在卡片不多时显示。
+              // `order` 必须给：guide 的排序是 `left.order - right.order`，
+              // 缺省会算成 NaN，位置就不确定了（排在其它卡片之前/之后都算错）。
+              guide: [{
+                id: 'workbuddy',
+                kind: RAIL_KIND,
+                order: 50,
+                title: () => 'WorkBuddy',
+                description: () => t('模型、签到与账号'),
+                // 不给 icon 时右栏画默认方块占位，夹在一排真图标里像"加载失败"
+                icon: WorkBuddyRailGlyph,
+              }],
+            });
+            railTabDispose = typeof dispose === 'function' ? dispose : () => {};
+            return true;
+          } catch (error) {
+            try { console.warn('dsh-plugin-workbuddy: right sidebar tab type not registered', error); } catch (e) { /* ignore */ }
+            return false;
+          }
+        };
+        const pollRailTab = () => {
+          railTabTimer = null;
+          if (registerRailTab()) return;
+          railTabTries += 1;
+          if (railTabTries >= RAIL_TAB_RETRIES) {
+            try {
+              console.warn('dsh-plugin-workbuddy: sidebarRightTabs never appeared; the right-sidebar page stays hidden');
+            } catch (e) { /* ignore */ }
+            return;
+          }
+          // 没有定时器的环境（纯 Node 装配测试）就只试这一次：右栏是可选能力，
+          // 不能因为它把整个 apply 打断（设置页会一起消失）。
+          if (typeof setTimeout !== 'function') return;
+          railTabTimer = setTimeout(pollRailTab, RAIL_TAB_RETRY_MS);
+          // 不拖住宿主退出：这个重试只是"等一会儿再试"，不是常驻任务。
+          if (railTabTimer && typeof railTabTimer.unref === 'function') railTabTimer.unref();
+        };
+        if (!registerRailTab()) pollRailTab();
+        /** 本轮所有槽注册的注销器（含设置页那一条之外的对话页那几处）。 */
+        const disposers = [];
+        if (railTabTimer) disposers.push(() => { if (railTabTimer) { clearTimeout(railTabTimer); railTabTimer = null; } });
+        disposers.push(() => { if (railTabDispose) { try { railTabDispose(); } catch (e) { /* ignore */ } railTabDispose = null; } });
+        const railRegistrations = [
+          ['sidebar.right.pane.tab', () => slots.register({
+            name: 'sidebar.right.pane.tab', key: RAIL_TAB_ID,
+          }, WorkBuddyRail)],
+          ['sidebar.right.pane.tab.title', () => slots.register({
+            name: 'sidebar.right.pane.tab.title', key: RAIL_TAB_ID,
+          }, WorkBuddyRailTitle)],
+        ];
+        for (const [name, register] of railRegistrations) {
+          try {
+            const dispose = slots.inject(name, () => {
+              try {
+                return register();
+              } catch (error) {
+                try { console.warn('dsh-plugin-workbuddy: rail slot registration failed', name, error); } catch (e) { /* ignore */ }
+                return () => {};
+              }
+            });
+            if (typeof dispose === 'function') disposers.push(dispose);
+          } catch (error) {
+            try { console.warn('dsh-plugin-workbuddy: rail slot unavailable', name, error); } catch (e) { /* ignore */ }
+          }
+        }
+
+        /*
          * 对话页的三处增强。`inject` 会等槽位声明；旧版 dsh 没有某个槽时
          * 不能影响设置页注册，所以逐个兜一层、互不牵连。
          */
@@ -9599,7 +11661,6 @@ const probeOne = async (id) => {
           ['conversation.hero.options', 'workbuddy-login', 20, ChatLoginButton],
           ['conversation.chat.turnTail', 'workbuddy-turn-cost', 30, ChatTurnCost],
         ];
-        const disposers = [];
         for (const [name, id, order, component] of conversationSlots) {
           try {
             const dispose = slots.inject(name, () => {
@@ -9627,8 +11688,25 @@ const probeOne = async (id) => {
 
     exports.name = 'workbuddy-client';
     exports.apply = apply;
+    /*
+     * 只有 `slots` 是硬依赖。**右栏不能写进这个数组**：
+     *   - 旧版 dsh / 未启用右栏时它永远不出现，写进来会让整根纤维等它等到永远
+     *     （连设置页都一起消失）；
+     *   - 而且它由 ui-sidebar-right 用 `ctx.reflect.provide()` 挂上去，
+     *     不参与 cordis 的 inject 追踪，写进来也不会按预期触发。
+     * 所以右栏走 `ctx.get()` + 有界重试（见 apply 里 `registerRailTab`）。
+     */
     exports.inject = ['slots'];
     exports.WorkBuddyPanel = WorkBuddyPanel;
+    exports.WorkBuddyRail = WorkBuddyRail;
+    exports.WorkBuddyRailTitle = WorkBuddyRailTitle;
+    exports.WorkBuddyRailGlyph = WorkBuddyRailGlyph;
+    exports.RAIL_TAB_ID = RAIL_TAB_ID;
+    exports.RAIL_KIND = RAIL_KIND;
+    exports.RAIL_TIERS = RAIL_TIERS;
+    /* 倒计时锚点算法：纯函数，供单元测试直接覆盖（见 tests/limit-anchors.test.mjs） */
+    exports.applyLimitAnchors = applyLimitAnchors;
+    exports.fmtCountdown = fmtCountdown;
     exports.ChatQuotaPill = ChatQuotaPill;
     exports.ChatLoginButton = ChatLoginButton;
     exports.ChatTurnCost = ChatTurnCost;

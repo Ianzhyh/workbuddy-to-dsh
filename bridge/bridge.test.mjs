@@ -3129,6 +3129,75 @@ test('桥：6004 账号用量上限 —— 不等待重试、按 insufficient_qu
   }
 });
 
+test('桥：多个模型各自触顶时，/health 必须逐条列出（不能只剩一条）', { timeout: 90_000 }, async () => {
+  /*
+   * 用户反馈："我用别的不是 workbuddy 的用量上限怎么又只剩一个了"。
+   *
+   * 根因：`rateLimitSummary()` 把 `quotaResetStats` 压成了一个 `quota` ——
+   * 只保留最新那条，其余仅累加 count，于是 `model` / `resetAt` 全丢。
+   * 面板只能显示一条，看起来像"前一个被顶掉了"。
+   *
+   * 这里让两个不同模型各吃一次 6004（重置时刻故意不同），断言：
+   *   - `quotaModels` 有两条，模型名都在；
+   *   - 每条各自带自己的 resetAt，没有互相覆盖；
+   *   - 老字段 `quota` 仍然保留（自动切号只认它，不能破坏兼容）。
+   */
+  const pad = (n) => String(n).padStart(2, '0');
+  const wallOf = (offsetHours) => {
+    const wall = new Date(Date.now() + offsetHours * 3_600_000 + 8 * 3_600_000);
+    return `${wall.getUTCFullYear()}-${pad(wall.getUTCMonth() + 1)}-${pad(wall.getUTCDate())}`
+      + ` ${pad(wall.getUTCHours())}:${pad(wall.getUTCMinutes())}:${pad(wall.getUTCSeconds())}`;
+  };
+  const stampA = wallOf(10);
+  const stampB = wallOf(20);
+  const mkQuota = (stamp) => JSON.stringify({
+    code: 6004,
+    msg: `usage exceeds frequency limit, your usage will reset at ${stamp} UTC+8`,
+  });
+  /* 两个模型各自一条 6004：按请求顺序依次消费 */
+  const stub = await startStubUpstream(['quota-model-a', 'quota-model-b'], {
+    chatSequence: [
+      { status: 429, type: 'application/json', raw: mkQuota(stampA) },
+      { status: 429, type: 'application/json', raw: mkQuota(stampB) },
+    ],
+  });
+  const bridge = await startBridge({
+    CODEBUDDY_ENDPOINT: stub.base,
+    WORKBUDDY_SKIP_MODEL_PREFLIGHT: '1',
+    WORKBUDDY_429_WAITS: '0',
+  }, { auth: READABLE_FAKE_AUTH });
+  const auth = { authorization: `Bearer ${TOKEN}` };
+  try {
+    for (const model of ['quota-model-a', 'quota-model-b']) {
+      const res = await fetch(bridge.baseUrl + '/v1/chat/completions', {
+        method: 'POST',
+        headers: { ...auth, 'content-type': 'application/json' },
+        body: JSON.stringify({ model, messages: [{ role: 'user', content: 'hi' }] }),
+        signal: AbortSignal.timeout(20_000),
+      });
+      assert.equal(res.status, 429, `${model} 应回 429`);
+      await res.text();
+    }
+    const health = await (await fetch(bridge.baseUrl + '/health', { headers: auth })).json();
+    const list = health.rateLimit?.quotaModels;
+    assert.ok(Array.isArray(list), '/health.rateLimit.quotaModels 必须是数组');
+    assert.equal(list.length, 2, `两个模型触顶应各占一条，实际 ${list.length} 条`);
+    assert.deepEqual(list.map((q) => q.model).sort(), ['quota-model-a', 'quota-model-b'],
+      '两条的模型名都要在，不能只剩最新那条');
+    for (const q of list) {
+      assert.ok(q.resetAt, `${q.model} 必须各自带 resetAt，不能被别的模型覆盖`);
+    }
+    assert.notEqual(list[0].resetAt, list[1].resetAt,
+      '两个模型的重置时刻不同，说明各自的 resetAt 没有互相覆盖');
+    /* 兼容：老字段仍在，自动切号不受影响 */
+    assert.ok(health.rateLimit?.quota, '单条 quota 必须保留，供自动切号使用');
+  } finally {
+    await bridge.stop();
+    stub.close();
+    rmSync(bridge.dir, { recursive: true, force: true });
+  }
+});
+
 test('桥：点名清单里的模型被上游下架时，/health 要说出少了谁、为什么', { timeout: 90_000 }, async () => {
   /*
    * 实机（2026-11-07）：用户保存了 glm-5.1 / kimi-k3.1-pro / kimi-k3-1 三个，

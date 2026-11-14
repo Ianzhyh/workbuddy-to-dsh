@@ -79,6 +79,10 @@ export function createRouteTable(deps) {
     enableWebSearch = async () => { throw new Error('web search configuration is unavailable'); },
     verifyWebSearch = async () => { throw new Error('web search verification is unavailable'); },
     revertWebSearch = async () => { throw new Error('web search restore is unavailable'); },
+    readDefaultModel = () => null,
+    saveDefaultModel = async () => { throw new Error('default model editing is unavailable'); },
+    /** 用量上限快照：哪个账号的哪个模型触顶了（见 /workbuddy/limits）。 */
+    limitsSnapshot = async () => ({ limiting: [], accounts: [], at: null }),
   } = deps;
 
   /** 写操作的准入检查。 */
@@ -368,6 +372,73 @@ export function createRouteTable(deps) {
           refreshModelCatalog();
           onUpstreamMutation();
           sendJson(res, 200, { ok: true, ...result });
+        } catch (error) {
+          sendJson(res, 200, { ok: false, error: String(error?.message || error) });
+        }
+      },
+    },
+    {
+      /*
+       * dsh 的默认模型（`agent-default-model` 条目）：新会话没有显式选择时用它。
+       *
+       * GET  → 当前默认（provider / model / reasoningEffort），外加一份"该模型是否
+       *        还在当前目录里"的判断 —— 右栏的模型页要能如实说"默认的这个已经不在
+       *        目录里了"，而不是显示一个选不中的名字。
+       * POST → 写回同一条配置（走 configEditor，与设置页写的是同一处），并广播
+       *        adapters-updated：dsh 不轮询，只认这个事件。
+       */
+      kind: 'exact',
+      path: '/workbuddy/default-model',
+      async handler(req, res) {
+        try {
+          if (req.method === 'POST') {
+            if (!guard(req)) return sendJson(res, 403, { ok: false, error: 'missing x-workbuddy-panel header' });
+            const body = await readJsonBody(req);
+            const model = typeof body?.model === 'string' ? body.model.trim() : '';
+            if (!model) return sendJson(res, 400, { ok: false, error: 'model is required' });
+            const providerId = typeof body?.provider === 'string' && body.provider.trim()
+              ? body.provider.trim()
+              : provider;
+            const existing = readDefaultModel() || {};
+            const next = { provider: providerId, model };
+            // 思考档位跟着一起存：只改模型会把用户上次选的档位留在旧模型上。
+            const effort = typeof body?.reasoningEffort === 'string'
+              ? body.reasoningEffort.trim()
+              : (typeof existing.reasoningEffort === 'string' ? existing.reasoningEffort : '');
+            if (effort) next.reasoningEffort = effort;
+            await saveDefaultModel(next);
+            const applied = notifyAdaptersUpdated();
+            log(`default model -> ${providerId}/${model}${effort ? ` (${effort})` : ''}`);
+            return sendJson(res, 200, { ok: true, ...next, applied, saved: true });
+          }
+          if (readOnly(req, res)) return;
+          const current = readDefaultModel();
+          // 目录里的 id 集合用来判断"默认模型是否还选得中"；目录读失败不算失败。
+          /*
+           * `routable` 是**三态**，不是布尔：
+           *   true  —— 这个默认模型还在当前目录里，选得中；
+           *   false —— 服务给了默认模型，但它已经不在目录里（页面要提示重选）；
+           *   null  —— 无从判断（没有默认模型服务，或目录读失败）—— 页面只提示，
+           *           不能把"读不到"说成"这个模型不存在"。
+           */
+          let routable = null;
+          let catalogError = '';
+          try {
+            const catalog = await adapter.catalog({});
+            const ids = new Set(toDirectory(catalog).map((m) => m.id));
+            const sameProvider = !current?.provider || current.provider === provider;
+            if (current && current.model) routable = sameProvider && ids.has(current.model);
+          } catch (error) {
+            catalogError = String(error?.message || error);
+          }
+          sendJson(res, 200, {
+            ok: true,
+            provider: current?.provider || '',
+            model: current?.model || '',
+            reasoningEffort: current?.reasoningEffort || '',
+            routable,
+            catalogError,
+          });
         } catch (error) {
           sendJson(res, 200, { ok: false, error: String(error?.message || error) });
         }
@@ -682,6 +753,33 @@ export function createRouteTable(deps) {
           const url = new URL(req.url, 'http://127.0.0.1');
           const limit = Math.min(Math.max(Number(url.searchParams.get('limit')) || 50, 1), 500);
           sendJson(res, 200, { ok: true, ...(await client.requests({ limit })) });
+        } catch (error) {
+          sendJson(res, 200, { ok: false, error: String(error?.message || error) });
+        }
+      },
+    },
+    {
+      /*
+       * 用量上限（哪个账号的哪个模型触顶了）。
+       *
+       * 数据源是桥的 `/health.rateLimit` —— 它按「账号 + 模型」统计最近 10 分钟
+       * 最终返回给客户端的 429 / 额度上限，是**唯一**知道"这个号这个模型满没满"
+       * 的地方。之前它只被自动切号用，面板上一个字都看不到，用户只能靠
+       * "请求突然全红"猜。
+       *
+       * 返回三种状态，别把它们混成一句"失败"：
+       *   quota              账号级额度上限（6004 / 14018）—— 换模型才有用
+       *   account_restricted 账号被风控（11140）—— 重新登录无效，只能换号
+       *   rate_limit         瞬时限流（14003 / 429）—— 等一下就好
+       *
+       * 读操作：只暴露账号 id / 昵称（都不是密钥），不返回 token。
+       */
+      kind: 'exact',
+      path: '/workbuddy/limits',
+      async handler(req, res) {
+        if (readOnly(req, res)) return;
+        try {
+          sendJson(res, 200, { ok: true, ...(await limitsSnapshot()) });
         } catch (error) {
           sendJson(res, 200, { ok: false, error: String(error?.message || error) });
         }
