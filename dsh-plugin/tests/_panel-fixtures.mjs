@@ -706,6 +706,34 @@ export function buildRoutes(data) {
           accountLabel: 'Fixture Other',
           isCurrent: false,
         },
+        /*
+         * 积分不足：**没有恢复时间**。
+         *
+         * 用户原话："我积分不足怎么还有剩余时间" —— 早先 14018 和 6004 被判成
+         * 同一类，于是文案里的套餐到期日被当成恢复时间。这条钉住"积分不足永不
+         * 显示倒计时"。
+         */
+        {
+          kind: 'credits',
+          model: 'hy4-preview',
+          count: 1,
+          lastAt: new Date(now - 60000).toISOString(),
+          resetAt: '',
+          uid: 'uid-fixture-0001',
+          accountLabel: 'Fixture',
+          isCurrent: true,
+        },
+        /* 同账号第二个模型触顶：验证「每个账号一张卡」里会挂两条 */
+        {
+          kind: 'quota',
+          model: 'kimi-k3',
+          count: 1,
+          lastAt: new Date(now - 120000).toISOString(),
+          resetAt: new Date(now + 900000).toISOString(),
+          uid: 'uid-fixture-0001',
+          accountLabel: 'Fixture',
+          isCurrent: true,
+        },
       ],
       accounts: [
         { uid: 'uid-fixture-0001', account: '3300000000', label: 'Fixture', current: true, usable: true, quota: null },

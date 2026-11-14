@@ -6152,6 +6152,34 @@ function noteQueue(auth, model, queue, now = Date.now()) {
 }
 
 /**
+ * 积分 / 余额不足（14018 / 402）的最近一次命中。
+ *
+ * 与 `quotaResetStats` **分开记**：积分不足**没有"恢复时刻"** —— 充钱或换号才有用，
+ * 等多久都不会自己好。早先把它和 6004 归成一类去解析文案，于是套餐到期日之类
+ * 被当成恢复时间，界面上出现"积分不足但还剩 X 小时"（用户直接指出来的）。
+ *
+ * ⚠️ 但**下游契约不变**：`/health.rateLimit.quota.model` 仍要给出这个模型
+ * （面板靠它显示，既有测试也钉着），所以 `noteCreditsEmpty` 同时往
+ * `quotaResetStats` 写一条 `resetAt: 0` 的记录 —— 出现在 quota 里、但没有倒计时。
+ */
+const creditsEmptyStats = new Map();
+
+function noteCreditsEmpty(auth, model, now = Date.now()) {
+  creditsEmptyStats.set(rateLimitKey(auth, model), { lastAt: now });
+  if (creditsEmptyStats.size > 300) {
+    for (const [key, info] of creditsEmptyStats) {
+      if (now - info.lastAt > 24 * 3_600_000) creditsEmptyStats.delete(key);
+    }
+  }
+  /*
+   * 同时写进 quotaResetStats（resetAt = 0）：
+   *   - 保留 `quota.model` 的既有契约；
+   *   - resetAt 为 0 ⇒ rateLimitSummary 里 `resetAt: ''`，面板据此不显示倒计时。
+   */
+  quotaResetStats.set(rateLimitKey(auth, model), { lastAt: now, resetAt: 0 });
+}
+
+/**
  * 最终失败只记一次账/统计。放在 `callUpstreamWithChannelFallback` 的出口，
  * 而不是 `callUpstream` 内部的 429 分支：402/11140/队列等并不都是 429，
  * 而且 11128 的多轮救援只应该记最终那一次。
@@ -6174,7 +6202,14 @@ function noteFailureStats(auth, model, attempt) {
   });
   switch (verdict.kind) {
     case 'quota':
-      noteQuotaReset(auth, model, text);
+      /*
+       * `noResetTime`：积分/余额耗尽（14018）。它有 quota 的一切下游语义
+       * （不可重试、账号级、映射 insufficient_quota），但**没有"到点恢复"**：
+       * 文案里的套餐到期日不是恢复时间，解析它会让界面显示一个假的倒计时。
+       * 所以只记事实、不进 quotaResetStats。
+       */
+      if (verdict.noResetTime) noteCreditsEmpty(auth, model);
+      else noteQuotaReset(auth, model, text);
       break;
     case 'account_restricted':
       noteTimedFailure(accountRestrictedStats, auth, model, text);
@@ -6262,6 +6297,8 @@ function rateLimitSummary(auth) {
     const model = key.slice(prefix.length);
     quotaModels.push({
       model,
+      /* kind 让面板不必猜"这条要不要显示倒计时"：credits 永远没有 resetAt */
+      kind: 'quota',
       count: 1,
       lastAt: new Date(info.lastAt).toISOString(),
       resetAt: info.resetAt ? new Date(info.resetAt).toISOString() : '',
@@ -6280,6 +6317,23 @@ function rateLimitSummary(auth) {
     }
   }
   if (quota) delete quota.lastAtMs;
+  /*
+   * 积分 / 余额不足：**永不带 resetAt**。
+   *
+   * 它们已经在 quotaModels 里（`noteCreditsEmpty` 同时写了 quotaResetStats，
+   * resetAt=0），这里只**改 kind**，让面板知道"这条不是等时间能好的"。
+   * 不新增条目，避免同一条重复出现两次。
+   */
+  for (const [key, info] of creditsEmptyStats) {
+    if (!key.startsWith(prefix)) continue;
+    if (now - info.lastAt > 24 * 3_600_000) { creditsEmptyStats.delete(key); continue; }
+    const model = key.slice(prefix.length);
+    const hit = quotaModels.find((q) => q.model === model);
+    if (hit) {
+      hit.kind = 'credits';
+      hit.resetAt = '';        // 明确清空：积分不足没有恢复时刻
+    }
+  }
   quotaModels.sort((a, b) => b.lastAtMs - a.lastAtMs);
   for (const q of quotaModels) delete q.lastAtMs;
 
@@ -6333,6 +6387,10 @@ function rateLimitSummary(auth) {
     ...(quota ? { quota } : {}),
     /* 每条触顶记录的完整列表：面板用它逐条展示，不再被压成一条 */
     ...(quotaModels.length ? { quotaModels } : {}),
+    /* 其中属于"积分不足"的有几条 —— 面板据此提示"充钱/换号"，而不显示倒计时 */
+    ...(quotaModels.some((q) => q.kind === 'credits')
+      ? { creditsEmpty: quotaModels.filter((q) => q.kind === 'credits').length }
+      : {}),
     ...(accountRestricted ? { accountRestricted } : {}),
     ...(modelBusy ? { modelBusy } : {}),
     ...(queue ? { queue } : {}),
@@ -6854,7 +6912,8 @@ function queueMessage(queue) {
  *
  * @param {{status?: number, parsed?: any, text?: string, region?: 'cn'|'intl', now?: number}} input
  * @returns {{kind: string, action: string, retryable: boolean, accountWorthy: boolean,
- *   resetAt: number, queue: any, code: number|null, message: string}}
+ *   resetAt: number, queue: any, code: number|null, message: string,
+ *   noResetTime?: boolean}}
  */
 function classifyUpstreamFailure({ status = 0, parsed = null, text = '', region = 'intl', now = Date.now() } = {}) {
   const code = businessCodeOf(parsed);
@@ -6896,7 +6955,27 @@ function classifyUpstreamFailure({ status = 0, parsed = null, text = '', region 
     return result('rate_limit', 'switch-model', true, false);
   }
   if (isUsageQuotaExhausted(parsed, hay) || status === 402) {
-    return result('quota', 'wait-reset', false, true);
+    /*
+     * **积分不足 ≠ 额度用尽**，两者必须分开——但**只分"有没有恢复时刻"**，
+     * 分类结果（kind / action / 可重试性）保持与原先完全一致：
+     *
+     *   6004 / 6008（账号用量上限）→ 有重置时刻，等它回来 → `quota` / wait-reset
+     *   14018（积分 / 余额耗尽）    → **没有"重置时刻"**，充钱或换号才有用
+     *
+     * 早先把两者都当 `quota` 并去文案里解析时刻，于是 14018 的套餐到期日被
+     * 当成"恢复时间"，界面上出现"积分不足但还剩 X 小时"（用户直接指出来的）。
+     *
+     * 但对**下游**（映射到 insufficient_quota、不可重试、账号级可切号）它们
+     * 必须完全一样 —— 所以这里仍然返回 `quota`，只额外带一个
+     * `noResetTime: true`，让 `noteFailureStats` 别去解析 resetAt。
+     */
+    /*
+     * 402（billing: credits exhausted）与 14018 同理：积分/余额耗尽。
+     * 两者都**没有恢复时刻**，只是下游分类保持一致。
+     */
+    const creditsOnly = status === 402 || code === 14018
+      || /insufficient[_ ]?balance|余额不足|积分(?:已)?耗尽|credits? (?:balance|exhausted|insufficient)/i.test(hay);
+    return result('quota', 'wait-reset', false, true, creditsOnly ? { noResetTime: true } : {});
   }
   if (code === 14003) {
     return result('model_busy', 'switch-model', true, false);

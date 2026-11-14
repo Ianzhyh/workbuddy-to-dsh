@@ -299,19 +299,42 @@ try {
     }));
   })())`));
   console.log('上限行：', JSON.stringify(limitRows));
-  if (limitRows.length !== 2) problems.push(`用量上限应有 2 行（额度用尽 / 账号风控），实际 ${limitRows.length}`);
+  /*
+   * 结构断言：**每个账号一张卡**。
+   *
+   * 用户要求"每个账号卡片化"—— 一个账号可能有好几个模型触顶，平铺读不出
+   * "这是同一个号的几件事"。夹具里 Fixture 有 3 条（2 额度 + 1 积分不足）、
+   * Fixture Other 有 1 条（风控），所以应该是 2 张卡。
+   */
+  const limitCards = JSON.parse(await page.cdp.evaluate(`JSON.stringify((() => {
+    const rail = document.querySelector('[data-workbuddy-rail]');
+    const card = [...rail.querySelectorAll('.wb-card')].find((c) => /用量上限/.test(c.textContent));
+    if (!card) return [];
+    return [...card.querySelectorAll('.wb-limit-acct')].map((g) => ({
+      name: (g.querySelector('.wb-limit-acct-name') || {}).textContent || '',
+      count: g.querySelectorAll('.wb-rail-item').length,
+    }));
+  })())`));
+  console.log('账号卡片：', JSON.stringify(limitCards));
+  if (limitCards.length !== 2) {
+    problems.push(`用量上限应按账号分成 2 张卡（Fixture / Fixture Other），实际 ${limitCards.length}`);
+  }
+  const fixtureCard = limitCards.find((c) => /Fixture$/.test((c.name || '').trim())) || null;
+  if (fixtureCard && fixtureCard.count < 3) {
+    problems.push(`Fixture 那张卡应挂 3 条（2 额度 + 1 积分不足），实际 ${fixtureCard.count}`);
+  }
+  if (limitRows.length < 4) problems.push(`用量上限应有 4 条记录，实际 ${limitRows.length}`);
+
   const quotaRow = limitRows.find((r) => /deepseek-v4\.1-flash/.test(r.text)) || {};
   const restrictRow = limitRows.find((r) => /glm-5\.3/.test(r.text)) || {};
+  const creditsRow = limitRows.find((r) => /hy4-preview/.test(r.text)) || {};
   /*
    * 卡上必须明确写「所有账号」—— 用户要的是**跨账号总览**（"不管我是什么账号
-   * 都得看得到别的是不是用完"），而不是只列当前号。这两条一起钉住：
-   *   1. 说明文字讲的是"所有账号"；
-   *   2. 属于**另一个**账号的那条也在列表里（不是被过滤掉）。
+   * 都得看得到别的是不是用完"），而不是只列当前号。
    */
   if (!/所有账号/.test(s.text)) problems.push('用量上限卡没有说明这是「所有账号」的记录');
-  if (!/Fixture Other/.test(restrictRow.text || '')) {
-    problems.push(`风控那条没有标出它属于另一个账号：${restrictRow.text || '(缺)'}`);
-  }
+  if (!/Fixture Other/.test(s.text)) problems.push('用量上限卡里看不到另一个账号（Fixture Other）的记录');
+
   /*
    * 恢复时间必须是**倒计时**（"还剩 N 分"），不是绝对时刻 ——
    * 用户要回答的是"我还要等多久"。上游没给时间时也必须明说，不能编造。
@@ -322,6 +345,27 @@ try {
   if (!/上游未给恢复时间|10 分钟窗口内/.test(restrictRow.text || '')) {
     problems.push(`没有恢复时间的那条应明说原因：${restrictRow.text || '(缺)'}`);
   }
+  /*
+   * **积分不足绝对不能有倒计时**。
+   * 用户原话："我积分不足怎么还有剩余时间" —— 它等不来恢复，只能充积分或换号。
+   * 任何 "还剩 / 分 / 小时 / 天" 出现在这条上都是错的。
+   */
+  if (!creditsRow.text) problems.push('积分不足那条没渲染出来');
+  else {
+    if (/还剩|即将恢复|不到 1 分钟|\d+\s*(分|小时|天)/.test(creditsRow.text)) {
+      problems.push(`积分不足那条不该有倒计时：${creditsRow.text}`);
+    }
+    if (!/需充值|不会自动恢复/.test(creditsRow.text)) {
+      problems.push(`积分不足那条应说明"需充值、不会自动恢复"：${creditsRow.text}`);
+    }
+  }
+  /*
+   * **按时间倒序**：最近触顶的排最前。
+   * 夹具里 lastAt 依次是 hy4(-60s) / kimi(-120s) / deepseek(-240s) / glm(-600s)。
+   */
+  const orderOk = /hy4-preview[\s\S]*kimi-k3[\s\S]*deepseek-v4\.1-flash[\s\S]*glm-5\.3/.test(s.text);
+  if (!orderOk) problems.push('用量上限没有按时间倒序排列（最近的应在最前）');
+
   /*
    * **触顶后要自动出现，不能等用户手动点刷新**。
    * 用户反馈："我这边提示上限了，还要我手动点刷新才会出现，不能自动刷吗"。

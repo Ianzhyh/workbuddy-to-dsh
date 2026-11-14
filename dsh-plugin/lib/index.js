@@ -2618,7 +2618,14 @@ export function apply(ctx, rawConfig = {}) {
         model: typeof raw.model === 'string' ? raw.model : '',
         count,
         lastAt: typeof raw.lastAt === 'string' ? raw.lastAt : '',
-        resetAt: typeof raw.resetAt === 'string' ? raw.resetAt : '',
+        /*
+         * 积分不足（`credits`）**永远不带恢复时间**。
+         *
+         * 它没有"到点自己好"这回事（充钱或换号才有用），而文案里常混着套餐
+         * 到期日之类的时刻 —— 一旦被当成 resetAt，界面就会出现"积分不足但
+         * 还剩 X 小时"（用户直接指出来的）。这里显式清空，不靠上游文案。
+         */
+        resetAt: kind === 'credits' ? '' : (typeof raw.resetAt === 'string' ? raw.resetAt : ''),
         uid,
       });
     };
@@ -2629,13 +2636,24 @@ export function apply(ctx, rawConfig = {}) {
      * 其余仅累加 count），于是"用别的渠道 / 别的模型"触顶时，面板上那条会被
      * 最新的一条**顶掉**，看起来像"只剩一个"（用户原话）。
      *
-     * 新桥会额外给出 `quotaModels`（每条一条）。这里优先用它；老桥没有这个
-     * 字段时回落到单个 `quota` —— 保证老版本 dsh/桥也能正常显示。
+     * 新桥会额外给出 `quotaModels`（每条一条，且带 `kind`：quota / credits）。
+     * 这里优先用它；老桥没有这个字段时回落到单个 `quota` —— 保证老版本也能显示。
      */
     const quotaList = Array.isArray(rateLimit.quotaModels) && rateLimit.quotaModels.length
       ? rateLimit.quotaModels
       : [rateLimit.quota];
-    for (const q of quotaList) push(q, 'quota');
+    for (const q of quotaList) {
+      if (!q || typeof q !== 'object') continue;
+      /*
+       * 是不是"积分不足"（等不来恢复）：
+       *   1. 新桥直接给 `kind: 'credits'`；
+       *   2. 老桥没有 kind，但桥侧 `creditsEmpty > 0` 且这条**没有 resetAt**
+       *      —— 那也按积分不足处理，免得把套餐到期日误当恢复时间。
+       */
+      const creditsHint = q.kind === 'credits'
+        || (q.kind === undefined && Number(rateLimit.creditsEmpty) > 0 && !q.resetAt);
+      push(q, creditsHint ? 'credits' : 'quota');
+    }
     push(rateLimit.accountRestricted, 'account_restricted');
     /*
      * 总量限流只有在**没有更具体的结论**时才展示：`quota` 已经把"哪个模型满了"

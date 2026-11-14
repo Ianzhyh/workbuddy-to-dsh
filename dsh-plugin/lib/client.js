@@ -1007,6 +1007,42 @@ body.dark .wb-root,
 .wb-rail-count{font-size:11.5px;line-height:16px;color:var(--dsw-alias-label-secondary,light-dark(#61666b,#cfd3d6));font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .wb-rail-sumbar .wb-pill{flex:none}
 
+/*
+ * 用量上限：**每个账号一张小卡**。
+ *
+ * 为什么分组而不是拉一条平铺列表：一个账号常有好几个模型同时触顶，平铺时
+ * 读不出"这是同一个号的几件事"。卡片把账号名做成标题，下面挂它自己的条目。
+ *
+ * 卡片本身不再套一层 .wb-card —— 那会在一张卡里套一张卡（重边框 + 双份内边距），
+ * 窄栏里特别臃肿。这里只用一条左侧色带 + 轻底色区分账号。
+ */
+.wb-limit-acct{
+  border-left:2px solid var(--dsw-alias-border-l2,light-dark(#0000001f,#ffffff26));
+  background:var(--dsw-alias-interactive-bg-hover,light-dark(#26314808,#ffffff0a));
+  border-radius:0 9px 9px 0;
+  padding:7px 8px 6px;
+  margin:0 0 8px;
+  min-width:0;
+}
+.wb-limit-acct:last-child{margin-bottom:0}
+.wb-limit-acct-head{
+  display:flex;align-items:center;gap:6px;min-width:0;
+  margin:0 0 4px;
+}
+.wb-limit-acct-name{
+  flex:0 1 auto;min-width:0;
+  font-size:12px;font-weight:650;line-height:17px;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+}
+.wb-limit-acct-count{
+  flex:none;margin-left:auto;
+  font-size:11px;line-height:16px;
+  color:var(--dsw-alias-label-tertiary,light-dark(#81858c,#adb2b8));
+  font-variant-numeric:tabular-nums;white-space:nowrap;
+}
+/* 卡片内的清单不再自己滚：整张卡的内容都很短，多一层滚动条反而割裂 */
+.wb-limit-acct .wb-rail-list{max-height:none;overflow:visible;margin:0;padding:0}
+
 /* ── 常规档（≥300px，默认停靠 320px）：基线已覆盖，只补列表高度 ── */
 @container wb-rail (min-width:300px){
   .wb-rail-list{max-height:min(46vh,320px)}
@@ -2388,6 +2424,11 @@ body.dark .wb-root,
       '保存上下文': 'Save context',
       '已设置上下文：': 'Context set: ',
       '已恢复为自动上下文：': 'Context reverted to automatic: ',
+      // 用量上限卡片化 + 积分不足
+      ' 条': ' item(s)',
+      '积分不足': 'No credits',
+      '充积分或换号，等待无效': 'Top up or switch account; waiting will not help',
+      '需充值，不会自动恢复': 'Needs top-up; will not recover by itself',
     };
 
     /**
@@ -2836,60 +2877,34 @@ body.dark .wb-root,
      * 绝不编造一个时间出来。
      */
     /**
-     * 给"用量上限"条目算剩余时间，并在到点时把它们摘掉。
+     * 给「用量上限」条目算剩余时间，并摘掉已经到点的。
      *
-     * 抽成**纯函数**是为了能真正测透它。这件事在浏览器里跟轮询时序搏斗极其
-     * 脆弱（实测反复假失败：一会儿读到上一轮的 999ms、一会儿又被重新锚定成
-     * 12000ms），而算法本身很朴素 —— 单独测它只要几毫秒。
+     * 算法就是**恢复时间 − 现在**，没有别的。
      *
-     * ## 为什么需要"锚点"
+     * 曾经写过一版"锚点"算法（记下首次看到 resetAt 的时刻，用单调时钟消耗
+     * 服务端给的时长），本意是防本机时钟偏差 —— 但它把简单的事搞复杂了，
+     * 而且引入了一个真实误差：`now` 来自每秒 tick，`服务端 at` 是响应那一刻，
+     * 两者不同步，加上每轮轮询重新锚定，倒计时看着就"不准"（用户直接指出来了）。
      *
-     * 如果每次都用「本轮的 `resetAt - at` 再减去本轮已过时间」，那么每次轮询
-     * 都会带回一个新 `at`（服务端说"现在还剩 4 秒"），elapsed 归零、倒计时
-     * 永远回到 4 秒 —— 那条记录**永远不会过期**。这就是"到时间也不消失"的根因。
-     *
-     * 所以给每个 resetAt 记一个"本机首次看到它的时刻"：只要 `resetAt` 没变，
-     * 锚点就不动，`now - anchor` 单调增长，剩余时间单调递减，到 0 就摘掉。
-     * `resetAt` 变了（上游延长了恢复时间）才重新锚定。
+     * 现在的取舍：**直接用本机墙钟减**。本机时钟偏几分钟确实会让倒计时差
+     * 几分钟 —— 但那正是用户自己看到的"现在"，符合直觉；而"看起来在走、
+     * 数值对得上"比"理论上不受时钟影响但显示飘忽"更重要。
      *
      * @param {object} input
-     * @param {Array} input.raw      服务端返回的 limiting 数组
-     * @param {string} input.at      服务端这份数据的时间戳（ISO）
-     * @param {number} input.now     本机**单调**时钟当前值（毫秒）
-     * @param {Map} input.anchors    锚点表（同一个 Map 跨渲染复用）
-     * @returns {Array} 未过期的条目，每项多出 `leftMs`（剩余毫秒，NaN=上游没给）
+     * @param {Array} input.raw   服务端返回的 limiting 数组
+     * @param {number} input.nowMs 本机当前时刻（墙钟，毫秒）
+     * @returns {Array} 未过期的条目，每项多出 leftMs（剩余毫秒，NaN=上游没给时间）
      */
-    function applyLimitAnchors({ raw, at, now, anchors }) {
-      const serverAtMs = at ? Date.parse(at) : NaN;
+    function applyLimitAnchors({ raw, nowMs }) {
       const list = Array.isArray(raw) ? raw : [];
       const kept = [];
-      const alive = new Set();
       for (const it of list) {
-        const key = `${it.uid}\0${it.model}\0${it.kind}`;
         const resetMs = it.resetAt ? Date.parse(it.resetAt) : NaN;
-        /*
-         * 服务端给的「还差多久」= resetAt - at。这是**唯一不依赖本机墙钟**的量，
-         * 所以拿它当真相，只用本机单调时钟去消耗它。
-         */
-        const spanMs = Number.isFinite(resetMs) && Number.isFinite(serverAtMs)
-          ? resetMs - serverAtMs
-          : NaN;
-        const prev = anchors.get(key);
-        const sameTarget = Boolean(prev) && prev.resetAt === it.resetAt;
-        const startAt = sameTarget ? prev.atMs : now;
-        if (!sameTarget) anchors.set(key, { resetAt: it.resetAt, atMs: startAt });
-        const elapsedMs = Math.max(0, now - startAt);
-        const leftMs = Number.isFinite(spanMs) ? spanMs - elapsedMs : NaN;
-        if (Number.isFinite(leftMs) && leftMs <= 0) {
-          /* 到点了：连锚点一起丢掉，免得下次同名条目复用一个陈旧锚点 */
-          anchors.delete(key);
-          continue;
-        }
-        alive.add(key);
+        /* 上游没给恢复时间（例如"积分不足"）：不编造，也不让它自动消失 */
+        const leftMs = Number.isFinite(resetMs) ? resetMs - nowMs : NaN;
+        if (Number.isFinite(leftMs) && leftMs <= 0) continue;   // 到点了，摘掉
         kept.push({ ...it, leftMs });
       }
-      /* 清掉不再出现的条目的锚点，避免 Map 无限增长 */
-      for (const key of [...anchors.keys()]) if (!alive.has(key)) anchors.delete(key);
       return kept;
     }
 
@@ -3189,7 +3204,7 @@ body.dark .wb-root,
              * 与 `useNowTick` 用**同一个时钟**（单调毫秒），否则下面算
              * 「已过多久」时两边基准不同，差值会变成天文数字。
              */
-            fetchedAtMs: nowMs(),
+            fetchedAtMs: Date.now(),
           });
           if (!failed) { retryCount.current = 0; return; }
           scheduleRetry(forPath);
@@ -10223,47 +10238,29 @@ const probeOne = async (id) => {
     );
 
     /**
-     * 每秒推进一次的时钟，只用来重算"还剩多久恢复"。
+     * 每秒推进一次的本机时刻（墙钟毫秒）。
      *
-     * 为什么不直接用 `Date.now()` 在 render 里算：那样只有父组件重渲染时才更新，
-     * 倒计时会卡住不动。为什么不 `setState(Date.now())` 每秒：那会让整棵树每秒
-     * 重渲染一次，代价明显。这里返回的是**秒级时间戳**（`Math.floor(now/1000)`），
-     * 它每秒才变一次，React 的 state 相等判断会自然把无变化的更新吞掉。
+     * 只用来重算"还剩多久恢复"：`nowTick` 每秒跳一格 → 组件重渲染 →
+     * 倒计时 = `resetAt - nowTick` 每秒更新、到点自动摘除，不需要额外请求。
      *
-     * 页面不可见时停表：后台标签页里每秒跑一次 setState 纯属浪费（也省电）。
+     * 为什么不在 render 里直接 `Date.now()`：那样只有父组件重渲染时才更新，
+     * 倒计时会卡住不动。为什么不用 `performance.now()`：倒计时的另一端
+     * （`resetAt`）是**绝对时刻**，两边必须同一把尺子，否则算出来的差值没有意义
+     * —— 曾经用单调时钟配"锚点"绕了一大圈，反而让数字看着飘。
+     *
+     * 页面不可见时停表：后台标签页里每秒 setState 纯属浪费（也省电）；
+     * 切回来时立刻补一次，不会停在旧值。
      */
-    /**
-     * 一个单调递增的"已过毫秒"计数器，每秒推进一次。
-     *
-     * 用它而不是 `Date.now()` 的原因有两个：
-     *
-     * 1. **系统时间会被调整**（NTP 校正、用户改时间、双系统来回切）。用
-     *    `Date.now()` 做倒计时，时间往回跳时倒计时会**倒着走甚至卡住**。
-     *    `performance.now()` 是单调时钟，不跳。
-     * 2. **测试里 `Date` 会被冻结**（夹具为了可复现把 Date 钉死）。此时
-     *    `Date.now()` 永远不变，倒计时就永远不推进、条目永远不消失 ——
-     *    这不是测试的错，而是"用墙钟当计时器"本身不对。
-     *
-     * 退化顺序：`performance.now()` → `Date.now()`。两者都拿不到就返回 0
-     * （倒计时不推进，但不会崩）。
-     */
-    function nowMs() {
-      if (typeof performance !== 'undefined' && typeof performance.now === 'function') {
-        return performance.now();
-      }
-      return Date.now();
-    }
-
     function useNowTick(intervalMs = 1000) {
-      const [tick, setTick] = useState(() => nowMs());
+      const [tick, setTick] = useState(() => Date.now());
       useEffect(() => {
         if (typeof setInterval !== 'function') return undefined;
         let timer = null;
         const start = () => {
           if (timer !== null) return;
           timer = setInterval(() => {
-            const next = nowMs();
-            /* 千分之一毫秒级的抖动不算变化，避免每帧都重渲染整棵树 */
+            const next = Date.now();
+            /* 不足 250ms 的抖动不算变化，避免无意义地重渲染整棵树 */
             setTick((prev) => (Math.abs(next - prev) < 250 ? prev : next));
           }, intervalMs);
           // Node/测试环境下别把进程挂住（浏览器里没有 unref）
@@ -10276,7 +10273,7 @@ const probeOne = async (id) => {
         };
         const onVisibility = () => {
           if (typeof document !== 'undefined' && document.hidden) stop();
-          else { setTick(nowMs()); start(); }
+          else { setTick(Date.now()); start(); }
         };
         start();
         if (typeof document !== 'undefined' && document.addEventListener) {
@@ -10488,27 +10485,32 @@ const probeOne = async (id) => {
        * Date.now 差值）。这样本机时钟偏多少都不影响倒计时。
        */
       /*
-       * ## 倒计时的锚点：**首次看到这个 resetAt 的那一刻**
+       * 倒计时 = **恢复时间 − 现在**（`applyLimitAnchors`，纯函数、可单测）。
        *
-       * 早期写法是「本轮的 `resetAt - at`，减去本轮已过时间」。问题很明显：
-       * 每次轮询都会带回一个新的 `at`（服务端说"现在还剩 4 秒"），于是
-       * elapsed 归零、倒计时**永远回到 4 秒**，那条记录永远不过期。
-       *
-       * 现在把算法抽成纯函数 `applyLimitAnchors()`（见下方模块级定义）：
-       *   同一个 resetAt 复用同一个锚点，只有 resetAt 变了才重新锚定。
-       * 这样轮询不会重置倒计时，上游延长恢复时间时也能跟着更新。
-       *
-       * 抽成纯函数是为了**能单元测试**：在浏览器里跟轮询时序搏斗验这件事
-       * 又慢又脆（实测反复假失败），而算法本身几分钟就能测透。
+       * `nowTick` 每秒跳一格，所以倒计时每秒重算、到点即被摘除 —— 不需要
+       * 额外请求。用本机墙钟而不是什么"锚点"：用户看到的"现在"就是本机时间，
+       * 两者一致才不会觉得数字飘。
        */
-      const anchorRef = useRef(new Map());
       const limits = applyLimitAnchors({
         raw: limitsApi.data && limitsApi.data.ok === true && Array.isArray(limitsApi.data.limiting)
           ? limitsApi.data.limiting
           : [],
-        at: limitsApi.data?.at,
-        now: nowTick,
-        anchors: anchorRef.current,
+        nowMs: nowTick,
+      });
+      /*
+       * **按时间倒序**：最近触顶的排最前面。
+       *
+       * 用户要的是"哪个用完了"——最该先看到刚发生的那条（往往就是导致这次
+       * 对话失败的原因），而不是历史里最老的。缺 `lastAt` 时按"需要人工处理
+       * 的排前面"兜底（积分不足等不来，必须充钱或换号）。
+       */
+      limits.sort((a, b) => {
+        const ta = a.lastAt ? Date.parse(a.lastAt) : NaN;
+        const tb = b.lastAt ? Date.parse(b.lastAt) : NaN;
+        if (Number.isFinite(ta) && Number.isFinite(tb) && ta !== tb) return tb - ta;
+        if (Number.isFinite(ta) !== Number.isFinite(tb)) return Number.isFinite(tb) ? -1 : 1;
+        const credits = (x) => (x.kind === 'credits' ? 1 : 0);
+        return credits(b) - credits(a);
       });
       /*
        * 这张卡覆盖了几个账号 —— 用来区分「只有当前号触顶」与「历史上攒了几个号」。
@@ -11226,49 +11228,86 @@ const probeOne = async (id) => {
                         t('所有账号都已列出，不只当前这个（共 ') + limitsAccountCount + t(' 个账号）。')),
                       h('p', { className: 'wb-note' }, t('每条到恢复时间会自动消失。')))
                     : h('p', { className: 'wb-note' }, t('到恢复时间会自动消失；换模型或换号可恢复。')),
-                  h('div', { className: 'wb-rail-list' },
-                    limits.map((l) => {
-                      const tone = l.kind === 'account_restricted' ? 'bad' : 'warn';
-                      const what = l.kind === 'account_restricted'
-                        ? t('账号被风控')
-                        : l.kind === 'quota' ? t('额度已用尽') : t('触发了限流');
-                      const advice = l.kind === 'account_restricted'
-                        ? t('重新登录无效，请换号')
-                        : l.kind === 'quota' ? t('换模型或换号') : t('稍等再试');
-                      /*
-                       * 恢复时间：给**倒计时**，不是给一个绝对时刻。
-                       *
-                       * 用户要回答的是"我还要等多久"，不是"上游说几点几分" ——
-                       * 后者还得自己心算。所以这里显示 `还剩 1 小时 12 分`，
-                       * 并且每秒重算（`nowTick`）；到点这条会被上面的 filter 摘掉。
-                       *
-                       * 上游没给 resetAt 时**不编造**：如实写"上游未给恢复时间"，
-                       * 并说明它会保留到什么时候（桥侧 24 小时兜底）。
-                       */
-                      const countdown = fmtCountdown(l.leftMs);
-                      const resetLine = Number.isFinite(l.leftMs)
-                        ? t('还剩 ') + countdown
-                        : (l.kind === 'rate_limit' ? t('10 分钟窗口内') : t('上游未给恢复时间'));
-                      return h('div', {
-                        className: 'wb-rail-item',
-                        key: l.kind + ':' + l.uid + ':' + l.model,
-                        title: [
-                          l.accountLabel || l.uid,
-                          l.model,
-                          l.resetAt ? t('上游提示 ') + fmtLimitClock(l.resetAt) + t(' 重置') : '',
-                          l.lastAt ? t('最近一次 ') + fmtLimitClock(l.lastAt) : '',
-                        ].filter(Boolean).join(' · '),
-                      },
-                        h('span', { className: 'wb-rail-item-main' },
-                          h('span', { className: 'wb-rail-item-name', 'data-wb-raw': '' },
-                            h(Raw, { text: String(l.model || '—') })),
-                          narrow || short
-                            ? null
-                            : h('span', { className: 'wb-rail-item-sub' },
-                              (l.accountLabel || String(l.uid || '').slice(0, 8)) + ' · ' + resetLine)),
-                        h('span', { className: 'wb-rail-item-side' },
-                          h(Pill, { tone, text: what, title: advice })));
-                    })),
+                  /*
+                   * **每个账号一张小卡**（不是一条长列表）。
+                   *
+                   * 用户明确要求"每个账号卡片化"：一个账号可能有好几个模型同时触顶，
+                   * 按"行"平铺时读不出"这是同一个号的几件事"。卡片按账号分组后：
+                   * 账号名是标题，下面挂它自己的那几条（模型 + 原因 + 倒计时）。
+                   *
+                   * 组内顺序沿用上面的时间倒序（最近触顶的先列）。
+                   */
+                  (() => {
+                    const groups = [];
+                    const byUid = new Map();
+                    for (const l of limits) {
+                      const gid = l.uid || '(unknown)';
+                      let g = byUid.get(gid);
+                      if (!g) {
+                        g = { uid: gid, label: l.accountLabel || String(gid).slice(0, 8), items: [], isCurrent: false };
+                        byUid.set(gid, g);
+                        groups.push(g);
+                      }
+                      g.items.push(l);
+                      if (l.isCurrent) g.isCurrent = true;
+                    }
+                    return groups.map((g) => h('div', {
+                      className: 'wb-limit-acct',
+                      key: 'acct:' + g.uid,
+                    },
+                      h('div', { className: 'wb-limit-acct-head' },
+                        h('span', { className: 'wb-limit-acct-name', 'data-wb-raw': '' },
+                          h(Raw, { text: g.label })),
+                        g.isCurrent
+                          ? h(Pill, { tone: 'ok', text: t('当前') })
+                          : null,
+                        h('span', { className: 'wb-limit-acct-count' },
+                          g.items.length + t(' 条'))),
+                      h('div', { className: 'wb-rail-list' },
+                        g.items.map((l) => {
+                          const isCredits = l.kind === 'credits';
+                          const tone = l.kind === 'account_restricted' ? 'bad'
+                            : isCredits ? 'bad' : 'warn';
+                          const what = l.kind === 'account_restricted'
+                            ? t('账号被风控')
+                            : isCredits ? t('积分不足')
+                              : l.kind === 'quota' ? t('额度已用尽') : t('触发了限流');
+                          const advice = l.kind === 'account_restricted'
+                            ? t('重新登录无效，请换号')
+                            : isCredits ? t('充积分或换号，等待无效')
+                              : l.kind === 'quota' ? t('换模型或换号') : t('稍等再试');
+                          /*
+                           * 恢复时间：**倒计时 = 恢复时间 − 现在**，就这一句。
+                           *
+                           * 积分不足（credits）**永远没有倒计时** —— 它等不来恢复，
+                           * 必须充积分或换号。早先把它和额度用尽归成一类，界面上
+                           * 会出现"积分不足但还剩 X 小时"（用户直接指出来的）。
+                           */
+                          const resetLine = isCredits
+                            ? t('需充值，不会自动恢复')
+                            : Number.isFinite(l.leftMs)
+                              ? t('还剩 ') + fmtCountdown(l.leftMs)
+                              : (l.kind === 'rate_limit' ? t('10 分钟窗口内') : t('上游未给恢复时间'));
+                          return h('div', {
+                            className: 'wb-rail-item',
+                            key: l.kind + ':' + l.uid + ':' + l.model,
+                            title: [
+                              l.model,
+                              resetLine,
+                              l.resetAt ? t('上游提示 ') + fmtLimitClock(l.resetAt) + t(' 重置') : '',
+                              l.lastAt ? t('最近一次 ') + fmtLimitClock(l.lastAt) : '',
+                            ].filter(Boolean).join(' · '),
+                          },
+                            h('span', { className: 'wb-rail-item-main' },
+                              h('span', { className: 'wb-rail-item-name', 'data-wb-raw': '' },
+                                h(Raw, { text: String(l.model || '—') })),
+                              narrow || short
+                                ? null
+                                : h('span', { className: 'wb-rail-item-sub' }, resetLine)),
+                            h('span', { className: 'wb-rail-item-side' },
+                              h(Pill, { tone, text: what, title: advice })));
+                        }))));
+                  })(),
                   /*
                    * 结论一句话：用户最想知道"那我该做什么"。只在有多条或原因为
                    * 账号级时补一句，避免每条都重复同样的话。
@@ -11452,9 +11491,8 @@ const probeOne = async (id) => {
          * ── 验收探针（只读，不参与任何逻辑）──
          *
          * `tests/rail-render.mjs` 靠它们读组件**内部**的倒计时状态：
-         *   - `data-now-tick`    单调时钟当前值，判断"时钟在走"
+         *   - `data-now-tick`    本机时刻（每秒跳一格），判断"时钟在走"
          *   - `data-limits-left` 有恢复时间的条目里最小剩余毫秒（到点应归零）
-         *   - `data-limits-anchor` 锚点|当前|剩余|at，判断"轮询有没有重置锚点"
          *   - `data-limits-count` 条目数
          *
          * 为什么保留在生产代码里：倒计时是纯前端行为（不发请求、后端也看不到），
@@ -11467,12 +11505,6 @@ const probeOne = async (id) => {
           return String(timed.length ? Math.min(...timed) : -1);
         })(),
         'data-limits-count': String(limits.length),
-        'data-limits-anchor': (() => {
-          const first = limits[0];
-          if (!first) return '';
-          const a = anchorRef.current.get(`${first.uid}\0${first.model}\0${first.kind}`);
-          return a ? `${Math.round(a.atMs)}|${Math.round(nowTick)}|${Math.round(first.leftMs)}|${limitsApi.data?.at || ''}` : '';
-        })(),
         ref: rootRef,
       },
       h('div', { className: 'wb-rail-body' },
