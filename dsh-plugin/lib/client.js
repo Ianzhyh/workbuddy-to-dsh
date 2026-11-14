@@ -922,7 +922,40 @@ body.dark .wb-root,
  * 结果矮面板里内容把容器撑到 640px（可视 300），滚动区与底部条全被顶出去。
  */
 .wb-rail-page{display:flex;flex-direction:column;gap:0;min-height:0;flex:1 1 auto;min-width:0}
-.wb-rail-scroll{display:flex;flex-direction:column;gap:10px;min-height:0;flex:1 1 auto;overflow:auto;padding-right:2px}
+/*
+ * 滚动容器**不能靠 padding-right 给滚动条让位**。
+ *
+ * 那 2px 会把里面的卡片压窄（实测：卡片 314px，而不在滚动区里的分段控件
+ * 是 316px），于是页面出现"三段控件比卡片宽 2px"的错位 —— 一眼能看出来。
+ *
+ * 也不能用 scrollbar-gutter: stable：它会**无条件**预留 15px 槽位
+ * （没有滚动条时也留），卡片反而缩到 301px，差得更多（实测）。
+ *
+ * 所以：滚动条用 overlay 形态（覆盖在内容上，不占宽度）。Windows Chrome 上
+ * 需要给 webkit-scrollbar 配成透明轨道才真的不占位，见下一条规则。
+ */
+.wb-rail-scroll{
+  display:flex;flex-direction:column;gap:10px;min-height:0;flex:1 1 auto;
+  overflow:auto;
+  padding-right:0;
+}
+/*
+ * overlay 滚动条：拇指半透明、轨道透明、不占布局宽度。
+ * 这样卡片和滚动区外的分段控件**右边界严格对齐**，滚动时也只盖住几像素。
+ */
+.wb-rail-scroll::-webkit-scrollbar{width:8px;height:8px;background:transparent}
+.wb-rail-scroll::-webkit-scrollbar-track{background:transparent;border:0}
+.wb-rail-scroll::-webkit-scrollbar-thumb{
+  background:light-dark(rgba(0,0,0,.18),rgba(255,255,255,.22));
+  border-radius:999px;
+  /* 用透明边框把拇指收窄，视觉上更细，且不额外占位 */
+  border:2px solid transparent;
+  background-clip:content-box;
+}
+.wb-rail-scroll::-webkit-scrollbar-thumb:hover{
+  background:light-dark(rgba(0,0,0,.28),rgba(255,255,255,.32));
+  background-clip:content-box;
+}
 .wb-rail-scroll>.wb-card{flex:none}
 .wb-rail-dock{
   flex:none;display:flex;align-items:center;gap:6px;flex-wrap:wrap;
@@ -967,8 +1000,15 @@ body.dark .wb-root,
 .wb-rail .wb-actions{gap:6px}
 .wb-rail .wb-btn{padding:5px 10px;font-size:12px}
 .wb-rail .wb-input,.wb-rail .wb-select{width:100%;font-size:12px;min-height:30px;padding:5px 9px}
-.wb-rail .wb-segmented-wrap{display:flex;width:100%}
-.wb-rail .wb-segmented{display:flex;width:100%}
+/*
+ * 三段控件要与卡片**左右边界严格对齐**。
+ *
+ * 实测（340px 栏）：不加 box-sizing:border-box 时 .wb-segmented 的
+ * 0.5px 边框会被算在 100% 之外，整条比卡片宽 2px —— 右边缘突出来一格。
+ * 同理 .wb-segmented-wrap 也要 border-box，否则外层再套一圈时同样溢出。
+ */
+.wb-rail .wb-segmented-wrap{display:flex;width:100%;box-sizing:border-box;min-width:0}
+.wb-rail .wb-segmented{display:flex;width:100%;box-sizing:border-box;min-width:0}
 .wb-rail .wb-segmented-item{flex:1 1 0;justify-content:center;text-align:center;padding:4px 8px}
 .wb-rail .wb-dropdown{display:block;width:100%}
 .wb-rail .wb-dropdown-trigger{width:100%;min-height:30px;font-size:12px}
@@ -1020,14 +1060,22 @@ body.dark .wb-root,
   border-left:2px solid var(--dsw-alias-border-l2,light-dark(#0000001f,#ffffff26));
   background:var(--dsw-alias-interactive-bg-hover,light-dark(#26314808,#ffffff0a));
   border-radius:0 9px 9px 0;
+  /*
+   * 内边距只有**一份**（左右 8px），卡头与条目共用它 —— 不再给卡头或
+   * 条目各加一层横向 padding，否则会出现"名字 307 / 条目 314"这种两级缩进，
+   * 左右边界全都不齐（实测过）。
+   */
   padding:7px 8px 6px;
   margin:0 0 8px;
   min-width:0;
+  box-sizing:border-box;
 }
 .wb-limit-acct:last-child{margin-bottom:0}
 .wb-limit-acct-head{
   display:flex;align-items:center;gap:6px;min-width:0;
   margin:0 0 4px;
+  /* 与下面的清单同宽、同左边界 */
+  padding:0;
 }
 .wb-limit-acct-name{
   flex:0 1 auto;min-width:0;
@@ -1040,8 +1088,15 @@ body.dark .wb-root,
   color:var(--dsw-alias-label-tertiary,light-dark(#81858c,#adb2b8));
   font-variant-numeric:tabular-nums;white-space:nowrap;
 }
-/* 卡片内的清单不再自己滚：整张卡的内容都很短，多一层滚动条反而割裂 */
+/*
+ * 卡片内的清单不再自己滚：整张卡的内容都很短，多一层滚动条反而割裂。
+ *
+ * 同时把条目横向内边距归零：.wb-rail-item 默认有 7px 左右 padding，
+ * 叠在卡片的 8px 上会让条目的名字比卡头再缩进 7px，而右侧胶囊又比"3 条"
+ * 多缩 7px —— 两列都不在一条竖线上。归零后卡片内所有内容共用同一条基准。
+ */
 .wb-limit-acct .wb-rail-list{max-height:none;overflow:visible;margin:0;padding:0}
+.wb-limit-acct .wb-rail-item{padding-left:0;padding-right:0}
 
 /* ── 常规档（≥300px，默认停靠 320px）：基线已覆盖，只补列表高度 ── */
 @container wb-rail (min-width:300px){
