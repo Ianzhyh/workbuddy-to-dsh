@@ -1,4 +1,4 @@
-<h1 align="center">WorkBuddy 本地 API 桥</h1>
+﻿<h1 align="center">WorkBuddy 本地 API 桥</h1>
 
 <p align="center">
   <a href="https://www.dsh.so/artifact/workbuddy-to-dsh/?ref=badge"><img height="20" src="https://cdn.dsh.so/badge/workbuddy-to-dsh.svg" alt="dsh.so risk: low"></a>
@@ -201,7 +201,7 @@ dsh plugin --profile desktop add github:Ianzhyh/workbuddy-to-dsh
 
 # 方式二：release 附件（tgz 安装包，无构建、无需 allowBuilds 授权）
 #   从 GitHub Releases 下载 dsh-plugin-workbuddy-<版本>.tgz 后：
-dsh plugin --profile desktop add ./dsh-plugin-workbuddy-1.23.2.tgz
+dsh plugin --profile desktop add ./dsh-plugin-workbuddy-1.24.0.tgz
 
 # 方式三：从源码（插件在 dsh-plugin/ 子目录，接第 1 步的 git clone）
 dsh plugin --profile desktop add workbuddy-to-dsh/dsh-plugin

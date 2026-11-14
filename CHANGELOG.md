@@ -1,4 +1,4 @@
-# Changelog
+﻿# Changelog
 
 本项目所有值得注意的变化都记录在这里。格式参考
 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
@@ -17,7 +17,7 @@
 
 只支持最近 2 个 minor 版本。
 
-## [Unreleased]
+## [1.24.0] - 2026-11-14
 
 ### Added
 
