@@ -185,8 +185,27 @@ async function startBridge(env = {}, opts = {}) {
         break;
       }
       try {
-        const res = await fetch(baseUrl + '/', { headers: { authorization: `Bearer ${TOKEN}` }, signal: AbortSignal.timeout(1500) });
-        if (res.status > 0) {
+        /*
+         * 就绪判据必须证明「端口上应答的就是我 spawn 的这个 pid」。
+         *
+         * 原先只看 `res.status > 0`——任何 HTTP 响应都认领。端口上若是本机别的
+         * 服务（或另一个测试文件起的桥），它会被当成自己的桥，后续请求全部打到
+         * 别人身上，失败原因看起来毫无道理（实测过一次：count_tokens 用例拿到
+         * 403，而它期望 413）。
+         *
+         * 令牌可能被用例显式覆盖成空串（那是「让桥自动生成」的场景），此时从
+         * 子进程输出里取它打印的真实值 —— 桥在 listen 之前就会打印这一行。
+         */
+        const probeToken = (typeof env.WORKBUDDY_LOCAL_TOKEN === 'string' && env.WORKBUDDY_LOCAL_TOKEN)
+          ? env.WORKBUDDY_LOCAL_TOKEN
+          : (output.match(/WORKBUDDY_LOCAL_TOKEN=([A-Za-z0-9._-]{16,})/)?.[1] || TOKEN);
+        const res = await fetch(baseUrl + '/v1/identity', {
+          headers: { authorization: `Bearer ${probeToken}` },
+          signal: AbortSignal.timeout(1500),
+        });
+        const body = await res.json().catch(() => null);
+        // `/v1/identity` 在凭据读不出时回 503，但 body 里同样带 pid —— 只要 pid 相符就认。
+        if (body && Number(body.pid) === Number(child.pid)) {
           return {
             baseUrl,
             dir,
@@ -3764,7 +3783,11 @@ test('桥：开销头与进程计数 —— 响应带 X-WorkBuddy-Overhead-Ms，
   const stub = await startStubUpstream(['ov-model']);
   const bridge = await startBridge({ CODEBUDDY_ENDPOINT: stub.base }, { auth: READABLE_FAKE_AUTH });
   try {
-    await fetch(bridge.baseUrl + '/v1/models?all=1');
+    /*
+     * 带鉴权：这里要的是"一次真实的 200 请求"，不是靠就绪探测顺带打的那一次。
+     * 旧断言依赖了探测请求被计入进程计数（探测现在改用 /v1/identity，明确不计数）。
+     */
+    await fetch(bridge.baseUrl + '/v1/models?all=1', { headers: auth });
 
     const res = await fetch(bridge.baseUrl + '/v1/chat/completions', {
       method: 'POST',
