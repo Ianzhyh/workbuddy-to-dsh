@@ -115,6 +115,36 @@ test('旧控制台没有 /api/version：按端口监听者确认归属后才停'
   }
 });
 
+test('spawn 失败必须如实报错，不能返回 ok:true 让 ensure 白等', async () => {
+  /*
+   * 回归背景：`start()` 原先无条件返回 `{ok:true, pid:child.pid}`，而 Node 的
+   * `spawn` 对"可执行文件不存在"不抛异常、只异步 emit `error`，`child.pid` 是
+   * undefined。于是 ensure() 会白等 readyTimeoutMs（默认 20 秒），最后报
+   * 「控制台已拉起但 20 秒内没有就绪」—— 真正原因 ENOENT 被完全掩盖。
+   *
+   * 用真实 spawn（不 mock）：要验证的正是这条异步错误路径。
+   */
+  const dir = makeProjectRoot();
+  const port = await freePort();
+  const sup = new ConsoleSupervisor({
+    projectRoot: dir,
+    port,
+    idleExitMs: 0,
+    cacheTtlMs: 0,
+    nodePath: join(dir, 'no-such-node', process.platform === 'win32' ? 'node.exe' : 'node'),
+    logPath: join(dir, 'console.log'),
+  });
+  try {
+    const started = await sup.start();
+    assert.equal(started.ok, false, `spawn 失败不能报成功：${JSON.stringify(started)}`);
+    assert.equal(started.pid, null);
+    assert.match(String(started.error), /ENOENT|not found|no such file/i, `要带出真实原因：${started.error}`);
+    assert.equal(sup.spawnedPid, null, '失败后不能留着一个不可信的 pid');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('归属对不上时拒绝 kill（不能误杀端口上的另一个实例）', async () => {
   const dir = makeProjectRoot();
   const port = await freePort();

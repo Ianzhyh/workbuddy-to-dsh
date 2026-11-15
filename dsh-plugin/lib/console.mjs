@@ -450,12 +450,20 @@ export class ConsoleSupervisor {
         windowsHide: true,
       });
       child.unref();
-      this.spawnedPid = child.pid ?? null;
-      this.lastStartError = null;
-      this.cache = { at: 0, state: null, error: '' };
-      this.onLog(`console spawned pid=${child.pid} ${this.url}`);
+      /*
+       * ⚠️ `error` 监听必须**在任何早退之前**挂上。
+       *
+       * `spawn` 失败（nodePath 不存在 / 没有执行权限）时不抛异常，而是异步
+       * emit `error`。如果先判断 `!child.pid` 就 return，那个事件没有监听者，
+       * 会变成未捕获异常带走宿主进程。桥侧同一处踩过这个坑（见 bridge.mjs 的
+       * `start()`），这里保持同样的顺序。
+       */
+      let brokenSpawnError = null;
       child.on('error', (error) => {
-        this.lastStartError = String(error?.message || error);
+        brokenSpawnError = String(error?.message || error);
+        this.lastStartError = brokenSpawnError;
+        // pid 已经不可信：清掉归属，避免 stop() 按这个 pid 去杀别人
+        if (this.spawnedPid === child.pid) this.spawnedPid = null;
         this.onLog(`console spawn error: ${this.lastStartError}`);
       });
       /*
@@ -471,7 +479,28 @@ export class ConsoleSupervisor {
         }
         this.cache = { at: 0, state: null, error: '' };
       });
-      return { ok: true, pid: child.pid ?? null, reused: false };
+      /*
+       * `child.pid` 为空 = spawn 根本没成功（nodePath 不存在 / EACCES / EMFILE…）。
+       * Node 的 `spawn` 对多数失败**不抛异常**，所以这里必须自己判 —— 原先无论
+       * pid 是什么都返回 `ok:true`，于是 ensure() 会白等 readyTimeoutMs，最后报
+       * 「控制台已拉起但 20 秒内没有就绪」，真正原因（ENOENT/EACCES）被完全掩盖。
+       */
+      if (!child.pid) {
+        this.spawnedPid = null;
+        this.cache = { at: 0, state: null, error: '' };
+        // error 事件可能比这里晚一拍：等一个宏任务，让 ENOENT 之类的原因有机会填进来
+        await new Promise((resolve) => { setTimeout(resolve, 0); });
+        return {
+          ok: false,
+          pid: null,
+          error: brokenSpawnError || 'spawn 没有返回 pid（控制台进程没起来，原因见日志）',
+        };
+      }
+      this.spawnedPid = child.pid;
+      this.lastStartError = null;
+      this.cache = { at: 0, state: null, error: '' };
+      this.onLog(`console spawned pid=${child.pid} ${this.url}`);
+      return { ok: true, pid: child.pid, reused: false };
     } catch (error) {
       this.lastStartError = String(error?.message || error);
       return { ok: false, pid: null, error: this.lastStartError };
