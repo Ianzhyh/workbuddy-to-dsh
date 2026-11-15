@@ -328,3 +328,55 @@ test('mediaFileName：index 只影响显式文件名场景的序号', () => {
     'video-20261026-093015-task-1-3.mp4',
   );
 });
+
+test('落盘：声明大小超限时主动取消响应体（不把连接挂到 GC）', async () => {
+  const dir = tmp();
+  try {
+    let cancelled = false;
+    const response = {
+      ok: true,
+      url: 'https://cdn.example/big.mp4',
+      headers: new Headers({ 'content-length': String(DEFAULT_MAX_DOWNLOAD_BYTES + 1) }),
+      body: { cancel: async () => { cancelled = true; } },
+    };
+    await assert.rejects(
+      () => saveMediaFile(
+        { url: 'https://cdn.example/big.mp4', saveTo: dir },
+        { fetchImpl: async () => response, maxBytes: 1024 },
+      ),
+      /too large/,
+    );
+    assert.equal(cancelled, true, '超限拒绝时必须 cancel 响应体');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('落盘：调用方取消时立刻中止下载', async () => {
+  const dir = tmp();
+  const ac = new AbortController();
+  let seenSignal = null;
+  const fetchImpl = (_url, init) => {
+    seenSignal = init.signal;
+    return new Promise((_, reject) => {
+      init.signal.addEventListener('abort', () => {
+        const error = new Error('caller aborted');
+        error.name = 'AbortError';
+        reject(error);
+      }, { once: true });
+    });
+  };
+  try {
+    const task = saveMediaFile(
+      { url: 'https://cdn.example/slow.mp4', saveTo: dir },
+      { fetchImpl, signal: ac.signal },
+    );
+    await new Promise((r) => setTimeout(r, 20));
+    ac.abort();
+    await assert.rejects(task, /download failed/);
+    assert.equal(seenSignal?.aborted, true, '调用方的 signal 必须传到 fetch');
+    assert.deepEqual(readdirSync(dir), [], '取消后不能留下半截文件');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

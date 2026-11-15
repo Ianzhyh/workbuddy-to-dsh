@@ -198,6 +198,7 @@ function assertDownloadUrl(raw) {
  *   fetchImpl?: Function, now?: () => number, mkdirImpl?: Function,
  *   createWriteStreamImpl?: Function, statImpl?: Function,
  *   maxBytes?: number, timeoutMs?: number, index?: number,
+ *   signal?: AbortSignal,
  * }} [options]
  * @returns {Promise<{ path: string, bytes: number }>}
  */
@@ -230,62 +231,94 @@ export async function saveMediaFile(request, options = {}) {
   }
   if (dir) await mkdirImpl(dir, { recursive: true });
 
-  let response;
-  try {
-    response = await fetchImpl(target, { method: 'GET', signal: AbortSignal.timeout(timeoutMs) });
-  } catch (error) {
-    throw new Error(`download failed: ${error?.message || error}`, { cause: error });
-  }
-  if (!response.ok) {
-    throw new Error(`download failed: HTTP ${response.status}`);
-  }
   /*
-   * fetch 默认跟随重定向。起始 URL 校验过，不代表**最终落点**也安全：
-   * 公网签名地址 302 到 `http://127.0.0.1/…` 时，Node 会照跟。这里再按
-   * `response.url`（最终 URL）复核一次；stub/无 url 时沿用起始地址。
+   * 下载信号：超时 + 调用方取消合并成一个。
+   *
+   * 只挂 `AbortSignal.timeout` 的话，用户在 dsh 里点「停止」之后下载器仍会把
+   * 整个产物读完（最多 256MB / 120 秒）—— 任务已经计过费，继续下载只是白占
+   * 带宽与磁盘。`options.signal` 由工具层透传。
+   *
+   * 清理放在最外层 finally：fetch 拿到响应头不算结束，响应体读完 / 取消 / 出错
+   * 都走同一个出口，监听与定时器不会留在那里。
    */
-  const finalUrl = typeof response.url === 'string' && response.url ? response.url : target;
-  try {
-    assertDownloadUrl(finalUrl);
-  } catch (error) {
-    try { await response.body?.cancel?.(); } catch { /* 已关闭/不可取消 */ }
-    throw error;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(new Error(`download timed out after ${timeoutMs}ms`)), timeoutMs);
+  const callerSignal = options.signal;
+  const onCallerAbort = () => controller.abort(callerSignal?.reason);
+  if (callerSignal) {
+    if (callerSignal.aborted) controller.abort(callerSignal.reason);
+    else callerSignal.addEventListener('abort', onCallerAbort, { once: true });
   }
-  const declared = Number(response.headers?.get?.('content-length')) || 0;
-  if (declared > maxBytes) {
-    throw new Error(`artifact is too large to save (${declared}B > ${maxBytes}B)`);
-  }
+  const releaseSignal = () => {
+    clearTimeout(timer);
+    if (callerSignal) callerSignal.removeEventListener?.('abort', onCallerAbort);
+  };
 
-  // 流式写盘：先写临时文件，成功后再改名，避免半个文件被当成完整产物。
-  const partial = `${file}.part`;
-  let written = 0;
-  const out = openWrite(partial);
   try {
-    const body = response.body;
-    if (!body) {
-      // 某些 fetch 实现没有 body 流：退回整段读取（此时 content-length 已兜过一次）。
-      const buffer = Buffer.from(await response.arrayBuffer());
-      if (buffer.length === 0) throw new Error('artifact is empty');
-      if (buffer.length > maxBytes) throw new Error(`artifact is too large to save (${buffer.length}B > ${maxBytes}B)`);
-      const { writeFile } = await import('node:fs/promises');
-      await writeFile(partial, buffer);
-      written = buffer.length;
-    } else {
-      const source = Readable.fromWeb(body);
-      source.on('data', (chunk) => {
-        written += chunk.length;
-        if (written > maxBytes) source.destroy(new Error(`artifact is too large to save (>${maxBytes}B)`));
-      });
-      await pipeline(source, out);
+    let response;
+    try {
+      response = await fetchImpl(target, { method: 'GET', signal: controller.signal });
+    } catch (error) {
+      throw new Error(`download failed: ${error?.message || error}`, { cause: error });
     }
-    if (written === 0) throw new Error('artifact is empty');
-    const { rename } = await import('node:fs/promises');
-    await rename(partial, file);
-    return { path: file, bytes: written };
-  } catch (error) {
-    // 失败时不留半截文件：`unlink` 失败（文件没建出来）也不该盖住真正的原因。
-    await unlink(partial).catch(() => {});
-    throw error instanceof Error ? error : new Error(String(error));
+    if (!response.ok) {
+      throw new Error(`download failed: HTTP ${response.status}`);
+    }
+    /*
+     * fetch 默认跟随重定向。起始 URL 校验过，不代表**最终落点**也安全：
+     * 公网签名地址 302 到 `http://127.0.0.1/…` 时，Node 会照跟。这里再按
+     * `response.url`（最终 URL）复核一次；stub/无 url 时沿用起始地址。
+     */
+    const finalUrl = typeof response.url === 'string' && response.url ? response.url : target;
+    try {
+      assertDownloadUrl(finalUrl);
+    } catch (error) {
+      try { await response.body?.cancel?.(); } catch { /* 已关闭/不可取消 */ }
+      throw error;
+    }
+    const declared = Number(response.headers?.get?.('content-length')) || 0;
+    if (declared > maxBytes) {
+      /*
+       * 声明就超限：还没开始写，但响应体已经打开。必须主动 cancel —— 否则这条
+       * 连接会挂到 GC（上面的「最终 URL 不安全」分支早就这么做，这里原先漏了）。
+       */
+      try { await response.body?.cancel?.(); } catch { /* 已关闭/不可取消 */ }
+      throw new Error(`artifact is too large to save (${declared}B > ${maxBytes}B)`);
+    }
+
+    // 流式写盘：先写临时文件，成功后再改名，避免半个文件被当成完整产物。
+    const partial = `${file}.part`;
+    let written = 0;
+    const out = openWrite(partial);
+    try {
+      const body = response.body;
+      if (!body) {
+        // 某些 fetch 实现没有 body 流：退回整段读取（此时 content-length 已兜过一次）。
+        const buffer = Buffer.from(await response.arrayBuffer());
+        if (buffer.length === 0) throw new Error('artifact is empty');
+        if (buffer.length > maxBytes) throw new Error(`artifact is too large to save (${buffer.length}B > ${maxBytes}B)`);
+        const { writeFile } = await import('node:fs/promises');
+        await writeFile(partial, buffer);
+        written = buffer.length;
+      } else {
+        const source = Readable.fromWeb(body);
+        source.on('data', (chunk) => {
+          written += chunk.length;
+          if (written > maxBytes) source.destroy(new Error(`artifact is too large to save (>${maxBytes}B)`));
+        });
+        await pipeline(source, out);
+      }
+      if (written === 0) throw new Error('artifact is empty');
+      const { rename } = await import('node:fs/promises');
+      await rename(partial, file);
+      return { path: file, bytes: written };
+    } catch (error) {
+      // 失败时不留半截文件：`unlink` 失败（文件没建出来）也不该盖住真正的原因。
+      await unlink(partial).catch(() => {});
+      throw error instanceof Error ? error : new Error(String(error));
+    }
+  } finally {
+    releaseSignal();
   }
 }
 

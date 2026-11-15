@@ -106,9 +106,10 @@ function imageInputList(value, field) {
  * 而是把原因写进文案再退回 URL：产物已经生成、钱已经花了，绝不能因为
  * 「存不下来」就让这次查询看起来失败。
  *
- * @param {{ urls: string[], kind: 'video'|'image', id: string, saveTo?: unknown, mimeType?: string }} input
+ * @param {{ urls: string[], kind: 'video'|'image', id: string, saveTo?: unknown, mimeType?: string,
+ *   signal?: AbortSignal }} input
  */
-async function describeArtifacts({ urls, kind, id, saveTo, mimeType }) {
+async function describeArtifacts({ urls, kind, id, saveTo, mimeType, signal }) {
   const noun = kind === 'image' ? '图片' : '视频';
   const list = urls.map((url) => `- ${url}`).join('\n');
   const wantSave = typeof saveTo === 'string' && saveTo.trim();
@@ -127,6 +128,14 @@ async function describeArtifacts({ urls, kind, id, saveTo, mimeType }) {
   // 序号跟着**成功保存的个数**走：显式文件名下若第一个产物下载失败，
   // 第二个仍用用户给的原名，而不是莫名变成 -2。
   for (const url of urls.slice(0, 4)) {
+    /*
+     * 用户已经取消（dsh 里点「停止」）：产物已经生成、钱已经花了，但没必要继续
+     * 占用带宽把文件拖下来。剩下的如实列进回执，让用户知道还能手动取。
+     */
+    if (signal?.aborted) {
+      failed.push({ url, reason: '已取消，未继续下载' });
+      continue;
+    }
     const remaining = saveBudgetMs - (Date.now() - saveStartedAt);
     if (remaining <= 0) {
       failed.push({ url, reason: '本次落盘的 120 秒预算已用完（产物较多/较大），可减少一次保存的产物再试' });
@@ -135,7 +144,7 @@ async function describeArtifacts({ urls, kind, id, saveTo, mimeType }) {
     try {
       const result = await saveMediaFile(
         { url, saveTo, id, kind, mimeType, index: saved.length },
-        { timeoutMs: Math.min(120_000, remaining) },
+        { timeoutMs: Math.min(120_000, remaining), signal },
       );
       saved.push(result);
     } catch (error) {
@@ -690,6 +699,7 @@ export function createTools(deps) {
         if (urls.length) {
           lines.push(await describeArtifacts({
             urls, kind: 'video', id: video.id, saveTo: args?.save_to, mimeType: mediaMimeType(video.result_files),
+            signal: exec?.signal,
           }));
         } else if (video.sync) {
           lines.push('上游同步标记完成，但没有返回可下载的 https 产物；这个任务按 id 查不到更多信息。'
@@ -785,6 +795,7 @@ export function createTools(deps) {
         if (urls.length) {
           lines.push(await describeArtifacts({
             urls, kind: 'video', id, saveTo: args?.save_to, mimeType: mediaMimeType(video.result_files),
+            signal: exec?.signal,
           }));
         } else if (video.sync) {
           lines.push('上游同步标记完成，但没有返回 https 产物。同步任务按 id 查不到更多信息；'
@@ -899,6 +910,7 @@ export function createTools(deps) {
         if (urls.length) {
           lines.push(await describeArtifacts({
             urls, kind: 'image', id: image.id, saveTo: args?.save_to, mimeType: mediaMimeType(image.result_files),
+            signal: exec?.signal,
           }));
         } else if (image.sync) {
           lines.push('上游同步标记完成，但没有返回可下载的 https 产物；这个任务按 id 查不到更多信息。'
@@ -995,6 +1007,7 @@ export function createTools(deps) {
         if (urls.length) {
           lines.push(await describeArtifacts({
             urls, kind: 'image', id, saveTo: args?.save_to, mimeType: mediaMimeType(image.result_files),
+            signal: exec?.signal,
           }));
         } else if (image.sync) {
           lines.push('上游同步标记完成，但没有返回 https 产物。同步任务按 id 查不到更多信息；'
