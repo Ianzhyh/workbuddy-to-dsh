@@ -192,6 +192,18 @@ const upstream = createServer((req, res) => {
       return;
     }
 
+    if (scenario.kind === 'longToolName') {
+      // 上游只接受 64 字符内的工具名；桥把原名缩短后转发，响应再还原。
+      const upstreamName = lastUpstreamBody?.tools?.[0]?.function?.name;
+      res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+      res.write(sse(dTool(0, { name: upstreamName }, 'call_long')));
+      res.write(sse(dTool(0, { arguments: '{"ok":true}' })));
+      res.write(sse(dStop('tool_calls')));
+      res.write('data: [DONE]\n\n');
+      res.end();
+      return;
+    }
+
     // 默认：正常一句话
     res.writeHead(200, { 'Content-Type': 'text/event-stream' });
     res.write(sse(dText('hi')));
@@ -343,6 +355,31 @@ test('并行工具调用交错下发：块不得被提前关闭（delta 不能�
   const md = events.find((e) => e.event === 'message_delta');
   assert.equal(md.data.delta.stop_reason, 'tool_use');
   assert.equal(events[events.length - 1].event, 'message_stop', '正常流必须以 message_stop 收尾');
+});
+
+test('超过 64 字符的 MCP 工具名：上游收到短名，客户端收到原名', async () => {
+  await waitReady();
+  scenario = { kind: 'longToolName' };
+  const longName = 'mcp__agentflow_session__agentflow__project_business_domain_history';
+  assert.ok(longName.length > 64);
+  const res = await post({
+    model: 'm',
+    max_tokens: 64,
+    stream: true,
+    messages: [{ role: 'user', content: 'go' }],
+    tools: [{ name: longName, description: 'history', input_schema: { type: 'object', properties: {} } }],
+  });
+  assert.equal(res.status, 200, `桥不应再本地拒绝长工具名：${await res.clone().text()}`);
+  const events = parseSse(await res.text());
+  assertBlockProtocol(events);
+  const upstreamName = lastUpstreamBody?.tools?.[0]?.function?.name;
+  assert.ok(upstreamName, '上游请求里应有 tools[].function.name');
+  assert.ok(upstreamName.length <= 64, `上游工具名必须 ≤64，实际 ${upstreamName} (${upstreamName.length})`);
+
+  const blocks = rebuildToolBlocks(events);
+  assert.equal(blocks.length, 1);
+  assert.equal(blocks[0].name, longName, 'Anthropic 客户端必须看到原始工具名，而不是桥内部短名');
+  assert.deepEqual(JSON.parse(blocks[0].args), { ok: true });
 });
 
 test('两个工具都无 arguments：两个块都必须发 start（不得被静默吞掉一个）', async () => {
