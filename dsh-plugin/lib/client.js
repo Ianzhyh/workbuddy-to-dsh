@@ -1387,8 +1387,6 @@ body.dark .wb-root,
         'After connecting, search uses WorkBuddy quota instead of the DeepSeek wallet; use the button below.',
       '重新接入 WorkBuddy 搜索': 'Reconnect WorkBuddy web search',
       '接入搜索': 'Connect search',
-      '网页搜索还没接入 WorkBuddy：现在仍走 DeepSeek，会消耗 DeepSeek 钱包':
-        'Web search is not connected to WorkBuddy yet: it still uses DeepSeek and consumes the DeepSeek wallet',
       'dsh 没有加载网页搜索 provider，无法一键接入':
         'dsh did not load the web search provider; one-click setup is unavailable',
       '一键接入 WorkBuddy 搜索': 'One-click WorkBuddy web search',
