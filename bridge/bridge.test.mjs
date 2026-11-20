@@ -4198,6 +4198,37 @@ test('桥：Anthropic 流式工具名分片必须拼完整（不能只留首片�
   }
 });
 
+test('桥：OpenAI 路径的超长 MCP 工具名必须缩短后转发（LiteLLM 会走这条）', { timeout: 30_000 }, async () => {
+  const longName = 'mcp__agentflow_session__agentflow__project_business_domain_history';
+  assert.ok(longName.length > 64);
+  const stub = await startStubUpstream(['stub-model']);
+  const bridge = await startBridge({ CODEBUDDY_ENDPOINT: stub.base }, { auth: READABLE_FAKE_AUTH });
+  try {
+    const res = await fetch(`${bridge.baseUrl}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { ...auth, 'content-type': 'application/json' },
+      body: JSON.stringify({
+        model: 'stub-model',
+        messages: [{ role: 'user', content: 'hi' }],
+        tools: [{
+          type: 'function',
+          function: { name: longName, description: 'history', parameters: { type: 'object', properties: {} } },
+        }],
+      }),
+    });
+    assert.equal(res.status, 200, `桥不应再本地拒绝长工具名：${await res.clone().text()}`);
+    assert.ok(stub.seen.length >= 1, '上游没收到请求');
+    const upstreamBody = JSON.parse(stub.seen[0].body);
+    const upstreamName = upstreamBody.tools?.[0]?.function?.name;
+    assert.ok(upstreamName && upstreamName.length <= 64,
+      `上游工具名必须 ≤64，实际 ${upstreamName} (${upstreamName?.length})`);
+  } finally {
+    await bridge.stop();
+    try { await stub.close(); } catch { /* 忽略 */ }
+    rmSync(bridge.dir, { recursive: true, force: true });
+  }
+});
+
 /**
  * Anthropic `tool_result` 里的图片**不能静默丢掉**。
  *

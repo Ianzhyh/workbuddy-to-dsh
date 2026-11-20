@@ -4305,6 +4305,124 @@ function toolNameError(tools) {
 }
 
 /**
+ * Claude Code 的 MCP 工具名形如 `mcp__server__long_tool_name`，可能超过 OpenAI
+ * 工具名 64 字符上限。上游会确定性拒绝这类名字；本地再把合法名字改短没有任何
+ * 代价。这里用稳定 hash 保留尾部语义，并把别名→原名记在 map 里，响应翻译时
+ * 再还原，客户端仍然只看到自己的原始工具名。
+ */
+const BRIDGED_TOOL_PREFIX = 'wb_';
+function bridgedToolName(name) {
+  const orig = String(name || '');
+  if (TOOL_NAME_RE.test(orig)) return orig;
+  const safe = /^[A-Za-z0-9_-]+$/.test(orig) ? orig.slice(0, 48) : null;
+  // 只救“字符集合法但超长”的名字；含非法字符的名字仍交给 toolNameError 本地拒绝，
+  // 不把调用方的错误输入静默改写（工具名是 API 合约，不是自由文本）。
+  if (!safe) return orig;
+  return BRIDGED_TOOL_PREFIX + safe + '_' + createHash('sha256').update(orig).digest('hex').slice(0, 12);
+}
+
+function aliasBridgedToolName(name, map, seen = null) {
+  const orig = String(name || '');
+  const alias = bridgedToolName(orig);
+  if (alias !== orig && map) map.set(alias, orig);
+  let unique = alias;
+  let n = 2;
+  if (seen) {
+    while (seen.has(unique)) {
+      const suffix = `_${n++}`;
+      unique = alias.slice(0, 64 - suffix.length) + suffix;
+    }
+    seen.add(unique);
+    if (unique !== alias && map && map.has(alias)) map.set(unique, map.get(alias));
+  }
+  return unique;
+}
+
+function applyBridgedToolNames(tools) {
+  const map = new Map();
+  if (!Array.isArray(tools)) return { tools, map };
+  const seen = new Set();
+  const out = tools.map((tool) => {
+    if (!tool || typeof tool !== 'object') return tool;
+    const name = tool?.function?.name ?? tool?.name;
+    if (typeof name !== 'string' || !name) return tool;
+    const unique = aliasBridgedToolName(name, map, seen);
+    if (tool?.function?.name) return { ...tool, function: { ...tool.function, name: unique } };
+    return { ...tool, name: unique };
+  });
+  return { tools: out, map };
+}
+
+function restoreBridgedToolName(map, name) {
+  return map?.get(String(name || '')) || name;
+}
+
+/** OpenAI 请求入口：把 tools 与历史 tool_calls 里的长名字统一改成上游可接受的别名。 */
+function applyBridgedToolNamesToOpenAIPayload(payload) {
+  const bridged = applyBridgedToolNames(payload?.tools);
+  const map = bridged.map;
+  const next = { ...payload, tools: bridged.tools };
+  if (Array.isArray(payload?.messages)) {
+    next.messages = payload.messages.map((message) => {
+      if (!Array.isArray(message?.tool_calls)) return message;
+      return {
+        ...message,
+        tool_calls: message.tool_calls.map((call) => {
+          const name = call?.function?.name;
+          if (typeof name !== 'string' || !name) return call;
+          const alias = aliasBridgedToolName(name, map);
+          return alias === name ? call : { ...call, function: { ...call.function, name: alias } };
+        }),
+      };
+    });
+  }
+  return { payload: next, map };
+}
+
+/** OpenAI 流式响应：把上游回显的短工具名还原成客户端原始名字。 */
+function restoreBridgedToolNamesInSseBlock(block, map) {
+  if (!map || !map.size) return block;
+  const lines = block.split('\n');
+  const dataIdx = lines.findIndex((line) => line.startsWith('data:'));
+  if (dataIdx < 0) return block;
+  const raw = lines[dataIdx].slice(5).trim();
+  if (!raw || raw === '[DONE]') return block;
+  let j;
+  try { j = JSON.parse(raw); } catch { return block; }
+  let changed = false;
+  for (const choice of Array.isArray(j?.choices) ? j.choices : []) {
+    const calls = choice?.delta?.tool_calls || choice?.message?.tool_calls;
+    if (!Array.isArray(calls)) continue;
+    for (const call of calls) {
+      const name = call?.function?.name;
+      if (typeof name !== 'string' || !map.has(name)) continue;
+      call.function = { ...call.function, name: map.get(name) };
+      changed = true;
+    }
+  }
+  if (!changed) return block;
+  lines[dataIdx] = `data: ${JSON.stringify(j)}`;
+  return lines.join('\n');
+}
+
+/** OpenAI 非流式响应：同样还原工具名。 */
+function restoreBridgedToolNamesInResponse(response, map) {
+  if (!map || !map.size || !response || typeof response !== 'object') return response;
+  let changed = false;
+  for (const choice of Array.isArray(response.choices) ? response.choices : []) {
+    const calls = choice?.message?.tool_calls;
+    if (!Array.isArray(calls)) continue;
+    for (const call of calls) {
+      const name = call?.function?.name;
+      if (typeof name !== 'string' || !map.has(name)) continue;
+      call.function = { ...call.function, name: map.get(name) };
+      changed = true;
+    }
+  }
+  return changed ? { ...response } : response;
+}
+
+/**
  * 模型是否支持图片输入。`true/false` 来自目录或精选表；未知模型返回 null。
  *
  * 不用“默认支持”猜：上游目录对没有视觉能力的模型通常省略 `images`，
@@ -7889,7 +8007,7 @@ function anthropicImageToOpenAI(block) {
  * 3. 顺序不能乱：带 tool_calls 的 assistant 消息必须排在对应 `role:"tool"`
  *    消息之前，否则上游会以「tool 消息没有前置调用」拒绝。
  */
-function anthropicToOpenAIMessages(body) {
+function anthropicToOpenAIMessages(body, bridgedToolNames = null) {
   const out = [];
   const sys = anthropicSystemText(body.system);
   out.push({ role: 'system', content: sys || 'You are a helpful assistant.' });
@@ -7920,7 +8038,7 @@ function anthropicToOpenAIMessages(body) {
         toolCalls.push({
           id: block.id || `call_${trace().slice(0, 20)}`,
           type: 'function',
-          function: { name: block.name || '', arguments: JSON.stringify(block.input ?? {}) },
+          function: { name: aliasBridgedToolName(block.name || '', bridgedToolNames), arguments: JSON.stringify(block.input ?? {}) },
         });
       } else if (block.type === 'tool_result' || block.type === 'mcp_tool_result') {
         /*
@@ -7950,7 +8068,7 @@ function anthropicToOpenAIMessages(body) {
         toolCalls.push({
           id: block.id || `call_${trace().slice(0, 20)}`,
           type: 'function',
-          function: { name: block.name || '', arguments: JSON.stringify(block.input ?? {}) },
+          function: { name: aliasBridgedToolName(block.name || '', bridgedToolNames), arguments: JSON.stringify(block.input ?? {}) },
         });
       } else if (block.type === 'server_tool_use' || block.type === 'web_search_tool_result'
         || block.type === 'code_execution_tool_result') {
@@ -8016,7 +8134,7 @@ function anthropicToolChoiceToOpenAI(tc) {
 }
 
 /** 聚合后的 OpenAI 响应 → Anthropic message 对象（非流式）。 */
-function openAIToAnthropicMessage(agg, model, estInputTokens = 0) {
+function openAIToAnthropicMessage(agg, model, estInputTokens = 0, bridgedToolNames = null) {
   const choice = (agg.choices || [])[0] || {};
   const msg = choice.message || {};
   const content = [];
@@ -8029,7 +8147,7 @@ function openAIToAnthropicMessage(agg, model, estInputTokens = 0) {
     content.push({
       type: 'tool_use',
       id: tc.id || `toolu_${trace().slice(0, 24)}`,
-      name: tc.function?.name || '',
+      name: restoreBridgedToolName(bridgedToolNames, tc.function?.name || ''),
       input: safeJsonParse(tc.function?.arguments),
     });
   }
@@ -8071,7 +8189,7 @@ function openAIToAnthropicMessage(agg, model, estInputTokens = 0) {
  *
  * 返回 `{ finishReason, usage, streamError }` 供调用方记账。
  */
-async function relayAnthropicStream(up, res, model, estInputTokens) {
+async function relayAnthropicStream(up, res, model, estInputTokens, bridgedToolNames = null) {
   /*
    * 背压状态：`res.write()` 返回 false 表示已超过高水位线。
    *
@@ -8127,7 +8245,7 @@ async function relayAnthropicStream(up, res, model, estInputTokens) {
     write('content_block_start', {
       type: 'content_block_start',
       index: slot.blockIndex,
-      content_block: { type: 'tool_use', id: slot.id, name: slot.name, input: {} },
+      content_block: { type: 'tool_use', id: slot.id, name: restoreBridgedToolName(bridgedToolNames, slot.name), input: {} },
     });
   };
 
@@ -9195,7 +9313,7 @@ function responsesUsage(u, fallback = {}) {
 }
 
 /** 聚合后的 assistant 消息 → Responses 的 `output` 数组。 */
-function openAIToResponsesOutput(message, routes = null) {
+function openAIToResponsesOutput(message, routes = null, bridgedToolNames = null) {
   const customTools = routes?.custom ?? new Set();
   const items = [];
   const text = typeof message?.content === 'string' ? message.content : '';
@@ -9210,7 +9328,7 @@ function openAIToResponsesOutput(message, routes = null) {
   }
   for (const tc of message?.tool_calls || []) {
     if (!tc) continue;
-    const name = tc.function?.name || '';
+    const name = restoreBridgedToolName(bridgedToolNames, tc.function?.name || '');
     const callId = tc.id || `call_${trace().slice(0, 20)}`;
     const args = typeof tc.function?.arguments === 'string'
       ? tc.function.arguments
@@ -9286,10 +9404,10 @@ const responsesTextOf = (output) => output
   .join('');
 
 /** 聚合结果 → 完整的 Responses 对象（非流式）。 */
-function openAIToResponsesResponse(agg, model, routes = null, estInputTokens = 0) {
+function openAIToResponsesResponse(agg, model, routes = null, estInputTokens = 0, bridgedToolNames = null) {
   const choice = (agg.choices || [])[0] || {};
   const message = choice.message || {};
-  const output = openAIToResponsesOutput(message, routes);
+  const output = openAIToResponsesOutput(message, routes, bridgedToolNames);
   const truncated = choice.finish_reason === 'length';
   const estOutput = estimateStructuredTokens(typeof message.content === 'string' ? message.content : '')
     + (message.tool_calls || []).reduce(
@@ -9349,6 +9467,7 @@ function openAIToResponsesResponse(agg, model, routes = null, estInputTokens = 0
  */
 async function relayResponsesStream(up, res, model, routes = null, options = {}) {
   const customTools = routes?.custom ?? new Set();
+  const restoreToolName = (name) => restoreBridgedToolName(options.bridgedToolNames, name);
   let backpressured = false;
   const send = (type, obj) => {
     backpressured = !res.write(`event: ${type}\ndata: ${JSON.stringify({ type, ...obj })}\n\n`);
@@ -9549,14 +9668,15 @@ async function relayResponsesStream(up, res, model, routes = null, options = {})
      * 触发条件：模型这一轮调了 `tool_search`，而当前请求**没有**声明它
      * （Codex 在轮次之间丢掉/改名该工具、或历史回放）。所以判据要与 closeTool 同款。
      */
-    if (slot.name === TOOL_SEARCH_NAME && routes?.toolSearch) return;
-    const isCustom = customTools.has(slot.name);
+    const wireName = restoreToolName(slot.name);
+    if (wireName === TOOL_SEARCH_NAME && routes?.toolSearch) return;
+    const isCustom = customTools.has(wireName);
     /*
      * 分组工具（MCP）必须还原成 Codex 认的形状：`name` 用**短名**、命名空间放
      * 独立的 `namespace` 字段（实测 135/135 条 MCP 调用都是这个形状）。上游侧
      * 用的是拍平名 `mcp__node_repl__js`。
      */
-    const { name: emitName, namespace } = splitWireName(routes, slot.name);
+    const { name: emitName, namespace } = splitWireName(routes, wireName);
     send('response.output_item.added', {
       output_index: slot.outputIndex,
       item: isCustom
@@ -9589,7 +9709,8 @@ async function relayResponsesStream(up, res, model, routes = null, options = {})
      * 检索这一步就永远发生不了，MCP 工具也就永远发现不了 —— 而 `mcp__node_repl.js`
      * （Codex 自带 computer-use 的唯一入口）正是只能靠检索拿到。
      */
-    if (slot.name === TOOL_SEARCH_NAME && routes?.toolSearch) {
+    const wireName = restoreToolName(slot.name);
+    if (wireName === TOOL_SEARCH_NAME && routes?.toolSearch) {
       const item = {
         id: slot.id,
         type: 'tool_search_call',
@@ -9602,7 +9723,7 @@ async function relayResponsesStream(up, res, model, routes = null, options = {})
       output[slot.outputIndex] = item;
       return;
     }
-    if (customTools.has(slot.name)) {
+    if (customTools.has(wireName)) {
       /*
        * freeform：上游给的是 JSON 参数，客户端要裸正文。`input` 在 added 里
        * 是空串（真实 API 同款），正文靠 delta/done 送到 —— 一次给全即可，
@@ -9620,14 +9741,14 @@ async function relayResponsesStream(up, res, model, routes = null, options = {})
         type: 'custom_tool_call',
         status: 'completed',
         call_id: slot.callId,
-        name: splitWireName(routes, slot.name).name,
+        name: splitWireName(routes, wireName).name,
         input,
       };
       send('response.output_item.done', { output_index: slot.outputIndex, item });
       output[slot.outputIndex] = item;
       return;
     }
-    const { name: emitName, namespace } = splitWireName(routes, slot.name);
+    const { name: emitName, namespace } = splitWireName(routes, wireName);
     send('response.function_call_arguments.done', {
       item_id: slot.id, output_index: slot.outputIndex, arguments: slot.arguments,
     });
@@ -13754,7 +13875,11 @@ async function handleRequest(req, res) {
       // 模型预校验：桥手里就有目录，拼错的 id 不该花一次上游往返（详见
       // preflightModelError 的注释）。放在 maybeAutoCheckin 之前是刻意的 ——
       // 一次注定失败的调用不该顺带触发签到。
-      // 工具名是上游确定性拒绝的字段：本地先拦，省一次上游往返并指出具体工具。
+      // 工具名是上游确定性拒绝的字段：先把超长/非法名字变成可逆短名，
+      // 再校验剩下的结构性问题；响应侧会把名字还原给客户端。
+      const bridgedRequest = applyBridgedToolNamesToOpenAIPayload(payload);
+      payload = bridgedRequest.payload;
+      const openAIBridgedToolNames = bridgedRequest.map;
       const toolError = toolNameError(payload.tools);
       if (toolError) {
         const message = `workbuddy-bridge: ${toolError}`;
@@ -14062,6 +14187,7 @@ async function handleRequest(req, res) {
             return lines.join('\n');
           };
           const handleBlock = async (block) => {
+            block = restoreBridgedToolNamesInSseBlock(block, openAIBridgedToolNames);
             inspectBlock(block);
             if (!normalizeSse) {
               await writeOut(`${block}\n\n`);
@@ -14229,7 +14355,7 @@ async function handleRequest(req, res) {
           ...usageOf(aggregated.usage),
           ...fallbackInfo,
         });
-        return json(res, 200, aggregated);
+        return json(res, 200, restoreBridgedToolNamesInResponse(aggregated, openAIBridgedToolNames));
       } catch (e) {
         if (handleUpstreamTimeout(res, 'openai', e)) {
           recordRequest({
@@ -14427,8 +14553,10 @@ async function handleRequest(req, res) {
         return json(res, 400, { type: 'error', error: { type: 'invalid_request_error', message } });
       }
       const model = resolveAnthropicModel(body.model);
-      const messages = anthropicToOpenAIMessages(body);
-      const tools = anthropicToolsToOpenAIMessages(body.tools);
+      const bridgedTools = applyBridgedToolNames(anthropicToolsToOpenAIMessages(body.tools));
+      const tools = bridgedTools.tools;
+      const bridgedToolNames = bridgedTools.map;
+      const messages = anthropicToOpenAIMessages(body, bridgedToolNames);
       const toolChoice = anthropicToolChoiceToOpenAI(body.tool_choice);
 
       const oai = { model, messages, stream: true, stream_options: { include_usage: true } };
@@ -14554,7 +14682,7 @@ async function handleRequest(req, res) {
 
         if (wantStream) {
           res.__overheadMs = Math.max(0, upstreamStartedAt - startedAt);
-          const r = await relayAnthropicStream(up, res, model, estimateRequestTokens(body));
+          const r = await relayAnthropicStream(up, res, model, estimateRequestTokens(body), bridgedToolNames);
           if (r.streamError && !ac.signal.aborted) {
             recordRequest({ model, stream: true, ms: Date.now() - startedAt, ok: false, status: 0, code: null, error: r.streamError.message, ...fallbackInfo });
           } else {
@@ -14595,7 +14723,7 @@ async function handleRequest(req, res) {
           ...usageOf(aggregated.usage),
           ...fallbackInfo,
         });
-        return json(res, 200, openAIToAnthropicMessage(aggregated, model, estimateRequestTokens(body)));
+        return json(res, 200, openAIToAnthropicMessage(aggregated, model, estimateRequestTokens(body), bridgedToolNames));
       } catch (e) {
         if (handleUpstreamTimeout(res, 'anthropic', e)) {
           recordRequest({
@@ -14685,7 +14813,7 @@ async function handleRequest(req, res) {
         });
       }
       const model = resolveResponsesModel(body.model);
-      const messages = responsesToOpenAIMessages(body);
+      let messages = responsesToOpenAIMessages(body);
       /*
        * 工具可能出现在三个地方：
        *   1. 顶层 `tools`（经典 function tools）；
@@ -14700,6 +14828,23 @@ async function handleRequest(req, res) {
         responsesToolsToOpenAI(body.tools) || responsesToolsFromAdditional(body),
         routes.deferred,
       );
+      // LiteLLM 把 Anthropic /v1/messages 翻成 Responses /v1/responses 时会把
+      // MCP 长工具名放在这里；与另外两条协议路径一样，缩短后转发、响应再还原。
+      const bridgedTools = applyBridgedToolNames(tools);
+      const responsesToolNames = bridgedTools.map;
+      const upstreamTools = bridgedTools.tools;
+      messages = messages.map((message) => {
+        if (!Array.isArray(message?.tool_calls)) return message;
+        return {
+          ...message,
+          tool_calls: message.tool_calls.map((call) => {
+            const name = call?.function?.name;
+            if (typeof name !== 'string' || !name) return call;
+            const alias = aliasBridgedToolName(name, responsesToolNames);
+            return alias === name ? call : { ...call, function: { ...call.function, name: alias } };
+          }),
+        };
+      });
       const toolChoice = responsesToolChoiceToOpenAI(body.tool_choice);
       const modelError = preflightModelError(model);
       if (modelError) {
@@ -14721,14 +14866,14 @@ async function handleRequest(req, res) {
       const customTools = routes.custom;
 
       const oai = { model, messages, stream: true, stream_options: { include_usage: true } };
-      if (tools) oai.tools = tools;
+      if (upstreamTools) oai.tools = upstreamTools;
       if (toolChoice) oai.tool_choice = toolChoice;
       // Responses 的 `max_output_tokens` 对应 chat 的 `max_tokens`
       if (typeof body.max_output_tokens === 'number') oai.max_tokens = body.max_output_tokens;
       if (typeof body.temperature === 'number') oai.temperature = body.temperature;
       if (typeof body.top_p === 'number') oai.top_p = body.top_p;
 
-      const toolError = toolNameError(tools);
+      const toolError = toolNameError(upstreamTools);
       if (toolError) {
         const message = `workbuddy-bridge: ${toolError}`;
         log('rejected invalid tool name (responses)', toolError);
@@ -14888,6 +15033,7 @@ async function handleRequest(req, res) {
           }
           const r = await relayResponsesStream(up, res, model, routes, {
             forwardReasoning: wantsReasoning,
+            bridgedToolNames: responsesToolNames,
             // 必须用 Responses 形状的估算：Anthropic 那个只读 system/messages，
             // 在 Responses 请求上恒得 1（详见 estimateResponsesTokens）
             estInputTokens: estimateResponsesTokens(body),
@@ -14931,7 +15077,7 @@ async function handleRequest(req, res) {
           ...usageOf(aggregated.usage),
           ...fallbackInfo,
         });
-        return json(res, 200, openAIToResponsesResponse(aggregated, model, routes, estimateResponsesTokens(body)));
+        return json(res, 200, openAIToResponsesResponse(aggregated, model, routes, estimateResponsesTokens(body), responsesToolNames));
       } catch (e) {
         if (handleUpstreamTimeout(res, 'responses', e)) {
           recordRequest({
