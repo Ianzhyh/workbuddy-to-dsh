@@ -348,9 +348,19 @@ if (!existsSync(profilesDir)) {
     const expected = `http://127.0.0.1:${bridgePort}/v1`;
     const states = installedProfiles.map(({ name, dir }) => {
       const found = findSearchConfig(dir);
-      if (!found) return { name, state: 'missing', detail: '未配置（dsh 默认走 DeepSeek）' };
+      /*
+       * 三种状态必须分开（issue #33）：**没配**（走 dsh 默认）和**主动选了
+       * 别的通道**都不是故障，只有「本该指向桥却没指过来」才值得提醒。
+       * 旧写法把它们全归成 `other` + warn，于是用户特意切到 DeepSeek 官方之后，
+       * 每次自检都在催他"去点一键接入"—— 那是在让工具反驳用户的选择。
+       */
+      if (!found) return { name, state: 'official', detail: '未配置（走 dsh 自带的 DeepSeek 官方搜索）' };
       if (found.baseURL === expected && found.apiKeyEnv === 'WORKBUDDY_SEARCH_BRIDGE_KEY') {
         return { name, state: 'ok', detail: `指向本地桥（${found.apiKeyEnv}）` };
+      }
+      // 地址为空 + 没有插件专用凭据引用 = 官方通道，不是故障
+      if (!found.baseURL && (!found.apiKeyEnv || found.apiKeyEnv === 'DEEPSEEK_API_KEY')) {
+        return { name, state: 'official', detail: '走 dsh 自带的 DeepSeek 官方搜索（用户选择）' };
       }
       return {
         name,
@@ -359,9 +369,22 @@ if (!existsSync(profilesDir)) {
       };
     });
     const okCount = states.filter((s) => s.state === 'ok').length;
-    record(okCount ? 'ok' : 'warn', '网页搜索（配置层）',
+    const officialCount = states.filter((s) => s.state === 'official').length;
+    const oddCount = states.length - okCount - officialCount;
+    /*
+     * 级别只看"有没有说不清的形态"：
+     *   · 全都指向桥 → ok；
+     *   · 其余全是官方通道 → info（这是默认形态，连 warn 都不该有）；
+     *   · 有第三方/读不懂的端点 → warn，并把原文摆出来让人自己判断。
+     */
+    const level = okCount === states.length ? 'ok' : (oddCount === 0 ? 'info' : 'warn');
+    record(level, '网页搜索（配置层）',
       states.map((s) => `${s.name}：${s.detail}`).join('；'),
-      okCount ? null : '在 dsh 的 WorkBuddy → 概览 → 网页搜索点「一键接入」；真实搜索用「重新检测」');
+      oddCount === 0
+        ? (okCount === states.length
+          ? null
+          : '当前走 DeepSeek 官方搜索；要用 WorkBuddy 额度就在概览里点「切到 WorkBuddy 搜索」')
+        : '在 dsh 的 WorkBuddy → 概览 → 网页搜索里选择通道；真实搜索用「重新检测」');
   }
 }
 
