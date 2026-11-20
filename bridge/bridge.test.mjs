@@ -4038,6 +4038,67 @@ test('桥：客户端凭据分层 —— key 鉴权、账本归因、独立限�
     const localSource = await mgmt('/v1/auth/source', 'GET', TOKEN);
     assert.equal(localSource.status, 200, 'LOCAL_TOKEN 仍必须能访问管理面');
     await localSource.text();
+
+    /*
+     * ⑥ `/health` 的账号明细必须按调用方分层（issue #32 后续发现的泄露）。
+     *
+     * `/health.autoCheckin.accounts[]` 里有本机每个已登录账号的 uid 与昵称 ——
+     * 那是账号枚举能力，和 `/v1/checkin/accounts` 同一级别，而后者已经明确挡在
+     * 管理面闸门后。可 `/health` 是**所有**调用方都能打的探活端点，于是只拿到
+     * 一把 chat-only key 的人也能把本机账号列出来。
+     *
+     * 钉住：local 拿完整明细，client key 只拿"跑没跑 / 结果"这两项非身份字段。
+     */
+    const health = async (token) => (await fetch(`${bridge.baseUrl}/health`, {
+      headers: { authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(8000),
+    })).json();
+    const healthLocal = await health(TOKEN);
+    const healthClient = await health('key-bbb');
+
+    /*
+     * `credential` / `auth` 里的账号标识也属于管理面信息：
+     *   · `desktopUserId` / `plugin.uids[]` / `plugin.activeUid` 能一次列出本机所有账号；
+     *   · `auth.userId` 是当前号的 sub。
+     * local 视图必须保留（面板要靠它显示"桌面 vs 桥"是否同一个钱包），
+     * client key 一律看不到。
+     */
+    const asText = JSON.stringify(healthClient || {});
+    for (const field of ['"uids"', '"activeUid"', '"userId"', '"desktopUserId"', '"storeDir"']) {
+      assert.equal(asText.includes(field), false,
+        `client key 的 /health 里不该出现 ${field}：${asText.slice(0, 400)}`);
+    }
+    /*
+     * 本机绝对路径同样不该出现：`C:\Users\<系统用户名>\…` 本身就是身份信息，
+     * 而 client key 只需要 `storeMode`（dpapi / file / memory）。
+     */
+    assert.doesNotMatch(asText, /[A-Za-z]:\\\\Users|[A-Za-z]:\\Users|\/Users\/|\/home\//,
+      `client key 的 /health 里不该出现本机路径：${asText.slice(0, 400)}`);
+    // 但"有没有可用凭据 / 是不是能登录"这类判断依据必须留着，否则客户端没法给对的引导
+    assert.equal(typeof healthClient?.credential?.configured, 'string',
+      'client 视图仍要告诉客户端凭据来源配置（引导登录要用）');
+    assert.equal(typeof healthClient?.credential?.pluginCount, 'number',
+      'client 视图仍要给出插件凭据数量（不含 uid）');
+    assert.equal(typeof healthClient?.auth?.source, 'string', 'client 视图需要知道来源，才能说清是谁在供模型');
+    // local 视图反过来必须有账号字段，证明不是"两处都剥光"
+    assert.ok(Object.hasOwn(healthLocal?.credential || {}, 'desktopUserId'),
+      'local 视图必须保留 desktopUserId（面板要对照桌面与桥是否同一个号）');
+    assert.ok(Object.hasOwn(healthLocal?.auth || {}, 'userId'),
+      'local 视图必须保留 auth.userId');
+
+    const auto = healthClient?.autoCheckin;
+    if (auto && typeof auto === 'object') {
+      assert.equal(auto.accounts, undefined,
+        `client key 不得从 /health 读到账号明细：${JSON.stringify(auto)}`);
+      assert.equal(auto.key, undefined, 'client key 不应看到账号 key');
+      assert.equal(auto.label, undefined, 'client key 不应看到账号昵称');
+      assert.doesNotMatch(JSON.stringify(auto), /"label"|"key"\s*:/,
+        `client 视图里不该出现任何账号标识：${JSON.stringify(auto)}`);
+    }
+    // 反过来：完整视图确实会带 accounts（有结果时），证明分层不是"两处都空"
+    if (healthLocal?.autoCheckin?.accounts) {
+      assert.ok(Array.isArray(healthLocal.autoCheckin.accounts),
+        'local 视图的 accounts 必须是数组');
+    }
   } finally {
     await bridge.stop();
     try { await stub.close(); } catch { /* 忽略 */ }
@@ -7282,6 +7343,98 @@ test('桥：自动签到按账号独立 —— 当前账号无活动不阻止其
     await bridge.stop();
     upstream.close();
     rmSync(authDir, { recursive: true, force: true });
+  }
+});
+
+/**
+ * 自动签到的**热路径成本**（issue #32 的连带回归）。
+ *
+ * `maybeAutoCheckin()` 挂在三条协议入口上，每个 token 流都会碰一次。按账号独立
+ * 之后它还要 `resolveAuth()` + `readLocalAccounts()`（扫目录 + 逐个解 at-rest
+ * 信封）。如果每个请求都跑一遍，就是纯浪费 —— 而且症状极隐蔽：CPU/IO 升高、
+ * 上游计费端点被打多次，但**功能看起来正常**。
+ *
+ * 钉住的契约：两个账号今天都结束后，继续打模型请求**不再**命中间计费端点。
+ * 这条用真实的 chat 请求驱动（而不是直接调内部函数），因为要防的正是
+ * "从请求路径进来"的那条路。
+ */
+test('桥：账号都签完之后，模型请求不再重复触发自动签到（热路径不许反复扫盘）', { timeout: 90_000 }, async () => {
+  const authDir = mkdtempSync(join(tmpdir(), 'wb-checkin-hotonce-'));
+  const jwtFor = (uid) => 'x.' + Buffer.from(JSON.stringify({
+    sub: uid, exp: Math.floor(Date.now() / 1000) + 3600,
+  })).toString('base64url') + '.y';
+  const writeInfo = (name, uid, domain) => {
+    writeFileSync(join(authDir, name), JSON.stringify({
+      auth: { accessToken: jwtFor(uid), refreshToken: 'r', domain, expiresAt: Date.now() + 86_400_000 },
+      account: { uid, nickname: '昵称-' + uid, uin: '100' },
+    }));
+  };
+  writeInfo('a.info', 'uid-a', 'www.workbuddy.cn');
+  writeInfo('b.info', 'uid-b', 'www.workbuddy.cn');
+
+  const checkinHits = [];
+  const billing = createServer((req, res) => {
+    const path = new URL(req.url, 'http://127.0.0.1').pathname;
+    if (path === '/v2/billing/meter/daily-checkin') {
+      checkinHits.push(String(req.headers['x-user-id'] || ''));
+    }
+    res.writeHead(200, { 'content-type': 'application/json' });
+    if (path === '/v2/billing/meter/daily-checkin') {
+      return res.end(JSON.stringify({ code: 0, data: { credit: 50 } }));
+    }
+    if (path === '/v2/billing/meter/checkin-activity-status') {
+      return res.end(JSON.stringify({ code: 0, data: { active: true, today_checked_in: false } }));
+    }
+    return res.end(JSON.stringify({ code: 0, data: {} }));
+  });
+  await new Promise((r) => billing.listen(0, '127.0.0.1', r));
+
+  const stub = await startStubUpstream(['stub-model']);
+  const bridge = await startBridge({
+    CODEBUDDY_ENDPOINT: stub.base,
+    WORKBUDDY_AUTH_DIR: authDir,
+    WORKBUDDY_BILLING_BASE: `http://127.0.0.1:${billing.address().port}`,
+    WORKBUDDY_SKIP_MODEL_PREFLIGHT: '1',
+    WORKBUDDY_AUTO_CHECKIN: '1',
+    WORKBUDDY_CHECKIN_KICK_MS: '0',
+    WORKBUDDY_CHECKIN_COOLDOWN_MS: '0',
+  }, { auth: authFileFor('uid-a') });
+
+  const chat = async () => {
+    const res = await fetch(bridge.baseUrl + '/v1/chat/completions', {
+      method: 'POST',
+      headers: { ...auth, 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'stub-model', messages: [{ role: 'user', content: 'hi' }], stream: false }),
+      signal: AbortSignal.timeout(20_000),
+    });
+    await res.text();
+  };
+  try {
+    // 第一轮：等两个账号都被签完
+    const deadline = Date.now() + 60_000;
+    while (Date.now() < deadline) {
+      const got = new Set(checkinHits);
+      if (got.has('uid-a') && got.has('uid-b')) break;
+      await new Promise((r) => setTimeout(r, 250));
+    }
+    const afterFirst = checkinHits.length;
+    assert.ok(new Set(checkinHits).size >= 2,
+      `两个账号都该被签到过，实际 ${JSON.stringify(checkinHits)}`);
+
+    /*
+     * 再打 5 次模型请求：每次都会进 maybeAutoCheckin()。今天都已结束，
+     * 一条都不该再打到计费端点。
+     */
+    for (let i = 0; i < 5; i += 1) await chat();
+    await new Promise((r) => setTimeout(r, 800));
+    assert.equal(checkinHits.length, afterFirst,
+      `都已签完却又打了 ${checkinHits.length - afterFirst} 次签到（热路径在重复扫盘）：${JSON.stringify(checkinHits)}`);
+  } finally {
+    await bridge.stop();
+    try { await stub.close(); } catch { /* 忽略 */ }
+    billing.close();
+    rmSync(authDir, { recursive: true, force: true });
+    rmSync(bridge.dir, { recursive: true, force: true });
   }
 });
 

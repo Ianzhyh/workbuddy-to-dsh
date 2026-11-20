@@ -382,6 +382,61 @@ test('超过 64 字符的 MCP 工具名：上游收到短名，客户端收到�
   assert.deepEqual(JSON.parse(blocks[0].args), { ok: true });
 });
 
+/**
+ * Anthropic 的 `tool_choice: {type:'tool', name}` = **只准调这一个**。
+ *
+ * 旧实现把 `any` 和 `tool` 都压成字符串 `'required'`，于是"只许调 A"退化成
+ * "随便调哪个"，客户端设的约束静默失效（也没有任何报错）。
+ * 这条同时钉住别名：长工具名在 tools[] 里被改短，tool_choice 必须跟着改。
+ */
+test('tool_choice 指定工具：上游必须收到 function.name，且与 tools[] 里的别名一致', async () => {
+  await waitReady();
+  scenario = { kind: 'text' };
+  const longName = 'mcp__agentflow_session__agentflow__project_business_domain_assign';
+  assert.ok(longName.length > 64);
+  const res = await post({
+    model: 'm',
+    max_tokens: 64,
+    stream: true,
+    messages: [{ role: 'user', content: 'go' }],
+    tools: [{ name: longName, description: 'assign', input_schema: { type: 'object', properties: {} } }],
+    tool_choice: { type: 'tool', name: longName },
+  });
+  assert.equal(res.status, 200, `桥不应拒绝这个 tool_choice：${await res.clone().text()}`);
+  await res.text();
+
+  const body = lastUpstreamBody;
+  assert.ok(body, '上游没收到请求体');
+  assert.equal(typeof body.tool_choice, 'object',
+    `指定工具名时不能退化成字符串 required，实得 ${JSON.stringify(body.tool_choice)}`);
+  assert.equal(body.tool_choice.type, 'function');
+  const chosen = body.tool_choice.function?.name;
+  const sent = body.tools?.[0]?.function?.name;
+  assert.ok(chosen, `tool_choice 必须带 function.name，实得 ${JSON.stringify(body.tool_choice)}`);
+  assert.equal(chosen, sent, 'tool_choice 的工具名必须与 tools[] 里的完全一致（同一套别名）');
+  assert.ok(chosen.length <= 64, `别名必须 ≤64，实得 ${chosen}`);
+});
+
+/**
+ * `tool_choice: {type:'any'}` 仍是 `required`（那是"随便哪个工具"，本来就对）。
+ * 与上面那条一起，防止修复被写成"所有对象都带名字"。
+ */
+test('tool_choice {type:any} 仍然映射成 required（不能瞎编一个工具名）', async () => {
+  await waitReady();
+  scenario = { kind: 'text' };
+  const res = await post({
+    model: 'm',
+    max_tokens: 64,
+    stream: true,
+    messages: [{ role: 'user', content: 'go' }],
+    tools: [{ name: 'Alpha', description: 'a', input_schema: { type: 'object', properties: {} } }],
+    tool_choice: { type: 'any' },
+  });
+  assert.equal(res.status, 200);
+  await res.text();
+  assert.equal(lastUpstreamBody?.tool_choice, 'required');
+});
+
 test('两个工具都无 arguments：两个块都必须发 start（不得被静默吞掉一个）', async () => {
   await waitReady();
   scenario = { kind: 'twoBareTools' };

@@ -3757,6 +3757,83 @@ async function credentialStatus() {
   return status;
 }
 
+/**
+ * 抹掉自由文本里的**本机绝对路径**。
+ *
+ * 桥的很多错误串是 Node 原始异常（`ENOENT: no such file or directory, stat
+ * 'C:\Users\alice\AppData\…'`）。这些内容对**本机管理面**是排查线索，对
+ * 只该聊天的 client key 却是"这台机器上有个叫 alice 的用户、数据在哪个目录"
+ * —— 一次 key 泄漏顺带泄漏系统身份。
+ *
+ * 只抹路径片段、保留错误类型（ENOENT / EACCES / 过期…）：后者才是客户端
+ * 给修法的依据，整条删掉会让"为什么登录不上"变成谜。
+ */
+function scrubLocalPaths(text, limit = 300) {
+  return String(text || '')
+    .replace(/[A-Za-z]:\\[^\s'"]+/g, '<path>')
+    .replace(/\/(?:Users|home)\/[^\s'"]+/g, '<path>')
+    .slice(0, limit);
+}
+
+/**
+ * 凭据状态里**与身份无关**的那部分。
+ *
+ * `credentialStatus()` 会带 `desktop.userId` / `plugin.uids[]` / `effective.uid`
+ * —— 全是账号枚举信息。它被 `auth` 管理端点（管理面，只认 local）和 `/health`
+ * 两处共用，而 `/health` 是**所有**调用方都能打的探活端点。
+ *
+ * 于是同一个对象从 `/health` 泄出去就等于「一把 chat-only key 能列出本机所有
+ * 账号」。这里剥掉标识，只留"配了什么来源、存储模式、有没有可用凭据"——
+ * 那些才是客户端判断"要不要提示用户去登录"真正需要的信息。
+ *
+ * 保留 `desktop.available` / `plugin.count` 是刻意的：面板第一屏要靠它们决定
+ * 引导去「账号页」还是「登录页」（issue #6 的 UX），但它们不含任何 uid。
+ */
+function redactCredentialStatus(status) {
+  if (!status || typeof status !== 'object') return status;
+  const out = { ...status };
+  /*
+   * `sameAccount` 只说明"桌面和插件是不是同一个号"，本身不含 uid。
+   * 但它是从两个 uid 推出来的 —— 留在 client 视图里等于承认"本机有桌面号
+   * 和插件号两份凭据"，仍属账号拓扑信息。客户端引导登录用不到它。
+   *
+   * 用 delete 而不是赋 undefined：后者虽然会被 JSON.stringify 丢掉，
+   * 但对象本身还留着键，`Object.keys()` / 深比较都会看见。
+   */
+  delete out.sameAccount;
+  out.desktop = status.desktop
+    ? { available: status.desktop.available === true, error: status.desktop.error || '' }
+    : status.desktop;
+  out.plugin = status.plugin
+    ? {
+      available: status.plugin.available === true,
+      count: status.plugin.count || 0,
+      error: status.plugin.error || '',
+    }
+    : status.plugin;
+  out.effective = status.effective
+    ? {
+      source: status.effective.source || '',
+      region: status.effective.region || '',
+      endpoint: status.effective.endpoint || '',
+    }
+    : status.effective;
+  /*
+   * `desktop.error` / `error` 里会带**本机绝对路径**（`ENOENT: … stat
+   * C:\Users\<用户名>\AppData\…`），路径本身就泄漏了系统用户名。
+   * 只抹路径片段、保留错误类型 —— 后者才是客户端给修法的依据。
+   */
+  /*
+   * `storeDir` 也是本机绝对路径。client key 只需要知道凭据存在哪种模式
+   * （dpapi / file / memory），存哪儿与它无关。
+   */
+  delete out.storeDir;
+  out.desktop = out.desktop ? { ...out.desktop, error: scrubLocalPaths(out.desktop.error) } : out.desktop;
+  out.plugin = out.plugin ? { ...out.plugin, error: scrubLocalPaths(out.plugin.error) } : out.plugin;
+  if (typeof out.error === 'string') out.error = scrubLocalPaths(out.error);
+  return out;
+}
+
 // ── OAuth device-code sign-in (second credential source) ─────────────────
 const LOGIN_UA = process.env.WORKBUDDY_LOGIN_UA || 'CLI/2.63.2 CodeBuddy/2.63.2';
 const LOGIN_BASE_OVERRIDE = process.env.WORKBUDDY_LOGIN_BASE || '';
@@ -4630,25 +4707,35 @@ function repairToolHistory(messages) {
 function normalizePayload(payload) {
   let next = payload;
 
-  // ── tool_choice：对象 → 字符串 ─────────────────────────────────────────
-  // `{type:'function'}` 表达的是「必须调用工具」里最强的那档，而上游没有
-  // 「指定某一个函数」的表达，取语义最接近的 `required`（必须调用工具，
-  // 但不限定是哪一个）。
-  //
-  // 认不出来的对象**丢弃而不是原样转发**：留着必然 400，丢掉最多退化成
-  // `auto`（让模型自己决定），这比整条请求失败好得多。
+  // ── tool_choice：对象 → 上游认的两种形状 ───────────────────────────────
+  /*
+   * 上游**认识** `{type:'function', function:{name}}`（指定某一个函数），所以
+   * 这种形状必须原样保留 —— 压成 `required` 会把「只准调 A」变成「随便调哪个」，
+   * 客户端设的约束静默失效。
+   *
+   * 只有**上游不认识**的对象才降级：
+   *   · `{type:'auto'|'none'|'required'}` → 同名字符串（有些客户端写成对象）；
+   *   · 其余（`{type:'function'}` 无名字、`allowed_tools` …）→ `required`
+   *     或丢弃。认不出来就原样转发必然 400，丢掉最多退化成"让模型自己决定"。
+   */
   const tc = next.tool_choice;
   if (tc !== null && typeof tc === 'object' && !Array.isArray(tc)) {
-    const mapped = tc.type === 'function' ? 'required'
-      : (tc.type === 'auto' || tc.type === 'none' || tc.type === 'required') ? tc.type
-        : null;
     next = { ...next };
-    if (mapped) {
-      next.tool_choice = mapped;
-      log(`normalize: tool_choice object -> "${mapped}"`);
+    const n = tc.function && typeof tc.function === 'object' ? tc.function.name : undefined;
+    if (tc.type === 'function' && typeof n === 'string' && n) {
+      // 已经是上游形状：保留（名字是否超长由工具名映射那层管，不在这里动）
+      next.tool_choice = { type: 'function', function: { name: n } };
     } else {
-      delete next.tool_choice;
-      log('normalize: dropped unrecognized tool_choice object');
+      const mapped = (tc.type === 'function') ? 'required'
+        : (tc.type === 'auto' || tc.type === 'none' || tc.type === 'required') ? tc.type
+          : null;
+      if (mapped) {
+        next.tool_choice = mapped;
+        log(`normalize: tool_choice object -> "${mapped}"`);
+      } else {
+        delete next.tool_choice;
+        log('normalize: dropped unrecognized tool_choice object');
+      }
     }
   }
 
@@ -8126,10 +8213,32 @@ function anthropicToolsToOpenAIMessages(tools) {
  * 这里**直接产出字符串**：上游只收字符串，虽然 normalizePayload 会兜底把对象
  * 转掉，但没必要多绕一圈。
  */
-function anthropicToolChoiceToOpenAI(tc) {
+function anthropicToolChoiceToOpenAI(tc, bridgedToolNames = null) {
   if (!tc || typeof tc !== 'object') return null;
-  if (tc.type === 'any' || tc.type === 'tool') return 'required';
+  /*
+   * Anthropic 的 `{type:'tool', name}` = **只准调这一个**；OpenAI 侧对应的是
+   * `{type:'function', function:{name}}`。
+   *
+   * 旧实现把两者都压成字符串 `'required'`，于是"只许调 A"退化成"随便调哪个"——
+   * 工具多的会话里模型会去调别的工具，客户端的约束形同虚设，而且**毫无报错**
+   * （上游合法、客户端也合法，只是行为不是用户要的）。
+   *
+   * 名字必须用**别名**（与 tools[] 里的一致），否则上游会说 tools 里没有这个名字。
+   */
+  if (tc.type === 'tool') {
+    const name = typeof tc.name === 'string' ? tc.name : '';
+    if (!name) return 'required';
+    return {
+      type: 'function',
+      function: { name: aliasBridgedToolName(name, bridgedToolNames) },
+    };
+  }
+  if (tc.type === 'any') return 'required';
   if (tc.type === 'auto' || tc.type === 'none') return tc.type;
+  /*
+   * 认不出来的类型丢掉（返回 null），由调用方不写 tool_choice —— 让模型自己
+   * 决定，比整条请求 400 好。这条边界与 `normalizePayload` 里那段同款。
+   */
   return null;
 }
 
@@ -9271,11 +9380,26 @@ function responsesToolsFromAdditional(body) {
 /**
  * Responses 的 tool_choice：字符串（`auto`/`none`/`required`）或对象
  * （`{type:'function',name}` / `{type:'allowed_tools',...}`）。
- * 对象形式统一落到 `required`（上游只认字符串，见 normalizePayload 的同类处理）。
+ *
+ * `{type:'function', name}` 必须**保住名字**，映射成上游的
+ * `{type:'function', function:{name}}`：压成 `required` 会从「只准调这一个」
+ * 退化成「随便调哪个」（与 Anthropic 那条同一个缺陷，见
+ * `anthropicToolChoiceToOpenAI`）。名字同样要用别名。
+ *
+ * `allowed_tools` 是"限定候选集合"，上游没有等价物；保留成 `required`
+ * （至少保证会调工具），并在日志里留痕 —— 静默降级比说出来更坏。
  */
-function responsesToolChoiceToOpenAI(tc) {
+function responsesToolChoiceToOpenAI(tc, bridgedToolNames = null) {
   if (typeof tc === 'string') return ['auto', 'none', 'required'].includes(tc) ? tc : null;
-  if (tc && typeof tc === 'object') return 'required';
+  if (tc && typeof tc === 'object') {
+    if (tc.type === 'function') {
+      const name = typeof tc.name === 'string' ? tc.name : '';
+      if (!name) return 'required';
+      return { type: 'function', function: { name: aliasBridgedToolName(name, bridgedToolNames) } };
+    }
+    if (tc.type === 'allowed_tools') log('normalize: tool_choice allowed_tools -> required (no upstream equivalent)');
+    return 'required';
+  }
   return null;
 }
 
@@ -9916,7 +10040,19 @@ async function relayResponsesStream(up, res, model, routes = null, options = {})
              * `tool_search` 同理：它的 `arguments` 在 Codex 侧必须是**对象**，
              * 分片拼不出合法形状，也只在收尾给一次 `output_item.done`。
              */
-            if (!deferred && !customTools.has(slot.name) && slot.name !== TOOL_SEARCH_NAME) {
+            /*
+             * 判据必须用**还原后的名字**（`restoreToolName`）。
+             *
+             * `customTools` / `TOOL_SEARCH_NAME` 都是**客户端原名**的集合；而
+             * `slot.name` 累加的是**上游回显的名字**，长工具名在这里已经被
+             * `bridgedToolName()` 改成 `wb_…_<hash>`（PR #31）。原先这行直接拿
+             * `slot.name` 去查，于是超长 freeform 工具被当成普通工具 ——
+             * 逐片发 `function_call_arguments.delta`，而客户端等的是
+             * `custom_tool_call_input.delta`，整段参数被丢掉。
+             * 同一个表达式的两半（has / !==）都要还原，缺一半仍会错。
+             */
+            const deltaWireName = restoreToolName(slot.name);
+            if (!deferred && !customTools.has(deltaWireName) && deltaWireName !== TOOL_SEARCH_NAME) {
               send('response.function_call_arguments.delta', {
                 item_id: slot.id, output_index: slot.outputIndex, delta: tc.function.arguments,
               });
@@ -12049,6 +12185,26 @@ let autoCheckinState = null;
 /** 是否有一轮 autoCheckin 正在进行（全局闸门：别让定时器与请求路径同时开跑）。 */
 let autoCheckinInflight = null;
 
+/**
+ * 给**非管理面**调用方看的自动签到状态。
+ *
+ * 去掉一切账号标识（`key` / `label` / 逐账号明细），只留"今天这台机器上自动
+ * 签到发生过没有、结果是什么"。client key 只能聊天，不该知道本机有几个号、是谁
+ * —— 那是 `/v1/checkin/accounts` 那种管理面才给的信息。
+ *
+ * 保留 `at` 是刻意的：面板与插件靠它判断「刚又签了一次」并刷新签到卡片，
+ * 而它们的调用方是 local，走的是完整视图；这条降级视图只给不属于本机的客户端。
+ */
+function autoCheckinPublicView() {
+  if (!autoCheckinState) return null;
+  const { at, result, credit } = autoCheckinState;
+  return {
+    at: at || '',
+    result: typeof result === 'string' ? result : '',
+    ...(typeof credit === 'number' ? { credit } : {}),
+  };
+}
+
 /** 取（或重置）某个账号当天的签到进度。跨天自动归零。 */
 function autoCheckinSlot(accountKey, today) {
   const key = String(accountKey || '');
@@ -12130,13 +12286,48 @@ function maybeAutoCheckin() {
   for (const [key, slot] of autoCheckinByAccount) {
     if (slot.day !== today) autoCheckinByAccount.delete(key);
   }
+  /*
+   * ## 快速退出：**别让每条模型请求都去扫登录目录**
+   *
+   * 这个函数挂在 `/v1/chat/completions`、`/v1/messages`、`/v1/responses` 三个
+   * 入口上（fire-and-forget），也就是每个 token 流都会碰一次。而 issue #32 之后
+   * 它要做的事比原来重得多：`resolveAuth()` + `readLocalAccounts()`（扫目录、
+   * 逐个解 at-rest 信封、解 JWT）+ 最多三次上游往返。
+   *
+   * 原先只有一个「已签」闸门，一次网络往返就可能撞上好几条并发请求 ——
+   * 每次都要把上面这套全跑一遍，纯属白烧 CPU 和目录 I/O。这里在**进入异步之前**
+   * 就按"今天还有没有活要干"挡掉：
+   *
+   *   · 所有已知账号今天都已结束（done / 试满 / 冷却中）→ 直接返回；
+   *   · 例外：`autoCheckinByAccount` 为空（桥刚起、还没跑过）时必须放行，
+   *     否则第一次永远等不到。
+   *
+   * 判据只看内存，不碰磁盘 —— 这正是它能挂在热路径上的前提。
+   */
+  if (autoCheckinByAccount.size) {
+    let allSettled = true;
+    for (const slot of autoCheckinByAccount.values()) {
+      if (!autoCheckinSkipReason(slot, now)) { allSettled = false; break; }
+    }
+    if (allSettled) return;
+  }
 
   autoCheckinInflight = (async () => {
     let currentAuth = null;
     let currentError = null;
     try { currentAuth = await resolveAuth(); } catch (e) { currentError = e; }
 
-    const accounts = await safeLocalAccounts();
+    /*
+     * 只有**当前账号**还没结束时才去枚举本机其它账号。
+     *
+     * 单账号机器上这个分支永远不会走 —— 而它恰恰是最贵的一步（扫目录 + 解密）。
+     * 多账号机器上，一旦两个号今天都签完了，热路径同样不会再来这里。
+     */
+    const currentKey = String(currentAuth?.userId || currentAuth?.uid || '');
+    const currentSettled = autoCheckinByAccount.size
+      ? Boolean(autoCheckinSkipReason(autoCheckinSlot(currentKey, today), now))
+      : false;
+    const accounts = currentSettled ? [] : await safeLocalAccounts();
     const targets = autoCheckinTargets(currentAuth, accounts);
     if (!targets.length) {
       // 一个凭据都拿不到：如实记账（面板据此显示原因），但不制造无谓重试。
@@ -13044,11 +13235,39 @@ async function handleRequest(req, res) {
     if (url.pathname === '/health') {
       let auth = null;
       let region = '';
+      /*
+       * `/health` 是**所有**调用方都能打的探活端点（控制台 4 秒探测、插件
+       * 2 秒身份轮询、客户端列表探测都靠它）。所以它回的内容必须按调用方分层：
+       * 只有本机管理钥匙（local）能拿到账号身份，client key 只能拿到
+       * "配了什么来源 / 有没有可用凭据"。
+       *
+       * 早先这里无条件带 `desktopUserId` + `auth.userId`，等于一把 chat-only
+       * key 就能把本机账号枚举出来（issue #32 的 accounts[] 是同一类问题的第四处）。
+       */
+      const isLocalCaller = requestScope.getStore()?.client === 'local';
+      /**
+       * 凭据状态。
+       *
+       * 显式列出可选字段：`desktopUserId` / `storeDir` / `desktopError` 只在
+       * 本机管理钥匙（local）那一侧才写，靠 `isLocalCaller` 分层。
+       * 不写类型注解的话 tsc 会把对象推断成"没有这些键"，后面赋值全报错。
+       *
+       * @type {{
+       *   configured: string, storeMode: string, storeKeySource: string,
+       *   storeDir?: string, fallbackReason: string, source: string, pluginCount: number,
+       *   desktopUserId?: string, desktopError?: string,
+       * }}
+       */
       const credential = {
         configured: await effectiveSource(),
         storeMode: credentialStoreMode(),
         storeKeySource: credentialKeySource,
-        storeDir: credentialStoreMode() === 'memory' ? '' : CREDENTIAL_DIR,
+        /*
+         * `storeDir` 是本机绝对路径，含系统用户名 —— 只给本机管理钥匙。
+         * client key 只需要 `storeMode`（dpapi / file / memory）来判断
+         * "凭据是加密存的吗"，不需要知道它在哪个目录。
+         */
+        ...(isLocalCaller ? { storeDir: credentialStoreMode() === 'memory' ? '' : CREDENTIAL_DIR } : {}),
         fallbackReason: credentialStoreFallback,
         source: '',
         pluginCount: 0,
@@ -13063,10 +13282,14 @@ async function handleRequest(req, res) {
          */
         try {
           const desktop = a.source === 'desktop' ? a : await readStoredAuth();
-          credential.desktopUserId = desktop.userId || '';
+          // `desktopUserId` 是账号标识：只给本机管理钥匙。
+          // `desktopError` 留下 —— 它是"为什么读不出凭据"，不含身份，客户端靠它给修法；
+          // 但里面可能带本机绝对路径（含系统用户名），非 local 要抹掉路径片段。
+          if (isLocalCaller) credential.desktopUserId = desktop.userId || '';
         } catch (desktopError) {
-          credential.desktopUserId = '';
-          credential.desktopError = String(desktopError?.message || desktopError).slice(0, 200);
+          if (isLocalCaller) credential.desktopUserId = '';
+          const raw = String(desktopError?.message || desktopError).slice(0, 200);
+          credential.desktopError = isLocalCaller ? raw : scrubLocalPaths(raw);
         }
         /*
          * 并发请求可能在这段时间完成“跟随桌面”并改写来源。再对一次，避免
@@ -13076,9 +13299,11 @@ async function handleRequest(req, res) {
         region = upstreamRegion(a);
         credential.source = a.source;
         // 读取凭据时才加载密钥：对象字面量里的值可能还没填上
+        // 读取凭据时才加载密钥：对象字面量里的值可能还没填上
         credential.storeMode = credentialStoreMode();
         credential.storeKeySource = credentialKeySource;
-        credential.storeDir = credentialStoreMode() === 'memory' ? '' : CREDENTIAL_DIR;
+        // 与上面同一个理由：绝对路径只给本机管理钥匙
+        if (isLocalCaller) credential.storeDir = credentialStoreMode() === 'memory' ? '' : CREDENTIAL_DIR;
         credential.fallbackReason = credentialStoreFallback;
         try {
           credential.pluginCount = credentialStoreMode() === 'memory'
@@ -13087,7 +13312,8 @@ async function handleRequest(req, res) {
         } catch { credential.pluginCount = 0; }
         auth = {
           source: a.source,
-          userId: a.userId || a.uid || '',
+          // `userId` 只给本机管理钥匙：client key 不需要知道是哪一个号
+          ...(isLocalCaller ? { userId: a.userId || a.uid || '' } : {}),
           endpoint: a.endpoint,
           expiresAt: a.expiresAt ? new Date(a.expiresAt).toISOString() : '',
           expired: a.expiresAt ? a.expiresAt < Date.now() : false,
@@ -13095,12 +13321,22 @@ async function handleRequest(req, res) {
         };
       } catch (e) {
         // 带上 pid：未登录/凭据异常时 stop() 也要能停掉自己的进程（否则用户点停止只会得到一个假错误）
+        const rawCredential = await credentialStatus();
         return json(res, 503, {
-          ok: false, error: e.message, authFile: AUTH_PATH, pid: process.pid,
+          ok: false, error: e.message,
+          // 与 200 分支同一套分层：路径只给本机管理钥匙
+          authFile: isLocalCaller ? AUTH_PATH : basename(AUTH_PATH),
+          pid: process.pid,
           build: BRIDGE_BUILD,
-          ...(AUTH_PATH !== AUTH_PINNED_PATH ? { authFilePinned: AUTH_PINNED_PATH, authFollow: true } : {}),
+          ...(AUTH_PATH !== AUTH_PINNED_PATH
+            ? {
+              authFilePinned: isLocalCaller ? AUTH_PINNED_PATH : basename(AUTH_PINNED_PATH),
+              authFollow: true,
+            }
+            : {}),
           startedAt: new Date(STARTED_AT).toISOString(),
-          credential: await credentialStatus(),
+          // 与 200 分支同一套分层：非管理面拿不到 uid / uids
+          credential: isLocalCaller ? rawCredential : redactCredentialStatus(rawCredential),
         });
       }
       /*
@@ -13131,6 +13367,24 @@ async function handleRequest(req, res) {
         startedAt: new Date(STARTED_AT).toISOString(),
         uptimeMs: Date.now() - STARTED_AT,
         auth,
+        /*
+         * 账号身份同样分层（`auth.userId` 是本机账号的 sub）。
+         *
+         * client key 只知道"走的是哪条来源、令牌过没过期"就够了 —— 它不需要
+         * 知道具体是哪一个号。`rateLimit` 是按账号统计的，但它的键只在桥内部
+         * 有意义，下面单独处理。
+         */
+        ...(requestScope.getStore()?.client === 'local' ? {} : {
+          auth: auth
+            ? {
+              source: auth.source,
+              endpoint: auth.endpoint,
+              expiresAt: auth.expiresAt,
+              expired: auth.expired,
+              changedAt: auth.changedAt,
+            }
+            : auth,
+        }),
         // 最近 10 分钟「最终返回给客户端的 429」按账号+模型计数（runtime only）
         rateLimit: rateLimitSummary(auth ? { source: auth.source, uid: auth.userId } : null),
         /*
@@ -13161,8 +13415,28 @@ async function handleRequest(req, res) {
             ...(snapshot.error ? { error: snapshot.error } : {}),
           };
         })(),
-        authFile: AUTH_PATH,
-        ...(AUTH_PATH !== AUTH_PINNED_PATH ? { authFilePinned: AUTH_PINNED_PATH, authFollow: true } : {}),
+        /*
+         * `authFile` 同样是本机绝对路径（`C:\Users\<名>\AppData\…\.info`）。
+         *
+         * 它原先无条件回给所有调用方，控制台/插件靠它对照"桥用的是哪个登录
+         * 文件"。但那是管理面信息：client key 只要知道"有凭据"就够了，
+         * 不需要知道这台机器上的用户名与目录结构。
+         *
+         * 非 local 时只回**文件名**（不含目录）：既保留"是哪个文件的快照"这层
+         * 可读线索，又不泄漏路径。
+         */
+        authFile: isLocalCaller ? AUTH_PATH : basename(AUTH_PATH),
+        ...(AUTH_PATH !== AUTH_PINNED_PATH
+          ? {
+            authFilePinned: isLocalCaller ? AUTH_PINNED_PATH : basename(AUTH_PINNED_PATH),
+            authFollow: true,
+          }
+          : {}),
+        /*
+         * 凭据状态：**逐字段**在构造时就分好层了（见上面 `isLocalCaller` 的说明），
+         * 这里直接回 —— 不要再套一层 redact，否则 local 视图会连自己需要的
+         * `desktopUserId` 也拿不到（面板要靠它显示"桌面 vs 桥"是不是同一个钱包）。
+         */
         credential,
         // 客户端定位结果（**只读内存缓存、绝不触发探测** —— /health 有 4 秒超时
         // 约束，慢探测会让控制台把桥误判成"未运行"；没定位过就显示空）
@@ -13210,7 +13484,27 @@ async function handleRequest(req, res) {
         clients: { enabled: CLIENT_KEY_HASHES.size > 0, count: CLIENT_KEY_HASHES.size },
         // 自动签到的内存态：桥重启后清空、重新判定（上游幂等兜底）
         autoCheckinEnabled: AUTO_CHECKIN_ENABLED,
-        autoCheckin: autoCheckinState,
+        /*
+         * 自动签到状态（issue #32 之后带多账号明细）。
+         *
+         * ## 为什么按调用方分层
+         *
+         * `accounts[]` 里有本机**每一个**已登录账号的 uid 与昵称 —— 那是账号
+         * 枚举能力，与 `/v1/checkin/accounts` 同一级别（那边已经明确挡在管理面
+         * 闸门后）。而 `/health` 是给**所有**调用方用的探活端点，chat-only 的
+         * client key 也能打进来（控制台/插件/客户端都靠它判“桥在不在”）。
+         *
+         * 所以：
+         *   · local（本机管理钥匙）→ 完整 `autoCheckin`（含 accounts[]）；
+         *   · client key           → 只给"有没有跑、结果是什么"这两个非身份字段，
+         *                            不含任何账号标识。
+         *
+         * 这不是"过度谨慎"：把别人的账号列表递给一把只该聊天的 key，等于让
+         * 一次 key 泄漏顺带暴露"这台机器上有几个号、分别是谁"。
+         */
+        autoCheckin: requestScope.getStore()?.client === 'local'
+          ? autoCheckinState
+          : autoCheckinPublicView(),
       });
     }
 
@@ -14704,7 +14998,7 @@ async function handleRequest(req, res) {
       const tools = bridgedTools.tools;
       const bridgedToolNames = bridgedTools.map;
       const messages = anthropicToOpenAIMessages(body, bridgedToolNames);
-      const toolChoice = anthropicToolChoiceToOpenAI(body.tool_choice);
+      const toolChoice = anthropicToolChoiceToOpenAI(body.tool_choice, bridgedToolNames);
 
       const oai = { model, messages, stream: true, stream_options: { include_usage: true } };
       if (tools) oai.tools = tools;
@@ -14992,7 +15286,7 @@ async function handleRequest(req, res) {
           }),
         };
       });
-      const toolChoice = responsesToolChoiceToOpenAI(body.tool_choice);
+      const toolChoice = responsesToolChoiceToOpenAI(body.tool_choice, responsesToolNames);
       const modelError = preflightModelError(model);
       if (modelError) {
         log('rejected unknown model (responses)', model);

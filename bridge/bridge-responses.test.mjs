@@ -931,6 +931,45 @@ test('请求翻译：系统提示、工具、tool_choice、tool 结果都转成�
   assert.deepEqual(m.tools[0].function.parameters.properties.cmd, { type: 'string' });
 });
 
+/**
+ * `tool_choice` 指定**某一个**工具时，名字不能被压成 `required`。
+ *
+ * 压成 `required` 只保住「必须调用工具」，却丢掉了「只能调这一个」——
+ * 工具多的会话里模型会去调别的工具，客户端设的约束静默失效，而且**全程无报错**
+ * （上游合法、客户端也合法，只是行为不是用户要的）。
+ *
+ * 这条同时覆盖 Responses 路径的别名：长工具名在 tools[] 里被改短，`tool_choice`
+ * 里必须跟着改，否则上游会说"tools 里没有这个名字"。
+ */
+test('tool_choice 指定函数：名字必须透传（含超长名用别名），不能退化成 required', async () => {
+  await waitReady();
+  scenario = { kind: 'text' };
+  const longName = 'mcp__agentflow_session__agentflow__project_business_domain_history';
+  await post({
+    model: 'gpt-5.1-codex',
+    stream: false,
+    input: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'go' }] }],
+    tools: [
+      { type: 'function', name: longName, description: 'h', parameters: { type: 'object', properties: {} } },
+    ],
+    // Responses 的对象形式：`{type:'function', name}`
+    tool_choice: { type: 'function', name: longName },
+    max_output_tokens: 64,
+  });
+
+  const m = lastUpstreamBody;
+  assert.ok(m, '上游没收到请求体');
+  assert.equal(typeof m.tool_choice, 'object',
+    `指定工具名时不能退化成字符串 required，实得 ${JSON.stringify(m.tool_choice)}`);
+  assert.equal(m.tool_choice.type, 'function');
+  const chosen = m.tool_choice.function?.name;
+  assert.ok(chosen, `tool_choice 必须带 function.name，实得 ${JSON.stringify(m.tool_choice)}`);
+  // 名字必须与 tools[] 里的一致（同一套别名），否则上游会说没有这个工具
+  const sentName = m.tools?.[0]?.function?.name;
+  assert.equal(sentName, chosen, 'tool_choice 的工具名必须与 tools[] 里的完全一致');
+  assert.ok(chosen.length <= 64, `别名必须 ≤64，实得 ${chosen} (${chosen.length})`);
+});
+
 /*
  * 新版 Codex 的 code mode：工具在 `input[].additional_tools` 里，顶层没有 `tools`。
  *
