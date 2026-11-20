@@ -44,6 +44,7 @@ import { createRouteTable, mountRoutes } from './routes.mjs';
 import {
   configureWorkBuddyWebSearch,
   decideWebSearchAutoSetup,
+  deriveSearchChannel,
   deriveWebSearchReadiness,
   deriveWebSearchStatus,
   hasExplicitSearchOverride,
@@ -52,7 +53,9 @@ import {
   readWebSearchConfig,
   resetWorkBuddyWebSearchOverrides,
   restoreWorkBuddyWebSearch,
+  SEARCH_CHANNEL_BRIDGE,
   snapshotWorkBuddyWebSearch,
+  switchWorkBuddyWebSearchToDeepSeek,
   verifyWorkBuddyWebSearch,
 } from './web-search-config.mjs';
 import { cleanLegacyRoutes, detectLegacyRoutes } from './legacy.mjs';
@@ -1791,6 +1794,8 @@ export function apply(ctx, rawConfig = {}) {
       baseURL: '',
       apiKeyRef: '',
       expectedBaseURL,
+      // issue #33：读不到 provider 时通道是「未知」，不是「需要接 WorkBuddy」。
+      ...deriveSearchChannel({ section: undefined, webSection: undefined, expectedBaseURL, available: false }),
       reason: 'unavailable',
       revert,
     };
@@ -1804,6 +1809,22 @@ export function apply(ctx, rawConfig = {}) {
      * 就永远读到 undefined —— 令牌比对静默失效（面板显示 ready，搜索却 401）。
      */
     const searchConfig = readWebSearchConfig(settings);
+    /*
+     * 通道判定（issue #33）：**先**把「现在走的是哪条路」算出来，再谈就绪度。
+     *
+     * 顺序很重要。旧实现只有「已接入本地桥 / 未接入」两态，于是
+     *   · 用户主动切到 DeepSeek 官方搜索 → 被当成「未接入」报警；
+     *   · 用户自己配了第三方端点 → 也被报警；
+     *   · 报警文案还断言「会消耗 DeepSeek 钱包」—— 对第三方通道是假话。
+     * 现在通道是独立维度：`bridge` 才谈就绪，其余通道是**用户的选择**。
+     */
+    const channel = deriveSearchChannel({
+      section: searchConfig.section,
+      webSection: searchConfig.webSection,
+      expectedBaseURL,
+      available: searchConfig.available === true,
+      configError: searchConfig.error === true,
+    });
     if (!settings || searchConfig.source === 'none') {
       return {
         ...unavailable,
@@ -1816,7 +1837,13 @@ export function apply(ctx, rawConfig = {}) {
       };
     }
     if (searchConfig.error) {
-      const base = { ...unavailable, available: true, reason: 'error', error: '读取 dsh 搜索配置失败' };
+      const base = {
+        ...unavailable,
+        ...channel,
+        available: true,
+        reason: 'error',
+        error: '读取 dsh 搜索配置失败',
+      };
       return {
         ...base,
         ...deriveWebSearchReadiness({
@@ -1828,7 +1855,7 @@ export function apply(ctx, rawConfig = {}) {
       };
     }
     if (!searchConfig.available) {
-      const base = { ...unavailable, available: true, reason: 'namespace-missing' };
+      const base = { ...unavailable, ...channel, available: true, reason: 'namespace-missing' };
       return {
         ...base,
         ...deriveWebSearchReadiness({
@@ -1913,14 +1940,36 @@ export function apply(ctx, rawConfig = {}) {
       managed,
       explicit,
       revert: revertState,
+      /*
+       * `channel` / `deliberate` 是 issue #33 的核心输出：
+       *   - `channel = bridge` 才谈「接没接上」，其余通道都算「按用户选择在跑」；
+       *   - `deliberate = true` 表示这不是故障，面板**不得**把它放进待办/红字。
+       * 保留原来平铺的 configured/pointsToBridge/.../reason 字段不动：旧面板还在读。
+       */
       ...status,
-      ...deriveWebSearchReadiness({
-        status,
-        bridgeState,
-        tokenMatches,
-        verification: state.webSearchVerify,
-        expectedBaseURL,
-      }),
+      ...channel,
+      // 只有「桥通道」的就绪度才说明问题；别的通道 ready 恒为 true（它不归我们管）。
+      ...(channel.channel === SEARCH_CHANNEL_BRIDGE
+        ? deriveWebSearchReadiness({
+          status,
+          bridgeState,
+          tokenMatches,
+          verification: state.webSearchVerify,
+          expectedBaseURL,
+        })
+        : {
+          // 非桥通道：不谎报「已接入」，也不谎报故障。
+          ready: true,
+          reason: '',
+          bridgeState,
+          tokenMatches,
+          lastVerifiedAt: '',
+          lastVerifySourceCount: null,
+          lastVerifyError: '',
+          lastVerifyStale: false,
+          lastVerifyFailed: false,
+          lastVerifyVerified: null,
+        }),
     };
   }
 
@@ -2546,6 +2595,67 @@ export function apply(ctx, rawConfig = {}) {
   }
 
   /**
+   * 把网页搜索**手动切到 DeepSeek 官方**（issue #33）。
+   *
+   * 与 `enableWebSearch()` 对称：那个是「切到 WorkBuddy」，这个是「切回去」。
+   * 三点必须在宿主侧做，不能只让面板改字段：
+   *
+   *   1. **先存快照**：切走之前把 dsh 的搜索配置存一份。这样用户点错了也能
+   *      「恢复接入前配置」回来 —— 而快照只在内存里，含令牌也不能落盘；
+   *   2. **关掉自动接入**：这是用户明确的选择，必须让状态机记下来
+   *      （`webSearchAuto = opted-out`），否则下一次身份轮询/重启又会接回桥，
+   *      表现为"我明明切走了，它自己又跳回去"（正是 issue #33 说的不尊重选择）；
+   *   3. **第三方端点要确认**：那是用户自己的配置，静默抹掉既越权也让他下次
+   *      无处可去。`confirmExternal` 由面板在二次确认后传入。
+   *
+   * @param {{confirmExternal?: boolean}} [options]
+   */
+  async function disableWebSearch({ confirmExternal = false } = {}) {
+    const settings = ctx.get('settings');
+    const credentials = ctx.get('credentials');
+    const expectedBaseURL = `${supervisor.baseUrl}/v1`;
+    if (!state.webSearchPrevious) {
+      const previous = await snapshotWorkBuddyWebSearch({ settings, credentials });
+      if (previous.ok) state.webSearchPrevious = previous;
+    }
+    const result = await switchWorkBuddyWebSearchToDeepSeek({
+      settings,
+      credentials,
+      expectedBaseURL,
+      confirmExternal,
+    });
+    if (!result.switched) {
+      // 需要确认：什么都没改，也不该动自动接入状态（用户可能马上改主意）。
+      return result;
+    }
+    /*
+     * 先落"退出自动接入"的标记，再清状态。
+     *
+     * `markWorkBuddyWebSearchOptOut()` 写的是与默认值等价的 `searchProvider`，
+     * 但它进了 user 层 —— 自动接入的 `hasExplicitSearchOverride()` 据此认出
+     * 「用户选过」，这是「尊重用户选择」的**唯一**落地机制。
+     */
+    const optOut = await markWorkBuddyWebSearchOptOut({ settings }).catch((error) => ({
+      marked: false,
+      reason: String(error?.message || error),
+    }));
+    state.webSearchAuto = {
+      ...state.webSearchAuto,
+      status: 'opted-out',
+      reason: 'manual-switch',
+      mode: '',
+      at: Date.now(),
+      nextAt: 0,
+      error: '',
+      inflight: false,
+    };
+    // 上一次自检是桥通道的结论，切走之后不再代表任何东西。
+    state.webSearchVerify = { at: 0, verified: null, sourceCount: null, error: '', baseURL: '' };
+    log('web search switched to deepseek official', result.previousEndpoint ? `(removed ${result.previousEndpoint})` : '');
+    return { ...result, optOut };
+  }
+
+  /**
    * dsh 的默认模型（`agent-default-model` 条目）。
    *
    * 读：该服务自己的 `currentSelection()` —— 与设置页/选择器读到的是同一份，
@@ -2866,6 +2976,7 @@ export function apply(ctx, rawConfig = {}) {
         enableWebSearch,
         verifyWebSearch: runWebSearchVerify,
         revertWebSearch,
+        disableWebSearch,
       });
       const disposeRoutes = mountRoutes(webServer, routes, log);
       ctx.effect(() => disposeRoutes, 'workbuddy.panel-routes');

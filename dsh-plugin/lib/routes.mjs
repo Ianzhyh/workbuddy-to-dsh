@@ -79,6 +79,7 @@ export function createRouteTable(deps) {
     enableWebSearch = async () => { throw new Error('web search configuration is unavailable'); },
     verifyWebSearch = async () => { throw new Error('web search verification is unavailable'); },
     revertWebSearch = async () => { throw new Error('web search restore is unavailable'); },
+    disableWebSearch = async () => { throw new Error('web search switching is unavailable'); },
     readDefaultModel = () => null,
     saveDefaultModel = async () => { throw new Error('default model editing is unavailable'); },
     /** 用量上限快照：哪个账号的哪个模型触顶了（见 /workbuddy/limits）。 */
@@ -194,6 +195,34 @@ export function createRouteTable(deps) {
           sendJson(res, 200, { ok: true, ...result });
         } catch (error) {
           log('panel web-search verify failed', error);
+          sendJson(res, 500, { ok: false, error: String(error?.message || error) });
+        }
+      },
+    },
+    {
+      /*
+       * 把网页搜索**手动切回 DeepSeek 官方**（issue #33）。
+       *
+       * 与 `/web-search/enable` 对称：那条是"切到 WorkBuddy"，这条是"切回去"。
+       * 分开成两条路由而不是给 enable 加个 mode 参数：这两个动作的**失败语义**
+       * 完全不同（切到桥要先有桥；切回官方根本不需要桥），塞进一个 handler 只会
+       * 让错误文案互相干扰。
+       *
+       * `confirmExternal` 走 body：端点若是用户自己配的第三方地址，宿主不会
+       * 静默抹掉，先回 `needsConfirm` 让面板二次确认。
+       */
+      kind: 'exact',
+      path: '/workbuddy/web-search/disable',
+      async handler(req, res) {
+        if (req.method !== 'POST') return sendJson(res, 405, { ok: false, error: `${req.method} not allowed` });
+        if (!guard(req)) return sendJson(res, 403, { ok: false, error: 'missing x-workbuddy-panel header' });
+        try {
+          const body = await readJsonBody(req).catch(() => ({}));
+          const result = await disableWebSearch({ confirmExternal: body?.confirmExternal === true });
+          // needsConfirm 也是 200：这不是错误，是一次"等你确认"的正常往返。
+          sendJson(res, 200, { ok: true, ...result });
+        } catch (error) {
+          log('panel web-search switch-to-deepseek failed', error);
           sendJson(res, 500, { ok: false, error: String(error?.message || error) });
         }
       },

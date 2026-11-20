@@ -15,6 +15,29 @@ export const WEB_ENTRY_ID = 'web';
 export const SEARCH_KEY_REF = 'WORKBUDDY_SEARCH_BRIDGE_KEY';
 
 /**
+ * 网页搜索当前实际用的**通道**（issue #33）。
+ *
+ * 为什么需要这个枚举：面板原先只有「已接入本地桥 / 未接入」两态，于是把
+ * **用户主动选择的其它渠道**也报成「需要处理的问题」，还写了句「会消耗
+ * DeepSeek 钱包」—— 既冤枉了用户的选择，也对非 DeepSeek 的渠道说了假话
+ * （第三方端点、`deepseek-search-api` 这类都不是同一个计费口径）。
+ *
+ * 现在四态分开：
+ *   - `bridge`            走 WorkBuddy 本地桥；
+ *   - `deepseek-official` 走 dsh 自带的 DeepSeek 官方搜索（默认形态）；
+ *   - `external`          用户自己配的第三方端点/其它 provider —— 这是**选择**，不是故障；
+ *   - `unknown`           读不到配置 / dsh 没加载搜索 provider —— 这才是需要提示的。
+ */
+export const SEARCH_CHANNEL_BRIDGE = 'bridge';
+export const SEARCH_CHANNEL_DEEPSEEK = 'deepseek-official';
+export const SEARCH_CHANNEL_EXTERNAL = 'external';
+export const SEARCH_CHANNEL_UNKNOWN = 'unknown';
+
+/** 面板「切到 X」用的稳定值（与上面的通道一一对应，只有一个方向是 external 之外）。 */
+export const SEARCH_SWITCH_TARGET_BRIDGE = 'bridge';
+export const SEARCH_SWITCH_TARGET_DEEPSEEK = 'deepseek-official';
+
+/**
  * @param {object} deps
  * @param {{ update: (ns: string, patch: object) => Promise<void>, get?: (ns: string) => unknown }} deps.settings
  * @param {{ set: (ref: string, value: string) => Promise<void> }} deps.credentials
@@ -422,6 +445,154 @@ export function readWebSearchUserLayers(settings) {
 }
 
 /**
+ * 把网页搜索**切回 dsh 自带的 DeepSeek 官方搜索**（issue #33）。
+ *
+ * 与 {@link configureWorkBuddyWebSearch} 完全对称：那个负责"切到本地桥"，这个
+ * 负责"切回去"。用户手动切换必须是一条**明确的、可重复执行**的操作，
+ * 而不是只能靠「恢复接入前的配置」这个语义模糊的按钮（快照丢了就点不动）。
+ *
+ * 边界（与恢复/回滚同一条纪律）：
+ *   - 只动 `web-search-deepseek` 与 `web` 两个分节里**换后端**的那几个字段；
+ *     `maxUses` 这类调参原样保留；
+ *   - **删除**桥地址而不是写上官方地址：dsh 的 provider 自己有默认端点，
+ *     写死一个地址只会在上游改域名时变成新的故障源；
+ *   - `DEEPSEEK_API_KEY` 一个字都不碰（也更不该把桥令牌留在引用里）；
+ *   - 用完的独立凭据引用 `WORKBUDDY_SEARCH_BRIDGE_KEY` 顺手清掉 —— 它只属于
+ *     桥通道，留着等于留一份无主凭据。
+ *
+ * @returns {Promise<{ provider: string, removed: string[], credentialCleared: boolean }>}
+ */
+export async function switchWorkBuddyWebSearchToDeepSeek({
+  settings,
+  credentials,
+  expectedBaseURL = '',
+  searchKeyRef = SEARCH_KEY_REF,
+  confirmExternal = false,
+} = {}) {
+  if (!settings || typeof settings.describe !== 'function' || typeof settings.replace !== 'function') {
+    throw new Error('dsh settings service does not support switching web search settings');
+  }
+  const descriptors = settings.describe();
+  const list = Array.isArray(descriptors) ? descriptors : [];
+  const searchDesc = list.find((item) => item && item.ns === WEB_SEARCH_ENTRY_ID);
+  if (!searchDesc) throw new Error('dsh web search section is not configurable');
+
+  // 只改**用户层**：写合并值会把 base 里的默认值固化进 profile。
+  const section = searchDesc.user && typeof searchDesc.user === 'object' ? { ...searchDesc.user } : {};
+  const removed = [];
+  const endpointBefore = typeof section.baseURL === 'string' ? section.baseURL : '';
+  /*
+   * 端点：只在它确实是**我们写的**时候才直接删。
+   *
+   * 两个充分条件之一即可（都是我们的指纹）：
+   *   · 与当前桥地址完全一致（`expectedBaseURL`）；
+   *   · 是本地 /v1 且凭据引用就是插件专用引用（`WORKBUDDY_SEARCH_BRIDGE_KEY`）
+   *     —— 端口漂移后地址会对不上，但这个引用是我们独有的。
+   *
+   * 只看"像不像本机 /v1"是不够的：用户自己起的本地搜索服务（同样是
+   * `127.0.0.1:PORT/v1`）会被那种判据认成我们的桥然后删掉。
+   */
+  const ownedEndpoint = Boolean(endpointBefore)
+    && (normalizeBaseURL(endpointBefore) === normalizeBaseURL(expectedBaseURL)
+      || (section.apiKeyEnv === searchKeyRef && isBridgeSearchEndpoint(endpointBefore, '')));
+  /*
+   * 第三方端点：**不替用户删**。
+   *
+   * 「切到 DeepSeek 官方」在 dsh 里的真实含义就是"让 provider 用它自己的默认
+   * 端点"，也就是必须把这个地址去掉。但那是用户自己的配置，静默抹掉既越权、
+   * 也让他下次切回来时无处可去 —— 所以必须先要一次明确确认。
+   * 确认后才删，并把原值放进返回值里，让调用方有机会存快照。
+   */
+  const externalEndpoint = Boolean(endpointBefore) && !ownedEndpoint;
+  if (externalEndpoint && !confirmExternal) {
+    return {
+      switched: false,
+      needsConfirm: true,
+      endpoint: endpointBefore,
+      reason: 'external-endpoint',
+    };
+  }
+  if (endpointBefore) {
+    delete section.baseURL;
+    removed.push('baseURL');
+  }
+  /*
+   * 只有**确认是我们写的**配置才顺手清掉插件专用凭据引用。
+   *
+   * 不去动用户自己的 `apiKeyEnv`：`MY_KEY` 配合官方默认端点仍然是「官方
+   * DeepSeek，只是用自己的计费账号」，那是他的选择；删了就变成"凭据凭空消失"。
+   */
+  if (section.apiKeyEnv === searchKeyRef && (ownedEndpoint || endpointBefore === '')) {
+    delete section.apiKeyEnv;
+    removed.push('apiKeyEnv');
+  }
+  /*
+   * 字面 key 只可能是旧版配置遗留：provider 会优先用它，留着就永远绕过引用。
+   */
+  if (typeof section.apiKey === 'string' && section.apiKey.length > 0) {
+    section.apiKey = '';
+    removed.push('apiKey');
+  }
+  // 保留原来的 `{}` 语义：确实什么都没写时也落一次空分节，行为与旧版一致。
+  await settings.replace(WEB_SEARCH_ENTRY_ID, section);
+
+  const webDesc = list.find((item) => item && item.ns === WEB_ENTRY_ID);
+  if (webDesc) {
+    const webSection = webDesc.user && typeof webDesc.user === 'object' ? { ...webDesc.user } : {};
+    webSection.searchProvider = 'deepseek-official';
+    await settings.replace(WEB_ENTRY_ID, webSection);
+  } else {
+    /*
+     * 没有 `web` 分节（rc.6）时没有 provider 选项可写，只能靠"不指向桥"来表达
+     * 官方通道。这里额外写 `apiKeyEnv: DEEPSEEK_API_KEY`：与默认值等价，但它会
+     * 进 user 层，自动接入据此认出「用户选过官方」，不会又把桥接回去。
+     */
+    if (section.apiKeyEnv === undefined) {
+      section.apiKeyEnv = 'DEEPSEEK_API_KEY';
+      await settings.replace(WEB_SEARCH_ENTRY_ID, section);
+    }
+  }
+
+  let credentialCleared = false;
+  if (credentials && typeof credentials.unset === 'function') {
+    try {
+      await credentials.unset(searchKeyRef);
+      credentialCleared = true;
+    } catch { /* 凭据本来就不存在时忽略 */ }
+  }
+  return {
+    switched: true,
+    provider: 'deepseek-official',
+    removed,
+    credentialCleared,
+    // 第三方端点在确认后被删掉了：把原值如实交回，调用方可以据此留快照。
+    endpoint: '',
+    previousEndpoint: endpointBefore,
+  };
+}
+
+/**
+ * 把网页搜索切到本地桥（面板「切到 WorkBuddy」的**手动**入口）。
+ *
+ * `configureWorkBuddyWebSearch` 只负责写配置；它不知道桥是否在跑、令牌对不对，
+ * 也不负责自检。面板按钮需要"点一下就成"的语义，所以把**前置检查**放在这里：
+ * 桥没在跑就明确说"先启动桥"，而不是写一份注定 401 的配置再让用户猜。
+ *
+ * 之所以不把这段塞进 `configureWorkBuddyWebSearch`：自动接入那条路已经在
+ * `enableWebSearch()` 里做过同样的检查，且它的错误文案要按"自动/手动"区分。
+ *
+ * @returns {Promise<{ baseURL: string, provider: string, apiKeyRef: string }>}
+ */
+export async function switchWorkBuddyWebSearchToBridge({
+  settings,
+  credentials,
+  baseURL,
+  token,
+} = {}) {
+  return configureWorkBuddyWebSearch({ settings, credentials, baseURL, token });
+}
+
+/**
  * 没有内存快照时的回滚：只摘掉本插件写进去的字段。
  *
  * 用在「自动接入后重启了 dsh」：这时原配置快照已经随内存消失，但我们仍能
@@ -541,6 +712,82 @@ export function deriveWebSearchStatus({ section, webSection, expectedBaseURL, ke
       : !keyConfigured ? 'key'
         : 'provider';
   return { configured, pointsToBridge, providerSelected, provider, baseURL, apiKeyRef, reason };
+}
+
+/**
+ * 网页搜索现在实际走哪条通道（issue #33）。
+ *
+ * 判据顺序刻意是「先证明确实指向桥，再区分用户选的其它渠道」：
+ *   1. 端点确实是本地桥 + provider 没换成别的 → `bridge`（后面再看桥/令牌/凭据是否就绪）；
+ *   2. provider 是空或 `deepseek-official` 且端点不是桥 → `deepseek-official`
+ *      （dsh bundle 的默认形态：官方搜索）；
+ *   3. 有明确的自定义端点（第三方 baseURL / 别的 apiKeyEnv / 别的 provider）
+ *      → `external`。**这是用户的选择**，不是故障；
+ *   4. 读不到分节 / 宿主没加载搜索 provider → `unknown`（这才是要提示的）。
+ *
+ * @param {object} deps
+ * @param {object | undefined} deps.section `web-search-deepseek` 分节
+ * @param {object | undefined} deps.webSection `web` 分节（可能不存在）
+ * @param {string} deps.expectedBaseURL 本地桥地址
+ * @param {boolean} [deps.available] 分节是否存在（false = dsh 没加载 provider）
+ * @param {boolean} [deps.configError] 读配置本身失败
+ * @returns {{ channel: string, deliberate: boolean, label: string, endpoint: string, provider: string }}
+ *   `deliberate: true` 表示这是「用户选择的结果」，面板不得把它报成需要处理的问题。
+ */
+export function deriveSearchChannel({
+  section,
+  webSection,
+  expectedBaseURL,
+  available = true,
+  configError = false,
+} = {}) {
+  const baseURL = normalizeBaseURL(section?.baseURL);
+  const provider = typeof webSection?.searchProvider === 'string' ? webSection.searchProvider : '';
+  const unknown = { channel: SEARCH_CHANNEL_UNKNOWN, deliberate: false, label: '', endpoint: baseURL, provider };
+
+  // 读不到配置 / 宿主没加载 provider：这才是需要提示的「不知道」。
+  if (configError || !available) return unknown;
+
+  // 1) 指向本地桥 + provider 没换成别的 = 本插件的接入形态。
+  //    是否真的能用交给 `deriveWebSearchReadiness`（桥没跑/令牌变了它才是故障）。
+  if (isBridgeSearchEndpoint(baseURL, expectedBaseURL)
+    && (provider === '' || provider === 'deepseek-official')) {
+    return { channel: SEARCH_CHANNEL_BRIDGE, deliberate: true, label: 'bridge', endpoint: baseURL, provider };
+  }
+
+  /*
+   * 2) 有自定义端点但没指向本机桥 = 用户自己接的第三方通道（可以是官方
+   *    DeepSeek 的 anthropic 兼容端点，也可以是任何别的服务）。
+   *
+   *    这里**不判断它属于谁**：地址不是我们的桥，就不是我们该议论的东西。
+   *    面板只能说"当前走 <这个端点>"，不能断言费用、更不能说成故障。
+   */
+  if (baseURL !== '') {
+    return {
+      channel: SEARCH_CHANNEL_EXTERNAL,
+      deliberate: true,
+      label: provider || baseURL,
+      endpoint: baseURL,
+      provider,
+    };
+  }
+
+  // 3) 换过 provider、但端点交给 provider 自己决定 = 用户选的另一个后端。
+  if (provider !== '' && provider !== 'deepseek-official') {
+    return {
+      channel: SEARCH_CHANNEL_EXTERNAL, deliberate: true, label: provider, endpoint: '', provider,
+    };
+  }
+
+  // 4) 其余（含空分节）= dsh 自带官方搜索，也就是默认形态。
+  //    `apiKeyEnv` 被改成别的引用但端点没改时仍属官方通道：引用只影响鉴权。
+  return {
+    channel: SEARCH_CHANNEL_DEEPSEEK,
+    deliberate: true,
+    label: 'deepseek-official',
+    endpoint: '',
+    provider: provider || 'deepseek-official',
+  };
 }
 
 /**

@@ -61,6 +61,14 @@ test('数据面的方法 / 权限矩阵：只读路由拒绝写方法，写路�
     }),
     verifyWebSearch: async () => ({ verified: true, sourceCount: 2 }),
     revertWebSearch: async () => ({ reverted: true, summary: { baseURL: 'https://api.deepseek.com/v1' } }),
+    disableWebSearch: async ({ confirmExternal } = {}) => ({
+      switched: true,
+      provider: 'deepseek-official',
+      removed: ['baseURL', 'apiKeyEnv'],
+      credentialCleared: true,
+      endpoint: '',
+      previousEndpoint: confirmExternal ? 'https://search.example.com/v1' : 'http://127.0.0.1:8790/v1',
+    }),
   });
   const byPath = (p) => routes.find((r) => r.path === p);
 
@@ -132,6 +140,7 @@ test('数据面的方法 / 权限矩阵：只读路由拒绝写方法，写路�
     ['/workbuddy/web-search/enable', 'POST'],
     ['/workbuddy/web-search/verify', 'POST'],
     ['/workbuddy/web-search/revert', 'POST'],
+    ['/workbuddy/web-search/disable', 'POST'],
   ];
   for (const [path, method] of writes) {
     const blocked = await run(path, method);
@@ -164,6 +173,16 @@ test('数据面的方法 / 权限矩阵：只读路由拒绝写方法，写路�
   assert.equal(revert.status, 200);
   assert.equal(revert.body.reverted, true);
   assert.equal(revert.body.summary.baseURL, 'https://api.deepseek.com/v1');
+
+  /*
+   * 「切到 DeepSeek 官方」是 issue #33 新增的双向切换之一：它必须也要求面板头
+   * （上面 writes 列表里已覆盖 403 分支），并且返回体要有可判定的 `switched`。
+   */
+  const disable = await run('/workbuddy/web-search/disable', 'POST', { 'x-workbuddy-panel': '1' });
+  assert.equal(disable.status, 200);
+  assert.equal(disable.body.ok, true);
+  assert.equal(disable.body.switched, true, `切到官方应当成功：${JSON.stringify(disable.body)}`);
+  assert.equal(disable.body.provider, 'deepseek-official');
 });
 
 test('BridgeSupervisor：调用方 abort 不能被误报成桥已停止', async () => {
@@ -506,7 +525,7 @@ test('apply() 装配：注册 llm 路由、10 个工具、命令、HTTP 路由',
     }
     assert.equal(calls.commands.length, 1);
     assert.equal(calls.commands[0].name, 'workbuddy');
-    assert.equal(calls.routes.length, 27, 'HTTP 数据面应有 27 条路由（26 条 exact + 1 条 console-api 前缀）');
+    assert.equal(calls.routes.length, 28, 'HTTP 数据面应有 28 条路由（27 条 exact + 1 条 console-api 前缀）');
     assert.deepEqual(calls.routes.map((r) => r.path).sort(), [
       '/workbuddy/bridge', '/workbuddy/checkin', '/workbuddy/checkin/accounts', '/workbuddy/checkin/all',
       '/workbuddy/console', '/workbuddy/console-api', '/workbuddy/default-model', '/workbuddy/identity',
@@ -514,7 +533,7 @@ test('apply() 装配：注册 llm 路由、10 个工具、命令、HTTP 路由',
       '/workbuddy/login', '/workbuddy/login/active', '/workbuddy/login/cancel', '/workbuddy/login/logout',
       '/workbuddy/login/poll', '/workbuddy/login/source', '/workbuddy/login/start',
       '/workbuddy/migrate', '/workbuddy/model-visibility', '/workbuddy/models', '/workbuddy/quota', '/workbuddy/requests', '/workbuddy/status', '/workbuddy/usage',
-      '/workbuddy/web-search/enable', '/workbuddy/web-search/revert', '/workbuddy/web-search/verify',
+      '/workbuddy/web-search/disable', '/workbuddy/web-search/enable', '/workbuddy/web-search/revert', '/workbuddy/web-search/verify',
     ]);
     const prefix = calls.routes.find((r) => r.path === '/workbuddy/console-api');
     assert.equal(prefix.kind, 'prefix', 'console-api 必须挂成前缀路由');
