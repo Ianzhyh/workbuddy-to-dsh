@@ -7167,6 +7167,125 @@ test('桥：多账号签到 —— 按 uid 去重、逐个领取、无活动不�
 });
 
 /**
+ * 自动签到必须**按账号**判定（issue #32）。
+ *
+ * ## 现场
+ *
+ * 本机登录两个号：当前账号是国际版（`workbuddy.ai` 网关，没有积分活动），
+ * 另一个是国内账号（有活动、没签）。自动签到跑完的结果是：国内账号一次都没被
+ * 尝试过，当天也不会再被尝试 —— 因为「无活动」被写进了**全局**的
+ * `autoCheckinDoneDay`，整轮直接收工。
+ *
+ * ## 这条用例钉住的行为
+ *
+ *   1. 当前账号（国际版）判 no-activity，且**只影响它自己**；
+ *   2. 同一次自动签到里，国内账号必须真的被打到上游 `/daily-checkin` 并签到成功；
+ *   3. `/health.autoCheckin` 要如实给出每个账号各自的结果（不能只报当前账号）。
+ *
+ * 为了让"自动签到"在测试里马上发生，用 `WORKBUDDY_CHECKIN_KICK_MS=0` +
+ * 显式打开 `WORKBUDDY_AUTO_CHECKIN`（其余用例都把它关掉）。
+ */
+test('桥：自动签到按账号独立 —— 当前账号无活动不阻止其它账号（issue #32）', { timeout: 90_000 }, async () => {
+  const authDir = mkdtempSync(join(tmpdir(), 'wb-auto-checkin-per-account-'));
+  const jwtFor = (uid) => 'x.' + Buffer.from(JSON.stringify({
+    sub: uid,
+    exp: Math.floor(Date.now() / 1000) + 3600,
+  })).toString('base64url') + '.y';
+  const writeInfo = (name, uid, domain) => {
+    writeFileSync(join(authDir, name), JSON.stringify({
+      auth: { accessToken: jwtFor(uid), refreshToken: 'r', domain, expiresAt: Date.now() + 86_400_000 },
+      account: { uid, nickname: '昵称-' + uid, uin: '100' },
+    }));
+  };
+  // 当前账号（authFile 指的就是它）= 国际版，没有签到活动
+  writeInfo('intl.info', 'uid-intl', 'www.workbuddy.ai');
+  // 另一个账号 = 国内版，有活动且没签
+  writeInfo('cn.info', 'uid-cn', 'www.workbuddy.cn');
+
+  const seen = [];
+  const upstream = createServer((req, res) => {
+    const path = new URL(req.url, 'http://127.0.0.1').pathname;
+    const uid = String(req.headers['x-user-id'] || '');
+    seen.push(`${uid} ${path}`);
+    res.writeHead(200, { 'content-type': 'application/json' });
+    if (path === '/v2/billing/meter/daily-checkin') {
+      // 国际版网关：签到活动未开启
+      if (uid === 'uid-intl') return res.end(JSON.stringify({ code: 10086, msg: '签到活动未开启或已过期' }));
+      return res.end(JSON.stringify({ code: 0, data: { credit: 100, streak_days: 3 } }));
+    }
+    if (path === '/v2/billing/meter/checkin-activity-status') {
+      return res.end(JSON.stringify({
+        code: 0,
+        data: { active: uid !== 'uid-intl', today_checked_in: false, daily_credit: 100 },
+      }));
+    }
+    return res.end(JSON.stringify({ code: 0, data: {} }));
+  });
+  await new Promise((r) => upstream.listen(0, '127.0.0.1', r));
+
+  const bridge = await startBridge(
+    {
+      WORKBUDDY_AUTH_DIR: authDir,
+      // 目录本身就是 auth 目录，当前账号由 authFile 指定（国际版那个）
+      WORKBUDDY_BILLING_BASE: `http://127.0.0.1:${upstream.address().port}`,
+      WORKBUDDY_SKIP_MODEL_PREFLIGHT: '1',
+      WORKBUDDY_AUTO_CHECKIN: '1',
+      WORKBUDDY_CHECKIN_KICK_MS: '0',
+      WORKBUDDY_CHECKIN_COOLDOWN_MS: '0',
+    },
+    { auth: authFileFor('uid-intl', 'www.workbuddy.ai') },
+  );
+  try {
+    // 等自动签到把两个账号都走完：判据是「国内账号真的被领过」
+    const deadline = Date.now() + 60_000;
+    let health = null;
+    while (Date.now() < deadline) {
+      health = await (await fetch(`${bridge.baseUrl}/health`, {
+        headers: auth, signal: AbortSignal.timeout(8000),
+      })).json();
+      const claimedCn = seen.some((c) => c === 'uid-cn /v2/billing/meter/daily-checkin');
+      if (claimedCn && health?.autoCheckin?.at) break;
+      await new Promise((r) => setTimeout(r, 300));
+    }
+
+    assert.ok(seen.some((c) => c === 'uid-intl /v2/billing/meter/daily-checkin'),
+      `当前账号（国际版）也该被尝试一次，实际请求：${JSON.stringify(seen)}`);
+    assert.ok(seen.some((c) => c === 'uid-cn /v2/billing/meter/daily-checkin'),
+      `国内账号必须被自动签到照顾到（这正是 issue #32 的缺陷），实际请求：${JSON.stringify(seen)}`);
+
+    const auto = health?.autoCheckin;
+    assert.ok(auto?.accounts?.length >= 2,
+      `autoCheckin.accounts 必须逐账号给出结果，实得 ${JSON.stringify(auto)}`);
+    const intl = auto.accounts.find((x) => x.key === 'uid-intl');
+    const cn = auto.accounts.find((x) => x.key === 'uid-cn');
+    assert.equal(intl?.result, 'no-activity', '国际版账号应判 no-activity');
+    assert.equal(cn?.result, 'ok', `国内账号应签到成功，实得 ${JSON.stringify(cn)}`);
+    assert.equal(cn?.credit, 100);
+    // 顶层 result 仍是「当前账号」的结论（控制台/面板都读这个字段）
+    assert.equal(auto.result, 'no-activity', '顶层 result 代表当前账号');
+
+    /*
+     * 再打一次会触发自动签到的入口：两个账号当天都已收工（国际版无活动、国内版已签），
+     * 不该再对上游重复领。这条同时守住"按账号的 done 标记真的生效"——
+     * 只改判断不记标记的话，定时器每轮都会重领一遍。
+     */
+    const before = seen.filter((c) => c.endsWith('/daily-checkin')).length;
+    await fetch(`${bridge.baseUrl}/v1/checkin`, {
+      method: 'POST', headers: auth, signal: AbortSignal.timeout(30000),
+    });
+    await new Promise((r) => setTimeout(r, 1500));
+    const after = seen.filter((c) => c.endsWith('/daily-checkin')).length;
+    // 手动 POST /v1/checkin 本来就只签当前账号一次（那是显式操作，不受自动签到的 done 影响）
+    assert.ok(after - before <= 1,
+      `自动签到不该重复领（${before} -> ${after}）`);
+  } finally {
+    await bridge.stop();
+    upstream.close();
+    rmSync(authDir, { recursive: true, force: true });
+  }
+});
+
+/**
  * 单账号签到的「没有活动」分支：必须是 200 + noActivity，而不是 502 失败。
  *
  * 现场症状（2026-10-26）：国际版账号的签到卡片上写着「领取失败：签到活动未开启

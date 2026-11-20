@@ -12019,63 +12019,210 @@ async function handleCheckinAccounts(req, res, claim) {
 // 与**桥自己的定时器**（见 startAutoCheckinTimer 的说明）。
 const AUTO_CHECKIN_COOLDOWN_MS = numEnv('WORKBUDDY_CHECKIN_COOLDOWN_MS', 3600000, { min: 0 }); // 失败后冷却 1 小时再试
 const AUTO_CHECKIN_MAX_PER_DAY = 3;       // 当天最多试 3 次，避免对上游打无效请求
-let autoCheckinDay = '';                  // 「今天已尝试」的本地日期
-let autoCheckinDoneDay = '';              // 「今天已签成功」的本地日期 —— 当天不再重试
-let autoCheckinTries = 0;
-let autoCheckinLastAt = 0;
-let autoCheckinInflight = null;
-let autoCheckinState = null;              // { at, result, error?, credit? }
 
 /**
- * 触发一次自动签到（不 await）。失败策略写死，避免对上游打无效请求：
- * 失败后冷却 1 小时、当天最多 3 次；上游「已签到」按**成功**处理。
+ * 每个账号各自的当天签到进度（issue #32）。
+ *
+ * ## 为什么必须是"每账号一份"
+ *
+ * 原先这四个变量（day / done / tries / lastAt）是**全局唯一**的，整套自动签到
+ * 只照顾"当前账号"一个人。多账号机器上于是出现这种确定性坏结果：
+ *
+ *   1. 当前账号是**国际版**（`workbuddy.ai` 网关没有积分活动）；
+ *   2. 自动签到试一次 → 上游回「签到活动未开启或已过期」→ 判定 no-activity；
+ *   3. 原实现把 no-activity 也写进全局 `autoCheckinDoneDay`（"当天收工"）；
+ *   4. 于是**国内账号当天彻底不再被尝试** —— 明明有活动、明明没签，却一次都不签；
+ *      切换账号也一样，因为那个标记是进程级的、不随账号走。
+ *
+ * 换号以后更糟：新账号继承了上一个账号的「今天已签成功」/「今天已试满 3 次」。
+ *
+ * 现在每天的签到状态按 `uid` 分桶，一个账号的「无活动」「已签」「失败冷却」
+ * 都只影响它自己。当前账号仍然排在最前面（兼容单账号与 `api-key` 这类没有
+ * uid 的来源，它们共用 `key` 为空的桶）。
+ *
+ * @type {Map<string, { day: string, done: boolean, tries: number, lastAt: number, result: string, credit: number | null }>}
+ */
+const autoCheckinByAccount = new Map();
+
+/** 当前账号最近一次自动签到的结果（`/health` 与面板的信号源，全局取最近一次）。 */
+let autoCheckinState = null;
+/** 是否有一轮 autoCheckin 正在进行（全局闸门：别让定时器与请求路径同时开跑）。 */
+let autoCheckinInflight = null;
+
+/** 取（或重置）某个账号当天的签到进度。跨天自动归零。 */
+function autoCheckinSlot(accountKey, today) {
+  const key = String(accountKey || '');
+  let slot = autoCheckinByAccount.get(key);
+  if (!slot || slot.day !== today) {
+    slot = { day: today, done: false, tries: 0, lastAt: 0, result: '', credit: null };
+    autoCheckinByAccount.set(key, slot);
+  }
+  return slot;
+}
+
+/**
+ * 这个账号今天还需要试吗？
+ *
+ * 三种"今天不用再管"的情形分开表达，日志里才能看出到底卡在哪一条：
+ * `done`（已签/无活动）、`tries`（试满 3 次）、`cooldown`（失败后 1 小时内）。
+ */
+function autoCheckinSkipReason(slot, now) {
+  if (slot.done) return 'done';
+  if (slot.tries >= AUTO_CHECKIN_MAX_PER_DAY) return 'tries';
+  if (slot.lastAt && now - slot.lastAt < AUTO_CHECKIN_COOLDOWN_MS) return 'cooldown';
+  return '';
+}
+
+/** 一个待签账号：`{ key, label, auth }`。`auth` 是**该账号自己**的凭据。 */
+function autoCheckinTargets(currentAuth, localAccounts) {
+  const targets = [];
+  const seen = new Set();
+  const push = (key, label, auth) => {
+    if (!auth || seen.has(key)) return;
+    seen.add(key);
+    targets.push({ key, label, auth });
+  };
+  // 当前账号优先：单账号机器就走这一个，行为与旧版一致。
+  if (currentAuth) push(String(currentAuth.userId || currentAuth.uid || ''), 'current', currentAuth);
+  for (const account of localAccounts || []) {
+    const key = String(account.userId || '');
+    if (!key) continue;
+    push(key, account.nickname || key.slice(0, 8), account);
+  }
+  return targets;
+}
+
+/**
+ * 本机已登录账号（只用于自动签到，失败一律当成"没有别的账号"）。
+ *
+ * `readLocalAccounts()` 要扫目录、解信封，失败原因很多（另一个 build 写的、
+ * 文件被占用…）。自动签到是后台补偿动作，扫不到就只签当前账号 —— 绝不能因为
+ * 一次枚举失败把当前账号也拖住。
+ */
+async function safeLocalAccounts() {
+  try {
+    return await readLocalAccounts();
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * 触发一轮自动签到（不 await）。失败策略写死，避免对上游打无效请求：
+ * 失败后冷却 1 小时、每账号每天最多 3 次；上游「已签到」按**成功**处理。
+ *
+ * ## 与旧实现的三处差别（都是 issue #32 的点）
+ *
+ *   1. **按账号独立**：本机每个已登录账号各有自己的 day/done/tries/lastAt，
+ *      一个账号「无活动」或「失败」不阻止其它账号；
+ *   2. **不切换当前账号**：只是拿各自的令牌去各自的网关领，`resolveAuth()`
+ *      与模型路由一个字都不动（红线仍然是「单账号供给」）；
+ *   3. **当前账号不可用时也照样照顾其它账号**：以前 `resolveAuth()` 抛错
+ *      （没登录 / 过期）整轮直接结束，本机其它账号明明能签也不签。
  */
 function maybeAutoCheckin() {
   if (!AUTO_CHECKIN_ENABLED) return;
-
-  const today = localDay(Date.now());
-  if (today !== autoCheckinDay) {
-    autoCheckinDay = today;
-    autoCheckinTries = 0;
-    autoCheckinLastAt = 0;
-  }
-  // 今天已经签成功了就别再打上游 —— 没有这条的话，定时器每小时都会问一次
-  // 「签了没」，而答案永远是「签了」。
-  if (autoCheckinDoneDay === today) return;
-  if (autoCheckinTries >= AUTO_CHECKIN_MAX_PER_DAY) return;
-  if (autoCheckinLastAt && Date.now() - autoCheckinLastAt < AUTO_CHECKIN_COOLDOWN_MS) return;
   if (autoCheckinInflight) return;
 
-  autoCheckinLastAt = Date.now();
-  autoCheckinTries += 1;
+  const now = Date.now();
+  const today = localDay(now);
+  // 跨天：整张表只保留今天的桶（历史上按账号记的那些直接丢弃，键会自然重建）
+  for (const [key, slot] of autoCheckinByAccount) {
+    if (slot.day !== today) autoCheckinByAccount.delete(key);
+  }
+
   autoCheckinInflight = (async () => {
-    try {
-      const claim = await claimDailyCheckin(await resolveAuth());
+    let currentAuth = null;
+    let currentError = null;
+    try { currentAuth = await resolveAuth(); } catch (e) { currentError = e; }
+
+    const accounts = await safeLocalAccounts();
+    const targets = autoCheckinTargets(currentAuth, accounts);
+    if (!targets.length) {
+      // 一个凭据都拿不到：如实记账（面板据此显示原因），但不制造无谓重试。
       autoCheckinState = {
         at: new Date().toISOString(),
-        // 上游「已签到」是成功，不是失败（复用 claimDailyCheckin 的幂等语义）
-        result: claim.already ? 'already' : 'ok',
-        credit: typeof claim.credit === 'number' ? claim.credit : 0,
+        result: 'error',
+        error: shortError(currentError || new Error('no usable credential for auto check-in')),
       };
-      // 「已签到」也算今天不用再管了
-      autoCheckinDoneDay = localDay(Date.now());
-      log('auto checkin', autoCheckinState.result, autoCheckinState.credit);
-    } catch (e) {
-      const msg = shortError(e);
-      // 国际版网关没有积分系统：这不是「失败」，如实区分开
-      const noActivity = /no.?activity|not.?support|无.?签到|不存在|not.?found/i.test(msg);
-      autoCheckinState = {
-        at: new Date().toISOString(),
-        result: noActivity ? 'no-activity' : 'error',
-        error: msg,
-      };
-      // 没有签到活动的地方永远不会「成功」，再试也是白试 —— 当天收工
-      if (noActivity) autoCheckinDoneDay = localDay(Date.now());
-      log('auto checkin', autoCheckinState.result, msg);
-    } finally {
-      autoCheckinInflight = null;
+      log('auto checkin', 'no-account', autoCheckinState.error);
+      return;
     }
-  })();
+
+    const results = [];
+    for (const target of targets) {
+      const slot = autoCheckinSlot(target.key, today);
+      const skip = autoCheckinSkipReason(slot, now);
+      if (skip) {
+        // 已经结束的账号不重复打上游；但仍然让它出现在结果里，日志才完整。
+        results.push({
+          key: target.key,
+          label: target.label,
+          result: slot.result || 'skipped',
+          skip,
+          ...(typeof slot.credit === 'number' ? { credit: slot.credit } : {}),
+        });
+        continue;
+      }
+      slot.lastAt = now;
+      slot.tries += 1;
+      try {
+        const claim = await claimDailyCheckin(target.auth);
+        // 上游「已签到」是成功，不是失败（复用 claimDailyCheckin 的幂等语义）
+        slot.result = claim.already ? 'already' : 'ok';
+        slot.credit = typeof claim.credit === 'number' ? claim.credit : 0;
+        slot.done = true;
+        results.push({
+          key: target.key,
+          label: target.label,
+          result: slot.result,
+          credit: slot.credit,
+        });
+      } catch (e) {
+        const msg = shortError(e);
+        /*
+         * 「没有签到活动」= 这个账号（通常是国际版网关）没有积分活动。
+         *
+         * 判据必须与 `/v1/checkin` 用同一份正则：那边已经把「令牌过期」之类
+         * 真故障和「签到活动未开启」分开了，这里再写一套迟早分叉。
+         * 无活动的账号当天收工（它永远不会有活动），但**只收它自己**。
+         */
+        const noActivity = NO_CHECKIN_ACTIVITY_RE.test(msg);
+        slot.result = noActivity ? 'no-activity' : 'error';
+        if (noActivity) slot.done = true;
+        results.push({
+          key: target.key,
+          label: target.label,
+          result: slot.result,
+          error: noActivity ? undefined : msg,
+        });
+      }
+    }
+
+    const current = results.find((r) => r.key === String(currentAuth?.userId || currentAuth?.uid || '')) || results[0];
+    autoCheckinState = {
+      at: new Date().toISOString(),
+      result: current?.result || 'error',
+      ...(typeof current?.credit === 'number' ? { credit: current.credit } : {}),
+      ...(current?.error ? { error: current.error } : {}),
+      // 多账号明细（不含任何令牌）：面板/控制台据此说明"另一个号签到了"。
+      accounts: results.map((r) => ({
+        key: r.key,
+        label: r.label,
+        result: r.result,
+        ...(r.skip ? { skip: r.skip } : {}),
+        ...(typeof r.credit === 'number' ? { credit: r.credit } : {}),
+        ...(r.error ? { error: r.error } : {}),
+      })),
+    };
+    for (const row of results) log('auto checkin', `${row.label || row.key}:${row.result}`, row.credit ?? row.error ?? '');
+  })().catch((e) => {
+    // 兜底：任何未预期的异常也不能让 inflight 卡死（否则之后再也不自动签）。
+    autoCheckinState = { at: new Date().toISOString(), result: 'error', error: shortError(e) };
+    log('auto checkin', 'unexpected', autoCheckinState.error);
+  }).finally(() => {
+    autoCheckinInflight = null;
+  });
 }
 
 /**
