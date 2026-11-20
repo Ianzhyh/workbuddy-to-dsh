@@ -17,7 +17,7 @@
 
 只支持最近 2 个 minor 版本。
 
-## [Unreleased]
+## [1.24.3] - 2026-11-20
 
 ### Added
 
@@ -40,6 +40,10 @@
   「会消耗 DeepSeek 钱包」被删掉 —— 对第三方端点它本来就是假话。读不到配置这种
   **真**问题仍然提示，但按钮指向诊断页而不是盲写配置。
 
+  `workbuddy_status` 工具同步修掉同类误报：agent 原先会照「修法：点一键接入」把
+  用户特意切走的通道又掰回桥。`preflight` 的「网页搜索（配置层）」也改为三态
+  （指向桥 / 官方通道 / 第三方端点），只对第三种给 warn。
+
 ### Fixed
 
 - **自动签到按账号独立，国际账号不再阻止国内账号签到（#32）。**
@@ -53,6 +57,30 @@
   `/health.autoCheckin` 增加 `accounts[]` 明细（每个账号各自的结果与积分，
   **不含任何令牌**），顶层 `result` 仍是当前账号的结论，控制台与面板的既有读法
   不受影响。
+
+- **自动签到的热路径成本（#32 的连带回归）。**
+  这个函数挂在三条协议入口上，每个 token 流都会碰一次；按账号独立之后它还要扫
+  登录目录、逐个解 at-rest 信封。现在在进入异步之前就有内存闸门：所有已知账号
+  当天都已结束（已签 / 试满 / 冷却）时直接返回，单账号机器也不会去枚举其它账号。
+
+- **`/health` 会把本机账号与路径漏给 chat-only 的 client key。**
+  `autoCheckin.accounts[]`（#32 新增）、`credential.desktopUserId`、
+  `credential.plugin.uids[]`、`auth.userId`、`authFile`、`storeDir` 都属账号
+  枚举 / 系统身份信息，而 `/health` 是所有调用方都能打的探活端点。现在按调用方
+  分层：本机管理钥匙（local）拿完整视图，client key 只拿"配了什么来源 / 有没有
+  可用凭据 / 凭据是哪种存储模式"，错误串里的本机绝对路径也抹成 `<path>`。
+
+- **`tool_choice` 指定某个工具时，工具名被整个丢掉。**
+  Anthropic 的 `{type:'tool', name}` 与 Responses 的 `{type:'function', name}`
+  原先都被压成字符串 `required`，于是「只准调 A」退化成「随便调哪个」——
+  客户端的约束静默失效，且全程无报错。现在映射成上游认的
+  `{type:'function', function:{name}}`，名字用与 `tools[]` 一致的别名；
+  `normalizePayload` 不再把这个形状抹平。
+
+- **长名 freeform 工具在 Responses 流式路径丢参数（PR #31 的漏网）。**
+  判断"要不要逐片发 `function_call_arguments.delta`"时用的是**别名**去查
+  `customTools`（存的是客户端原名），于是超长 `custom` 工具被当成普通工具，
+  客户端等的是 `custom_tool_call_input.delta`，整段参数被丢掉。
 
 ## [1.24.2] - 2026-11-14
 
