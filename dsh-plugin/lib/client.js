@@ -1348,6 +1348,31 @@ body.dark .wb-root,
       '复制诊断报告': 'Copy diagnostic report',
       '复制桥地址': 'Copy bridge URL',
       '网页搜索': 'Web search',
+      '当前通道': 'Current channel',
+      'WorkBuddy 本地桥': 'WorkBuddy local bridge',
+      'DeepSeek 官方搜索': 'DeepSeek official search',
+      '自定义端点': 'Custom endpoint',
+      '自定义端点：': 'Custom endpoint: ',
+      '未知（读不到配置）': 'Unknown (settings unreadable)',
+      '切到 WorkBuddy 搜索': 'Switch to WorkBuddy search',
+      '切到 DeepSeek 官方搜索': 'Switch to DeepSeek official search',
+      '把 dsh 的网页搜索切回 DeepSeek 官方搜索（不改其它设置）':
+        'Point dsh web search back at DeepSeek official search (nothing else is changed).',
+      '已切换到 DeepSeek 官方搜索': 'Switched to DeepSeek official search',
+      '当前是你选择的通道，本插件不会自动改回 WorkBuddy。':
+        'This channel is your choice; the plugin will not switch it back to WorkBuddy on its own.',
+      '点下面的按钮把搜索切到本地桥。': 'Use the button below to point search at the local bridge.',
+      '自动接入已关闭（你手动切到过别的通道）；需要时可再点「接入 WorkBuddy」。':
+        'Automatic setup is off because you switched to another channel manually; use "Switch to WorkBuddy search" if you want it back.',
+      '当前搜索端点不是本插件的本地桥：':
+        'The current search endpoint is not this plugin\'s local bridge: ',
+      '\n切到 DeepSeek 官方会删掉这个地址（你自己配的）。确定继续？':
+        '\nSwitching to DeepSeek official removes that endpoint (your own configuration). Continue?',
+      '已取消：没有改动你的搜索端点。': 'Cancelled: your search endpoint was not changed.',
+      '切换失败：': 'Switch failed: ',
+      '网页搜索走的是别的通道（不是本插件的本地桥）':
+        'Web search uses another channel (not this plugin\'s local bridge)',
+      '搜索走 WorkBuddy 额度。': 'Search uses the WorkBuddy quota.',
       '已接入本地桥': 'Connected to local bridge',
       '未接入（走 DeepSeek）': 'Not connected (uses DeepSeek)',
       '搜索走 WorkBuddy 额度，不消耗 DeepSeek。': 'Search uses WorkBuddy quota, not DeepSeek.',
@@ -1581,7 +1606,6 @@ body.dark .wb-root,
       '。桥已重启，两边同步。': '. The bridge restarted; both sides are in sync.',
       '积分已更新。': 'Credits updated.',
       '（积分正在后台刷新，稍后自动显示新账号的值。）': ' (credits are refreshing in the background; the new account\'s values will appear automatically.)',
-      '切换失败：': 'Switch failed: ',
       '改名': 'Rename',
       '保存': 'Save',
       '拖动排序': 'Drag to reorder',
@@ -4635,14 +4659,46 @@ body.dark .wb-root,
       const search = status?.webSearch;
       const searchKnown = search?.available === true;
       /*
+       * 当前搜索通道（issue #33）。
+       *
+       * 宿主会给出 `channel`：`bridge` / `deepseek-official` / `external` / `unknown`。
+       * 旧宿主没有这个字段，退回按 `configured` 猜：配置对了就是桥，否则当官方。
+       *
+       * **这里的关键判断是 `onBridge`，不是 `ready`**：只有"走桥但没接好"才是
+       * 本插件该修的问题；用户主动选了别的通道时，`ready` 的取值与他无关，
+       * 面板也不该把它算成待办（旧实现正是把这件事报成了红字）。
+       */
+      const channel = typeof search?.channel === 'string'
+        ? search.channel
+        : (search?.configured === true ? 'bridge' : 'deepseek-official');
+      const onBridge = channel === 'bridge';
+      /*
+       * `deliberate` 由宿主给出：true = 当前通道是**用户选择的结果**（含默认形态）。
+       * 只有它明确为 false（读不到配置 / 宿主没加载 provider）时才值得提示；
+       * 旧宿主没有这个字段，按"渠道已确定"处理，避免凭空造出一条告警。
+       */
+      const channelKnown = search?.deliberate !== false;
+      /*
        * 不能只看 `configured`：那只是“settings 写对了”。桥没跑、令牌被轮换、
        * 地址指向旧端口时 configured 仍为 true，面板却会显示绿色。
        */
       // 旧宿主没有 ready 字段（客户端可能先于宿主热更）；此时退回 configured，
       // 保持旧行为，不让面板在升级窗口里突然报“未接入”。
-      const searchReady = searchKnown && (search.ready === undefined
-        ? search.configured === true
-        : search.ready === true);
+      const searchReady = searchKnown && (onBridge
+        ? (search.ready === undefined ? search.configured === true : search.ready === true)
+        // 非桥通道没有"就绪"这件事：它由 dsh 自己管，不由我们判定。
+        : true);
+      /** 只有「走桥却没接好」才算需要处理的问题。 */
+      const searchBroken = searchKnown && onBridge && !searchReady;
+      /*
+       * 「读不到配置」这类**真**问题：通道未知且不是用户选择，必须如实提示。
+       *
+       * 与 `searchBroken` 分成两个变量，是为了让下面两处判断各自只说一件事：
+       *   · 走桥没接好 → 提示"重新接入"；
+       *   · 连配置都读不到 → 提示"去诊断页"，且**不**引导用户点一键接入
+       *     （那会在读不到配置的情况下盲写）。
+       */
+      const searchUnreadable = searchKnown && !channelKnown;
       const searchIssue = (() => {
         switch (search?.reason) {
           case 'namespace-missing': return {
@@ -4692,25 +4748,43 @@ body.dark .wb-root,
           };
           default: return {
             pill: '未接入',
-            alert: '网页搜索还没接入 WorkBuddy：现在仍走 DeepSeek，会消耗 DeepSeek 钱包',
+            /*
+             * 文案不能再断言"会消耗 DeepSeek 钱包"：这是 issue #33 明确点出的错。
+             * 我们只知道**当前不是本插件的桥**，不知道对方是谁、怎么计费。
+             */
+            alert: '网页搜索走的是别的通道（不是本插件的本地桥）',
             action: 'websearch',
           };
         }
       })();
-      const searchNote = searchReady
-        ? (search?.lastVerifyFailed
-          ? t('已接入，但上次自检失败：') + (search.lastVerifyError || t('未知错误'))
-          : t('搜索走 WorkBuddy 额度，不消耗 DeepSeek。'))
-        : search.reason === 'namespace-missing'
-          ? t('当前 dsh 没有加载网页搜索 provider；升级 dsh 或启用该插件后再试。')
-          : search.reason === 'bridge-auth'
-            ? t('本地桥还没有登录 WorkBuddy；先在「账号」页完成登录。')
-            : search.reason === 'bridge-conflict'
-              ? t('本地桥令牌或端口异常；先重启桥或检查端口。')
-              : search.reason === 'error'
-                ? t('读取 dsh 的网页搜索配置失败；请到「诊断」页查看详情。')
-                : t('接入后搜索走 WorkBuddy 额度，不消耗 DeepSeek 钱包；点下面的按钮即可。');
-      const searchVerifyNote = searchReady
+      /** 通道的中文名（面板只展示事实，不评价用户的选择）。 */
+      const channelLabel = channel === 'bridge'
+        ? t('WorkBuddy 本地桥')
+        : channel === 'external'
+          ? (search?.label ? t('自定义端点：') + search.label : t('自定义端点'))
+          : channel === 'deepseek-official'
+            ? t('DeepSeek 官方搜索')
+            : t('未知（读不到配置）');
+      const searchNote = !searchKnown
+        ? ''
+        : onBridge
+          ? (searchReady
+            ? (search?.lastVerifyFailed
+              ? t('已接入，但上次自检失败：') + (search.lastVerifyError || t('未知错误'))
+              : t('搜索走 WorkBuddy 额度。'))
+            : search.reason === 'namespace-missing'
+              ? t('当前 dsh 没有加载网页搜索 provider；升级 dsh 或启用该插件后再试。')
+              : search.reason === 'bridge-auth'
+                ? t('本地桥还没有登录 WorkBuddy；先在「账号」页完成登录。')
+                : search.reason === 'bridge-conflict'
+                  ? t('本地桥令牌或端口异常；先重启桥或检查端口。')
+                  : search.reason === 'error'
+                    ? t('读取 dsh 的网页搜索配置失败；请到「诊断」页查看详情。')
+                    : t('点下面的按钮把搜索切到本地桥。'))
+          // 非桥通道：说明这是你自己的选择，我们不会自作主张改回去。
+          : t('当前是你选择的通道，本插件不会自动改回 WorkBuddy。');
+      // 自检只对「走桥」有意义：别的通道我们没发起过自检，也不该拿旧结论吓人。
+      const searchVerifyNote = onBridge && channelKnown && searchReady
         ? (search?.lastVerifiedAt
           ? (search.lastVerifyStale
             ? t('配置已变化，上次自检已失效；建议重新检测。')
@@ -4732,16 +4806,23 @@ body.dark .wb-root,
         ? (search.revert.mode || 'snapshot')
         : 'none';
       const searchAuto = search?.auto;
-      const searchAutoNote = searchReady
+      const searchAutoNote = onBridge && searchReady
         ? (searchAuto?.status === 'done' && searchAuto?.mode === 'auto'
           ? t('已自动接入，无需手动配置。')
           : '')
         : (searchAuto?.status === 'failed'
           ? t('自动接入失败：') + (searchAuto.error || searchAuto.reason || t('未知错误'))
-          : (searchAuto?.enabled === true
-            && ['pending', 'waiting', 'configuring'].includes(searchAuto.status)
-            ? t('插件会在桥就绪后自动接入，不必手动点。')
-            : ''));
+          : (searchAuto?.status === 'opted-out'
+            /*
+             * 用户手动切走过：必须明确说"我不会再接回去"，否则下次启动如果
+             * 又出现桥通道配置，用户会以为插件没听话（issue #33 的第 2 条）。
+             */
+            ? t('自动接入已关闭（你手动切到过别的通道）；需要时可再点「接入 WorkBuddy」。')
+            : (searchAuto?.enabled === true
+              && onBridge
+              && ['pending', 'waiting', 'configuring'].includes(searchAuto.status)
+              ? t('插件会在桥就绪后自动接入，不必手动点。')
+              : '')));
       async function enableSearch() {
         setSearchBusy(true);
         setSearchAction('enable');
@@ -4812,6 +4893,43 @@ body.dark .wb-root,
           } else {
             setSearchMsg(t('恢复失败：') + (res.data?.error || ('HTTP ' + res.status)));
           }
+        } finally {
+          setSearchBusy(false);
+          setSearchAction('');
+        }
+      }
+      /**
+       * 手动切到 DeepSeek 官方搜索（issue #33）。
+       *
+       * 与「一键接入 WorkBuddy」对称的一条命令。端点若是用户自己配的第三方
+       * 地址，宿主先回 `needsConfirm`：这里弹一次确认，用户点头才带上
+       * `confirmExternal` 重发 —— 别人的配置不能被一次点击静默抹掉。
+       */
+      async function switchToDeepSeek(confirmExternal) {
+        setSearchBusy(true);
+        setSearchAction('disable');
+        setSearchMsg('');
+        try {
+          const res = await postJson('/workbuddy/web-search/disable', { confirmExternal }, undefined, {
+            timeoutMs: LONG_REQUEST_TIMEOUT_MS,
+          });
+          const data = res.data || {};
+          if (res.status < 200 || res.status >= 300 || data.ok === false) {
+            setSearchMsg(t('切换失败：') + (data.error || ('HTTP ' + res.status)));
+            return;
+          }
+          if (data.switched === false && data.needsConfirm) {
+            // 第三方端点：问一次再走。取消就什么都不改。
+            const ok = typeof window.confirm === 'function'
+              ? window.confirm(t('当前搜索端点不是本插件的本地桥：') + (data.endpoint || '')
+                + t('\n切到 DeepSeek 官方会删掉这个地址（你自己配的）。确定继续？'))
+              : false;
+            if (ok) await switchToDeepSeek(true);
+            else setSearchMsg(t('已取消：没有改动你的搜索端点。'));
+            return;
+          }
+          setSearchMsg(t('已切换到 DeepSeek 官方搜索'));
+          reload();
         } finally {
           setSearchBusy(false);
           setSearchAction('');
@@ -4938,13 +5056,26 @@ body.dark .wb-root,
         alerts.push({ tone: 'warn', text: '今日还没签到', action: 'checkin' });
       }
       if (status?.legacy?.found) alerts.push({ tone: 'warn', text: '检测到旧的 llm-pi-ai 路由，与插件撞名，建议清理', action: 'cleanup' });
-      // 未登录时欢迎卡已经接管引导；再催“接入搜索”只会让用户点一个必然失败的按钮。
-      if (searchKnown && !searchReady && state !== 'unauthenticated') {
+      /*
+       * 未登录时欢迎卡已经接管引导；再催“接入搜索”只会让用户点一个必然失败的按钮。
+       *
+       * `searchBroken`（而不是 `!searchReady`）是 issue #33 的关键：
+       * 只有「**走桥**但没接好」才是本插件该修的问题。用户主动切到 DeepSeek
+       * 官方或自己的第三方端点时，那是他的选择 —— 把它放进「需要你动手」等于
+       * 用报警逼他改回去，正是这条 issue 要消除的行为。
+       */
+      if (searchBroken && state !== 'unauthenticated') {
         alerts.push({
           tone: 'warn',
           text: searchIssue.alert,
           action: searchIssue.action || undefined,
         });
+      } else if (searchUnreadable && state !== 'unauthenticated') {
+        /*
+         * 读不到配置 ≠ 用户选了别的渠道。这种时候**必须**提示，但不能给
+         * 「接入搜索」按钮：读不到配置就去写配置属于盲操作，先去诊断页看原因。
+         */
+        alerts.push({ tone: 'warn', text: searchIssue.alert, action: 'diagnose' });
       }
       // 控制台 /api/overview 的 routeLive 同样是迁移前口径（只认 settings.yaml /
       // profile patch），原生路由它看不见 —— 原生路由已注册时不作为问题提示。
@@ -4952,7 +5083,7 @@ body.dark .wb-root,
       const ACTION_LABEL = { start: '启动桥', restart: '重启桥', 'console-start': '重启控制台', 'follow-desktop': '改用桌面端', cleanup: '清理旧路由', requests: '查看失败', checkin: '去签到', account: '去登录', accounts: '去账号页', websearch: '接入搜索' };
       const alertAction = (action) => {
         if (action === 'account' || action === 'accounts') onOpenTab('accounts');
-        else if (action === 'requests' || action === 'checkin') onOpenTab(action);
+        else if (action === 'requests' || action === 'checkin' || action === 'diagnose') onOpenTab(action);
         else if (action === 'websearch') enableSearch();
         else onAct(action);
       };
@@ -4995,30 +5126,51 @@ body.dark .wb-root,
        * 网页搜索是插件最容易被忽略、也最容易“装了却还在走 DeepSeek”的功能
        * （issue #7）。它在余额之后保留独立一栏，而不是藏在「操作」按钮堆里；
        * 旧宿主没上报 webSearch 状态时也要显示，并说明重启后生效。
+       *
+       * issue #33 之后这张卡回答的是「**现在走哪条通道**」，而不是「接没接上」：
+       * 通道是事实陈述，切换是用户的决定；只有「走桥却没接好」才标黄。
        */
       const searchCard = unauthenticated ? null : h(Card, { title: '网页搜索' },
         ...(searchKnown ? [
-          h(Row, { label: '状态' }, h(Pill, {
-            tone: searchReady ? (search?.lastVerifyFailed ? 'warn' : 'ok') : 'warn',
-            text: searchReady ? '已接入本地桥' : searchIssue.pill,
+          h(Row, { label: '当前通道' }, h(Pill, {
+            tone: onBridge ? (searchReady ? (search?.lastVerifyFailed ? 'warn' : 'ok') : 'warn') : '',
+            /*
+             * 非桥通道一律**不**用告警色：那是用户选出来的状态，不是待修的故障。
+             * 文案也只说事实（走哪条路），不评价、不断言费用。
+             */
+            text: channelLabel,
           })),
+          searchBroken
+            ? h(Row, { label: '问题' }, h(Pill, { tone: 'warn', text: searchIssue.pill }))
+            : null,
           h('p', { className: 'wb-note', style: { margin: '6px 0 0' } }, searchNote),
           searchAutoNote ? h('p', { className: 'wb-note', style: { margin: '4px 0 0' } }, searchAutoNote) : null,
           searchVerifyNote ? h('p', { className: 'wb-note', style: { margin: '4px 0 0' } }, searchVerifyNote) : null,
           h('div', { className: 'wb-actions', style: { marginTop: '10px' } },
+            /*
+             * 双向切换：两条命令并列摆放，用户一眼能看出"可以换回来也换过去"。
+             * 当前在哪条通道上，就把**另一条**做成主按钮 —— 不给"再点一次当前项"
+             * 这种没有意义的操作。
+             */
             h(Btn, {
-              primary: !searchReady,
+              primary: !onBridge,
               disabled: busy || searchBusy
                 || search.reason === 'namespace-missing'
                 || search.reason === 'error'
-                || search.reason === 'bridge-auth'
-                || search.reason === 'bridge-conflict',
+                || (onBridge && (search.reason === 'bridge-auth' || search.reason === 'bridge-conflict')),
               onClick: enableSearch,
-              title: '把 dsh 的网页搜索指向本地桥（使用 WorkBuddy 搜索额度，不消耗 DeepSeek）',
-            }, searchBusy
-              ? (searchAction === 'verify' ? '检测中…' : '配置中…')
-              : (searchReady ? '重新接入 WorkBuddy 搜索' : '一键接入 WorkBuddy 搜索')),
-            searchReady
+              title: '把 dsh 的网页搜索指向本地桥（使用 WorkBuddy 搜索额度）',
+            }, searchBusy && searchAction === 'enable'
+              ? '配置中…'
+              : (onBridge ? '重新接入 WorkBuddy 搜索' : '切到 WorkBuddy 搜索')),
+            onBridge
+              ? h(Btn, {
+                disabled: busy || searchBusy,
+                onClick: () => switchToDeepSeek(false),
+                title: '把 dsh 的网页搜索切回 DeepSeek 官方搜索（不改其它设置）',
+              }, searchBusy && searchAction === 'disable' ? '切换中…' : '切到 DeepSeek 官方搜索')
+              : null,
+            onBridge && searchReady
               ? h(Btn, {
                 disabled: busy || searchBusy,
                 onClick: verifySearch,

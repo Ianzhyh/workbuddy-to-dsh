@@ -877,15 +877,30 @@ try {
   }
   // 已接入时必须在概览顶部显示状态卡；未接入时必须出现待办提醒 + 接入按钮
   if (offline || liveStatus?.webSearch?.available === true) {
-    if (!/已接入本地桥/.test(overviewText)) problems.push('网页搜索已接入时状态卡没有显示「已接入本地桥」');
+    /*
+     * issue #33 之后卡片先说「当前通道」，再说就绪度：
+     * 走桥时通道显示「WorkBuddy 本地桥」，接好了 pill 不再是绿/黄二选一，
+     * 而是通道名 + 独立的问题行（有问题才出现）。
+     */
+    if (!/WorkBuddy 本地桥/.test(overviewText)) {
+      problems.push('网页搜索走桥通道时没有显示「WorkBuddy 本地桥」');
+    }
     if (!/恢复接入前配置/.test(overviewText)) problems.push('有可恢复快照时没有「恢复接入前配置」按钮');
+    // 双向切换必须成对出现：走桥时才提供「切到 DeepSeek 官方搜索」
+    if (!/切到 DeepSeek 官方搜索/.test(overviewText)) {
+      problems.push('走桥通道时没有提供「切到 DeepSeek 官方搜索」的入口（issue #33 要求可手动切换）');
+    }
 
     const searchAlert = await page.cdp.evaluate(`(async () => {
       const orig = window.__routes['/workbuddy/status'];
       window.__setRoute('/workbuddy/status', {
         ...orig,
         webSearch: {
-          available: true, configured: false, ready: false, reason: 'endpoint',
+          available: true,
+          // 走桥但地址没指过来：这才是本插件该修的问题
+          channel: 'bridge',
+          deliberate: true,
+          configured: false, ready: false, reason: 'endpoint',
           bridgeState: 'running', tokenMatches: true,
           expectedBaseURL: 'http://127.0.0.1:8790/v1', baseURL: '', apiKeyRef: 'WORKBUDDY_SEARCH_BRIDGE_KEY',
         },
@@ -900,14 +915,53 @@ try {
       await new Promise((r) => setTimeout(r, 300));
       return { text, hasAction };
     })()`);
-    if (!/网页搜索需要重新接入：地址没有指向当前本地桥/.test(searchAlert.text)
-      && !/网页搜索还没接入 WorkBuddy/.test(searchAlert.text)) {
+    if (!/网页搜索需要重新接入：地址没有指向当前本地桥/.test(searchAlert.text)) {
       problems.push('网页搜索未接入时没有出现提醒');
     }
     if (!/地址未指向本地桥/.test(searchAlert.text)) {
       problems.push('网页搜索未接入时状态卡没有给出具体原因');
     }
     if (!searchAlert.hasAction) problems.push('网页搜索未接入时没有「接入搜索」按钮');
+
+    /*
+     * issue #33 的核心断言：**用户主动切到别的通道时不能报警**。
+     *
+     * 假数据刻意给成「不是桥、也不是官方」的第三方端点：最容易被误报的一种。
+     */
+    const deliberateChannel = await page.cdp.evaluate(`(async () => {
+      const orig = window.__routes['/workbuddy/status'];
+      window.__setRoute('/workbuddy/status', {
+        ...orig,
+        webSearch: {
+          available: true,
+          channel: 'external',
+          deliberate: true,
+          label: 'https://search.example.com/v1',
+          configured: false, ready: true, reason: '',
+          bridgeState: 'running', tokenMatches: null,
+          expectedBaseURL: 'http://127.0.0.1:8790/v1',
+          baseURL: 'https://search.example.com/v1', apiKeyRef: 'MY_OWN_KEY',
+        },
+      });
+      const refresh = [...document.querySelectorAll('.wb-btn')].find((b) => b.textContent.includes('刷新状态'));
+      refresh && refresh.click();
+      await new Promise((r) => setTimeout(r, 700));
+      const root = document.querySelector('.wb-root');
+      const text = root?.innerText || '';
+      const todo = [...root.querySelectorAll('.wb-alert-text')].map((el) => el.textContent).join('\\n');
+      window.__setRoute('/workbuddy/status', orig);
+      refresh && refresh.click();
+      await new Promise((r) => setTimeout(r, 300));
+      return { text, todo };
+    })()`);
+    if (/需要重新接入|还没接入 WorkBuddy|会消耗 DeepSeek 钱包/.test(deliberateChannel.text)) {
+      problems.push('用户主动选的其他搜索通道仍被报成故障/钱包告警（issue #33）：'
+        + deliberateChannel.text.split('\n').filter((l) => /需要重新接入|还没接入|钱包/.test(l)).join(' / '));
+    }
+    if (!/DeepSeek 官方搜索|自定义端点/.test(deliberateChannel.text) && !/未知（读不到配置）/.test(deliberateChannel.text)) {
+      problems.push('非桥通道没有说明当前走的是哪条通道：' + deliberateChannel.text.slice(0, 200));
+    }
+    console.log('issue #33：第三方通道不被误报为故障，且通道名可见');
   } else {
     // 旧宿主没有 webSearch 状态：独立卡片仍要在最上面，并给出重启提示与手动入口。
     if (!/宿主端未上报搜索状态/.test(overviewText)) {

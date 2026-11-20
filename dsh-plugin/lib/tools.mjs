@@ -372,16 +372,40 @@ export function createTools(deps) {
       /*
        * 搜索接入状态要在状态工具里可见：用户报「搜不到 / 401」时，agent 先看这里
        * 就能分清是 dsh 内置搜索没接桥，还是桥本身没登录，而不是盲猜。
+       *
+       * 但**不能把用户的选择报成故障**（issue #33）：agent 会照这段文字去"修"，
+       * 于是它会把用户特意切到的 DeepSeek 官方搜索又掰回桥。所以先按通道分流。
        */
       const ws = state.webSearch;
       if (ws) {
-        const ready = ws.ready === true || (ws.ready === undefined && ws.configured === true);
-        lines.push(ready
-          ? `网页搜索：已接入 WorkBuddy（dsh 内置搜索走桥${ws.lastVerifyFailed ? `；上次自检失败：${ws.lastVerifyError || '未知错误'}` : ''}）`
-          : `网页搜索：dsh 内置搜索未接入 WorkBuddy（${ws.reason || 'unknown'}）${ws.auto?.status ? `；自动接入：${ws.auto.status}${ws.auto.reason ? `/${ws.auto.reason}` : ''}` : ''}`);
-        if (!ready) {
-          lines.push('  修法：插件概览的「网页搜索」卡点「一键接入」，或运行 /workbuddy websearch；');
-          lines.push('  临时兜底：直接调用 `workbuddy_web_search` 工具，它不依赖 dsh 内置搜索配置。');
+        const channel = typeof ws.channel === 'string'
+          ? ws.channel
+          : (ws.configured === true ? 'bridge' : 'deepseek-official');
+        const autoNote = ws.auto?.status
+          ? `；自动接入：${ws.auto.status}${ws.auto.reason ? `/${ws.auto.reason}` : ''}`
+          : '';
+        if (channel === 'bridge') {
+          const ready = ws.ready === true || (ws.ready === undefined && ws.configured === true);
+          lines.push(ready
+            ? `网页搜索：已接入 WorkBuddy（dsh 内置搜索走桥${ws.lastVerifyFailed ? `；上次自检失败：${ws.lastVerifyError || '未知错误'}` : ''}）`
+            : `网页搜索：走桥但还没接好（${ws.reason || 'unknown'}）${autoNote}`);
+          if (!ready) {
+            lines.push('  修法：插件概览的「网页搜索」卡点「切到 WorkBuddy 搜索」，或运行 /workbuddy websearch；');
+            lines.push('  临时兜底：直接调用 `workbuddy_web_search` 工具，它不依赖 dsh 内置搜索配置。');
+          }
+        } else if (channel === 'unknown') {
+          lines.push(`网页搜索：读不到 dsh 的搜索配置（${ws.reason || 'unknown'}）${autoNote}`);
+          lines.push('  别猜：到插件「诊断」页看具体原因，不要直接重写搜索配置。');
+        } else {
+          /*
+           * 官方 / 第三方通道：这是用户主动选的，**不要**报成问题，也不要给修法。
+           * 只说清事实 + 一条兜底（我们自己的搜索工具随时可用）。
+           */
+          const where = channel === 'external'
+            ? `自定义端点${ws.label ? `（${ws.label}）` : ''}`
+            : 'DeepSeek 官方搜索';
+          lines.push(`网页搜索：当前走 ${where}（不是本插件的桥，按用户选择保留）`);
+          lines.push('  需要 WorkBuddy 额度时：插件概览点「切到 WorkBuddy 搜索」，或直接调用 `workbuddy_web_search` 工具。');
         }
       }
       const con = state.console || {};

@@ -94,10 +94,13 @@ export const FIXTURES = {
     catalogAt: new Date(now - 300_000).toISOString(),
     catalogError: '',
     legacy: { found: false, files: [], cleaned: null },
-    // 已接入形态：面板顶部应显示「网页搜索 / 已接入本地桥」；未接入形态在
+    // 已接入形态：面板顶部应显示「网页搜索 / WorkBuddy 本地桥」；未接入形态在
     // panel-render.mjs 里通过覆盖路由单独验（提醒 + 接入按钮）。
     webSearch: {
       available: true,
+      // issue #33：通道是独立维度，面板据此决定"这是故障"还是"用户的选择"。
+      channel: 'bridge',
+      deliberate: true,
       configured: true,
       ready: true,
       bridgeState: 'running',
