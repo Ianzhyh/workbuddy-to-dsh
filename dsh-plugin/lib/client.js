@@ -137,6 +137,12 @@ const EFFORT_LABELS = { minimal: 'Minimal', low: '低', medium: '中', high: '�
   --wb-ease: cubic-bezier(0.16, 1, 0.3, 1);
   --wb-anim-fast: 0.16s var(--wb-ease);
   --wb-anim-normal: 0.24s var(--wb-ease);
+  --wb-z-base: 1;
+  --wb-z-table-head: 2;
+  --wb-z-tooltip: 10;
+  --wb-z-dock: 15;
+  --wb-z-drag: 20;
+  --wb-z-dropdown: 50;
   display: flex;
   flex-direction: column;
   gap: 12px;
@@ -148,6 +154,7 @@ const EFFORT_LABELS = { minimal: 'Minimal', low: '低', medium: '中', high: '�
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 }
+.wb-root input[type="checkbox"]{accent-color:var(--dsw-alias-brand-primary,light-dark(#0f1115,#6366f1))}
 @media (prefers-color-scheme: dark) {
   .wb-root { color-scheme: dark; }
 }
@@ -164,7 +171,7 @@ body.dark .wb-root,
 .wb-sub{margin:4px 0 0;color:var(--dsw-alias-label-secondary,light-dark(#61666b,#cfd3d6));font-size:12px;overflow-wrap:anywhere;line-height:18px}
 .wb-tabs{position:relative;display:flex;gap:6px;flex-wrap:wrap;border-bottom:.5px solid var(--dsw-alias-border-l2,light-dark(#0000001a,#ffffff1f));padding-bottom:8px}
 .wb-tab-indicator{position:absolute;background:var(--dsw-alias-brand-primary,light-dark(#0f1115,#f9fafb));border-radius:999px;transition:left .22s var(--wb-ease),top .22s var(--wb-ease),width .22s var(--wb-ease),height .22s var(--wb-ease),opacity .15s ease;pointer-events:none;z-index:0;box-shadow:0 1px 3px light-dark(rgba(0,0,0,0.12),rgba(0,0,0,0.35))}
-.wb-tab{position:relative;z-index:1;appearance:none;border:0;border-radius:999px;padding:5px 12px;font:inherit;font-size:12.5px;cursor:pointer;background:transparent;color:var(--dsw-alias-label-secondary,light-dark(#61666b,#cfd3d6));transition:color var(--wb-anim-fast),transform var(--wb-anim-fast)}
+.wb-tab{position:relative;z-index:var(--wb-z-base,1);appearance:none;border:0;border-radius:999px;padding:5px 12px;font:inherit;font-size:12.5px;cursor:pointer;background:transparent;color:var(--dsw-alias-label-secondary,light-dark(#61666b,#cfd3d6));transition:color var(--wb-anim-fast),transform var(--wb-anim-fast)}
 .wb-tab:hover{background:var(--dsw-alias-interactive-bg-hover,light-dark(#2631480f,#ffffff14));color:var(--dsw-alias-label-primary,light-dark(#0f1115,#f9fafb))}
 .wb-tab:active{transform:scale(0.96)}
 .wb-tab:focus-visible{outline:2px solid var(--dsw-alias-brand-primary,#6366f1);outline-offset:2px}
@@ -216,7 +223,7 @@ body.dark .wb-root,
 .wb-acct-sub{margin-top:2px;font-size:12px;line-height:16px;font-variant-numeric:tabular-nums;color:var(--dsw-alias-label-secondary,light-dark(#61666b,#cfd3d6))}
 .wb-acct-side{display:flex;align-items:center;gap:6px;flex:none}
 .wb-acct-wrap{margin-top:16px}
-.wb-acct-region{flex:none;font-size:11px;font-weight:500;color:var(--dsw-alias-label-tertiary,#adb2b8)}
+.wb-acct-region{flex:none;font-size:11px;font-weight:400;color:var(--dsw-alias-label-tertiary,#adb2b8)}
 /*
  * 卡内分组：标题 + 一条分隔线。
  * 用途是把「一片同构 Row」切成几段（桥 / 账号 / 能力），
@@ -288,13 +295,15 @@ body.dark .wb-root,
 .wb-btn.primary{background:var(--dsw-alias-brand-primary,light-dark(#0f1115,#f9fafb));color:var(--dsw-alias-label-primary-foreground,light-dark(#ffffff,#0f1115));font-weight:600;border-color:transparent}
 .wb-btn.primary:hover{opacity:.92}
 .wb-btn:disabled{opacity:.5;cursor:default;transform:none}
+.wb-btn.primary:disabled{background:var(--dsw-alias-interactive-bg-hover,light-dark(#2631480f,#ffffff14));color:var(--dsw-alias-label-tertiary,light-dark(#81858c,#adb2b8));border-color:var(--dsw-alias-border-l1,light-dark(#00000014,#ffffff1a));opacity:.72}
+.wb-btn.primary:disabled:hover{opacity:.72}
 .wb-note{color:var(--dsw-alias-label-secondary,light-dark(#61666b,#cfd3d6));font-size:12px;margin:8px 0 0;overflow-wrap:anywhere;line-height:18px}
 .wb-alert{margin:0 0 10px;padding:9px 12px;border-radius:10px;font-size:12px;background:light-dark(#fff8e1,#3a2f10);color:light-dark(#6b4e00,#f0d38a);border:.5px solid light-dark(#fde68a,#544416);overflow-wrap:anywhere;line-height:18px}
 .wb-alert.bad{background:light-dark(#ffebe9,#3d1d1b);color:light-dark(#a40e26,#ffb3ad);border-color:light-dark(#fecaca,#5a2623)}
 /* 表格：内容驱动宽度 + 粘性表头 */
 .wb-table{width:100%;border-collapse:collapse;table-layout:auto;font-size:12px}
 .wb-table th,.wb-table td{text-align:left;padding:6px 8px;border-bottom:.5px solid var(--dsw-alias-border-l1,light-dark(#0000000a,#ffffff0f));white-space:normal;word-break:normal;overflow-wrap:break-word;vertical-align:middle}
-.wb-table th{color:var(--dsw-alias-label-tertiary,light-dark(#81858c,#adb2b8));font-weight:500;white-space:nowrap;position:sticky;top:0;z-index:2;background:var(--dsw-alias-bg-module-platform,light-dark(#ffffff,#202226));box-shadow:0 1px 0 var(--dsw-alias-border-l1,light-dark(#0000000a,#ffffff0f))}
+.wb-table th{color:var(--dsw-alias-label-tertiary,light-dark(#81858c,#adb2b8));font-weight:600;white-space:nowrap;position:sticky;top:0;z-index:var(--wb-z-table-head,2);background:var(--dsw-alias-bg-module-platform,light-dark(#ffffff,#202226));box-shadow:0 1px 0 var(--dsw-alias-border-l1,light-dark(#0000000a,#ffffff0f))}
 .wb-table td.num{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
 .wb-table td.wrap{overflow-wrap:anywhere;word-break:break-word;min-width:160px;max-width:340px}
 /*
@@ -313,7 +322,11 @@ body.dark .wb-root,
 .wb-table tbody tr:hover td{background:var(--dsw-alias-interactive-bg-hover,light-dark(#26314808,#ffffff0a))}
 .wb-table tr.bad td{color:light-dark(#a40e26,#ffb3ad)}
 .wb-table tr.click{cursor:pointer}
-.wb-scroll{overflow:auto;max-height:420px;min-width:0;position:relative}
+.wb-scroll{overflow:auto;max-height:420px;min-width:0;position:relative;scrollbar-width:thin;scrollbar-color:light-dark(rgba(0,0,0,.18),rgba(255,255,255,.22)) transparent}
+.wb-scroll::-webkit-scrollbar,.wb-log::-webkit-scrollbar,.wb-chat::-webkit-scrollbar{width:7px;height:7px;background:transparent}
+.wb-scroll::-webkit-scrollbar-track,.wb-log::-webkit-scrollbar-track,.wb-chat::-webkit-scrollbar-track{background:transparent;border:0}
+.wb-scroll::-webkit-scrollbar-thumb,.wb-log::-webkit-scrollbar-thumb,.wb-chat::-webkit-scrollbar-thumb{background:light-dark(rgba(0,0,0,.18),rgba(255,255,255,.22));border-radius:999px;border:2px solid transparent;background-clip:content-box}
+.wb-scroll::-webkit-scrollbar-thumb:hover,.wb-log::-webkit-scrollbar-thumb:hover,.wb-chat::-webkit-scrollbar-thumb:hover{background:light-dark(rgba(0,0,0,.28),rgba(255,255,255,.32));background-clip:content-box}
 /* 状态列里"胶囊 + 切换按钮"并排 */
 .wb-status-cell{display:inline-flex;align-items:center;gap:8px;flex-wrap:wrap;justify-content:flex-end}
 /* 模型页：主任务（选择 + 保存）在首屏，低频维护动作收进折叠区。 */
@@ -349,6 +362,7 @@ body.dark .wb-root,
 .wb-model-tools{margin:0 0 12px;border:.5px solid var(--dsw-alias-border-l2,light-dark(#0000001a,#ffffff1f));border-radius:10px;background:var(--dsw-alias-interactive-bg-hover,light-dark(#26314808,#ffffff0a))}
 .wb-model-tools>summary,.wb-detail-meta>summary{padding:8px 11px;cursor:pointer;user-select:none;color:var(--dsw-alias-label-secondary,light-dark(#61666b,#cfd3d6));font-size:12px;font-weight:600;outline-offset:-2px}
 .wb-model-tools>summary:hover,.wb-detail-meta>summary:hover{color:var(--dsw-alias-label-primary,light-dark(#0f1115,#f9fafb))}
+.wb-model-tools>summary:focus-visible,.wb-detail-meta>summary:focus-visible,.wb-usage-details>summary:focus-visible{outline:2px solid var(--dsw-alias-brand-primary,#6366f1);outline-offset:-2px;border-radius:8px}
 .wb-model-tools-body{padding:2px 11px 10px}
 .wb-model-tools-body .wb-note{margin:8px 0 0}
 .wb-model-scroll{max-height:min(70vh,640px);border-radius:12px}
@@ -455,7 +469,7 @@ body.dark .wb-root,
  */
 /* 拖行车相对账号列表绝对定位：fixed 会被宿主设置弹窗的 transform 祖先
    改变参照物，拖影会整体偏移（实测"拖拽飘了"）。absolute 不受祖先影响。 */
-.wb-account.wb-account-pointer-drag{position:absolute;z-index:20;margin:0;opacity:1;cursor:grabbing;transition:none;box-shadow:0 12px 32px light-dark(rgba(16,24,20,.18),rgba(0,0,0,.55));pointer-events:none}
+.wb-account.wb-account-pointer-drag{position:absolute;z-index:var(--wb-z-drag,20);margin:0;opacity:1;cursor:grabbing;transition:none;box-shadow:0 12px 32px light-dark(rgba(16,24,20,.18),rgba(0,0,0,.55));pointer-events:none}
 .wb-account-placeholder{border:1px dashed var(--dsw-alias-border-l3,light-dark(#00000033,#ffffff42));border-radius:10px;background:var(--dsw-alias-interactive-bg-hover,light-dark(#2631480f,#ffffff14));opacity:.5;pointer-events:none}
 .wb-account:last-child{border-bottom:0}
 .wb-account.bad b{color:light-dark(#a40e26,#ffb3ad)}
@@ -508,7 +522,7 @@ body.dark .wb-root,
  * 用 warn 色而不是普通弱化色：这是一条**会让请求失败**的状态，
  * 和「剩余 29 天」那种纯信息不是一个重量级。
  */
-.wb-account-limit{color:var(--dsw-alias-text-warning,light-dark(#9a5b00,#ffc46b));font-weight:500}
+.wb-account-limit{color:var(--dsw-alias-text-warning,light-dark(#9a5b00,#ffc46b));font-weight:600}
 .wb-account-limit-label{font-weight:600}
 
 /*
@@ -546,10 +560,13 @@ body.dark .wb-root,
 .wb-segmented-wrap{display:inline-flex;position:relative;align-items:center}
 .wb-segmented{position:relative;display:inline-flex;align-items:center;background:var(--dsw-alias-interactive-bg-hover,light-dark(#2631480f,#ffffff14));border:.5px solid var(--dsw-alias-border-l1,light-dark(#00000010,#ffffff1a));border-radius:9999px;padding:2px;gap:2px;user-select:none;max-width:100%;flex-wrap:wrap}
 .wb-segmented-indicator{position:absolute;background:var(--dsw-alias-bg-module-platform,light-dark(#ffffff,#202226));border-radius:9999px;box-shadow:0 1px 3px light-dark(rgba(0,0,0,0.08),rgba(0,0,0,0.35));transition:left .22s cubic-bezier(0.16,1,0.3,1),top .22s cubic-bezier(0.16,1,0.3,1),width .22s cubic-bezier(0.16,1,0.3,1),height .22s cubic-bezier(0.16,1,0.3,1),opacity .15s ease;pointer-events:none;z-index:0}
-.wb-segmented-item{position:relative;z-index:1;appearance:none;border:0;background:transparent;color:var(--dsw-alias-label-secondary,light-dark(#61666b,#cfd3d6));border-radius:9999px;padding:3px 10px;font:inherit;font-size:12px;line-height:16px;cursor:pointer;white-space:nowrap;transition:color .16s ease,transform .12s ease}
+.wb-segmented-item{position:relative;z-index:var(--wb-z-base,1);appearance:none;border:0;background:transparent;color:var(--dsw-alias-label-secondary,light-dark(#61666b,#cfd3d6));border-radius:9999px;padding:3px 10px;font:inherit;font-size:12px;line-height:16px;cursor:pointer;white-space:nowrap;display:inline-flex;align-items:center;justify-content:center;gap:5px;transition:color .16s ease,transform .12s ease}
 .wb-segmented-item:hover{color:var(--dsw-alias-label-primary,light-dark(#0f1115,#f9fafb))}
 .wb-segmented-item:active{transform:scale(0.96)}
+.wb-segmented-item:focus-visible{outline:2px solid var(--dsw-alias-brand-primary,#6366f1);outline-offset:-1px}
 .wb-segmented-item.on{color:var(--dsw-alias-label-primary,light-dark(#0f1115,#f9fafb));font-weight:600}
+.wb-segmented-badge{width:6px;height:6px;border-radius:50%;flex:none;background:#d29922}
+.wb-segmented-badge.bad{background:#e5534b}
 .wb-segmented:not(.has-indicator) .wb-segmented-item.on{background:var(--dsw-alias-bg-module-platform,light-dark(#ffffff,#202226));box-shadow:0 1px 3px light-dark(rgba(0,0,0,0.08),rgba(0,0,0,0.35))}
 .wb-segmented.has-indicator .wb-segmented-item.on{background:transparent;box-shadow:none}
 @media (prefers-reduced-motion: reduce){.wb-segmented-indicator{transition:none}}
@@ -582,7 +599,7 @@ body.dark .wb-root,
 .wb-usage-range-label{font-size:10.5px;line-height:16px;color:var(--dsw-alias-label-tertiary,light-dark(#81858c,#adb2b8));font-variant-numeric:tabular-nums;white-space:nowrap}
 .wb-usage-range-label.is-loading{color:var(--dsw-alias-brand-primary,light-dark(#0f1115,#f9fafb))}
 .wb-chart-wrap{min-width:0;position:relative}
-.wb-chart-tooltip{position:absolute;top:2px;transform:translateX(-50%);z-index:3;min-width:150px;max-width:250px;padding:8px 10px;border-radius:10px;background:var(--dsw-alias-bg-module-platform,light-dark(#ffffff,#202226));border:.5px solid var(--dsw-alias-border-l2,light-dark(#0000001f,#ffffff2e));box-shadow:0 8px 22px light-dark(rgba(16,24,40,.14),rgba(0,0,0,.42));pointer-events:none;font-size:10.5px;line-height:16px}
+.wb-chart-tooltip{position:absolute;top:2px;transform:translateX(-50%);z-index:var(--wb-z-tooltip,10);min-width:150px;max-width:250px;padding:8px 10px;border-radius:10px;background:var(--dsw-alias-bg-module-platform,light-dark(#ffffff,#202226));border:.5px solid var(--dsw-alias-border-l2,light-dark(#0000001f,#ffffff2e));box-shadow:0 8px 22px light-dark(rgba(16,24,40,.14),rgba(0,0,0,.42));pointer-events:none;font-size:10.5px;line-height:16px}
 .wb-chart-tooltip>strong{display:block;margin-bottom:4px;font-size:11px}
 .wb-chart-tooltip>div{display:flex;align-items:center;justify-content:space-between;gap:14px;padding:1px 0;color:var(--dsw-alias-label-secondary,light-dark(#61666b,#cfd3d6))}
 .wb-chart-tooltip>div>span{flex:1;min-width:0;color:var(--dsw-alias-label-secondary,light-dark(#61666b,#cfd3d6))}
@@ -604,10 +621,14 @@ body.dark .wb-root,
 .wb-dropdown-trigger:focus-visible{outline:2px solid var(--dsw-alias-brand-primary,#6366f1);outline-offset:1px}
 .wb-dropdown-arrow{font-size:9px;color:var(--dsw-alias-label-tertiary,#adb2b8);margin-left:auto;transition:transform var(--wb-anim-fast);flex:none}
 .wb-dropdown.open .wb-dropdown-arrow{transform:rotate(180deg)}
-.wb-dropdown-menu{position:absolute;top:calc(100% + 4px);left:0;z-index:999;min-width:100%;max-width:320px;max-height:240px;overflow-y:auto;background:var(--dsw-alias-bg-module-platform,light-dark(#ffffff,#202226));border:.5px solid var(--dsw-alias-border-l2,light-dark(#0000001f,#ffffff2e));border-radius:10px;box-shadow:0 8px 24px light-dark(rgba(0,0,0,0.15),rgba(0,0,0,0.5));padding:4px;display:flex;flex-direction:column;gap:2px;animation:wb-dropdown-pop .16s cubic-bezier(0.16,1,0.3,1) both;transform-origin:top left}
+.wb-dropdown-menu{position:absolute;top:calc(100% + 4px);left:0;z-index:var(--wb-z-dropdown,50);min-width:100%;max-width:320px;max-height:240px;overflow-y:auto;background:var(--dsw-alias-bg-module-platform,light-dark(#ffffff,#202226));border:.5px solid var(--dsw-alias-border-l2,light-dark(#0000001f,#ffffff2e));border-radius:10px;box-shadow:0 8px 24px light-dark(rgba(0,0,0,0.15),rgba(0,0,0,0.5));padding:4px;display:flex;flex-direction:column;gap:2px;animation:wb-dropdown-pop .16s cubic-bezier(0.16,1,0.3,1) both;transform-origin:top left;scrollbar-width:thin;scrollbar-color:light-dark(rgba(0,0,0,.18),rgba(255,255,255,.22)) transparent}
 .wb-dropdown.drop-up .wb-dropdown-menu{top:auto;bottom:calc(100% + 4px);box-shadow:0 -8px 24px light-dark(rgba(0,0,0,0.15),rgba(0,0,0,0.5));animation-name:wb-dropdown-pop-up;transform-origin:bottom left}
+.wb-dropdown-menu.closing{animation:wb-dropdown-exit .11s var(--wb-ease) forwards;pointer-events:none}
+.wb-dropdown.drop-up .wb-dropdown-menu.closing{animation-name:wb-dropdown-exit-up}
 @keyframes wb-dropdown-pop{from{opacity:0;transform:translateY(-6px) scale(0.97)}to{opacity:1;transform:none}}
 @keyframes wb-dropdown-pop-up{from{opacity:0;transform:translateY(6px) scale(0.97)}to{opacity:1;transform:none}}
+@keyframes wb-dropdown-exit{from{opacity:1;transform:none}to{opacity:0;transform:translateY(-4px) scale(0.98)}}
+@keyframes wb-dropdown-exit-up{from{opacity:1;transform:none}to{opacity:0;transform:translateY(4px) scale(0.98)}}
 .wb-dropdown-menu::-webkit-scrollbar{width:5px}
 .wb-dropdown-menu::-webkit-scrollbar-thumb{background:var(--dsw-alias-border-l2,light-dark(#00000028,#ffffff33));border-radius:999px}
 .wb-dropdown-menu::-webkit-scrollbar-track{background:transparent}
@@ -668,7 +689,7 @@ body.dark .wb-root,
 .wb-metric{background:var(--dsw-alias-interactive-bg-hover,light-dark(#2631480c,#ffffff10));border:.5px solid var(--dsw-alias-border-l1,light-dark(#0000000d,#ffffff14));border-radius:12px;padding:10px 12px;min-width:0;transition:transform var(--wb-anim-fast),background-color var(--wb-anim-fast),box-shadow var(--wb-anim-fast),border-color var(--wb-anim-fast)}
 .wb-metric:hover{transform:translateY(-2px);background:var(--dsw-alias-interactive-bg-active,light-dark(#26314814,#ffffff18));box-shadow:0 3px 10px light-dark(rgba(0,0,0,0.04),rgba(0,0,0,0.25))}
 .wb-metric b{display:block;font-size:18px;font-weight:600;margin-top:4px;overflow-wrap:anywhere;letter-spacing:-0.01em;font-variant-numeric:tabular-nums}
-.wb-metric span{color:var(--dsw-alias-label-secondary,light-dark(#61666b,#cfd3d6));font-size:11.5px;font-weight:500}
+.wb-metric span{color:var(--dsw-alias-label-secondary,light-dark(#61666b,#cfd3d6));font-size:11.5px;font-weight:400}
 .wb-metric.warn{border-color:light-dark(#fca5a5,#7f1d1d);background:light-dark(#fff5f5,#2c1414)}
 .wb-metric.warn b{color:light-dark(#dc2626,#f87171)}
 .wb-metric.brand b{color:var(--dsw-alias-brand-primary,#4f6bd8)}
@@ -685,7 +706,7 @@ body.dark .wb-root,
 .wb-quota-pkg{padding:11px 0 12px;min-width:0;border-bottom:.5px solid var(--dsw-alias-border-l2,light-dark(#0000001a,#ffffff1f))}
 .wb-quota-pkg:last-child{border-bottom:0}
 .wb-quota-pkg-head{display:flex;align-items:baseline;justify-content:space-between;gap:8px;min-width:0}
-.wb-quota-pkg-name{font-size:12.5px;font-weight:550;min-width:0;overflow-wrap:anywhere}
+.wb-quota-pkg-name{font-size:12.5px;font-weight:600;min-width:0;overflow-wrap:anywhere}
 .wb-quota-pkg-num{font-size:12px;font-variant-numeric:tabular-nums;color:var(--dsw-alias-label-secondary,light-dark(#61666b,#cfd3d6));white-space:nowrap}
 .wb-quota-pkg-meta{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;margin:6px 0 0}
 .wb-quota-expiry{display:inline-flex;align-items:center;gap:6px;min-width:0;font-size:11.5px;line-height:17px;color:var(--dsw-alias-label-secondary,light-dark(#61666b,#cfd3d6));overflow-wrap:anywhere}
@@ -698,7 +719,7 @@ body.dark .wb-root,
 .wb-quota-batches{margin:8px 0 0;padding:8px;border-radius:12px;background:light-dark(#f5f5f4,#17181b);display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:8px;max-height:340px;overflow:auto;overscroll-behavior:contain;animation:wb-quota-reveal .18s ease-out}
 .wb-quota-batch{display:flex;flex-direction:column;gap:5px;min-width:0;padding:8px 9px 9px;border-radius:9px;background:light-dark(#ffffff,#202226);box-shadow:inset 0 0 0 .5px var(--dsw-alias-border-l2,light-dark(#00000014,#ffffff1f));font-variant-numeric:tabular-nums}
 .wb-quota-batch-head{display:flex;align-items:baseline;justify-content:space-between;gap:8px;min-width:0}
-.wb-quota-batch-date{min-width:0;white-space:nowrap;font-size:11.5px;font-weight:550;line-height:16px;color:var(--dsw-alias-label-secondary,light-dark(#61666b,#cfd3d6))}
+.wb-quota-batch-date{min-width:0;white-space:nowrap;font-size:11.5px;font-weight:600;line-height:16px;color:var(--dsw-alias-label-secondary,light-dark(#61666b,#cfd3d6))}
 .wb-quota-batch-rel{min-width:0;font-size:10.5px;line-height:14px;color:var(--dsw-alias-label-tertiary,light-dark(#8a8f94,#9aa0a6));overflow-wrap:anywhere}
 .wb-quota-batch-bar{width:100%;height:3px;margin-top:1px;border-radius:999px;background:light-dark(#00000014,#ffffff1f);overflow:hidden}
 .wb-quota-batch-bar i{display:block;height:100%;border-radius:999px;background:#2ea043}
@@ -805,18 +826,24 @@ body.dark .wb-root,
 @media (max-width:760px){.wb-usage-structure{grid-template-columns:minmax(0,1fr)}.wb-usage-trend-facts{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media (max-width:560px){.wb-usage-kpis{grid-template-columns:repeat(2,minmax(0,1fr))}.wb-usage-kpi b{font-size:18px}.wb-usage-model-head{align-items:flex-start}.wb-usage-model-nums{flex-direction:column;align-items:flex-end;gap:0}}
 @container (max-width:560px){.wb-usage-kpis{grid-template-columns:repeat(2,minmax(0,1fr))}.wb-usage-trend-facts{grid-template-columns:repeat(2,minmax(0,1fr))}.wb-usage-structure{grid-template-columns:minmax(0,1fr)}}
-/* 统一的"正在加载"占位 */
+/* 统一的"正在加载"占位 + 结构化骨架屏 */
 .wb-loading{display:flex;align-items:center;gap:8px;color:var(--dsw-alias-label-secondary,light-dark(#61666b,#cfd3d6));font-size:12.5px;padding:14px 2px}
 .wb-spinner{width:13px;height:13px;border-radius:50%;border:2px solid var(--dsw-alias-border-l2,light-dark(#0000001f,#ffffff2e));border-top-color:var(--dsw-alias-label-secondary,light-dark(#61666b,#cfd3d6));animation:wb-spin .7s linear infinite;flex:none}
 @keyframes wb-spin{to{transform:rotate(360deg)}}
 @media (prefers-reduced-motion: reduce){.wb-spinner{animation-duration:2s}}
+.wb-skeleton-group{display:flex;flex-direction:column;gap:8px;padding:2px 0}
+.wb-skeleton{height:12px;border-radius:6px;background:linear-gradient(90deg,light-dark(#2631480f,#ffffff10) 25%,light-dark(#2631481c,#ffffff1e) 50%,light-dark(#2631480f,#ffffff10) 75%);background-size:200% 100%;animation:wb-shimmer 1.4s ease-in-out infinite}
+.wb-skeleton.is-lg{height:24px;border-radius:8px}
+.wb-skeleton.is-row{height:30px;border-radius:9px}
+@keyframes wb-shimmer{0%{background-position:200% 0}100%{background-position:-200% 0}}
+.wb-check>input[type="checkbox"]:focus-visible{outline:2px solid var(--dsw-alias-brand-primary,#6366f1);outline-offset:2px;border-radius:3px}
 /*
  * 统一降级：设置页挂在 .wb-root 下；对话页组件不在 .wb-root 里，用 wb-chat-* /
  * wb-turn-cost 前缀单独兜住。**不要写裸星号选择器** —— 这页 CSS 是全局注入的，
  * 会把 dsh 宿主自己的动画也一起关掉。
  *
  * 只压时长、不删动画名，依赖 animationend/transitionend 的逻辑仍能收到事件；
- * 加载 spinner 是必要信息，保留 2s 慢转。
+ * 加载 spinner 是必要信息，保留 2s 慢转；骨架屏停止位移，保持静态占位。
  */
 @media (prefers-reduced-motion: reduce){
   .wb-root,.wb-root *,
@@ -830,8 +857,14 @@ body.dark .wb-root,
     scroll-behavior:auto!important;
   }
   .wb-root .wb-spinner{animation-duration:2s!important}
+  .wb-root .wb-skeleton{animation:none!important;background:light-dark(#26314812,#ffffff14)}
+  .wb-rail-page,.wb-rail-dock,.wb-rail-notice,.wb-rail-confirm{animation:none!important}
   .wb-metric:hover,.wb-prop-legend-item:hover .wb-prop-legend-dot,.wb-range::-webkit-slider-thumb:hover,
   .wb-tab:active,.wb-btn:active:not(:disabled),.wb-segmented-item:active{transform:none}
+}
+@media (prefers-contrast: more){
+  .wb-card,.wb-btn,.wb-input,.wb-select,.wb-dropdown-trigger,.wb-dropdown-menu{box-shadow:inset 0 0 0 1px var(--dsw-alias-border-l3,light-dark(#0000004d,#ffffff59))}
+  .wb-pill{box-shadow:inset 0 0 0 1px var(--dsw-alias-border-l3,light-dark(#0000004d,#ffffff59))}
 }
 /* 触摸/粗指针：hover 会粘住，位移与缩放收掉，颜色和边框反馈保留 */
 @media (hover: none){
@@ -943,50 +976,71 @@ body.dark .wb-root,
  * overlay 滚动条：拇指半透明、轨道透明、不占布局宽度。
  * 这样卡片和滚动区外的分段控件**右边界严格对齐**，滚动时也只盖住几像素。
  */
-.wb-rail-scroll::-webkit-scrollbar{width:8px;height:8px;background:transparent}
-.wb-rail-scroll::-webkit-scrollbar-track{background:transparent;border:0}
-.wb-rail-scroll::-webkit-scrollbar-thumb{
+.wb-rail-scroll::-webkit-scrollbar,.wb-rail-list::-webkit-scrollbar{width:7px;height:7px;background:transparent}
+.wb-rail-scroll::-webkit-scrollbar-track,.wb-rail-list::-webkit-scrollbar-track{background:transparent;border:0}
+.wb-rail-scroll::-webkit-scrollbar-thumb,.wb-rail-list::-webkit-scrollbar-thumb{
   background:light-dark(rgba(0,0,0,.18),rgba(255,255,255,.22));
   border-radius:999px;
   /* 用透明边框把拇指收窄，视觉上更细，且不额外占位 */
   border:2px solid transparent;
   background-clip:content-box;
 }
-.wb-rail-scroll::-webkit-scrollbar-thumb:hover{
+.wb-rail-scroll::-webkit-scrollbar-thumb:hover,.wb-rail-list::-webkit-scrollbar-thumb:hover{
   background:light-dark(rgba(0,0,0,.28),rgba(255,255,255,.32));
   background-clip:content-box;
 }
 .wb-rail-scroll>.wb-card{flex:none}
 .wb-rail-dock{
-  flex:none;display:flex;align-items:center;gap:6px;flex-wrap:wrap;
-  /* 下边距给足：dock 是**常驻**的，贴着容器底边会被裁掉一半（实测过） */
-  padding:8px 0 10px;margin-top:2px;
-  border-top:.5px solid var(--dsw-alias-border-l1,light-dark(#00000010,#ffffff1a));
+  flex:none;position:relative;z-index:var(--wb-z-dock,15);
+  display:flex;align-items:center;gap:6px;flex-wrap:wrap;
+  padding:8px 10px;margin-top:2px;border-radius:12px;
+  border:.5px solid var(--dsw-alias-border-l2,light-dark(#0000001a,#ffffff24));
   background:var(--dsw-alias-bg-module-platform,light-dark(#ffffff,#202226));
+  box-shadow:0 2px 10px light-dark(rgba(16,24,20,.06),rgba(0,0,0,.32));
+  animation:wb-rail-dock-in .18s var(--wb-ease) both;
 }
+@keyframes wb-rail-dock-in{from{opacity:0;transform:translate3d(0,6px,0)}to{opacity:1;transform:none}}
 .wb-rail-dock .wb-btn{flex:0 0 auto}
 .wb-rail-dockinfo{
   flex:1 1 auto;min-width:0;text-align:right;
   font-size:11px;line-height:16px;color:var(--dsw-alias-label-tertiary,light-dark(#81858c,#adb2b8));
   overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
 }
-.wb-rail-head{display:flex;align-items:center;gap:8px;min-width:0}
-.wb-rail-title{flex:1 1 auto;min-width:0;font-size:13px;font-weight:650;letter-spacing:-.01em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;transition:font-size .18s var(--wb-ease)}
+.wb-rail-head{display:flex;align-items:center;justify-content:space-between;gap:8px;min-width:0}
+.wb-rail-title{flex:1 1 auto;min-width:0;font-size:13px;font-weight:600;letter-spacing:-.01em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;transition:font-size .18s var(--wb-ease)}
+.wb-rail-status-btn{
+  appearance:none;flex:none;display:inline-flex;align-items:center;gap:5px;
+  padding:2px 8px;border-radius:999px;font:inherit;font-size:11px;font-weight:600;line-height:16px;
+  cursor:pointer;white-space:nowrap;
+  background:light-dark(#fff8e1,#3a2f10);color:light-dark(#6b4e00,#f0d38a);
+  border:.5px solid light-dark(#fde68a,#544416);
+  transition:background-color var(--wb-anim-fast),border-color var(--wb-anim-fast),transform var(--wb-anim-fast);
+}
+.wb-rail-status-btn.bad{background:light-dark(#ffebe9,#3d1d1b);color:light-dark(#a40e26,#ffb3ad);border-color:light-dark(#fecaca,#5a2623)}
+.wb-rail-status-btn:hover{filter:brightness(1.06)}
+.wb-rail-status-btn:active{transform:scale(0.96)}
+.wb-rail-status-btn:focus-visible{outline:2px solid var(--dsw-alias-brand-primary,#6366f1);outline-offset:1px}
 /*
- * 切页时的入场：极短、极小位移 —— 只为了"这一页换了"，不是特效。
+ * 切页时的入场：顺着分段胶囊的滑动方向入场 —— 只为了"这一页换了"，不是特效。
  *
  * 这条**只管动画**：几何（flex / min-height / gap）在上面那条规则里。
  * 同权重两条规则，后者生效，所以这里绝不能重写 display / gap ——
  * 早期就是在这里补了 display:flex 却丢了 min-height:0，整页按内容撑高，
  * 底部常驻操作条被推出容器（实拍：320px 高时完全看不见）。
  */
-.wb-rail-page{animation:wb-rail-page-in .16s var(--wb-ease) both}
-@keyframes wb-rail-page-in{from{opacity:.45;transform:translate3d(0,2px,0)}to{opacity:1;transform:none}}
+.wb-rail-page{animation:wb-rail-page-in .2s var(--wb-ease) both}
+@keyframes wb-rail-page-in{from{opacity:.2;transform:translate3d(calc(var(--wb-slide-dir,1) * 10px),0,0)}to{opacity:1;transform:none}}
+.wb-rail-notice{display:flex;align-items:flex-start;justify-content:space-between;gap:8px;margin:0;animation:wb-rail-alert-in .18s var(--wb-ease) both}
+.wb-rail-notice-text{flex:1 1 auto;min-width:0;overflow-wrap:anywhere}
+.wb-rail-notice-close{appearance:none;flex:none;border:0;background:transparent;color:inherit;opacity:.7;cursor:pointer;width:20px;height:20px;line-height:18px;padding:0;border-radius:6px;font:inherit;font-size:15px;display:inline-flex;align-items:center;justify-content:center;transition:opacity var(--wb-anim-fast),background-color var(--wb-anim-fast)}
+.wb-rail-notice-close:hover{opacity:1;background:light-dark(#0000000f,#ffffff1a)}
+.wb-rail-notice-close:focus-visible{outline:2px solid var(--dsw-alias-brand-primary,#6366f1);outline-offset:1px}
+@keyframes wb-rail-alert-in{from{opacity:0;transform:translate3d(0,-4px,0)}to{opacity:1;transform:none}}
 /* 右栏自己的 reduced-motion 兜底：文件末尾那条通用规则只覆盖 .wb-root 及其
    子元素，而 --wb-ease 在这里是新声明的，动画仍会跑 —— 这里显式关掉。 */
 @media (prefers-reduced-motion: reduce){
   .wb-rail,.wb-rail *{animation-duration:.01ms!important;transition-duration:.01ms!important}
-  .wb-rail-page{animation:none}
+  .wb-rail-page,.wb-rail-dock,.wb-rail-notice{animation:none}
 }
 .wb-rail .wb-card{padding:12px;border-radius:12px;transition:padding .18s var(--wb-ease),border-radius .18s var(--wb-ease),border-color var(--wb-anim-normal),box-shadow var(--wb-anim-normal)}
 .wb-rail .wb-card h3{margin:0 0 10px;font-size:12.5px}
@@ -997,9 +1051,32 @@ body.dark .wb-root,
 .wb-rail .wb-stat span{font-size:11px;line-height:15px}
 .wb-rail .wb-note{margin:6px 0 0;font-size:11.5px;line-height:17px}
 .wb-rail .wb-alert{margin:0 0 8px;padding:8px 10px;font-size:11.5px;line-height:17px}
+.wb-rail .wb-rail-notice{margin:0}
 .wb-rail .wb-actions{gap:6px}
 .wb-rail .wb-btn{padding:5px 10px;font-size:12px}
+.wb-rail .wb-btn.is-sm{font-size:11px;padding:2px 8px;min-height:24px;border-radius:7px}
 .wb-rail .wb-input,.wb-rail .wb-select{width:100%;font-size:12px;min-height:30px;padding:5px 9px}
+.wb-rail-search{display:flex;align-items:center;gap:4px;margin-top:6px;min-width:0;min-height:30px;background:var(--dsw-alias-interactive-bg-hover,light-dark(#2631480f,#ffffff14));border:.5px solid var(--dsw-alias-border-l2,light-dark(#0000001f,#ffffff2e));border-radius:9px;transition:border-color var(--wb-anim-fast),box-shadow var(--wb-anim-fast)}
+.wb-rail-search:hover{border-color:var(--dsw-alias-border-l3,light-dark(#00000033,#ffffff42))}
+.wb-rail-search:focus-within{border-color:var(--dsw-alias-brand-primary,light-dark(#0f1115,#f9fafb));box-shadow:0 0 0 3px light-dark(rgba(15,17,21,.07),rgba(255,255,255,.09))}
+.wb-rail-search-icon{display:inline-flex;align-items:center;flex:none;margin-left:9px;color:var(--dsw-alias-label-tertiary,light-dark(#81858c,#adb2b8))}
+.wb-rail-search-input{flex:1 1 auto;width:auto!important;min-width:0;max-width:none!important;min-height:28px;padding:4px 6px;border:0!important;border-radius:0;background:transparent!important;box-shadow:none!important;outline:none!important;color:inherit;font:inherit;font-size:12px}
+.wb-rail-search-input::placeholder{color:var(--dsw-alias-label-tertiary,light-dark(#81858c,#adb2b8))}
+.wb-rail-search-clear{appearance:none;display:inline-flex;align-items:center;justify-content:center;flex:none;width:22px;height:22px;margin-right:4px;border:0;border-radius:6px;background:transparent;color:var(--dsw-alias-label-tertiary,light-dark(#81858c,#adb2b8));font:inherit;font-size:15px;line-height:1;cursor:pointer;transition:background-color var(--wb-anim-fast),color var(--wb-anim-fast)}
+.wb-rail-search-clear:hover{background:var(--dsw-alias-interactive-bg-hover,light-dark(#2631480f,#ffffff14));color:var(--dsw-alias-label-primary,light-dark(#0f1115,#f9fafb))}
+.wb-rail-search-clear:focus-visible{outline:2px solid var(--dsw-alias-brand-primary,#6366f1);outline-offset:1px}
+.wb-rail-effort{margin-top:8px}
+.wb-rail-effort-head{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:5px;font-size:11.5px;color:var(--dsw-alias-label-secondary,light-dark(#61666b,#cfd3d6))}
+.wb-rail-chips{display:flex;flex-wrap:wrap;gap:5px}
+.wb-rail-chip{appearance:none;border:.5px solid var(--dsw-alias-border-l2,light-dark(#0000001f,#ffffff2e));border-radius:8px;padding:3px 9px;font:inherit;font-size:11.5px;font-weight:600;line-height:16px;cursor:pointer;background:var(--dsw-alias-interactive-bg-hover,light-dark(#2631480a,#ffffff0d));color:var(--dsw-alias-label-secondary,light-dark(#61666b,#cfd3d6));transition:background-color var(--wb-anim-fast),border-color var(--wb-anim-fast),color var(--wb-anim-fast),transform var(--wb-anim-fast)}
+.wb-rail-chip:hover{background:var(--dsw-alias-interactive-bg-active,light-dark(#26314814,#ffffff18));color:var(--dsw-alias-label-primary,light-dark(#0f1115,#f9fafb))}
+.wb-rail-chip:active:not(:disabled){transform:scale(0.96)}
+.wb-rail-chip:focus-visible{outline:2px solid var(--dsw-alias-brand-primary,#6366f1);outline-offset:1px}
+.wb-rail-chip.on{background:var(--dsw-alias-brand-primary,light-dark(#0f1115,#f9fafb));color:var(--dsw-alias-label-primary-foreground,light-dark(#ffffff,#0f1115));border-color:transparent}
+.wb-rail-ctx-row{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-top:8px}
+.wb-rail-ctx-input{flex:1 1 110px;min-width:90px}
+.wb-rail-confirm{margin:8px 0;padding:8px 10px;border-radius:10px;border:.5px solid light-dark(#fde68a,#544416);background:light-dark(#fff8e1,#3a2f10);color:light-dark(#6b4e00,#f0d38a);font-size:11.5px;line-height:17px;animation:wb-rail-alert-in .18s var(--wb-ease) both}
+.wb-rail-confirm-actions{display:flex;align-items:center;gap:6px;margin-top:7px;flex-wrap:wrap}
 /*
  * 三段控件要与卡片**左右边界严格对齐**。
  *
@@ -1020,16 +1097,17 @@ body.dark .wb-root,
 .wb-rail .wb-acct-sub{font-size:11px}
 .wb-rail .wb-meter{margin:0 0 10px}
 /* 行式清单：模型勾选与账号列表共用。滚动交给它自己，卡片高度才稳定 */
-.wb-rail-list{display:flex;flex-direction:column;gap:1px;max-height:238px;overflow:auto;margin:0 -4px;padding:1px 4px}
+.wb-rail-list{display:flex;flex-direction:column;gap:2px;max-height:238px;overflow:auto;margin:0 -4px;padding:1px 4px;scrollbar-width:thin;scrollbar-color:light-dark(rgba(0,0,0,.18),rgba(255,255,255,.22)) transparent}
 .wb-rail-item{display:flex;align-items:center;gap:8px;min-width:0;padding:5px 7px;border-radius:8px;transition:background-color var(--wb-anim-fast),padding .18s var(--wb-ease)}
 .wb-rail-item-name,.wb-rail-item-sub{transition:font-size .18s var(--wb-ease),line-height .18s var(--wb-ease)}
 /* 勾选态：给一个几乎察觉不到的缩放，把"这一行现在被选中了"说清楚 */
 .wb-rail-item>input[type="checkbox"]{transition:transform .14s var(--wb-ease)}
 .wb-rail-item>input[type="checkbox"]:active{transform:scale(0.92)}
+.wb-rail-item>input[type="checkbox"]:focus-visible{outline:2px solid var(--dsw-alias-brand-primary,#6366f1);outline-offset:2px;border-radius:3px}
 .wb-rail-item:hover{background:var(--dsw-alias-interactive-bg-hover,light-dark(#2631480f,#ffffff14))}
 .wb-rail-item.on{background:var(--dsw-alias-interactive-bg-active,light-dark(#2631481a,#ffffff24))}
 .wb-rail-item-main{flex:1 1 auto;min-width:0;display:flex;flex-direction:column;gap:1px}
-.wb-rail-item-name{font-size:12.5px;font-weight:550;line-height:17px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.wb-rail-item-name{font-size:12.5px;font-weight:600;line-height:17px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .wb-rail-item-sub{font-size:10.5px;line-height:14px;color:var(--dsw-alias-label-tertiary,light-dark(#81858c,#adb2b8));font-variant-numeric:tabular-nums;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .wb-rail-item-side{flex:0 0 auto;display:flex;align-items:center;gap:5px}
 .wb-rail-item .wb-check{gap:0}
@@ -1038,7 +1116,7 @@ body.dark .wb-root,
 .wb-rail-foot{display:flex;align-items:center;gap:6px;margin-top:9px;flex-wrap:wrap}
 .wb-rail-foot .wb-note{margin:0;flex:1 1 100%}
 /* 卡片标题右侧的次级信息（当前默认模型之类），窄时自动换到下一行 */
-.wb-rail-cardhead{display:flex;align-items:baseline;justify-content:space-between;gap:8px;flex-wrap:wrap;margin:0 0 10px}
+.wb-rail-cardhead{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;margin:0 0 10px}
 .wb-rail-cardhead h3{margin:0}
 .wb-rail-cardmeta{font-size:11px;line-height:16px;color:var(--dsw-alias-label-tertiary,light-dark(#81858c,#adb2b8));font-variant-numeric:tabular-nums;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 /* 卡片内的小结行：已选 N/M + 草稿态胶囊。它替代了原来一句长说明，
@@ -1054,32 +1132,29 @@ body.dark .wb-root,
  * 读不出"这是同一个号的几件事"。卡片把账号名做成标题，下面挂它自己的条目。
  *
  * 卡片本身不再套一层 .wb-card —— 那会在一张卡里套一张卡（重边框 + 双份内边距），
- * 窄栏里特别臃肿。这里只用一条左侧色带 + 轻底色区分账号。
+ * 窄栏里特别臃肿。这里用轻边框 + 语义色条区分严重度。
  */
 .wb-limit-acct{
-  border-left:2px solid var(--dsw-alias-border-l2,light-dark(#0000001f,#ffffff26));
+  border:.5px solid var(--dsw-alias-border-l1,light-dark(#00000010,#ffffff14));
+  border-left:3px solid var(--dsw-alias-border-l2,light-dark(#00000024,#ffffff2e));
   background:var(--dsw-alias-interactive-bg-hover,light-dark(#26314808,#ffffff0a));
-  border-radius:0 9px 9px 0;
-  /*
-   * 内边距只有**一份**（左右 8px），卡头与条目共用它 —— 不再给卡头或
-   * 条目各加一层横向 padding，否则会出现"名字 307 / 条目 314"这种两级缩进，
-   * 左右边界全都不齐（实测过）。
-   */
-  padding:7px 8px 6px;
-  margin:0 0 8px;
+  border-radius:10px;
+  padding:8px 10px 6px;
+  margin:8px 0 0;
   min-width:0;
   box-sizing:border-box;
 }
-.wb-limit-acct:last-child{margin-bottom:0}
+.wb-limit-acct.is-warn{border-left-color:#d29922}
+.wb-limit-acct.is-bad{border-left-color:#e5534b}
+.wb-limit-acct+.wb-limit-acct{margin-top:8px}
 .wb-limit-acct-head{
   display:flex;align-items:center;gap:6px;min-width:0;
   margin:0 0 4px;
-  /* 与下面的清单同宽、同左边界 */
   padding:0;
 }
 .wb-limit-acct-name{
   flex:0 1 auto;min-width:0;
-  font-size:12px;font-weight:650;line-height:17px;
+  font-size:12.5px;font-weight:600;line-height:17px;
   overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
 }
 .wb-limit-acct-count{
@@ -1088,15 +1163,12 @@ body.dark .wb-root,
   color:var(--dsw-alias-label-tertiary,light-dark(#81858c,#adb2b8));
   font-variant-numeric:tabular-nums;white-space:nowrap;
 }
-/*
- * 卡片内的清单不再自己滚：整张卡的内容都很短，多一层滚动条反而割裂。
- *
- * 同时把条目横向内边距归零：.wb-rail-item 默认有 7px 左右 padding，
- * 叠在卡片的 8px 上会让条目的名字比卡头再缩进 7px，而右侧胶囊又比"3 条"
- * 多缩 7px —— 两列都不在一条竖线上。归零后卡片内所有内容共用同一条基准。
- */
-.wb-limit-acct .wb-rail-list{max-height:none;overflow:visible;margin:0;padding:0}
-.wb-limit-acct .wb-rail-item{padding-left:0;padding-right:0}
+.wb-limit-acct .wb-rail-list{max-height:none;overflow:visible;margin:0;padding:0;gap:0}
+.wb-limit-acct .wb-rail-item{padding:5px 0;border-radius:6px}
+.wb-limit-acct .wb-rail-item+.wb-rail-item{border-top:.5px solid var(--dsw-alias-border-l1,light-dark(#0000000a,#ffffff0f));border-radius:0}
+.wb-limit-acct .wb-rail-item-name{font-size:12px;font-weight:600}
+/* 限制原因/恢复提示是用户下一步操作依据，允许清晰折行，不要在 340px 英文下被截成 ... */
+.wb-limit-acct .wb-rail-item-sub{white-space:normal;overflow:visible;text-overflow:clip;line-height:15px}
 
 /* ── 常规档（≥300px，默认停靠 320px）：基线已覆盖，只补列表高度 ── */
 @container wb-rail (min-width:300px){
@@ -1138,12 +1210,12 @@ body.dark .wb-root,
     column-gap:10px;
     max-height:min(50vh,420px);
   }
-  .wb-rail .wb-segmented-wrap{width:auto;max-width:420px;min-width:280px}
+  .wb-rail .wb-segmented-wrap{width:100%;max-width:none;min-width:280px}
   .wb-rail .wb-segmented{width:100%}
-  .wb-rail .wb-dropdown,.wb-rail .wb-input{max-width:420px}
+  .wb-rail .wb-dropdown{max-width:460px}
   .wb-rail-head{gap:10px}
   .wb-rail-title{font-size:14px}
-  .wb-rail .wb-dropdown-menu{min-width:0;width:100%;max-width:420px}
+  .wb-rail .wb-dropdown-menu{min-width:0;width:100%;max-width:460px}
   /*
    * 宽档里 Row 的 space-between 会把 label 与值拉到卡片两端 —— 中间空出
    * 一大片，「当前默认」和它的值看着像两件不相关的东西。这里改成一组靠左，
@@ -1152,8 +1224,7 @@ body.dark .wb-root,
   .wb-rail .wb-row{justify-content:flex-start}
   .wb-rail .wb-value{flex:0 1 auto;text-align:left;margin-left:2px}
   .wb-rail .wb-row .wb-value{max-width:100%}
-  /* 搜索框跟随卡片宽度（清单是双栏，框只有半宽会显得断掉） */
-  .wb-rail .wb-input{max-width:none}
+  .wb-rail-ctx-input{max-width:220px}
 }
 
 /* ── 极窄档（<300px，拖到最窄 / 小窗浮动）──
@@ -1175,6 +1246,8 @@ body.dark .wb-root,
   }
   /* 单个按钮（比如「刷新」）独占一行时仍铺满，别缩成一个小方块 */
   .wb-rail-foot .wb-btn:only-child{flex:1 1 100%}
+  .wb-rail-ctx-input{flex:1 1 100%}
+  .wb-rail-ctx-row .wb-btn{flex:1 1 calc(50% - 5px);text-align:center}
   /* Row 改成上下两行：label 与值并排时，值只剩几个字符宽 */
   .wb-rail .wb-row{flex-direction:column;align-items:flex-start;gap:2px;min-height:0;padding:5px 0}
   .wb-rail .wb-value{text-align:left;width:100%}
@@ -1184,7 +1257,9 @@ body.dark .wb-root,
   .wb-rail .wb-stat b{font-size:17px}
   /* 副标题（模型 id / 域名 / 有效期）在最窄档只剩三个省略号，让位 */
   .wb-rail-item-sub{display:none}
+  .wb-limit-acct .wb-rail-item-sub{display:block;font-size:10.5px}
   .wb-rail-item{padding:6px;gap:6px}
+  .wb-limit-acct .wb-rail-item{padding:4px 0}
   .wb-rail-item-name{font-size:12px}
   .wb-rail-item-side{gap:4px}
   .wb-rail-item-side .wb-pill{font-size:10.5px;padding:1px 6px}
@@ -1206,22 +1281,20 @@ body.dark .wb-root,
  *   short   < 420px  主操作**永远在视口内**：卡片头让位、清单变矮、说明隐去
  *   normal  ≥ 420px  默认
  *   tall    ≥ 720px  清单放长，一次看更多
- *
- * ## 矮面板的关键做法：让页面自己排成"头 / 可滚 / 操作"三段
- *
- * 只把清单压矮是不够的 —— 摘要 + 统计 + 说明叠起来仍然会把操作推出去。所以
- * 短档把操作条做成粘性：滚动时贴在容器底部，正常高度下仍在卡片原位。
  */
 @container wb-rail (max-height:419px){
-  /* 矮面板：先把纵向留白收紧（横向不动），再压清单 */
-  .wb-rail-body{padding:8px 12px 12px;gap:6px}
+  /* 矮面板：先把纵向留白收紧（横向不动），再压清单；标题行让位给页签 */
+  .wb-rail-head{display:none}
+  .wb-rail-body{padding:8px 12px 10px;gap:6px}
   .wb-rail-inner{gap:6px}
   .wb-rail .wb-card{padding:9px 10px;border-radius:10px}
   .wb-rail .wb-card h3{margin:0 0 6px}
+  .wb-rail .wb-cardhead{margin:0 0 6px}
   .wb-rail .wb-stats{margin:4px 0 6px;gap:12px}
   .wb-rail .wb-stat b{font-size:16px}
   .wb-rail .wb-row{min-height:0;padding:4px 0}
   .wb-rail .wb-note{margin:4px 0 0}
+  .wb-rail-dock{padding:6px 8px}
   /* 清单是吃掉高度的大头：给它一个随容器收缩的上限 */
   .wb-rail-list{max-height:min(34%, 160px)}
   .wb-rail-empty{padding:8px 4px}
@@ -1230,12 +1303,6 @@ body.dark .wb-root,
   /* 高面板：清单可以长一些，一次看更多；卡片间距也舒展一点 */
   .wb-rail-list{max-height:min(52vh,460px)}
   .wb-rail .wb-card+.wb-card{margin-top:2px}
-}
-
-/* 矮 + 窄同时成立时（小浮动窗），按钮两列的规则已经够用，这里只补一条：
-   标题行让位给页签 —— 否则两行头把本就不高的可视区吃掉一截。 */
-@container wb-rail (max-height:340px){
-  .wb-rail-head{display:none}
 }
 `;
 
@@ -2435,6 +2502,8 @@ body.dark .wb-root,
       '这一版 dsh 没有默认模型服务；仍可在对话页的模型选择器里切换。':
         'This dsh build has no default-model service; switch models from the composer selector instead.',
       '在 dsh 选择器中显示': 'Show in the dsh model picker',
+      '只显示勾选的模型；保存后立即生效。':
+        'Only checked models appear in the picker; save to apply immediately.',
       '只显示勾选的模型；改动立即生效，无需重启。':
         'Only checked models appear in the picker; changes apply immediately, no restart.',
       '已保存并即时生效：dsh 选择器现在显示 ': 'Saved and live: the dsh picker now shows ',
@@ -2516,6 +2585,19 @@ body.dark .wb-root,
       '积分不足': 'No credits',
       '充积分或换号，等待无效': 'Top up or switch account; waiting will not help',
       '需充值，不会自动恢复': 'Needs top-up; will not recover by itself',
+      // 右栏交互与状态增强
+      '查看上限': 'View limits',
+      '关闭提示': 'Dismiss notice',
+      '桌面端登录文件': 'Desktop login files',
+      '插件浏览器登录': 'Plugin browser sign-in',
+      '受限': 'Limited',
+      '确认切换': 'Confirm switch',
+      '确认重启桥并切换到 ': 'Restart bridge and switch to ',
+      '？（将中断正在进行的请求）': '? (In-flight requests will be interrupted)',
+      '官方目录外模型，需在设置页开启「显示官方目录外的模型」':
+        'Unofficial model; enable "Show models outside the official catalog" in Settings',
+      '输入合法正整数 tokens（或留空恢复自动）':
+        'Enter a positive integer of tokens (or leave empty for Auto)',
     };
 
     /**
@@ -2852,6 +2934,16 @@ body.dark .wb-root,
       // ── 对话 ──
       [/^最近一轮：(\d+) ms · (.+) · tokens (.+) → (.+)$/,
         'Last turn: $1 ms · $2 · tokens $3 → $4'],
+      [/^已选 (\d+) \/ (\d+)$/, '$1 / $2 selected'],
+      [/^匹配 (\d+) \/ (\d+)$/, '$1 / $2 matched'],
+      [/^(\d+) 项受限$/, '$1 limited'],
+      [/^受限 (\d+)$/, 'Limited $1'],
+      [/^受限：(.+)$/, (m, what) => 'Limited: ' + translateText(what)],
+      [/^(\d+) 个凭据$/, (m, n) => n + (n === '1' ? ' credential' : ' credentials')],
+      [/^(\d+) 个账号$/, (m, n) => n + (n === '1' ? ' account' : ' accounts')],
+      [/^默认 (.+) · 上限 (.+)$/, 'Default $1 · max $2'],
+      [/^上限 (.+)$/, 'Max $1'],
+      [/^当前模型受限（(.+)）$/, (m, what) => 'Current model limited (' + translateText(what) + ')'],
       [/^ · 扣分 (.+)$/, ' · credit $1'],
 
       // ── 日志 ──
@@ -3835,10 +3927,39 @@ body.dark .wb-root,
         };
       }, [value, options, lang]);
 
+      const selectOption = (optVal) => {
+        if (selectRef.current) selectRef.current.value = String(optVal);
+        if (onChange) onChange({ target: { value: optVal } });
+      };
+
+      const onGroupKeyDown = (e) => {
+        const list = options || [];
+        if (!list.length) return;
+        const idx = list.findIndex((opt) => String(opt.value) === String(value));
+        let next = -1;
+        if (e.key === 'ArrowRight' || e.key === 'ArrowDown') next = (idx < 0 ? 0 : idx + 1) % list.length;
+        else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') next = (idx <= 0 ? list.length - 1 : idx - 1);
+        else if (e.key === 'Home') next = 0;
+        else if (e.key === 'End') next = list.length - 1;
+        if (next < 0) return;
+        e.preventDefault();
+        selectOption(list[next].value);
+        if (typeof requestAnimationFrame === 'function') {
+          requestAnimationFrame(() => {
+            try {
+              const items = containerRef.current?.querySelectorAll('.wb-segmented-item');
+              if (items && items[next]) items[next].focus();
+            } catch (err) { /* ignore */ }
+          });
+        }
+      };
+
       return h('div', { className: 'wb-segmented-wrap' + (className ? ' ' + className : '') },
         h('select', {
           ref: selectRef,
           className: 'wb-select wb-hidden-select',
+          tabIndex: -1,
+          'aria-hidden': 'true',
           value: String(value),
           'aria-label': ariaLabel,
           onChange: (e) => {
@@ -3849,19 +3970,23 @@ body.dark .wb-root,
           ref: containerRef,
           className: 'wb-segmented' + (indicatorStyle.opacity ? ' has-indicator' : ''),
           role: 'radiogroup',
+          'aria-label': ariaLabel,
+          onKeyDown: onGroupKeyDown,
         },
           indicatorStyle.opacity ? h('div', { className: 'wb-segmented-indicator', style: indicatorStyle }) : null,
           (options || []).map((opt) => {
             const active = String(opt.value) === String(value);
             return h('button', {
               type: 'button',
+              role: 'radio',
+              'aria-checked': active,
+              tabIndex: active ? 0 : -1,
               key: String(opt.value),
               className: 'wb-segmented-item' + (active ? ' on' : ''),
-              onClick: () => {
-                if (selectRef.current) selectRef.current.value = String(opt.value);
-                if (onChange) onChange({ target: { value: opt.value } });
-              },
-            }, opt.label || opt.text || opt.value);
+              onClick: () => selectOption(opt.value),
+            },
+              opt.label || opt.text || opt.value,
+              opt.badge ? h('i', { className: 'wb-segmented-badge' + (opt.badge === 'bad' ? ' bad' : ''), 'aria-hidden': 'true' }) : null);
           })));
     }
     /**
@@ -3872,27 +3997,55 @@ body.dark .wb-root,
     function DropdownSelect(props) {
       const { value, onChange, options, placeholder, style, className, disabled, ariaLabel } = props;
       const [open, setOpen] = useState(false);
+      const [closing, setClosing] = useState(false);
       const [dropUp, setDropUp] = useState(false);
       const wrapRef = useRef(null);
       const selectRef = useRef(null);
       const triggerRef = useRef(null);
+      const menuRef = useRef(null);
+      const closeTimerRef = useRef(null);
       const pendingFocusRef = useRef(false);
+
+      const closeMenu = useCallback((returnFocus = false) => {
+        if (!open || closing) {
+          if (returnFocus && triggerRef.current) triggerRef.current.focus();
+          return;
+        }
+        const reduced = typeof window !== 'undefined'
+          && typeof window.matchMedia === 'function'
+          && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+        if (reduced || typeof setTimeout !== 'function') {
+          setOpen(false);
+          setClosing(false);
+          if (returnFocus && triggerRef.current) triggerRef.current.focus();
+          return;
+        }
+        setClosing(true);
+        if (closeTimerRef.current) clearTimeout(closeTimerRef.current);
+        closeTimerRef.current = setTimeout(() => {
+          closeTimerRef.current = null;
+          setOpen(false);
+          setClosing(false);
+        }, 110);
+        if (returnFocus && triggerRef.current) triggerRef.current.focus();
+      }, [open, closing]);
+
+      useEffect(() => () => {
+        if (closeTimerRef.current) { clearTimeout(closeTimerRef.current); closeTimerRef.current = null; }
+      }, []);
 
       useEffect(() => {
         if (!open) return undefined;
         const onDocClick = (e) => {
-          if (wrapRef.current && !wrapRef.current.contains(e.target)) setOpen(false);
+          if (wrapRef.current && !wrapRef.current.contains(e.target)) closeMenu(false);
         };
         const onKeyDown = (e) => {
-          if (e.key === 'Escape') {
-            setOpen(false);
-            if (triggerRef.current) triggerRef.current.focus();
-          }
+          if (e.key === 'Escape') closeMenu(true);
         };
         // 键盘 Tab 离开下拉时也要收起，不能只依赖点击外部
         const wrap = wrapRef.current;
         const onFocusOut = (e) => {
-          if (wrap && !wrap.contains(e.relatedTarget)) setOpen(false);
+          if (wrap && !wrap.contains(e.relatedTarget)) closeMenu(false);
         };
         if (wrap) wrap.addEventListener('focusout', onFocusOut);
         document.addEventListener('click', onDocClick);
@@ -3902,19 +4055,33 @@ body.dark .wb-root,
           document.removeEventListener('click', onDocClick);
           document.removeEventListener('keydown', onKeyDown);
         };
-      }, [open]);
+      }, [open, closeMenu]);
 
-      // 键盘打开时把焦点送进菜单；鼠标打开时保持焦点在触发器上（可直接 Tab 进去）
+      // 打开时将当前选中项滚入视野；键盘打开时同步聚焦
       useEffect(() => {
-        if (!open || !pendingFocusRef.current) return;
-        pendingFocusRef.current = false;
+        if (!open) return;
         const target = wrapRef.current && wrapRef.current.querySelector('.wb-dropdown-item.on, .wb-dropdown-item');
-        if (target) target.focus();
+        if (target && typeof target.scrollIntoView === 'function') {
+          try { target.scrollIntoView({ block: 'nearest' }); } catch (e) { /* ignore */ }
+        }
+        if (pendingFocusRef.current) {
+          pendingFocusRef.current = false;
+          if (target) target.focus();
+        }
       }, [open]);
 
       const toggle = (focus = false) => {
         if (disabled) return;
-        if (!open && wrapRef.current && typeof window !== 'undefined') {
+        if (open && !closing) {
+          closeMenu(focus);
+          return;
+        }
+        if (closeTimerRef.current) {
+          clearTimeout(closeTimerRef.current);
+          closeTimerRef.current = null;
+        }
+        setClosing(false);
+        if (wrapRef.current && typeof window !== 'undefined') {
           try {
             const rect = wrapRef.current.getBoundingClientRect();
             const spaceBelow = window.innerHeight - rect.bottom;
@@ -3922,18 +4089,20 @@ body.dark .wb-root,
             setDropUp(spaceBelow < 260 && spaceAbove > spaceBelow);
           } catch (e) { /* ignore */ }
         }
-        if (focus && !open) pendingFocusRef.current = true;
-        setOpen(!open);
+        if (focus) pendingFocusRef.current = true;
+        setOpen(true);
       };
 
       const currentOpt = (options || []).find((o) => String(o.value) === String(value));
       const currentLabel = currentOpt ? (currentOpt.label || currentOpt.text || currentOpt.value) : (placeholder || value || '请选择');
       const currentRaw = Boolean(currentOpt && currentOpt.raw);
 
-      return h('div', { ref: wrapRef, className: 'wb-dropdown' + (open ? ' open' : '') + (dropUp ? ' drop-up' : '') + (className ? ' ' + className : ''), style },
+      return h('div', { ref: wrapRef, className: 'wb-dropdown' + (open && !closing ? ' open' : '') + (dropUp ? ' drop-up' : '') + (className ? ' ' + className : ''), style },
         h('select', {
           ref: selectRef,
           className: 'wb-select wb-hidden-select',
+          tabIndex: -1,
+          'aria-hidden': 'true',
           value: String(value),
           disabled: disabled === true,
           'aria-label': ariaLabel,
@@ -3955,7 +4124,7 @@ body.dark .wb-root,
           onKeyDown: (e) => {
             if (e.key === 'Enter' || e.key === ' ' || e.key === 'ArrowDown' || e.key === 'ArrowUp') {
               e.preventDefault();
-              if (open) {
+              if (open && !closing) {
                 const item = wrapRef.current && wrapRef.current.querySelector('.wb-dropdown-item.on, .wb-dropdown-item');
                 if (item) item.focus();
               } else {
@@ -3967,13 +4136,13 @@ body.dark .wb-root,
           disabled: disabled === true,
           'aria-label': ariaLabel,
           'aria-haspopup': 'listbox',
-          'aria-expanded': open,
+          'aria-expanded': open && !closing,
           ...(currentRaw ? { 'data-wb-raw': '' } : {}),
         },
           h('span', { style: { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } },
             currentRaw ? h(Raw, { text: currentLabel }) : currentLabel),
           h('span', { className: 'wb-dropdown-arrow' }, '▼')),
-        open ? h('div', { className: 'wb-dropdown-menu', role: 'listbox' },
+        open ? h('div', { ref: menuRef, className: 'wb-dropdown-menu' + (closing ? ' closing' : ''), role: 'listbox' },
           (options || []).map((opt) => {
             const active = String(opt.value) === String(value);
             const label = opt.label || opt.text || opt.value;
@@ -4001,15 +4170,13 @@ body.dark .wb-root,
                   if (items[next]) items[next].focus();
                 } else if (e.key === 'Escape') {
                   e.preventDefault();
-                  setOpen(false);
-                  if (triggerRef.current) triggerRef.current.focus();
+                  closeMenu(true);
                 }
               },
               onClick: () => {
-                setOpen(false);
+                closeMenu(true);
                 if (selectRef.current) selectRef.current.value = String(opt.value);
                 if (onChange) onChange({ target: { value: opt.value } });
-                if (triggerRef.current) triggerRef.current.focus();
               },
             },
               h('span', { style: { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } },
@@ -4461,7 +4628,7 @@ body.dark .wb-root,
 
       return h('div', { style: { marginTop: compact ? '8px' : '14px', marginBottom: '8px' } },
         compact ? null : h('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontSize: '12px', marginBottom: '6px' } },
-          h('span', { style: { fontWeight: 500, color: 'var(--dsw-alias-label-secondary, light-dark(#61666b,#cfd3d6))' } },
+          h('span', { style: { fontWeight: 600, color: 'var(--dsw-alias-label-secondary, light-dark(#61666b,#cfd3d6))' } },
             `各模型占比 (${metricLabel})`),
           h('span', { style: { fontSize: '11px', color: 'var(--dsw-alias-label-tertiary, #81858c)' } },
             `共 ${list.length} 个活跃模型 · 合计 ${fmtMetricValue(metric, total)}`)),
@@ -9973,8 +10140,9 @@ const probeOne = async (id) => {
               setPending(null);
               setBusy(false);
               setError('');
-              // 顶部积分胶囊不必等自己的 60 秒轮询：登录完成就让它立刻重读。
+              // 顶部积分胶囊与右栏不必等各自轮询：登录完成立刻重读。
               notifyAuthChanged();
+              notifyIdentityChanged();
               reload();
               return;
             }
@@ -10086,8 +10254,9 @@ const probeOne = async (id) => {
        * 只在根组件订阅就够 —— 子组件都是它的函数子节点，会跟着一起重渲染。
        */
       const lang = useLang();
-      const [tab, setTab] = useState('overview');
-      const [prevTab, setPrevTab] = useState('overview');
+      const [tabState, setTabState] = useState({ tab: 'overview', prevTab: 'overview' });
+      const tab = tabState.tab;
+      const prevTab = tabState.prevTab;
       const [busy, setBusy] = useState(false);
       const [error, setError] = useState('');
       const [toast, setToast] = useState('');
@@ -10095,14 +10264,7 @@ const probeOne = async (id) => {
       const [indicatorStyle, setIndicatorStyle] = useState({ opacity: 0 });
 
       const switchTab = useCallback((nextTab) => {
-        setPrevTab((curr) => {
-          if (curr !== nextTab) return curr;
-          return curr;
-        });
-        setTab((curr) => {
-          setPrevTab(curr);
-          return nextTab;
-        });
+        setTabState((curr) => (curr.tab === nextTab ? curr : { tab: nextTab, prevTab: curr.tab }));
       }, []);
       /** 标签栏键盘导航：左右切换、Home/End 跳到首尾（WAI-ARIA tabs 的常规行为）。 */
       const onTabsKeyDown = useCallback((event) => {
@@ -10596,7 +10758,8 @@ const probeOne = async (id) => {
     function WorkBuddyRail() {
       // 订阅语言：切语言时这一个 hook 让整列重渲染（文案在 render 里现算）。
       useLang();
-      const rootRef = useRef(null);      const { tier, heightTier } = useRailFit(rootRef);
+      const rootRef = useRef(null);
+      const { tier, heightTier } = useRailFit(rootRef);
       const narrow = tier === 'narrow';
       const short = heightTier === 'short';
       /*
@@ -10605,10 +10768,11 @@ const probeOne = async (id) => {
        * 那时只留 id（上下文在对话页的模型选择器里本来就能看到）。
        */
       const roomy = tier === 'wide' || tier === 'medium';
-      const [tab, setTab] = useState('model');
+      const [{ tab, prevTab }, setTabState] = useState({ tab: 'model', prevTab: 'model' });
       const [busy, setBusy] = useState('');
       const [notice, setNotice] = useState({ text: '', bad: false });
       const [draftModel, setDraftModel] = useState('');
+      const [draftEffort, setDraftEffort] = useState('');
       const [filter, setFilter] = useState('');
       // 勾选清单的草稿：null = 还没动过（显示服务端值）；数组 = 用户改过
       const [draftVisible, setDraftVisible] = useState(null);
@@ -10622,6 +10786,13 @@ const probeOne = async (id) => {
        * 值 0 = 跟随官方默认（与后端 readContextWindow 的语义一致）。
        */
       const [ctxDraft, setCtxDraft] = useState({});
+      const [confirmSwitch, setConfirmSwitch] = useState(null);
+      const switchTab = useCallback((next) => {
+        if (next === tab) return;
+        setConfirmSwitch(null);
+        setNotice({ text: '', bad: false });
+        setTabState((s) => ({ tab: next, prevTab: s.tab }));
+      }, [tab]);
       /*
        * 一个只用来**重算倒计时**的时钟（每秒一格）。
        *
@@ -10732,6 +10903,23 @@ const probeOne = async (id) => {
        * 后者才是用户想看的："哪个用完了"。
        */
       const limitsAccountCount = new Set(limits.map((it) => it.uid)).size;
+      const limitByModel = new Map();
+      const limitCountByUid = new Map();
+      let hasSevereLimit = false;
+      const limitSeverity = (k) => (k === 'account_restricted' ? 3 : k === 'credits' ? 2 : k === 'quota' ? 1 : 0);
+      for (const l of limits) {
+        const severe = l.kind === 'credits' || l.kind === 'account_restricted';
+        if (severe) hasSevereLimit = true;
+        if (l.uid) {
+          const prev = limitCountByUid.get(l.uid) || { count: 0, severe: false };
+          limitCountByUid.set(l.uid, { count: prev.count + 1, severe: prev.severe || severe });
+        }
+        const isForCurrent = l.isCurrent === true || (l.isCurrent !== false && (!effectiveUid || !l.uid || l.uid === effectiveUid));
+        if (l.model && isForCurrent) {
+          const prev = limitByModel.get(l.model);
+          if (!prev || limitSeverity(l.kind) > limitSeverity(prev.kind)) limitByModel.set(l.model, l);
+        }
+      }
       const desktopAccounts = (() => {
         /*
          * 同一账号可能有多份登录文件（切号时只有"退出登录"才留快照，其余是就地覆盖，
@@ -10752,6 +10940,7 @@ const probeOne = async (id) => {
         }
         return [...byKey.values()];
       })();
+      const desktopLabel = (a) => String(a.alias || a.account || a.name || '');
       const routingName = (id) => {
         const found = models.find((m) => m.id === id);
         return found ? (found.name || found.id) : id;
@@ -10766,27 +10955,46 @@ const probeOne = async (id) => {
         label: (m.name || m.id) + (m.free ? ' · ' + t('免费') : ''),
         raw: true,
       }));
+      const RailSkeleton = ({ compact = false, label = '正在加载…' }) => h('div', {
+        className: 'wb-skeleton-group',
+        role: 'status',
+        'aria-busy': 'true',
+        'aria-label': t(label),
+      },
+      h('div', { className: 'wb-skeleton is-lg', style: { width: compact ? '68%' : '56%' } }),
+      h('div', { className: 'wb-skeleton is-row' }),
+      compact ? null : h('div', { className: 'wb-skeleton is-row', style: { width: '92%' } }));
 
       /* ── 动作 ─────────────────────────────────────────────────────── */
 
       const setDefault = async () => {
-        if (!draftModel) return;
+        const picked = draftModel || current?.model || '';
+        if (!picked) return;
         setBusy('default');
         setNotice({ text: '', bad: false });
-        const model = models.find((m) => m.id === draftModel);
-        const effort = (model && (model.defaultEffort || (Array.isArray(model.efforts) && model.efforts[0]))) || '';
-        const res = await postJson('/workbuddy/default-model', {
-          model: draftModel,
-          provider: current?.provider || undefined,
-          reasoningEffort: effort || undefined,
-        });
-        setBusy('');
-        if (res.data?.ok) {
-          setNotice({ text: t('已设为默认。'), bad: false });
-          defaultApi.reload();
-          notifyAuthChanged();
-        } else {
-          setNotice({ text: t('保存失败：') + (res.data?.error || res.status), bad: true });
+        try {
+          const model = models.find((m) => m.id === picked);
+          const efforts = Array.isArray(model?.efforts) ? model.efforts : [];
+          const baseEffort = draftModel && draftModel !== current?.model
+            ? (model?.defaultEffort || efforts[0] || '')
+            : (current?.reasoningEffort || '');
+          const chosenEffort = draftEffort || baseEffort;
+          const res = await postJson('/workbuddy/default-model', {
+            model: picked,
+            provider: current?.provider || undefined,
+            reasoningEffort: chosenEffort || undefined,
+          });
+          if (res.data?.ok) {
+            setDraftModel('');
+            setDraftEffort('');
+            setNotice({ text: t('已设为默认。'), bad: false });
+            defaultApi.reload();
+            notifyAuthChanged();
+          } else {
+            setNotice({ text: t('保存失败：') + (res.data?.error || res.status), bad: true });
+          }
+        } finally {
+          setBusy('');
         }
       };
 
@@ -10883,47 +11091,58 @@ const probeOne = async (id) => {
       const claim = async () => {
         setBusy('claim');
         setNotice({ text: '', bad: false });
-        // 与控制台同一口径：控制台在就给控制台（它会记 .state.json），否则直接问桥。
-        let res = await postJson(CONSOLE_API + '/checkin', {});
-        if (res.status === 503 || res.status === 404) res = await postJson('/workbuddy/checkin?claim=1', {});
-        setBusy('');
-        const payload = res.data || {};
-        setNotice({
-          text: payload.ok === false
-            ? t('领取失败：') + (payload.error || res.status)
-            : payload.noActivity
-              ? t('该账号没有签到活动')
-              : t('已尝试领取今日签到。'),
-          bad: payload.ok === false,
-        });
-        checkinApi.reload();
+        try {
+          // 与控制台同一口径：控制台在就给控制台（它会记 .state.json），否则直接问桥。
+          let res = await postJson(CONSOLE_API + '/checkin', {});
+          if (res.status === 503 || res.status === 404) res = await postJson('/workbuddy/checkin?claim=1', {});
+          const payload = res.data || {};
+          setNotice({
+            text: payload.ok === false
+              ? t('领取失败：') + (payload.error || res.status)
+              : payload.noActivity
+                ? t('该账号没有签到活动')
+                : t('已尝试领取今日签到。'),
+            bad: payload.ok === false,
+          });
+          checkinApi.reload();
+          acctCheckinApi.reload();
+        } finally {
+          setBusy('');
+        }
       };
 
       const claimAll = async () => {
         setBusy('claimAll');
         setNotice({ text: '', bad: false });
-        const res = await postJson('/workbuddy/checkin/all', {});
-        setBusy('');
-        const totals = res.data?.totals || null;
-        setNotice({
-          text: res.data?.ok === false
-            ? t('领取失败：') + (res.data?.error || res.status)
-            : t('已尝试领取今日签到。') + (totals ? ` (${totals.claimed}/${totals.accounts})` : ''),
-          bad: res.data?.ok === false,
-        });
-        acctCheckinApi.reload();
+        try {
+          const res = await postJson('/workbuddy/checkin/all', {});
+          const totals = res.data?.totals || null;
+          setNotice({
+            text: res.data?.ok === false
+              ? t('领取失败：') + (res.data?.error || res.status)
+              : t('已尝试领取今日签到。') + (totals ? ` (${totals.claimed}/${totals.accounts})` : ''),
+            bad: res.data?.ok === false,
+          });
+          acctCheckinApi.reload();
+          checkinApi.reload();
+        } finally {
+          setBusy('');
+        }
       };
 
       const startConsole = async () => {
         setBusy('console');
         setNotice({ text: '', bad: false });
-        const res = await postJson('/workbuddy/console', { action: 'start' });
-        setBusy('');
-        if (res.data?.ok) {
-          accountApi.probeConsole();
-          accountApi.reload();
-        } else {
-          setNotice({ text: t('控制台启动失败：') + (res.data?.error || res.status), bad: true });
+        try {
+          const res = await postJson('/workbuddy/console', { action: 'start' });
+          if (res.data?.ok) {
+            accountApi.probeConsole();
+            accountApi.reload();
+          } else {
+            setNotice({ text: t('控制台启动失败：') + (res.data?.error || res.status), bad: true });
+          }
+        } finally {
+          setBusy('');
         }
       };
 
@@ -10931,127 +11150,156 @@ const probeOne = async (id) => {
        * 切桌面账号：桌面登录文件由控制台唯一持有（它同时是 `.state.json` 的
        * 单写者），所以这一步必须走它。切完再把「凭据来源」切回桌面端 ——
        * 否则来源还停在 plugin 时，切了也不会生效（面板会显示"已切"却在扣旧号）。
+       * 采用行内二次确认（`confirmSwitch`）替代阻塞窗口的 window.confirm。
        */
       const switchDesktop = async (name) => {
-        if (typeof window.confirm === 'function'
-          && !window.confirm(t('切换账号会重启桥，正在进行的请求会被中断。继续？'))) return;
+        setConfirmSwitch(null);
         setBusy('switch:' + name);
         setNotice({ text: '', bad: false });
-        const res = await postJson(CONSOLE_API + '/account/switch', { file: name });
-        if (!res.data?.switched) {
+        try {
+          const res = await postJson(CONSOLE_API + '/account/switch', { file: name });
+          if (!res.data?.switched) {
+            setNotice({ text: t('切换失败：') + (res.data?.error || res.status), bad: true });
+            return;
+          }
+          const source = await postJson('/workbuddy/login/source', { source: 'desktop' });
+          const label = res.data?.account?.name || name;
+          setNotice(source.data?.ok
+            // 句号按语言取：`t('已切换到')` 只翻前缀，尾部标点不能跟着中文走。
+            ? { text: t('已切换到') + ' ' + label + sentenceEnd(), bad: false }
+            : { text: t('切换失败：') + (source.data?.error || source.status), bad: true });
+          accountApi.reload();
+          loginApi.reload();
+          /*
+           * 上限数据**属于账号**，换号后必须立刻重取 —— 否则界面还挂着上一个号
+           * 的上限（用户看到的就是"换个账号上限还覆盖显示"）。60 秒轮询要等到
+           * 下一拍，用户在这期间会一直看着别人的数据。
+           */
+          limitsApi.reload();
+          notifyAuthChanged();
+          notifyIdentityChanged();
+        } finally {
           setBusy('');
-          setNotice({ text: t('切换失败：') + (res.data?.error || res.status), bad: true });
-          return;
         }
-        const source = await postJson('/workbuddy/login/source', { source: 'desktop' });
-        setBusy('');
-        const label = res.data?.account?.name || name;
-        setNotice(source.data?.ok
-          // 句号按语言取：`t('已切换到')` 只翻前缀，尾部标点不能跟着中文走。
-          ? { text: t('已切换到') + ' ' + label + sentenceEnd(), bad: false }
-          : { text: t('切换失败：') + (source.data?.error || source.status), bad: true });
-        accountApi.reload();
-        loginApi.reload();
-        /*
-         * 上限数据**属于账号**，换号后必须立刻重取 —— 否则界面还挂着上一个号
-         * 的上限（用户看到的就是"换个账号上限还覆盖显示"）。60 秒轮询要等到
-         * 下一拍，用户在这期间会一直看着别人的数据。
-         */
-        limitsApi.reload();
-        notifyAuthChanged();
       };
 
       /** 切到某个插件凭据（不动桌面登录文件，也不重启桥）。 */
       const switchPlugin = async (uid, nickname) => {
         setBusy('plugin:' + uid);
         setNotice({ text: '', bad: false });
-        const active = await postJson('/workbuddy/login/active', { uid });
-        const source = active.data?.ok ? await postJson('/workbuddy/login/source', { source: 'plugin' }) : null;
-        setBusy('');
-        setNotice(active.data?.ok && source?.data?.ok
-          ? { text: t('已切换到') + ' ' + (nickname || uid.slice(0, 8)) + sentenceEnd(), bad: false }
-          : { text: t('切换失败：') + (active.data?.error || source?.data?.error || 'unknown'), bad: true });
-        loginApi.reload();
-        // 同上：上限跟着账号走，换号后立刻重取
-        limitsApi.reload();
-        notifyAuthChanged();
+        try {
+          const active = await postJson('/workbuddy/login/active', { uid });
+          const source = active.data?.ok ? await postJson('/workbuddy/login/source', { source: 'plugin' }) : null;
+          setNotice(active.data?.ok && source?.data?.ok
+            ? { text: t('已切换到') + ' ' + (nickname || uid.slice(0, 8)) + sentenceEnd(), bad: false }
+            : { text: t('切换失败：') + (active.data?.error || source?.data?.error || 'unknown'), bad: true });
+          loginApi.reload();
+          // 同上：上限跟着账号走，换号后立刻重取
+          limitsApi.reload();
+          notifyAuthChanged();
+          notifyIdentityChanged();
+        } finally {
+          setBusy('');
+        }
       };
 
       /* ── 三个页 ───────────────────────────────────────────────────── */
 
       const modelPage = () => {
+        const modelsInitial = isInitialLoading(modelsApi.loading, modelsApi.data, modelsApi.error);
         const shownList = models.filter((m) => {
           if (!filter.trim()) return true;
           const q = filter.trim().toLowerCase();
           return m.id.toLowerCase().includes(q) || String(m.name || '').toLowerCase().includes(q);
         });
         const currentName = current?.model ? routingName(current.model) : '';
-        /*
-         * 窄档（<300px）不显示副行：那里「默认模型用哪个」和「改哪个」两个
-         * 行本来就占满整宽，再挤一行只值几个省略号的元数据没有意义 —— 状态
-         * 已经由下面那个下拉的当前值表达了。
-         */
-        const effort = current?.reasoningEffort ? ' · ' + current.reasoningEffort : '';
-        /*
-         * 下拉里显示的就是**将要保存的值**，所以按钮文案要跟着变：
-         * 只有真的改过才说「设为默认」，否则用户会盯着一个看起来能点、
-         * 点了却什么都不变的按钮（旧实现是禁用它，但禁用不解释原因）。
-         */
+        const currentEffort = current?.reasoningEffort || '';
+        const effortSuffix = currentEffort ? ' · ' + currentEffort : '';
         const picked = draftModel || current?.model || '';
-        const dirty = Boolean(draftModel) && draftModel !== current?.model;
+        const pickedModelObj = models.find((m) => m.id === picked) || null;
+        const pickedEfforts = Array.isArray(pickedModelObj?.efforts) ? pickedModelObj.efforts : [];
+        const baseEffortForPicked = draftModel && draftModel !== current?.model
+          ? (pickedModelObj?.defaultEffort || pickedEfforts[0] || '')
+          : currentEffort;
+        const chosenEffort = draftEffort || baseEffortForPicked;
+        const modelChanged = Boolean(draftModel) && draftModel !== current?.model;
+        const effortChanged = Boolean(draftEffort) && draftEffort !== currentEffort;
+        const dirty = Boolean(picked) && (modelChanged || effortChanged);
+        const pickedLimit = picked ? limitByModel.get(picked) : null;
         const shownCount = models.filter((m) => isShown(m)).length;
         const hasDraftVisible = draftVisible !== null;
         return h(Fragment, null,
           h(Card, { title: t('模型') },
-            /*
-             * 一行式状态：**当前生效的是哪个** + 档位。窄档改成纯文本小字，
-             * 中宽以上用 Row（label 与值左右分开）。两者信息相同，只是排法不同。
-             */
-            narrow || short
-              ? h('p', { className: 'wb-note', title: current?.model || '' },
-                (current?.model ? t('当前默认') + '：' : '') + (current?.model || t('未设置')) + effort)
-              : h(Row, { label: t('当前默认') },
-                current?.model
-                  ? h('span', { className: 'wb-rail-mono', title: current.model }, currentName + effort)
-                  : h('span', null, t('未设置'))),
-            current && current.routable === false
-              ? h(Alert, { bad: true }, t('默认模型已失效（不在当前目录里），请重新选一个。'))
-              : null,
-            current && current.routable === null
-              ? h('p', { className: 'wb-note' }, t('这一版 dsh 没有默认模型服务；仍可在对话页的模型选择器里切换。'))
-              : null,
-            h(DropdownSelect, {
-              value: picked,
-              options: modelOptions,
-              placeholder: t('请选择'),
-              ariaLabel: t('模型'),
-              onChange: (e) => { setDraftModel(e.target.value); setNotice({ text: '', bad: false }); },
-            }),
-            /*
-             * 卡内**不放主操作** —— 有待办时它们升到底部常驻条（同一份 handler），
-             * 同一动作出现两次会让人犹豫该点哪个。
-             *
-             * 但「刷新模型」不是待办，它是这一页唯一的读取入口：没有待办时底部
-             * 那条不显示，所以它必须留在卡里，否则就没了。
-             */
-            dirty
-              ? h('p', { className: 'wb-note' }, t('改完记得设为默认，否则只影响下次新会话的初值。'))
-              : h('div', { className: 'wb-rail-foot' },
-                h(Btn, {
-                  disabled: modelsApi.loading,
-                  onClick: () => { modelsApi.reload(); defaultApi.reload(); },
-                }, t('刷新模型')))),
-          /*
-           * 「上下文预算」：在右栏**就地**调当前模型的上下文长度。
-           *
-           * 这个参数原本只在 设置 → WorkBuddy → 模型 → 详情 里能改（三级跳），
-           * 而它是"这个模型能塞多长的上下文"这种随手要改的东西，放在对话旁边
-           * 最有用。这里只暴露**当前模型**一条，不做成列表 —— 右栏是紧凑面板，
-           * 逐模型编辑属于设置页的活。
-           *
-           * 关掉（跟随默认）用「自动」按钮表达：后端把 0 解释为"跟随官方默认"，
-           * 与设置页滑块里那个"自动"是同一语义，不另造一套。
-           */
+            modelsApi.error ? h(Alert, { bad: true }, modelsApi.error) : null,
+            defaultApi.error && !modelsApi.error ? h(Alert, { bad: true }, defaultApi.error) : null,
+            modelsInitial
+              ? h(RailSkeleton, { label: '正在加载…' })
+              : h(Fragment, null,
+                narrow || short
+                  ? h('p', { className: 'wb-note', title: current?.model || '' },
+                    (current?.model ? t('当前默认') + '：' : '') + (current?.model || t('未设置')) + effortSuffix)
+                  : h(Row, { label: t('当前默认') },
+                    current?.model
+                      ? h('span', { className: 'wb-rail-mono', title: current.model }, currentName + effortSuffix)
+                      : h('span', null, t('未设置'))),
+                current && current.routable === false
+                  ? h(Alert, { bad: true }, t('默认模型已失效（不在当前目录里），请重新选一个。'))
+                  : null,
+                current && current.routable === null
+                  ? h('p', { className: 'wb-note' }, t('这一版 dsh 没有默认模型服务；仍可在对话页的模型选择器里切换。'))
+                  : null,
+                pickedLimit
+                  ? h(Alert, { bad: pickedLimit.kind === 'credits' || pickedLimit.kind === 'account_restricted' },
+                    t('当前模型受限（' + (pickedLimit.kind === 'credits'
+                      ? '积分不足'
+                      : pickedLimit.kind === 'account_restricted'
+                        ? '账号被风控'
+                        : pickedLimit.kind === 'quota'
+                          ? '额度已用尽'
+                          : '触发了限流') + '）'))
+                  : null,
+                h(DropdownSelect, {
+                  value: picked,
+                  options: modelOptions,
+                  placeholder: t('请选择'),
+                  ariaLabel: t('模型'),
+                  onChange: (e) => {
+                    setDraftModel(e.target.value);
+                    setDraftEffort('');
+                    setNotice({ text: '', bad: false });
+                  },
+                }),
+                pickedEfforts.length && !short
+                  ? h('div', { className: 'wb-rail-effort' },
+                    h('div', { className: 'wb-rail-effort-head' },
+                      h('span', null, t('思考强度')),
+                      chosenEffort ? h('span', { className: 'wb-rail-mono' }, chosenEffort) : null),
+                    h('div', { className: 'wb-rail-chips', role: 'group', 'aria-label': t('思考强度') },
+                      pickedEfforts.map((lv) => {
+                        const active = chosenEffort === lv;
+                        return h('button', {
+                          key: lv,
+                          type: 'button',
+                          className: 'wb-rail-chip' + (active ? ' on' : ''),
+                          'aria-pressed': active,
+                          onClick: () => {
+                            if (lv === baseEffortForPicked && !modelChanged) setDraftEffort('');
+                            else setDraftEffort(lv);
+                            setNotice({ text: '', bad: false });
+                          },
+                        }, EFFORT_LABELS[lv] || lv);
+                      })))
+                  : null,
+                dirty
+                  ? h('p', { className: 'wb-note' }, t('改完记得设为默认，否则只影响下次新会话的初值。'))
+                  : h('div', { className: 'wb-rail-foot' },
+                    h(Btn, {
+                      disabled: modelsApi.loading,
+                      onClick: () => { modelsApi.reload(); defaultApi.reload(); limitsApi.reload(); },
+                    }, t('刷新模型')),
+                    pickedLimit
+                      ? h(Btn, { onClick: () => switchTab('account') }, t('查看上限'))
+                      : null))),
           current?.model
             ? (() => {
               const modelId = current.model;
@@ -11061,7 +11309,19 @@ const probeOne = async (id) => {
               const editing = draft !== undefined;
               const shown = editing ? draft : effective;
               const busyCtx = busy === 'ctx:' + modelId;
-              return h(Card, { title: t('上下文预算') },
+              const validDraft = !editing || draft === 0 || (Number.isInteger(draft) && draft > 0 && draft <= 10_000_000);
+              const metaHint = roomy && info
+                ? (info.contextWindowDefault && info.contextWindowMax
+                  ? t('默认 ' + fmtContextLength(info.contextWindowDefault) + ' · 上限 ' + fmtContextLength(info.contextWindowMax))
+                  : (info.contextWindowMax ? t('上限 ' + fmtContextLength(info.contextWindowMax)) : ''))
+                : '';
+              const picks = (Array.isArray(info?.contextWindowOptions) ? info.contextWindowOptions : [])
+                .filter((n) => Number.isFinite(n) && n > 0)
+                .slice(0, 5);
+              return h('div', { className: 'wb-card' },
+                h('div', { className: 'wb-rail-cardhead' },
+                  h('h3', null, t('上下文预算')),
+                  metaHint ? h('span', { className: 'wb-rail-cardmeta' }, metaHint) : null),
                 narrow || short
                   ? null
                   : h('p', { className: 'wb-note' },
@@ -11070,169 +11330,172 @@ const probeOne = async (id) => {
                   effective > 0
                     ? h('span', { className: 'wb-rail-mono' }, fmtContextLength(effective))
                     : h('span', null, t('跟随官方默认'))),
-                /* 档位快选：只列这个模型目录里真实存在的档位，不编造数字 */
-                (() => {
-                  const picks = (Array.isArray(info?.contextWindowOptions) ? info.contextWindowOptions : [])
-                    .filter((n) => Number.isFinite(n) && n > 0)
-                    .slice(0, 5);
-                  if (!picks.length) return null;
-                  return h('div', { className: 'wb-rail-foot' },
+                picks.length
+                  ? h('div', { className: 'wb-rail-foot' },
                     picks.map((n) => h(Btn, {
                       key: 'ctx-' + n,
                       primary: shown === n,
                       disabled: busyCtx,
                       onClick: () => saveContextWindow(modelId, n),
-                    }, fmtContextLength(n))));
-                })(),
-                h('input', {
-                  className: 'wb-input',
-                  style: { marginTop: '6px' },
-                  type: 'number',
-                  min: 0,
-                  step: 1000,
-                  value: shown > 0 ? String(shown) : '',
-                  placeholder: t('自动（留空）'),
-                  'aria-label': t('输入上下文 tokens'),
-                  onChange: (e) => {
-                    const raw = e.target.value;
-                    setCtxDraft((prev) => ({ ...prev, [modelId]: raw === '' ? 0 : Number(raw) }));
-                  },
-                }),
-                h('div', { className: 'wb-rail-foot' },
+                    }, fmtContextLength(n))))
+                  : null,
+                h('div', { className: 'wb-rail-ctx-row' },
+                  h('input', {
+                    className: 'wb-input wb-rail-ctx-input',
+                    type: 'number',
+                    min: 0,
+                    step: 1000,
+                    value: shown > 0 ? String(shown) : '',
+                    placeholder: t('自动（留空）'),
+                    'aria-label': t('输入上下文 tokens'),
+                    onChange: (e) => {
+                      const raw = e.target.value;
+                      setCtxDraft((prev) => ({ ...prev, [modelId]: raw === '' ? 0 : Number(raw) }));
+                    },
+                    onKeyDown: (e) => {
+                      if (e.key === 'Enter' && editing && validDraft && !busyCtx) {
+                        e.preventDefault();
+                        saveContextWindow(modelId, Number(draft) || 0);
+                      } else if (e.key === 'Escape' && editing) {
+                        e.preventDefault();
+                        setCtxDraft((prev) => {
+                          const next = { ...prev };
+                          delete next[modelId];
+                          return next;
+                        });
+                      }
+                    },
+                  }),
                   h(Btn, {
-                    primary: true,
-                    disabled: busyCtx || !editing,
+                    primary: editing && validDraft,
+                    disabled: busyCtx || !editing || !validDraft,
                     onClick: () => saveContextWindow(modelId, Number(draft) || 0),
                   }, busyCtx ? t('保存中…') : t('保存上下文')),
                   h(Btn, {
-                    disabled: busyCtx,
+                    disabled: busyCtx || (effective === 0 && !editing),
                     onClick: () => saveContextWindow(modelId, 0),
-                  }, t('自动'))));
+                  }, t('自动'))),
+                editing && !validDraft
+                  ? h('p', { className: 'wb-note', style: { color: 'light-dark(#a40e26,#ffb3ad)' } },
+                    t('输入合法正整数 tokens（或留空恢复自动）'))
+                  : null);
             })()
             : null,
           h(Card, { title: t('在 dsh 选择器中显示') },
-            /*
-             * 说明文字在窄档 / 矮面板让位：它占三行、说的是一件点一次就懂的事，
-             * 而「保存/全选/全不选/跟随配置」四个按钮才是最需要空间的东西。
-             */
             narrow || short
               ? null
-              : h('p', { className: 'wb-note' }, t('只显示勾选的模型；改动立即生效，无需重启。')),
+              : h('p', { className: 'wb-note' }, t('只显示勾选的模型；保存后立即生效。')),
             h('div', { className: 'wb-rail-sumbar' },
               h('span', { className: 'wb-rail-count' },
-                t('已选 ') + shownCount + ' / ' + models.length),
-              /*
-               * 草稿态必须可见：勾了几个而不保存，界面不能装作已经生效 ——
-               * 旧实现里按钮一直是亮的，"保存"与"已保存"没有视觉差别。
-               */
+                t('已选 ') + shownCount + ' / ' + models.length
+                + (filter.trim() ? ' · ' + t('匹配 ' + shownList.length + ' / ' + models.length) : '')),
               hasDraftVisible
                 ? h(Pill, { tone: 'warn', text: t('未保存') })
                 : h(Pill, { tone: 'ok', text: t('已生效') })),
             models.length
-              ? h('input', {
-                className: 'wb-input',
-                style: { marginTop: '6px' },
-                value: filter,
-                placeholder: t('搜索模型'),
-                onChange: (e) => setFilter(e.target.value),
-                'aria-label': t('搜索模型'),
-              })
+              ? h('div', { className: 'wb-rail-search' },
+                h0('svg', {
+                  className: 'wb-rail-search-icon',
+                  width: 13,
+                  height: 13,
+                  viewBox: '0 0 24 24',
+                  fill: 'none',
+                  stroke: 'currentColor',
+                  strokeWidth: 2,
+                  strokeLinecap: 'round',
+                  strokeLinejoin: 'round',
+                  'aria-hidden': 'true',
+                },
+                h0('circle', { cx: 11, cy: 11, r: 7 }),
+                h0('path', { d: 'm20 20-3.5-3.5' })),
+                h('input', {
+                  className: 'wb-rail-search-input',
+                  value: filter,
+                  placeholder: t('搜索模型'),
+                  onChange: (e) => setFilter(e.target.value),
+                  'aria-label': t('搜索模型'),
+                }),
+                filter
+                  ? h('button', {
+                    type: 'button',
+                    className: 'wb-rail-search-clear',
+                    onClick: () => setFilter(''),
+                    title: t('清除搜索'),
+                    'aria-label': t('清除搜索'),
+                  }, '×')
+                  : null)
               : null,
-            /* is-grid：唯一值得宽档双栏的清单（几十个模型，一列太长） */
-            h('div', { className: 'wb-rail-list is-grid' + (short ? ' is-short' : '') },
-              shownList.length
-                ? shownList.map((m) => {
-                  const shown = isShown(m);
-                  return h('label', {
-                    className: 'wb-rail-item' + (shown ? ' on' : ''),
-                    key: m.id,
-                    title: String(m.name || m.id) + ' · ' + m.id,
-                  },
-                    h('input', {
-                      type: 'checkbox',
-                      checked: shown,
-                      disabled: m.official === false && prefs?.includeUnofficial !== true,
-                      onChange: () => toggleShown(m),
-                      'aria-label': m.name || m.id,
-                    }),
-                    h('span', { className: 'wb-rail-item-main' },
-                      h('span', { className: 'wb-rail-item-name', 'data-wb-raw': '' },
-                        h(Raw, { text: String(m.name || m.id) })),
-                      // 副行（模型 id + 上下文长度）只在中宽以上显示 —— 极窄档
-                      // CSS 已隐藏，这里连节点都不渲染，省一层无用的树。
-                      narrow
-                        ? null
-                        : h('span', { className: 'wb-rail-item-sub', 'data-wb-raw': '' },
-                          h(Raw, {
-                            text: m.id + (roomy && m.contextWindow ? ' · ' + fmtContextLength(m.contextWindow) : ''),
-                          }))),
-                    /*
-                     * 「免费」在窄档塞不下一行 —— 让位给模型名；信息没丢：
-                     * 它仍在 title 提示里，中宽以上照常显示成胶囊。
-                     */
-                    m.free && !narrow ? h(Pill, { tone: 'ok', text: t('免费') }) : null);
-                })
-                : h('div', { className: 'wb-rail-empty' },
-                  filter.trim() ? t('没有匹配的模型。') : t('无可用模型。'))),
-            /*
-             * 矮面板：这组按钮已由底部常驻操作条承担（保存 / 取消）。
-             * 但「全选 / 全不选 / 跟随配置」是**批量**动作，没有别的地方能放 ——
-             * 它们不是"主操作"，塞进常驻条会把那条撑成两行。所以矮面板里
-             * 只保留这三个批量按钮，主按钮让位给底部那一条。
-             */
-            short
-              ? h('div', { className: 'wb-rail-foot' },
-                h(Btn, { disabled: busy === 'visible', onClick: () => saveShown('all') }, t('全选')),
-                h(Btn, { disabled: busy === 'visible', onClick: () => saveShown('none') }, t('全不选')),
-                h(Btn, { disabled: busy === 'visible', onClick: () => saveShown('unset') }, t('跟随配置')))
-              : h('div', { className: 'wb-rail-foot' },
-                h(Btn, {
-                  primary: true,
-                  disabled: busy === 'visible' || !hasDraftVisible,
-                  onClick: () => saveShown('list'),
-                }, busy === 'visible' ? t('保存中…') : t('保存')),
-                h(Btn, { disabled: busy === 'visible', onClick: () => saveShown('all') }, t('全选')),
-                h(Btn, { disabled: busy === 'visible', onClick: () => saveShown('none') }, t('全不选')),
-                h(Btn, { disabled: busy === 'visible', onClick: () => saveShown('unset') },
-                  narrow ? t('默认') : t('跟随配置')))));
+            modelsInitial
+              ? h(RailSkeleton, { label: '正在加载…' })
+              : h('div', { className: 'wb-rail-list is-grid' + (short ? ' is-short' : '') },
+                shownList.length
+                  ? shownList.map((m) => {
+                    const shown = isShown(m);
+                    const unofficialDisabled = m.official === false && prefs?.includeUnofficial !== true;
+                    const mLimit = limitByModel.get(m.id);
+                    const limitTone = mLimit ? (mLimit.kind === 'credits' || mLimit.kind === 'account_restricted' ? 'bad' : 'warn') : '';
+                    return h('label', {
+                      className: 'wb-rail-item' + (shown ? ' on' : ''),
+                      key: m.id,
+                      title: String(m.name || m.id) + ' · ' + m.id
+                        + (unofficialDisabled ? ' · ' + t('官方目录外模型，需在设置页开启「显示官方目录外的模型」') : ''),
+                    },
+                      h('input', {
+                        type: 'checkbox',
+                        checked: shown,
+                        disabled: unofficialDisabled,
+                        onChange: () => toggleShown(m),
+                        'aria-label': m.name || m.id,
+                      }),
+                      h('span', { className: 'wb-rail-item-main' },
+                        h('span', { className: 'wb-rail-item-name', 'data-wb-raw': '' },
+                          h(Raw, { text: String(m.name || m.id) })),
+                        narrow
+                          ? null
+                          : h('span', { className: 'wb-rail-item-sub', 'data-wb-raw': '' },
+                            h(Raw, {
+                              text: m.id + (roomy && m.contextWindow ? ' · ' + fmtContextLength(m.contextWindow) : ''),
+                            }))),
+                      !narrow && (mLimit || m.free || current?.model === m.id)
+                        ? h('span', { className: 'wb-rail-item-side' },
+                          mLimit ? h(Pill, { tone: limitTone, text: t('受限') }) : null,
+                          m.free ? h(Pill, { tone: 'ok', text: t('免费') }) : null,
+                          !mLimit && !m.free && current?.model === m.id ? h(Pill, { tone: '', text: t('默认') }) : null)
+                        : null);
+                  })
+                  : h('div', { className: 'wb-rail-empty' },
+                    filter.trim() ? t('没有匹配的模型。') : t('无可用模型。'))),
+            h('div', { className: 'wb-rail-foot' },
+              h(Btn, { disabled: busy === 'visible' || !models.length, onClick: () => saveShown('all') }, t('全选')),
+              h(Btn, { disabled: busy === 'visible' || !models.length, onClick: () => saveShown('none') }, t('全不选')),
+              h(Btn, { disabled: busy === 'visible' || !models.length, onClick: () => saveShown('unset') },
+                narrow ? t('默认') : t('跟随配置')))));
       };
 
       const checkinPage = () => {
         const status = checkinApi.data?.status ? checkinApi.data.status : (checkinApi.data || {});
+        const autoInfo = checkinApi.data?.auto || null;
         const rows = acctCheckinApi.data?.accounts || [];
         const signed = rows.filter((a) => a.status && a.status.todayCheckedIn).length;
         const credited = rows.reduce((sum, a) => sum + (a.status && Number(a.status.todayCredit) || 0), 0);
-        /*
-         * 「还能不能领」决定按钮在哪、写什么：
-         *   - 能领 → 升到底部常驻条（醒目），卡里不重复；
-         *   - 不能领 → 底部条不显示，卡里保留一个禁用的、**写明原因**的按钮
-         *     （「今日已领完」/「无签到活动」）+「刷新」。
-         * 旧实现只是变灰，用户不知道为什么。
-         */
+        const pct = rows.length ? Math.round((signed / rows.length) * 100) : 0;
         const claimable = status.active !== false && status.todayCheckedIn !== true;
         const claimLabel = status.active === false
           ? t('无签到活动')
           : status.todayCheckedIn === true
             ? t('今日已领完')
             : (busy === 'claim' ? t('领取中…') : t('立即领取'));
-        /*
-         * 读数块在几档里是几种排法，不是同一排挤小一点：
-         *   wide   一行三个，数字最大（21px）
-         *   medium 一行三个，数字 21px（CSS 中档）
-         *   narrow 两列换行（CSS 极窄档），数字 17px
-         *   short（矮面板）只留前两个，把高度让给按钮
-         * 所以这里控制**渲染几个**：极窄档或矮面板放弃「今日已领」——
-         * 它与「已签到」说的是同一件事的一半信息。
-         */
         const statCount = [status.streakDays, status.todayCredit].filter((v) => typeof v === 'number' && v > 0).length;
         const dropCreditStat = (narrow || short) && statCount >= 2;
         const claimableAll = rows.some((a) => !a.expired && !a.noActivity
           && !(a.status && a.status.todayCheckedIn));
+        // 正常/高面板里把「立即领取 + 刷新」留在每日签到卡内；矮面板（<420px）才升到底部常驻条，避免400px空白与漂浮框。
+        const dockCheckin = short && claimable;
         return h(Fragment, null,
           h(Card, { title: t('每日签到') },
             checkinApi.error ? h(Alert, { bad: true }, checkinApi.error) : null,
             isInitialLoading(checkinApi.loading, checkinApi.data, checkinApi.error)
-              ? h(Loading, { text: t('正在读取签到状态…') })
+              ? h(RailSkeleton, { label: '正在读取签到状态…' })
               : h(Fragment, null,
                 h('div', { className: 'wb-stats' },
                   h('div', { className: 'wb-stat' },
@@ -11248,35 +11511,47 @@ const probeOne = async (id) => {
                       h('b', null, '+' + status.todayCredit),
                       h('span', null, t('今日已领')))
                     : null),
-                /*
-                 * 「立即领取 / 刷新」：能领的时候升到底部常驻条（那里更醒目），
-                 * 已签完/无活动时底部条不显示 —— 那就必须留在卡里，否则这一页
-                 * 连"刷新"都没有了。两处共用同一份 handler，不会分叉。
-                 */
-                claimable
+                autoInfo && typeof autoInfo.auto === 'boolean' && !short
+                  ? h(Row, { label: t('自动签到') },
+                    h(Pill, { tone: autoInfo.auto ? 'ok' : 'warn', text: autoInfo.auto ? t('已开启') : t('已关闭') }))
+                  : null,
+                dockCheckin
                   ? null
                   : h('div', { className: 'wb-rail-foot' },
                     h(Btn, {
-                      primary: false,
+                      primary: claimable,
                       disabled: busy === 'claim' || !claimable,
                       onClick: claim,
-                      title: t('明天再来'),
+                      title: claimable ? undefined : t('明天再来'),
                     }, claimLabel),
-                    h(Btn, { disabled: checkinApi.loading, onClick: () => checkinApi.reload() }, t('刷新'))))),
+                    h(Btn, {
+                      disabled: checkinApi.loading,
+                      onClick: () => { checkinApi.reload(); acctCheckinApi.reload(); },
+                    }, t('刷新'))))),
           h(Card, { title: t('账号签到状态') },
+            acctCheckinApi.error ? h(Alert, { bad: true }, acctCheckinApi.error) : null,
             isInitialLoading(acctCheckinApi.loading, acctCheckinApi.data, acctCheckinApi.error)
-              ? h(Loading, { text: t('正在读取本机账号…') })
+              ? h(RailSkeleton, { label: '正在读取本机账号…' })
               : h(Fragment, null,
                 rows.length
-                  ? h('div', { className: 'wb-stats' },
-                    h('div', { className: 'wb-stat' },
-                      h('b', null, signed + '/' + rows.length),
-                      h('span', null, t('个账号今日已签'))),
-                    credited && !short
-                      ? h('div', { className: 'wb-stat' },
-                        h('b', null, '+' + credited),
-                        h('span', null, t('今日共领 Credits')))
-                      : null)
+                  ? h(Fragment, null,
+                    h('div', { className: 'wb-stats' },
+                      h('div', { className: 'wb-stat' },
+                        h('b', null, signed + '/' + rows.length),
+                        h('span', null, t('个账号今日已签'))),
+                      credited && !short
+                        ? h('div', { className: 'wb-stat' },
+                          h('b', null, '+' + credited),
+                          h('span', null, t('今日共领 Credits')))
+                        : null),
+                    h('div', {
+                      className: 'wb-meter',
+                      role: 'progressbar',
+                      'aria-valuenow': pct,
+                      'aria-valuemin': 0,
+                      'aria-valuemax': 100,
+                      'aria-label': t('今日签到完成度'),
+                    }, h('i', { style: { width: pct + '%' } })))
                   : null,
                 h('div', { className: 'wb-rail-list' + (short ? ' is-short' : '') },
                   rows.length
@@ -11290,11 +11565,6 @@ const probeOne = async (id) => {
                       return h('div', {
                         className: 'wb-rail-item',
                         key: a.userId || a.authFile,
-                        /*
-                         * 极窄档不渲染副行与「当前」胶囊（两枚胶囊会把名字压没），
-                         * 但信息不丢：地区 / 过期 / 当前 / 错误原因都挂到 title 上。
-                         * 主胶囊（已签 / 未签）永远保留 —— 它是这一行要回答的问题。
-                         */
                         title: [
                           narrow ? (a.region === 'intl' ? t('国际版') : t('国内版')) : '',
                           narrow && a.current ? t('当前') : '',
@@ -11316,58 +11586,51 @@ const probeOne = async (id) => {
                     })
                     : h('div', { className: 'wb-rail-empty' }, t('没有找到本机已登录的账号。'))),
                 h('div', { className: 'wb-rail-foot' },
-                  /*
-                   * 「全部领取」以"还有没有人能领"为准：全签完时禁用并说明，
-                   * 而不是点了之后回一句"0 个新领" —— 那让人以为按钮坏了。
-                   * 它是**批量**动作，不属于底部那条（那条管"当前账号"），
-                   * 所以任何高度都留在卡里。
-                   */
                   h(Btn, {
-                    primary: true,
+                    primary: claimableAll,
                     disabled: busy === 'claimAll' || !claimableAll,
                     onClick: claimAll,
                     title: claimableAll ? undefined : t('明天再来'),
                   }, busy === 'claimAll' ? t('领取中…') : t('全部领取')),
-                  h(Btn, { disabled: acctCheckinApi.loading, onClick: () => acctCheckinApi.reload() }, t('刷新账号')),
-                  // 签到失败最常见的原因是"用的是别的号" —— 就地给一个出口
-                  h(Btn, { onClick: () => { setTab('account'); setNotice({ text: '', bad: false }); } },
+                  h(Btn, {
+                    disabled: acctCheckinApi.loading,
+                    onClick: () => { acctCheckinApi.reload(); checkinApi.reload(); },
+                  }, t('刷新账号')),
+                  h(Btn, { onClick: () => switchTab('account') },
                     t('换账号'))))));
       };
 
       const accountPage = () => {
         const consoleDown = accountApi.availability.state === 'console-down';
         const rows = desktopAccounts;
-        /**
-         * 桌面账号行的显示名。
-         *
-         * 控制台给的是「登录文件名」，而文件名在真实用户那里是
-         * `workbuddy-desktop.20261110T045735.rebuild-24384.info` 这种东西 —— 窄列里
-         * 只会显示成一串省略号，还认不出是谁。按信息量排序：别名 > 昵称 > 账号数字
-         * （uin / account）> 文件名（去掉 .info 后缀）。
-         */
-        const desktopLabel = (a) => {
-          if (a.alias) return String(a.alias);
-          if (a.nickname) return String(a.nickname);
-          if (a.account) return String(a.account);
-          return String(a.name || '').replace(/\.info$/i, '');
-        };
+        const activeDisplayName = (() => {
+          if (effectiveSource === 'plugin') {
+            const hit = pluginCreds.find((c) => c.uid === effectiveUid);
+            if (hit && hit.nickname) return String(hit.nickname);
+          }
+          if (effectiveSource === 'desktop') {
+            const hit = rows.find((a) => a.active === true || (a.userId && a.userId === effectiveUid));
+            if (hit) return desktopLabel(hit);
+          }
+          return effectiveUid ? String(effectiveUid).slice(0, 18) : '';
+        })();
         return h(Fragment, null,
-          h(Card, { title: t('切换账号') },
+          h('div', { className: 'wb-card' },
+            h('div', { className: 'wb-rail-cardhead' },
+              h('h3', null, t('切换账号')),
+              rows.length ? h('span', { className: 'wb-rail-cardmeta' }, t('桌面端登录文件')) : null),
             h(Row, { label: t('凭据来源') },
               h(Pill, {
                 tone: effectiveSource ? 'ok' : 'warn',
                 text: effectiveSource ? credentialSourceLabel(effectiveSource) : t('未设置'),
               })),
-            /*
-             * 当前账号的 uid 有 36 字符，在最窄档必然折成两行还认不出来 ——
-             * 窄档只留「来源」那一行，uid 挂到它自己的 title 上（复制/核对时
-             * 悬停可见）。切换按钮旁边本来就写着是哪个账号，信息不丢。
-             */
             narrow
               ? null
               : h(Row, { label: t('当前使用') },
-                h('span', { className: 'wb-rail-mono', title: effectiveUid },
-                  h(Raw, { text: String(effectiveUid || '—').slice(0, 18) }))),
+                activeDisplayName
+                  ? h('span', { className: 'wb-rail-mono', title: effectiveUid || activeDisplayName },
+                    h(Raw, { text: activeDisplayName }))
+                  : h('span', null, '—')),
             consoleDown
               ? h(Fragment, null,
                 h(Alert, null, t('切换桌面账号要写登录文件，由控制台统一负责；插件凭据可以直接切。')),
@@ -11375,17 +11638,32 @@ const probeOne = async (id) => {
                   h(Btn, { disabled: busy === 'console', onClick: startConsole },
                     busy === 'console' ? t('启动中…') : t('启动控制台'))))
               : null,
+            confirmSwitch
+              ? h('div', { className: 'wb-rail-confirm', role: 'alert' },
+                h('div', null,
+                  t('确认重启桥并切换到 '),
+                  h(Raw, { text: confirmSwitch.label }),
+                  t('？（将中断正在进行的请求）')),
+                h('div', { className: 'wb-rail-confirm-actions' },
+                  h(Btn, {
+                    primary: true,
+                    sm: true,
+                    disabled: Boolean(busy),
+                    onClick: () => switchDesktop(confirmSwitch.name),
+                  }, t('确认切换')),
+                  h(Btn, {
+                    sm: true,
+                    onClick: () => setConfirmSwitch(null),
+                  }, t('取消'))))
+              : null,
             isInitialLoading(accountApi.loading, accountApi.data, accountApi.error) && !consoleDown
-              ? h(Loading, { text: t('正在读取…') })
+              ? h(RailSkeleton, { compact: true, label: '正在读取…' })
               : h('div', { className: 'wb-rail-list' },
                 rows.length
                   ? rows.map((a) => {
-                    /*
-                     * 「使用中」只能有一个：来源是 desktop 时桌面那一行才算在用；
-                     * 来源是 plugin 时，桌面行只是"切过去会选中哪个"，不能也标在用。
-                     */
                     const active = effectiveSource === 'desktop'
                       && (a.active === true || (a.userId && a.userId === effectiveUid));
+                    const lim = a.userId ? limitCountByUid.get(a.userId) : null;
                     return h('div', {
                       className: 'wb-rail-item' + (active ? ' on' : ''),
                       key: a.name,
@@ -11399,59 +11677,80 @@ const probeOne = async (id) => {
                           : h('span', { className: 'wb-rail-item-sub' },
                             (a.domain || '') + (a.expired ? ' · ' + t('已过期') : ''))),
                       h('span', { className: 'wb-rail-item-side' },
+                        lim && !narrow ? h(Pill, { tone: lim.severe ? 'bad' : 'warn', text: t('受限 ' + lim.count) }) : null,
                         active
                           ? h(Pill, { tone: 'ok', text: t('当前使用') })
                           : h(Btn, {
                             sm: true,
                             disabled: busy === 'switch:' + a.name || consoleDown || a.usable === false,
-                            onClick: () => switchDesktop(a.name),
+                            onClick: () => setConfirmSwitch({ name: a.name, label: desktopLabel(a) }),
                           }, busy === 'switch:' + a.name ? t('切换中…') : t('切换'))));
                   })
                   : h('div', { className: 'wb-rail-empty' }, t('没有可切换的账号。'))),
-            /*
-             * 账号页**没有常驻操作条**（这一页没有"待办"，每一行自带「切换 / 使用」），
-             * 所以「刷新」必须留在卡里 —— 否则页面上就没有刷新入口了。
-             */
             h('div', { className: 'wb-rail-foot' },
               h(Btn, {
                 disabled: accountApi.loading,
-                onClick: () => { accountApi.reload(); loginApi.reload(); },
+                onClick: () => { accountApi.reload(); loginApi.reload(); limitsApi.reload(); },
               }, t('刷新')))),
-          /*
-           * 用量上限卡：**哪个账号的哪个模型触顶了**。
-           *
-           * 这份数据一直在桥里（`/health.rateLimit`），但以前只被自动切号用，
-           * 界面上一个字都看不到 —— 用户只能等请求整片变红才发现"这个号的这个
-           * 模型满了"。这里把它显式列出来，并按三种原因给不同处置建议
-           * （换模型 / 换号 / 等一下），因为它们的解法完全不同。
-           */
-          h(Card, { title: t('用量上限') },
+          h('div', { className: 'wb-card' },
+            h('div', { className: 'wb-rail-cardhead' },
+              h('h3', null, t('凭据')),
+              pluginCreds.length
+                ? h('span', { className: 'wb-rail-cardmeta' }, t('插件浏览器登录'))
+                : null),
+            loginApi.error ? h(Alert, { bad: true }, loginApi.error) : null,
+            isInitialLoading(loginApi.loading, loginApi.data, loginApi.error)
+              ? h(RailSkeleton, { compact: true, label: '正在读取…' })
+              : pluginCreds.length
+                ? h('div', { className: 'wb-rail-list' },
+                  pluginCreds.map((c) => {
+                    const active = effectiveSource === 'plugin' && c.uid === effectiveUid;
+                    const lim = c.uid ? limitCountByUid.get(c.uid) : null;
+                    return h('div', {
+                      className: 'wb-rail-item' + (active ? ' on' : ''),
+                      key: c.uid,
+                      title: narrow
+                        ? [String(c.nickname || c.uid.slice(0, 8)),
+                          (c.region === 'global' ? 'global' : 'cn') + ' · ' + (c.domain || '')].join(' · ')
+                        : undefined,
+                    },
+                      h('span', { className: 'wb-rail-item-main' },
+                        h('span', { className: 'wb-rail-item-name', 'data-wb-raw': '', title: c.uid },
+                          h(Raw, { text: String(c.nickname || c.uid.slice(0, 8)) })),
+                        narrow
+                          ? null
+                          : h('span', { className: 'wb-rail-item-sub', 'data-wb-raw': '' },
+                            h(Raw, { text: (c.region === 'global' ? 'global' : 'cn') + ' · ' + (c.domain || '') }))),
+                      h('span', { className: 'wb-rail-item-side' },
+                        lim && !narrow ? h(Pill, { tone: lim.severe ? 'bad' : 'warn', text: t('受限 ' + lim.count) }) : null,
+                        active
+                          ? h(Pill, { tone: 'ok', text: t('当前使用') })
+                          : h(Btn, {
+                            sm: true,
+                            disabled: busy === 'plugin:' + c.uid,
+                            onClick: () => switchPlugin(c.uid, c.nickname),
+                          }, busy === 'plugin:' + c.uid ? t('切换中…') : t('使用'))));
+                  }))
+                : h('div', { className: 'wb-rail-empty' }, t('没有可切换的账号。'))),
+          h('div', { className: 'wb-card' },
+            h('div', { className: 'wb-rail-cardhead' },
+              h('h3', null, t('用量上限')),
+              h(Btn, {
+                sm: true,
+                disabled: limitsApi.loading,
+                onClick: () => limitsApi.reload(),
+              }, t('刷新上限'))),
             limitsApi.error ? h(Alert, { bad: true }, limitsApi.error) : null,
             isInitialLoading(limitsApi.loading, limitsApi.data, limitsApi.error)
-              ? h(Loading, { text: t('正在读取用量上限…') })
+              ? h(RailSkeleton, { label: '正在读取用量上限…' })
               : limits.length
                 ? h(Fragment, null,
-                  /*
-                   * 这张卡列的是**所有账号**的上限，不只是当前这个 —— 用户的原话：
-                   * "我做这个就是为了看哪个用完了，所以不管我是什么账号都得看得到"。
-                   * 所以说明文字要明确讲清"跨账号"。分两句写，避免
-                   * "共 2 个账号）；到恢复时间…" 这种括号与分号挤在一起的读感。
-                   */
                   limitsAccountCount > 1
                     ? h(Fragment, null,
                       h('p', { className: 'wb-note' },
                         t('所有账号都已列出，不只当前这个（共 ') + limitsAccountCount + t(' 个账号）。')),
                       h('p', { className: 'wb-note' }, t('每条到恢复时间会自动消失。')))
                     : h('p', { className: 'wb-note' }, t('到恢复时间会自动消失；换模型或换号可恢复。')),
-                  /*
-                   * **每个账号一张小卡**（不是一条长列表）。
-                   *
-                   * 用户明确要求"每个账号卡片化"：一个账号可能有好几个模型同时触顶，
-                   * 按"行"平铺时读不出"这是同一个号的几件事"。卡片按账号分组后：
-                   * 账号名是标题，下面挂它自己的那几条（模型 + 原因 + 倒计时）。
-                   *
-                   * 组内顺序沿用上面的时间倒序（最近触顶的先列）。
-                   */
                   (() => {
                     const groups = [];
                     const byUid = new Map();
@@ -11459,15 +11758,16 @@ const probeOne = async (id) => {
                       const gid = l.uid || '(unknown)';
                       let g = byUid.get(gid);
                       if (!g) {
-                        g = { uid: gid, label: l.accountLabel || String(gid).slice(0, 8), items: [], isCurrent: false };
+                        g = { uid: gid, label: l.accountLabel || String(gid).slice(0, 8), items: [], isCurrent: false, severe: false };
                         byUid.set(gid, g);
                         groups.push(g);
                       }
                       g.items.push(l);
                       if (l.isCurrent) g.isCurrent = true;
+                      if (l.kind === 'credits' || l.kind === 'account_restricted') g.severe = true;
                     }
                     return groups.map((g) => h('div', {
-                      className: 'wb-limit-acct',
+                      className: 'wb-limit-acct ' + (g.severe ? 'is-bad' : 'is-warn'),
                       key: 'acct:' + g.uid,
                     },
                       h('div', { className: 'wb-limit-acct-head' },
@@ -11491,13 +11791,6 @@ const probeOne = async (id) => {
                             ? t('重新登录无效，请换号')
                             : isCredits ? t('充积分或换号，等待无效')
                               : l.kind === 'quota' ? t('换模型或换号') : t('稍等再试');
-                          /*
-                           * 恢复时间：**倒计时 = 恢复时间 − 现在**，就这一句。
-                           *
-                           * 积分不足（credits）**永远没有倒计时** —— 它等不来恢复，
-                           * 必须充积分或换号。早先把它和额度用尽归成一类，界面上
-                           * 会出现"积分不足但还剩 X 小时"（用户直接指出来的）。
-                           */
                           const resetLine = isCredits
                             ? t('需充值，不会自动恢复')
                             : Number.isFinite(l.leftMs)
@@ -11523,10 +11816,6 @@ const probeOne = async (id) => {
                               h(Pill, { tone, text: what, title: advice })));
                         }))));
                   })(),
-                  /*
-                   * 结论一句话：用户最想知道"那我该做什么"。只在有多条或原因为
-                   * 账号级时补一句，避免每条都重复同样的话。
-                   */
                   limits.length === 1
                     ? h('p', { className: 'wb-note' },
                       limits[0].kind === 'account_restricted'
@@ -11536,82 +11825,36 @@ const probeOne = async (id) => {
                           : t('只是瞬时限流，稍等再试即可。'))
                     : null)
                 : h('div', { className: 'wb-rail-empty' },
-                  /*
-                   * 空态要区分"本来就没触顶"和"刚恢复"：
-                   * 后者说明上一秒还在列表里的那条到点消失了，用户不会以为
-                   * "怎么突然没了、是不是出错了"。
-                   */
                   limitsApi.data?.expiredCount > 0
                     ? t('额度已恢复（刚到期移除）。')
-                    : t('没有账号触顶（最近 10 分钟）。')),
-            /*
-             * 上限卡不放进常驻操作条：它主要是**读**，唯一动作是刷新，
-             * 而刷新在「切换账号」卡里已经有一个了，重复放会让人以为刷的不是一回事。
-             */
-            h('div', { className: 'wb-rail-foot' },
-              h(Btn, {
-                disabled: limitsApi.loading,
-                onClick: () => limitsApi.reload(),
-              }, t('刷新上限')))),
-          h(Card, { title: t('凭据') },
-            pluginCreds.length
-              ? h('div', { className: 'wb-rail-list' },
-                pluginCreds.map((c) => {
-                  const active = effectiveSource === 'plugin' && c.uid === effectiveUid;
-                  return h('div', {
-                    className: 'wb-rail-item' + (active ? ' on' : ''),
-                    key: c.uid,
-                    title: narrow
-                      ? [String(c.nickname || c.uid.slice(0, 8)),
-                        (c.region === 'global' ? 'global' : 'cn') + ' · ' + (c.domain || '')].join(' · ')
-                      : undefined,
-                  },
-                    h('span', { className: 'wb-rail-item-main' },
-                      h('span', { className: 'wb-rail-item-name', 'data-wb-raw': '', title: c.uid },
-                        h(Raw, { text: String(c.nickname || c.uid.slice(0, 8)) })),
-                      narrow
-                        ? null
-                        : h('span', { className: 'wb-rail-item-sub', 'data-wb-raw': '' },
-                          h(Raw, { text: (c.region === 'global' ? 'global' : 'cn') + ' · ' + (c.domain || '') }))),
-                    h('span', { className: 'wb-rail-item-side' },
-                      active
-                        ? h(Pill, { tone: 'ok', text: t('当前使用') })
-                        : h(Btn, {
-                          sm: true,
-                          disabled: busy === 'plugin:' + c.uid,
-                          onClick: () => switchPlugin(c.uid, c.nickname),
-                        }, busy === 'plugin:' + c.uid ? t('切换中…') : t('使用'))));
-                }))
-              : h('div', { className: 'wb-rail-empty' }, t('没有可切换的账号。'))));
+                    : t('没有账号触顶（最近 10 分钟）。'))));
       };
 
       const tabs = [
         { id: 'model', label: t('模型') },
         { id: 'checkin', label: t('签到') },
-        { id: 'account', label: t('账号') },
+        { id: 'account', label: t('账号'), badge: limits.length > 0 ? (hasSevereLimit ? 'bad' : 'warn') : '' },
       ];
+      const tabIndex = tabs.findIndex((x) => x.id === tab);
+      const prevIndex = tabs.findIndex((x) => x.id === prevTab);
+      const slideDir = tabIndex >= prevIndex ? 1 : -1;
 
       /**
-       * 底部常驻操作条：每页**只有那一个主操作**。
-       *
-       * 为什么单独做一条：卡片区会滚（矮面板时尤其明显），主操作跟着滚走就
-       * 等于没有。这里与卡内按钮共用同一份 handler 与同一套 disabled 判据，
-       * 所以两处状态永远一致，不会出现"上面能点、下面不能点"。
-       *
-       * 只放主操作 + 一个次要项：这条要一直占着高度，塞四个按钮等于又回到
-       * "操作条吃掉半屏"的老问题（极窄档按钮两列的教训）。
+       * 底部常驻操作条：只在真有待办或矮面板需要救主操作时出现。
        */
       const primaryActions = () => {
         if (tab === 'model') {
           const picked = draftModel || current?.model || '';
-          const dirty = Boolean(draftModel) && draftModel !== current?.model;
+          const pickedObj = models.find((m) => m.id === picked) || null;
+          const pickedEfforts = Array.isArray(pickedObj?.efforts) ? pickedObj.efforts : [];
+          const baseEffort = draftModel && draftModel !== current?.model
+            ? (pickedObj?.defaultEffort || pickedEfforts[0] || '')
+            : (current?.reasoningEffort || '');
+          const chosenEffort = draftEffort || baseEffort;
+          const modelChanged = Boolean(draftModel) && draftModel !== current?.model;
+          const effortChanged = Boolean(draftEffort) && draftEffort !== (current?.reasoningEffort || '');
+          const dirty = Boolean(picked) && (modelChanged || effortChanged);
           const hasDraftVisible = draftVisible !== null;
-          /*
-           * 没有待办时**不显示这条**：刷新在卡片的正常位置就够了，底部再挂一条
-           * 「刷新模型 + 当前模型名」只是把已经看得到的信息重复一遍，还会在内容
-           * 与底边之间留一大片空白，看起来像一块漂着的方框（用户直接问了"下面那个
-           * 方方正正的是什么"）。常驻条只在**真有待办**时出现：改了下拉 / 改了勾选。
-           */
           if (dirty) {
             return [
               h(Btn, {
@@ -11620,8 +11863,11 @@ const probeOne = async (id) => {
                 onClick: setDefault,
               }, busy === 'default' ? t('提交中…') : t('设为默认')),
               h('span', { className: 'wb-rail-dockinfo' },
-                picked ? routingName(picked) : ''),
-              h(Btn, { disabled: busy === 'default', onClick: () => setDraftModel('') }, t('取消')),
+                (picked ? routingName(picked) : '') + (chosenEffort ? ' · ' + chosenEffort : '')),
+              h(Btn, {
+                disabled: busy === 'default',
+                onClick: () => { setDraftModel(''); setDraftEffort(''); },
+              }, t('取消')),
             ];
           }
           if (hasDraftVisible) {
@@ -11638,82 +11884,30 @@ const probeOne = async (id) => {
           }
           return null;
         }
-        if (tab === 'checkin') {
+        if (tab === 'checkin' && short) {
           const status = checkinApi.data?.status ? checkinApi.data.status : (checkinApi.data || {});
           const claimable = status.active !== false && status.todayCheckedIn !== true;
-          const claimLabel = status.active === false
-            ? t('无签到活动')
-            : status.todayCheckedIn === true
-              ? t('今日已领完')
-              : (busy === 'claim' ? t('领取中…') : t('立即领取'));
-          /*
-           * 签到页的「立即领取」是真主操作，但**只在能领时**才值得占一条常驻条：
-           * 已签完/无活动时它是个禁用按钮，剩下的「刷新」在卡片里就有。
-           * 矮面板例外（见下面 primaryActions 的收尾）—— 那时卡片被压得很矮，
-           * 操作必须在底下那条里。
-           */
           if (!claimable) return null;
           return [
             h(Btn, {
               primary: true,
               disabled: busy === 'claim',
               onClick: claim,
-            }, claimLabel),
-            h(Btn, { disabled: checkinApi.loading, onClick: () => checkinApi.reload() }, t('刷新')),
+            }, busy === 'claim' ? t('领取中…') : t('立即领取')),
+            h(Btn, {
+              disabled: checkinApi.loading,
+              onClick: () => { checkinApi.reload(); acctCheckinApi.reload(); },
+            }, t('刷新')),
           ];
         }
-        /*
-         * 账号页：卡片里的「刷新」与每一行的「切换 / 使用」已经是完整操作面，
-         * 没有"待办"需要浮到底部。所以这里不显示 —— 早先那条「刷新 + 插件登录」
-         * 既重复又像一块漂着的方框。
-         */
         return null;
       };
 
-      /*
-       * 两层的道理（见 CSS 里那段注释）：
-       *   - 外层 `.wb-rail` 只做**容器**：零内边距 + `container-type: inline-size`，
-       *     让 `@container` 量到的就是右栏的真实宽度（内边距写在这层会缩水，
-       *     各档再改内边距就会变成反馈环、档位来回跳）；它同时负责滚动条
-       *     —— 滚动条挂在容器上会吃掉约 15px 内容盒。
-       *   - 内层 `.wb-rail-body` 才是真正的内容盒，padding / gap 都在它身上。
-       *   - 宽档再多一层 `.wb-rail-inner`：把内容限制在 760px 内居中，否则
-       *     900px 的全屏右栏会把每一行拉成一条很长的线。
-       *
-       * ## 常驻操作条（本轮的结构性改动）
-       *
-       * 每页的**主操作**不再跟着卡片一起滚：卡片区 `.wb-rail-scroll` 自己滚，
-       * 主操作固定在下面那条 `.wb-rail-dock` 里。理由是实测的：320px 高时
-       * 5 个按钮只有 1 个滚得到，用户会以为"这页没有保存按钮"。
-       *
-       * 试过 `position: sticky`，不行 —— 操作条在卡片**内部**，粘性被卡片边界
-       * 夹住，滚出卡片它就跟着走了。所以只能真的把它提到滚动区之外。
-       * 卡内仍保留同一组按钮（同一份 handler），这样宽屏下操作就在内容旁边，
-       * 不必低头看底部那条；两条路径共享状态，不会分叉。
-       *
-       * 窄档（<300px）时标题换成短名：`模型、签到与账号` 在那个宽度只剩省略号，
-       * 而它下面紧跟着的三段控件已经说明了这一页是什么。
-       *
-       * 极矮（<340px 高）时整行标题让位给页签（CSS），否则本就不高的可视区
-       * 会被两行头吃掉一截 —— 这里不渲染标题节点，省下边框与间距。
-       */
       return h('div', {
         className: 'wb-root wb-rail',
         'data-workbuddy-rail': '',
         'data-rail-tier': tier,
         'data-rail-height': heightTier,
-        /*
-         * ── 验收探针（只读，不参与任何逻辑）──
-         *
-         * `tests/rail-render.mjs` 靠它们读组件**内部**的倒计时状态：
-         *   - `data-now-tick`    本机时刻（每秒跳一格），判断"时钟在走"
-         *   - `data-limits-left` 有恢复时间的条目里最小剩余毫秒（到点应归零）
-         *   - `data-limits-count` 条目数
-         *
-         * 为什么保留在生产代码里：倒计时是纯前端行为（不发请求、后端也看不到），
-         * 没有这几个值就只能靠"等 N 秒看文字变没变" —— 那既慢又不稳（实测反复
-         * 假失败）。它们只是几个字符串属性，不触发重排、不影响渲染，代价可忽略。
-         */
         'data-now-tick': String(Math.round(nowTick)),
         'data-limits-left': (() => {
           const timed = limits.map((l) => l.leftMs).filter((v) => Number.isFinite(v));
@@ -11723,43 +11917,48 @@ const probeOne = async (id) => {
         ref: rootRef,
       },
       h('div', { className: 'wb-rail-body' },
-        /*
-         * `.wb-rail-inner` 必须包住**全部内容**（标题 / 页签 / 提示 / 页 / 操作条），
-         * 不能只包标题。
-         *
-         * 它的作用是宽档限宽居中（max-width:760px）。早期只把标题包进去，
-         * 于是宽屏下出现"标题缩进、卡片却拉满整宽"的错位 —— 一眼就看得出没对齐
-         * （用户就是这么发现的："这个宽度适配的也不像啊"）。限宽是**整列**的属性，
-         * 任何一部分漏在外面都会破坏对齐。
-         */
         h('div', { className: 'wb-rail-inner' },
           short
             ? null
             : h('div', { className: 'wb-rail-head' },
               h('div', { className: 'wb-rail-title', title: t('模型、签到与账号') },
-                narrow ? 'WorkBuddy' : t('模型、签到与账号'))),
+                narrow ? 'WorkBuddy' : t('模型、签到与账号')),
+              limits.length > 0 && tab !== 'account'
+                ? h('button', {
+                  type: 'button',
+                  className: 'wb-rail-status-btn' + (hasSevereLimit ? ' bad' : ''),
+                  onClick: () => switchTab('account'),
+                  title: t('查看上限'),
+                },
+                h('span', { className: 'wb-dot ' + (hasSevereLimit ? 'bad' : 'warn'), 'aria-hidden': 'true' }),
+                t(String(limits.length) + ' 项受限'))
+                : null),
           h(Segmented, {
             value: tab,
             ariaLabel: t('模型、签到与账号'),
-            options: tabs.map((x) => ({ value: x.id, label: x.label })),
-            onChange: (e) => { setTab(e.target.value); setNotice({ text: '', bad: false }); },
+            options: tabs.map((x) => ({ value: x.id, label: x.label, badge: x.badge })),
+            onChange: (e) => switchTab(e.target.value),
           }),
-          notice.text ? h(Alert, { bad: notice.bad }, notice.text) : null,
-          /*
-           * `key` 让三个页是**三个不同元素**：切页时 React 换掉整棵子树，
-           * 入场动画才会重放（同一元素只改内容的话，animation 不会重跑）。
-           * 动画本身只有 160ms、2px 位移 —— 只为说明"这一页换了"。
-           */
-          h('div', { className: 'wb-rail-page', key: tab },
+          notice.text
+            ? h('div', {
+              className: 'wb-alert wb-rail-notice' + (notice.bad ? ' bad' : ''),
+              role: notice.bad ? 'alert' : 'status',
+              'aria-live': notice.bad ? 'assertive' : 'polite',
+            },
+            h('span', { className: 'wb-rail-notice-text' }, notice.text),
+            h('button', {
+              type: 'button',
+              className: 'wb-rail-notice-close',
+              onClick: () => setNotice({ text: '', bad: false }),
+              title: t('关闭提示'),
+              'aria-label': t('关闭提示'),
+            }, '×'))
+            : null,
+          h('div', { className: 'wb-rail-page', key: tab, style: { '--wb-slide-dir': slideDir } },
             h('div', { className: 'wb-rail-scroll' },
               tab === 'model' ? modelPage() : null,
               tab === 'checkin' ? checkinPage() : null,
               tab === 'account' ? accountPage() : null)),
-          /*
-           * 常驻操作条：只放"这一页此刻**真的有待办**的那个动作"。
-           * `primaryActions()` 返回 null 时整条不渲染 —— 渲染一个空的 .wb-rail-dock
-           * 会留下一条只有上边框的空白带，在内容下面看着像一块漂着的方框。
-           */
           (() => {
             const actions = primaryActions();
             if (!actions || (Array.isArray(actions) && actions.filter(Boolean).length === 0)) return null;

@@ -795,18 +795,40 @@ docs/                      架构、配置、排错、安全、接入链路审�
 ## 致谢
 
 这一版的很多修正来自使用者的真实反馈 —— 他们不只报现象，还把根因定位到具体代码行。
+**代码贡献者**（有已合并 PR）与**问题定位者**（issue 里给出可复现步骤与根因）分开列，
+因为两者对项目的价值不同、但同样关键。
+
+<a href="https://github.com/Ianzhyh/workbuddy-to-dsh/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=Ianzhyh/workbuddy-to-dsh&max=100" alt="Contributors" />
+</a>
+
+> 上面这张是 GitHub 自动统计的**代码贡献者**（只认已合并 PR 的提交身份）。
+> 报 issue、给思路、帮忙复现的同学不在其中 —— 下面的表把两边都记上。
+
+### 代码贡献（已合并 PR）
+
+| 贡献者 | 并入内容 |
+|---|---|
+| [@CherishLJ](https://github.com/CherishLJ) | PR #22：企业/教育账号积分不再显示 0（改读企业配额接口，+406/−17）；并参与 PR #23 的企业配额链路加固 |
+| [@fanyinghao](https://github.com/fanyinghao) | PR #31：超过 64 字符的 MCP 工具名（三条协议入口的可逆别名，+416/−56）—— 让 Claude Code 经 LiteLLM 调 LoopForge 时不再因工具名超长被拒 |
+| [@lenychang520](https://github.com/lenychang520) | PR #2：`imageRequestPricing` / `imageRequestTarget` 补齐，修掉 compact 崩溃（+175/−2） |
+| [@secretZZy](https://github.com/secretZZy) | PR #29：README 标点清理 |
+| [@liugangnhm](https://github.com/liugangnhm) | PR #19（经 PR #20 并入）：Claude Code 的 `[1m]` 后缀与 1M beta 头 |
+
+### 问题定位与思路
 
 | 贡献者 | 贡献 |
 |---|---|
-| [@JokesLin](https://github.com/JokesLin) | macOS 上 `CFBundleExecutable` 探测失效（#13）；控制台常驻内存与发布包体积（#14） |
-| [@liugangnhm](https://github.com/liugangnhm) | Claude Code 直连的模型名误路由与 200K 上下文（#18）、PR #19（已并入）的 `[1m]` 后缀与 1M beta 头 |
+| [@JokesLin](https://github.com/JokesLin) | macOS 上 `CFBundleExecutable` 探测失效（#13）；控制台常驻内存与发布包体积（#14）；**自动签到的多账号缺陷与搜索通道误报（#32 / #33）** —— 两条都给出了具体代码线索，不是只报现象 |
+| [@liugangnhm](https://github.com/liugangnhm) | Claude Code 直连的模型名误路由与 200K 上下文（#18） |
 | [@William-0406](https://github.com/William-0406) | DSH system 的 `@` 路径说明触发 11128 降级的定位与最小改写（#25） |
 | [@OxOld](https://github.com/OxOld) | 打包安装的 DSH 上 `profile bundles` 误报核心 bundle 缺失 —— 定位到 asar 内路径与悬空 junction 两层成因，并给出分档修法（#26） |
 | [@wflc](https://github.com/wflc) | Docker / NAS 部署下插件登录凭据每次都要重登（#16） |
 | [@GodGavin](https://github.com/GodGavin) | 限流后自动切换账号（#17） |
-| [@lenychang520](https://github.com/lenychang520) | PR #2：compact 崩溃修复 |
 
-> GitHub 的 Contributors 列表只统计**已合并**的 PR，所以这里用文字署名；被采纳但未合并的思路同样算数。
+> 头像墙由 [contrib.rocks](https://contrib.rocks) 按 GitHub 的提交身份自动生成，只收录**已合并 PR**；
+> 报 issue、给思路、帮忙复现的人不在其中 —— 那些记在下面两张表里。
+> 若你贡献过但没出现在上文，多半是提交邮箱没绑到 GitHub 账号，说一声即可补上。
 
 ---
 

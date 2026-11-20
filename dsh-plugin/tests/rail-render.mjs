@@ -81,16 +81,22 @@ const shot = async (name) => {
     const r = el.getBoundingClientRect();
     const w = Math.max(1, Math.round(r.width));
     const h = Math.max(1, Math.round(r.height));
+    const head = document.getElementById('head');
+    const frame = document.getElementById('frame');
+    const frameBg = frame ? getComputedStyle(frame).backgroundColor : '';
     window.__shotRestore = {
       html: document.documentElement.getAttribute('style'),
       body: document.body.getAttribute('style'),
+      head: head ? head.getAttribute('style') : null,
       rail: el.getAttribute('style'),
     };
-    document.documentElement.style.cssText += ';overflow:hidden;';
-    document.body.style.cssText += ';margin:0;padding:0;overflow:hidden;';
-    /* 把 rail 提到 (0,0) 并钉住尺寸：之后全页就是它自己 */
+    if (head) head.style.cssText += ';display:none;';
+    document.documentElement.style.cssText += ';overflow:hidden;' + (frameBg ? 'background:' + frameBg + ';' : '');
+    document.body.style.cssText += ';margin:0;padding:0;overflow:hidden;' + (frameBg ? 'background:' + frameBg + ';' : '');
+    /* 把 rail 提到 (0,0) 并钉住尺寸：之后全页就是它自己，同时铺上宿主底色避免下层透字 */
     el.style.cssText += ';position:fixed;left:0;top:0;right:auto;bottom:auto;'
-      + 'width:' + w + 'px;height:' + h + 'px;z-index:2147483647;';
+      + 'width:' + w + 'px;height:' + h + 'px;z-index:2147483647;'
+      + (frameBg ? 'background:' + frameBg + ';' : '');
     return { width: w, height: h };
   })())`));
   const res = await page.cdp.send('Page.captureScreenshot', {
@@ -98,11 +104,22 @@ const shot = async (name) => {
     captureBeyondViewport: true,
     clip: { x: 0, y: 0, width: box.width, height: box.height, scale: 1 },
   });
-  writeFileSync(join(OUT, name), Buffer.from(res.result.data, 'base64'));
+  const buf = Buffer.from(res.result.data, 'base64');
+  for (let attempt = 0; ; attempt++) {
+    try {
+      writeFileSync(join(OUT, name), buf);
+      break;
+    } catch (err) {
+      if (attempt >= 3) throw err;
+      await sleep(150);
+    }
+  }
   await page.cdp.evaluate(`(() => {
     const el = document.querySelector('[data-workbuddy-rail]');
+    const head = document.getElementById('head');
     const r = window.__shotRestore || {};
     if (el) { if (r.rail == null) el.removeAttribute('style'); else el.setAttribute('style', r.rail); }
+    if (head) { if (r.head == null) head.removeAttribute('style'); else head.setAttribute('style', r.head); }
     if (r.html == null) document.documentElement.removeAttribute('style');
     else document.documentElement.setAttribute('style', r.html);
     if (r.body == null) document.body.removeAttribute('style');
@@ -1099,7 +1116,181 @@ try {
       if (width === 240) await shot(`rail-${pageLabel === '签到' ? 'checkin' : 'account'}-narrow-240.png`);
     }
   }
-  // 回到模型页 + 默认宽度（后面的英文用例沿用）
+  // 回到模型页 + 默认宽度（后面的功能交互断言与动画/英文用例沿用）
+  await clickTab('模型');
+  await resize(340);
+
+  /*
+   * ═════════════ 新增功能与交互优化回归断言 ═════════════
+   *   1. 禁用态 primary 按钮（保存上下文）不能保留刺眼高对比亮白底；
+   *   2. 模型思考强度 chips：点非当前档位 → 底部常驻条升起「设为默认」，点保存发 reasoningEffort；
+   *   3. 搜索清除按钮：输入关键字后显示 ×，点 × 清空并恢复列表；
+   *   4. 顶栏受限药丸：在模型页点「N 项受限」直达账号页；
+   *   5. 账号页：当前使用显示昵称而非原始 uid、切换桌面账号走行内二次确认（不阻塞 window.confirm）、
+   *      用量上限副行可换行（不截断英文说明）；
+   *   6. 签到页：进度条 .wb-meter 与「自动签到」就位，矮面板（320px 高）仍将「立即领取」升入 dock。
+   */
+  const modelFeat = JSON.parse(await page.cdp.evaluate(`JSON.stringify((() => {
+    const rail = document.querySelector('[data-workbuddy-rail]');
+    const disabledPrim = rail.querySelector('.wb-btn.primary:disabled');
+    const dpCs = disabledPrim ? getComputedStyle(disabledPrim) : null;
+    const chips = [...rail.querySelectorAll('.wb-rail-chip')];
+    const inactiveChip = chips.find((c) => !c.classList.contains('on'));
+    const statusBtn = rail.querySelector('.wb-rail-status-btn');
+    return {
+      disabledPrimBg: dpCs ? dpCs.backgroundColor : '',
+      disabledPrimOpacity: dpCs ? dpCs.opacity : '',
+      chipCount: chips.length,
+      clickedChipText: inactiveChip ? inactiveChip.textContent : '',
+      hasStatusBtn: Boolean(statusBtn),
+      statusBtnText: statusBtn ? statusBtn.textContent.trim() : '',
+    };
+  })())`));
+  console.log('新增特性探针（模型页）：', JSON.stringify(modelFeat));
+  if (modelFeat.disabledPrimBg && /rgb\(249,\s*250,\s*251\)/.test(modelFeat.disabledPrimBg)) {
+    problems.push(`禁用主按钮仍然显示刺眼白底（${modelFeat.disabledPrimBg}）`);
+  }
+  if (modelFeat.chipCount < 2) problems.push(`模型思考强度 chips 应 ≥2 档，实际 ${modelFeat.chipCount}`);
+  if (!modelFeat.hasStatusBtn) problems.push('模型页顶栏缺少账号受限快捷状态按钮（.wb-rail-status-btn）');
+
+  // 点击非当前思考强度档位 → 验证 dock 出现并提交 reasoningEffort
+  await page.cdp.evaluate(`(() => {
+    const chip = [...document.querySelectorAll('[data-workbuddy-rail] .wb-rail-chip')].find((c) => !c.classList.contains('on'));
+    if (chip) chip.click();
+  })()`);
+  await sleep(220);
+  const effortDock = await dockProbe();
+  if (!effortDock.hasDock || !effortDock.dockText.includes('设为默认')) {
+    problems.push(`切思考强度后底部应出现「设为默认」，实际 ${JSON.stringify(effortDock)}`);
+  } else {
+    const reqBefore = JSON.parse(await page.cdp.evaluate('window.__reqs.length'));
+    await page.cdp.evaluate(`(() => {
+      const btn = [...document.querySelectorAll('[data-workbuddy-rail] .wb-rail-dock .wb-btn')].find((b) => b.textContent.trim() === '设为默认');
+      if (btn) btn.click();
+    })()`);
+    await sleep(600);
+    const effortPost = JSON.parse(await page.cdp.evaluate(`JSON.stringify(
+      window.__reqs.slice(${reqBefore}).find((r) => r.method === 'POST' && r.path === '/workbuddy/default-model') || null
+    )`));
+    console.log('思考强度保存请求：', JSON.stringify(effortPost));
+    if (!effortPost || !effortPost.body?.reasoningEffort) {
+      problems.push('改思考强度点设为默认未提交 reasoningEffort');
+    }
+  }
+
+  // 搜索清除按钮：设输入值为 kimi → 断言列表缩减且出现 × → 点 × 恢复
+  await page.cdp.evaluate(`(() => {
+    const input = document.querySelector('[data-workbuddy-rail] .wb-rail-search-input');
+    if (!input) return;
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+    setter.call(input, 'kimi');
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  })()`);
+  await sleep(220);
+  const searchFiltered = JSON.parse(await page.cdp.evaluate(`JSON.stringify((() => {
+    const rail = document.querySelector('[data-workbuddy-rail]');
+    const clear = rail.querySelector('.wb-rail-search-clear');
+    const items = rail.querySelectorAll('.wb-rail-list.is-grid .wb-rail-item').length;
+    if (clear) clear.click();
+    return { hasClear: Boolean(clear), items };
+  })())`));
+  await sleep(220);
+  const searchRestored = JSON.parse(await page.cdp.evaluate(`JSON.stringify((() => {
+    const rail = document.querySelector('[data-workbuddy-rail]');
+    const input = rail.querySelector('.wb-rail-search-input');
+    return {
+      value: input ? input.value : null,
+      items: rail.querySelectorAll('.wb-rail-list.is-grid .wb-rail-item').length,
+      hasClear: Boolean(rail.querySelector('.wb-rail-search-clear')),
+    };
+  })())`));
+  console.log('搜索清除：', JSON.stringify({ searchFiltered, searchRestored }));
+  if (!searchFiltered.hasClear) problems.push('搜索有值时未显示清除按钮（.wb-rail-search-clear）');
+  if (searchRestored.value !== '' || searchRestored.hasClear || searchRestored.items <= searchFiltered.items) {
+    problems.push(`点清除搜索后未还原（${JSON.stringify(searchRestored)}）`);
+  }
+
+  // 点顶栏受限状态按钮直达账号页，并测行内二次确认（不得调用阻塞的 window.confirm）
+  await page.cdp.evaluate(`(() => {
+    window.__confirmCalls = 0;
+    window.__origConfirm = window.confirm;
+    window.confirm = () => { window.__confirmCalls += 1; return false; };
+    const btn = document.querySelector('[data-workbuddy-rail] .wb-rail-status-btn');
+    if (btn) btn.click();
+  })()`);
+  await sleep(700);
+  const acctFeat = JSON.parse(await page.cdp.evaluate(`JSON.stringify((() => {
+    const rail = document.querySelector('[data-workbuddy-rail]');
+    const activeTab = rail.querySelector('.wb-segmented-item.on');
+    const firstCardRows = [...(rail.querySelector('.wb-card')?.querySelectorAll('.wb-row') || [])];
+    const currentRow = firstCardRows.find((r) => /当前使用/.test(r.textContent));
+    const switchBtn = [...rail.querySelectorAll('.wb-rail-item .wb-btn')].find((b) => b.textContent.trim() === '切换' && !b.disabled);
+    if (switchBtn) switchBtn.click();
+    return {
+      tab: activeTab ? activeTab.textContent.trim() : '',
+      currentUserText: currentRow ? currentRow.innerText : '',
+      hadSwitchBtn: Boolean(switchBtn),
+    };
+  })())`));
+  await sleep(220);
+  const inlineConfirm = JSON.parse(await page.cdp.evaluate(`JSON.stringify((() => {
+    const rail = document.querySelector('[data-workbuddy-rail]');
+    const box = rail.querySelector('.wb-rail-confirm');
+    const sub = rail.querySelector('.wb-limit-acct .wb-rail-item-sub');
+    const cancel = box ? [...box.querySelectorAll('.wb-btn')].find((b) => b.textContent.trim() === '取消') : null;
+    const text = box ? box.textContent.trim() : '';
+    const calls = window.__confirmCalls || 0;
+    if (cancel) cancel.click();
+    if (window.__origConfirm) window.confirm = window.__origConfirm;
+    return {
+      hasConfirm: Boolean(box),
+      confirmText: text,
+      confirmCalls: calls,
+      subWhiteSpace: sub ? getComputedStyle(sub).whiteSpace : '',
+    };
+  })())`));
+  await sleep(200);
+  const confirmClosed = JSON.parse(await page.cdp.evaluate(`Boolean(document.querySelector('[data-workbuddy-rail] .wb-rail-confirm'))`));
+  console.log('账号页新特性：', JSON.stringify({ acctFeat, inlineConfirm, confirmClosed }));
+  if (acctFeat.tab !== '账号') problems.push(`点顶栏状态按钮未跳到账号页（实际 ${acctFeat.tab}）`);
+  if (!/Fixture/.test(acctFeat.currentUserText) || /uid-fixture-0001/.test(acctFeat.currentUserText)) {
+    problems.push(`账号页「当前使用」应显示友好昵称而不是原始 uid（实际 ${acctFeat.currentUserText}）`);
+  }
+  if (acctFeat.hadSwitchBtn && (!inlineConfirm.hasConfirm || inlineConfirm.confirmCalls > 0)) {
+    problems.push(`切换桌面账号应走行内二次确认而非 window.confirm（${JSON.stringify(inlineConfirm)}）`);
+  }
+  if (confirmClosed) problems.push('点行内二次确认的「取消」后确认框未关闭');
+  if (inlineConfirm.subWhiteSpace && inlineConfirm.subWhiteSpace !== 'normal') {
+    problems.push(`用量上限副行应允许折行以防英文截断，实际 white-space=${inlineConfirm.subWhiteSpace}`);
+  }
+
+  // 签到页：验证 .wb-meter 与「自动签到」+ 矮面板 dock 救援
+  await clickTab('签到');
+  const checkinFeat = JSON.parse(await page.cdp.evaluate(`JSON.stringify((() => {
+    const rail = document.querySelector('[data-workbuddy-rail]');
+    const meter = rail.querySelector('.wb-meter');
+    const bar = meter ? meter.querySelector('i') : null;
+    const hasAutoRow = /自动签到/.test(rail.innerText);
+    const hasDockNormal = Boolean(rail.querySelector('.wb-rail-dock'));
+    return {
+      hasMeter: Boolean(meter && bar),
+      valuenow: meter ? meter.getAttribute('aria-valuenow') : null,
+      hasAutoRow,
+      hasDockNormal,
+    };
+  })())`));
+  await resize(340, 320);
+  const checkinShortDock = await dockProbe();
+  await resize(340, 900);
+  console.log('签到页新特性：', JSON.stringify({ checkinFeat, checkinShortDock }));
+  if (!checkinFeat.hasMeter) problems.push('签到页缺少完成度进度条（.wb-meter）');
+  if (!checkinFeat.hasAutoRow) problems.push('签到页缺少「自动签到」状态行');
+  if (checkinFeat.hasDockNormal) problems.push('常规高度下签到页不应额外显示底栏 dock（动作在每日签到卡内）');
+  if (!checkinShortDock.hasDock || !checkinShortDock.dockText.includes('立即领取')) {
+    problems.push(`矮面板（320px）签到页未将「立即领取」升入常驻底栏（${JSON.stringify(checkinShortDock)}）`);
+  }
+
+  // 回到模型页 + 默认宽度（后面的动画/英文用例沿用）
   await clickTab('模型');
   await resize(340);
 
