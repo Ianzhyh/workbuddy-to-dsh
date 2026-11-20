@@ -1393,6 +1393,16 @@ body.dark .wb-root,
       '配置中…': 'Configuring…',
       '把 dsh 的网页搜索指向本地桥（使用 WorkBuddy 搜索额度，不消耗 DeepSeek）':
         'Point dsh web search at the local bridge (uses WorkBuddy search quota, not DeepSeek).',
+      /*
+       * 短版（issue #33 之后「切到 WorkBuddy 搜索」按钮用的 title）。
+       *
+       * 长版那条不能再断言「不消耗 DeepSeek」—— 那是 issue #33 明确要求删掉的
+       * 说法（对第三方通道是假话），所以按钮 title 缩短了。但**词典必须跟着补**：
+       * 漏了这一步，英文模式下这个 title 会留中文，而 `release:check` 抓不到
+       * （它需要真实 Chrome，不在门禁里 —— 实测由 panel-i18n 发现）。
+       */
+      '把 dsh 的网页搜索指向本地桥（使用 WorkBuddy 搜索额度）':
+        'Point dsh web search at the local bridge (uses WorkBuddy search quota).',
       '已切换：网页搜索 → ': 'Switched: web search → ',
       '（自检通过）': ' (self-test passed)',
       '（自检失败：': ' (self-test failed: ',
