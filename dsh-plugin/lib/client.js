@@ -225,6 +225,30 @@ body.dark .wb-root,
 .wb-acct-wrap{margin-top:16px}
 .wb-acct-region{flex:none;font-size:11px;font-weight:400;color:var(--dsw-alias-label-tertiary,#adb2b8)}
 /*
+ * 「无签到活动的账号」折叠条。
+ *
+ * 外观刻意做成**弱提示**而不是第二个按钮：它回答的是"另外几个号去哪了"，
+ * 不是主操作。所以用无边框文字行 + 细chevron，hover 才显背景。
+ * 焦点环与其它可点元素保持同一套（2px brand，offset -1），键盘用户拿得到。
+ */
+.wb-acct-toggle{display:flex;align-items:center;gap:6px;width:100%;margin-top:8px;padding:7px 10px;border:0;border-radius:9px;background:transparent;color:var(--dsw-alias-label-secondary,light-dark(#61666b,#cfd3d6));font:inherit;font-size:12px;line-height:16px;text-align:left;cursor:pointer;transition:background-color var(--wb-anim-fast),color var(--wb-anim-fast)}
+/*
+ * 折叠条的文字**必须能换行**，且不和右侧「展开」抢同一行。
+ *
+ * 实测（240px 窄档截图）：整条是 nowrap 的 flex，中间那段文字被挤成三行
+ * 「1 个账号无签到活动，已 / 折叠」+「展开」贴到最右 —— 行高错位、看着像错版。
+ * 现在文字允许换行（min-width:0 + 正常 white-space），chevron 与「展开」
+ * 各自 flex:none，窄档也不会被压扁。
+ */
+.wb-acct-toggle>span:not(.wb-acct-toggle-caret):not(.wb-acct-toggle-hint){flex:1 1 auto;min-width:0;white-space:normal;overflow-wrap:anywhere;text-align:left}
+.wb-acct-toggle:hover{background:var(--dsw-alias-interactive-bg-hover,light-dark(#2631480f,#ffffff14));color:var(--dsw-alias-label-primary,light-dark(#0f1115,#f9fafb))}
+.wb-acct-toggle:focus-visible{outline:2px solid var(--dsw-alias-brand-primary,#6366f1);outline-offset:-1px}
+.wb-acct-toggle-caret{flex:none;width:12px;font-size:11px;line-height:1;color:var(--dsw-alias-label-tertiary,#adb2b8)}
+.wb-acct-toggle-hint{flex:none;margin-left:auto;font-size:11.5px;color:var(--dsw-alias-label-tertiary,#adb2b8)}
+.wb-acct-toggle[aria-expanded="true"] .wb-acct-toggle-hint{color:var(--dsw-alias-label-secondary,light-dark(#61666b,#cfd3d6))}
+/* 展开后的行挂在折叠条下面：去掉它们与上一条之间的双倍间距 */
+.wb-acct-toggle+.wb-acct{margin-top:8px}
+/*
  * 卡内分组：标题 + 一条分隔线。
  * 用途是把「一片同构 Row」切成几段（桥 / 账号 / 能力），
  * 否则十几个字段连排，找一个值只能逐行扫。
@@ -1087,9 +1111,20 @@ body.dark .wb-root,
 .wb-rail .wb-segmented-wrap{display:flex;width:100%;box-sizing:border-box;min-width:0}
 .wb-rail .wb-segmented{display:flex;width:100%;box-sizing:border-box;min-width:0}
 .wb-rail .wb-segmented-item{flex:1 1 0;justify-content:center;text-align:center;padding:4px 8px}
-.wb-rail .wb-dropdown{display:block;width:100%}
-.wb-rail .wb-dropdown-trigger{width:100%;min-height:30px;font-size:12px}
-.wb-rail .wb-dropdown-menu{min-width:100%;max-width:100%;max-height:280px}
+/*
+ * 右栏里的 dropdown：**容器、触发框、菜单三者同宽**。
+ *
+ * 关键在于容器。它是菜单的包含块，所以：
+ *   · 容器 width:100%（早先的写法）→ 菜单的 min-width:100% 等于**整行宽**，
+ *     点开一个「选模型」小框会弹出横跨半屏的板子（用户实测：460px 档菜单 389px）。
+ *   · 只放宽档的 max-width 也不够 —— 常规档（420/460）仍按容器走。
+ *
+ * 现在统一收到 280px：触发框、容器、菜单都是这个宽度，任何档位都不会出现
+ * "菜单比触发框宽"。长模型名由省略号 + title 承担。
+ */
+.wb-rail .wb-dropdown{display:block;width:auto;max-width:280px}
+.wb-rail .wb-dropdown-trigger{width:280px;max-width:280px;min-height:30px;font-size:12px}
+.wb-rail .wb-dropdown-menu{min-width:100%;width:100%;max-width:100%;max-height:280px}
 .wb-rail .wb-pill{font-size:11px;padding:1px 8px}
 .wb-rail .wb-acct{padding:8px 10px;border-radius:9px}
 .wb-rail .wb-acct+.wb-acct{margin-top:6px}
@@ -1212,10 +1247,55 @@ body.dark .wb-root,
   }
   .wb-rail .wb-segmented-wrap{width:100%;max-width:none;min-width:280px}
   .wb-rail .wb-segmented{width:100%}
-  .wb-rail .wb-dropdown{max-width:460px}
+  /*
+   * 宽档的 dropdown 宽度。
+   *
+   * 基础规则（.wb-rail .wb-dropdown）已把容器/触发框/菜单统一到 280px；
+   * 这里只强调"宽档不许再放大"——曾经这里写 max-width:460px，于是 740px 栏里
+   * 触发框 280px、点开菜单 460px，用户实测反馈「这个下拉栏怎么这么宽」。
+   */
+  .wb-rail .wb-dropdown{max-width:280px}
+  .wb-rail .wb-dropdown-trigger{max-width:280px}
   .wb-rail-head{gap:10px}
   .wb-rail-title{font-size:14px}
-  .wb-rail .wb-dropdown-menu{min-width:0;width:100%;max-width:460px}
+  /*
+   * 宽档把「模型选择」与「思考强度」**并排**，而不是一路单列往下堆。
+   *
+   * 实测（用户截图，760px 内容宽）：单列布局下每个控件只占左侧 280–460px，
+   * 右边整片空白 —— 卡片被拉宽了，信息密度却没变，纯粹是浪费。
+   * 并排之后一行放得下两件事，卡片高度也降下来。
+   *
+   * 只在宽档生效：常规/窄档一行放不下两列，硬挤会把 chips 挤成多行，
+   * 反而更难读。
+   */
+  .wb-rail-cols{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:10px 18px;align-items:start}
+  /* 说明文字 / 告警 / 底部动作条跨满两列，不被挤进某一栏 */
+  .wb-rail-cols>.wb-note,.wb-rail-cols>.wb-alert,.wb-rail-cols>.wb-rail-foot{grid-column:1/-1}
+  .wb-rail-cols .wb-rail-effort{margin-top:0}
+  /*
+   * 上下文预算卡同一套思路：左栏「预设档位」、右栏「输入 + 保存」。
+   *
+   * 用户实测（1253px 宽截图）：单列时预设按钮一排只有 3 个小块，下面再一行
+   * 输入框 —— 右边整片空白，而这两件事本来就是「选一个」或「自己填」的并列选择，
+   * 摆一列反而让人先看完上面再看下面。并排后一眼就能二选一。
+   */
+  .wb-rail-cols-ctx{display:grid;grid-template-columns:minmax(0,auto) minmax(0,1fr);gap:10px 16px;align-items:start}
+  .wb-rail-cols-ctx>.wb-note{grid-column:1/-1}
+  .wb-rail-cols-ctx .wb-rail-foot{margin-top:0}
+  .wb-rail-cols-ctx .wb-rail-ctx-row{margin-top:0}
+  .wb-rail-cols-ctx .wb-rail-ctx-input{max-width:none}
+  /*
+   * 「信息 + 行尾动作」一行放：当前默认 / 刷新模型。
+   *
+   * 宽档时左侧是信息、右侧是动作，视线一次扫完；窄档自动换行（按钮落到下一行），
+   * 不会把模型名挤成省略号。
+   */
+  .wb-rail-inline-head{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+  .wb-rail-inline-head>.wb-row{flex:1 1 auto;min-width:0}
+  .wb-rail-inline-head>.wb-note{flex:1 1 auto;margin:0;min-width:0}
+  .wb-rail-inline-head>.wb-btn{flex:none;margin-left:auto}
+  /* 菜单跟触发框同宽（见上方注释：不能再固定 460px） */
+  .wb-rail .wb-dropdown-menu{min-width:100%;width:100%;max-width:100%}
   /*
    * 宽档里 Row 的 space-between 会把 label 与值拉到卡片两端 —— 中间空出
    * 一大片，「当前默认」和它的值看着像两件不相关的东西。这里改成一组靠左，
@@ -1244,6 +1324,31 @@ body.dark .wb-root,
   .wb-rail-foot .wb-btn,.wb-rail .wb-actions .wb-btn{
     flex:1 1 calc(50% - 5px);width:auto;min-width:0;text-align:center;
   }
+  /*
+   * 三个按钮时改三列，别让最后一个单独掉到下一行。
+   *
+   * 实测（240px 签到页截图）：「今天都领完了 / 刷新账号 / 换账号」按 50% 排，
+   * 第三个必然换行并独占一行 —— 视觉上像"换账号"是另一组动作。
+   * 三个都在时每个 1/3（约 68px），文字短、仍点得到。
+   */
+  .wb-rail-foot:has(> .wb-btn:nth-child(3)):not(:has(> .wb-btn:nth-child(4))) .wb-btn,
+  .wb-rail .wb-actions:has(> .wb-btn:nth-child(3)):not(:has(> .wb-btn:nth-child(4))) .wb-btn{
+    flex:1 1 calc(33.333% - 5px);
+    /*
+     * 1/3 宽只有 ~68px。内边距收小是必要的，但**不要用省略号**：
+     * 「今天都…」比让它折成两行还难读。真实文案已在 JS 侧按档位缩短
+     * （窄档写「今天都领完了」以外的短说法），这里只保证不横向溢出。
+     */
+    padding-left:4px;padding-right:4px;
+    white-space:nowrap;
+  }
+  /*
+   * 折叠条在极窄档：文字与「展开」挤不进一行时，允许它们**各自整行**。
+   * 实测 240px 下「1 个账号无签到活动，已折叠」+「展开」会把文字拆成两行半
+   * 且行高错位，看起来像错版。
+   */
+  .wb-acct-toggle{flex-wrap:wrap;row-gap:2px}
+  .wb-acct-toggle-hint{margin-left:auto}
   /* 单个按钮（比如「刷新」）独占一行时仍铺满，别缩成一个小方块 */
   .wb-rail-foot .wb-btn:only-child{flex:1 1 100%}
   .wb-rail-ctx-input{flex:1 1 100%}
@@ -2019,6 +2124,12 @@ body.dark .wb-root,
       '本机账号': 'Accounts on this machine',
       '正在读取本机账号…': 'Reading accounts on this machine…',
       '没有找到本机已登录的账号。': 'No signed-in accounts found on this machine.',
+      '本机账号都没有签到活动': 'None of the accounts on this machine has check-in activity',
+      ' 个账号无签到活动，已折叠': ' account(s) without check-in activity, collapsed',
+      ' 个无活动': ' without activity',
+      '已领完': 'Done today',
+      ' 个账号没有签到活动（国际版网关不提供），未列入上方。':
+        ' account(s) without check-in activity (the international gateway has none), hidden above.',
       // 读数层次（大号数字 + 说明）
       '无活动': 'No activity',
       '该账号没有签到活动': 'This account has no check-in activity',
@@ -2037,6 +2148,9 @@ body.dark .wb-root,
       '项失败': 'failed',
       '红色项不解决，模型就不会出现。': 'Any red item blocks the model from appearing.',
       '全部领取': 'Claim all',
+      '今天都领完了': 'All claimed today',
+      '本机所有账号今天都已处理过（已签到或无签到活动）':
+        'Every account on this machine is done for today (claimed or no check-in activity).',
       '刷新账号': 'Refresh accounts',
       '无签到活动': 'No activity',
       '未签': 'Not checked in',
@@ -7386,6 +7500,14 @@ body.dark .wb-root,
       const [acctData, setAcctData] = useState(null);
       const [acctBusy, setAcctBusy] = useState(false);
       const [acctMsg, setAcctMsg] = useState('');
+      /*
+       * 「无签到活动的账号」默认折叠成一行说明，但**必须能展开**。
+       *
+       * 只折叠不给入口等于把账号藏起来：用户登录了 4 个号、这里只看到 2 行，
+       * 第一反应是"另外两个丢了"（实测反馈）。所以折叠条本身是个按钮，
+       * 点开就是完整的那些行 —— 默认安静，需要时可查。
+       */
+      const [showNoActivity, setShowNoActivity] = useState(false);
       const loadAccounts = useCallback(async () => {
         /*
          * getJson 在断连/超时会 **reject**。原先没有 catch：acctData 一直是
@@ -7509,17 +7631,95 @@ body.dark .wb-root,
           }
           const rows = acctData.accounts || [];
           if (!rows.length) return h('p', { className: 'wb-note' }, '没有找到本机已登录的账号。');
-          const total = rows.length;
-          const signed = rows.filter((a) => a.status && a.status.todayCheckedIn).length;
-          const credited = rows.reduce((sum, a) => sum + (a.status && typeof a.status.todayCredit === 'number' ? a.status.todayCredit : 0), 0);
+          /*
+           * 「今日共领」只能累加**真的签到了**的账号。
+           *
+           * 上游的 `today_credit` 是「这个活动今天值多少」，不是「这个账号今天领到了」
+           * —— 没签到的账号也会带同一个数字。原先无条件累加，于是 4 个账号（2 个已签、
+           * 2 个国际版无活动）会显示 `+400`，而明细里只有两行 `+100`：**汇总与明细
+           * 自相矛盾**，用户只会觉得"数字是编的"。
+           *
+           * 判据必须与明细胶囊完全同源（`todayCheckedIn`），否则两处还会再漂。
+           */
+          const credited = rows.reduce((sum, a) => sum
+            + (a.status && a.status.todayCheckedIn && typeof a.status.todayCredit === 'number'
+              ? a.status.todayCredit
+              : 0), 0);
           const notOpen = rows.filter((a) => a.noActivity).length;
           const failed = rows.filter((a) => a.error).length;
-          const pct = total ? Math.round((signed / total) * 100) : 0;
+          /*
+           * 列表里**只放有签到活动的账号**。
+           *
+           * 用户反馈（原话）："无活动不要列入条条，有强迫症的受不了"。截图里 4 个
+           * 账号有 2 个是国际版、根本没有积分活动，它们各自占一行、各挂一个橙色
+           * 「无签到活动」胶囊 —— 视觉噪音，且和"该我处理的事"混在一起。
+           *
+           * 但**不能直接删掉**：那样用户会发现"我明明登录了 4 个号，这里只有 2 个"，
+           * 反而更像 bug。所以：
+           *   · 明细行只给有活动的账号；
+           *   · 无活动的合并成**一行说明**（`M 个账号无签到活动`），不占每账号一行；
+           *   · 顶部的 `N 个无签到活动` 统计保留 —— 那里给的是数字，不占视觉行。
+           *
+           * 判据与胶囊同源（`noActivity`）；`error` 的账号**照常出行**，
+           * 因为那是需要处理的事，藏起来才是真的骗人。
+           */
+          const activeRows = rows.filter((a) => !a.noActivity);
+          /*
+           * 分母也用**有活动的账号数**，不是本机账号总数。
+           *
+           * 列表既然只显示有活动的，`2/4` 就会和"我只看到 2 行"打架 —— 用户会以为
+           * 漏了两个。改成 `2/2` 之后，顶部读数与实际渲染的行数永远对得上；
+           * "还有 2 个没有活动"由下面那句说明承担，不再混进完成度里。
+           *
+           * `activeRows.length === 0` 时 pct 记 0（没有可完成的事，不该显示满格）。
+           */
+          const activeTotal = activeRows.length;
+          const activeSigned = activeRows.filter((a) => a.status && a.status.todayCheckedIn).length;
+          const pct = activeTotal ? Math.round((activeSigned / activeTotal) * 100) : 0;
+          /** 无签到活动的账号（折叠在摘要后面，点开可见）。 */
+          const noActivityRows = rows.filter((a) => a.noActivity);
+          /*
+           * 一行账号的渲染。抽成函数是因为它现在有两处用途：正常列表 + 展开后的
+           * 「无活动」列表 —— 展开出来的行必须与正常行**完全一致**（含昵称、区域、
+           * 有效至），否则用户会看出"这是另一套简化视图"，反而更疑心。
+           */
+          const rowRender = (a) => {
+            const name = a.nickname || String(a.userId || '').slice(0, 8) || t('（未知账号）');
+            const tone = a.error ? 'bad'
+              : a.noActivity ? 'warn'
+                : (a.status && a.status.todayCheckedIn) ? 'ok' : 'warn';
+            /*
+             * 胶囊文案必须**逐段 t()**：Pill 的 `text` 不是 h() 的翻译属性
+             * （只有 title / placeholder / aria-label / alt 会过翻译），
+             * 而拼好的整串在词条表里查不到 —— 于是英文模式下会留中文。
+             */
+            const text = a.error ? t('失败')
+              : a.noActivity ? t('无签到活动')
+                : (a.status && a.status.todayCheckedIn)
+                  ? t('已签到') + (a.status.todayCredit ? ' +' + a.status.todayCredit : '')
+                  : t('未签');
+            // 日期也跟语言走：英文模式里 `toLocaleDateString('zh-CN')` 会给出中文月份
+            const since = a.expired
+              ? t('登录已过期')
+              : (a.expiresAt
+                ? t('有效至') + ' ' + new Date(a.expiresAt).toLocaleDateString(LANG === 'en' ? 'en-US' : 'zh-CN')
+                : '');
+            return h('div', { className: 'wb-acct', key: a.userId || a.authFile },
+              h('div', { className: 'wb-acct-main' },
+                h('div', { className: 'wb-acct-name' },
+                  h('span', null, name),
+                  h('span', { className: 'wb-acct-region' }, a.region === 'intl' ? '国际版' : '国内版'),
+                  a.current ? h(Pill, { tone: 'ok', text: '当前' }) : null),
+                h('div', { className: 'wb-acct-sub' },
+                  [String(a.userId || '').slice(0, 8), since].filter(Boolean).join(' · '))),
+              h('div', { className: 'wb-acct-side' },
+                h(Pill, { tone, text, title: a.error || undefined })));
+          };
           return h(Fragment, null,
             /* 先给结论（几个数字），再给明细（每账号一块）—— 一片同构的 Row 看不出重点 */
             h('div', { className: 'wb-stats' },
               h('div', { className: 'wb-stat' },
-                h('b', null, signed + '/' + total),
+                h('b', null, activeSigned + '/' + activeTotal),
                 h('span', null, '个账号今日已签')),
               credited
                 ? h('div', { className: 'wb-stat' }, h('b', null, '+' + credited), h('span', null, '今日共领 Credits'))
@@ -7540,19 +7740,18 @@ body.dark .wb-root,
               'aria-label': '今日签到完成度',
             }, h('i', { style: { width: pct + '%' } })),
             h('div', { className: 'wb-acct-wrap' },
-              ...rows.map((a) => {
+              ...activeRows.map((a) => {
                 const name = a.nickname || String(a.userId || '').slice(0, 8) || t('（未知账号）');
-                const tone = a.error ? 'bad' : a.noActivity ? 'warn' : (a.status && a.status.todayCheckedIn) ? 'ok' : 'warn';
+                const tone = a.error ? 'bad' : (a.status && a.status.todayCheckedIn) ? 'ok' : 'warn';
                 /*
                  * 胶囊文案必须**逐段 t()**：Pill 的 `text` 不是 h() 的翻译属性
                  * （只有 title / placeholder / aria-label / alt 会过翻译），
                  * 而拼好的整串在词条表里查不到 —— 于是英文模式下会留中文。
                  */
                 const text = a.error ? t('失败')
-                  : a.noActivity ? t('无签到活动')
-                    : (a.status && a.status.todayCheckedIn)
-                      ? t('已签到') + (a.status.todayCredit ? ' +' + a.status.todayCredit : '')
-                      : t('未签');
+                  : (a.status && a.status.todayCheckedIn)
+                    ? t('已签到') + (a.status.todayCredit ? ' +' + a.status.todayCredit : '')
+                    : t('未签');
                 // 日期也跟语言走：英文模式里 `toLocaleDateString('zh-CN')` 会给出中文月份
                 const since = a.expired
                   ? t('登录已过期')
@@ -7569,9 +7768,55 @@ body.dark .wb-root,
                       [String(a.userId || '').slice(0, 8), since].filter(Boolean).join(' · '))),
                   h('div', { className: 'wb-acct-side' },
                     h(Pill, { tone, text, title: a.error || undefined })));
-              })),
+              }),
+              /*
+               * 无活动的账号：默认折叠成**一行可点开的摘要**，点开就在同一位置
+               * 展开它们的真实行（含昵称/区域/有效至），再点收起。
+               *
+               * 只折叠不给入口等于把账号藏起来（实测反馈：用户以为号丢了）。
+               * 用 rowRender 复用同一份渲染，展开后的行与正常行完全一致。
+               */
+              noActivityRows.length
+                ? h(Fragment, null,
+                  h('button', {
+                    type: 'button',
+                    className: 'wb-acct-toggle',
+                    'aria-expanded': showNoActivity ? 'true' : 'false',
+                    onClick: () => setShowNoActivity((v) => !v),
+                  },
+                    h('span', { className: 'wb-acct-toggle-caret', 'aria-hidden': 'true' },
+                      showNoActivity ? '▾' : '▸'),
+                    h('span', null, String(noActivityRows.length) + t(' 个账号无签到活动，已折叠')),
+                    h('span', { className: 'wb-acct-toggle-hint' },
+                      showNoActivity ? t('收起') : t('展开'))),
+                  showNoActivity ? noActivityRows.map(rowRender) : null)
+                : null),
             h('div', { className: 'wb-actions', style: { marginTop: '14px' } },
-              h(Btn, { primary: true, disabled: acctBusy, onClick: claimAll }, acctBusy ? '领取中…' : '全部领取'),
+              /*
+               * 「全部领取」在**没有可领的账号**时要禁用。
+               *
+               * 原先只判 `acctBusy`，于是全都签完/都没活动时按钮仍是亮的可点主按钮
+               * （用户截图里就是这个状态）。点了虽然不会出事，但结果只会回一句
+               * 「已处理 4 个账号：新领 0 · 今天已签 2 · 无活动 2 · 失败 0」——
+               * 一个**点了什么都不会发生**的按钮不该看起来可点。
+               *
+               * 判据与上面那行「已签 N/M」同源：排除已过期、无活动、今天已签的。
+               */
+              (() => {
+                const rowsForClaim = rows.filter((a) => !a.expired && !a.noActivity
+                  && !(a.status && a.status.todayCheckedIn));
+                const nothingToClaim = rowsForClaim.length === 0;
+                return h(Btn, {
+                  primary: !nothingToClaim,
+                  disabled: acctBusy || nothingToClaim,
+                  title: nothingToClaim
+                    ? '本机所有账号今天都已处理过（已签到或无签到活动）'
+                    : undefined,
+                  onClick: claimAll,
+                }, acctBusy
+                  ? '领取中…'
+                  : (nothingToClaim ? '今天都领完了' : '全部领取'));
+              })(),
               h(Btn, { disabled: acctBusy, onClick: loadAccounts }, '刷新账号')));
         })(),
         acctMsg ? h(Alert, null, acctMsg) : null));
@@ -10787,6 +11032,13 @@ const probeOne = async (id) => {
        */
       const [ctxDraft, setCtxDraft] = useState({});
       const [confirmSwitch, setConfirmSwitch] = useState(null);
+      /*
+       * 「无签到活动的账号」在右栏也折叠，并能展开。
+       *
+       * 与设置页那张卡同一个理由：只折叠不给入口等于把账号藏起来。state 放在
+       * 组件顶层（`checkinPage` 是纯渲染函数，里面不能有 hook）。
+       */
+      const [showNoActivityRail, setShowNoActivityRail] = useState(false);
       const switchTab = useCallback((next) => {
         if (next === tab) return;
         setConfirmSwitch(null);
@@ -11235,13 +11487,24 @@ const probeOne = async (id) => {
             modelsInitial
               ? h(RailSkeleton, { label: '正在加载…' })
               : h(Fragment, null,
-                narrow || short
-                  ? h('p', { className: 'wb-note', title: current?.model || '' },
-                    (current?.model ? t('当前默认') + '：' : '') + (current?.model || t('未设置')) + effortSuffix)
-                  : h(Row, { label: t('当前默认') },
-                    current?.model
-                      ? h('span', { className: 'wb-rail-mono', title: current.model }, currentName + effortSuffix)
-                      : h('span', null, t('未设置'))),
+                /*
+                 * 「当前默认」与「刷新模型」放在**同一行**：后者是整卡的刷新动作，
+                 * 原先单独占一行（宽档下就是左侧一个小按钮、右边全空）。
+                 * 现在它是这一行的行尾动作，信息与操作在同一条视线上 ——
+                 * 符合"先看是什么、再决定要不要重取"的操作顺序。
+                 */
+                h('div', { className: 'wb-rail-inline-head' },
+                  narrow || short
+                    ? h('p', { className: 'wb-note', title: current?.model || '' },
+                      (current?.model ? t('当前默认') + '：' : '') + (current?.model || t('未设置')) + effortSuffix)
+                    : h(Row, { label: t('当前默认') },
+                      current?.model
+                        ? h('span', { className: 'wb-rail-mono', title: current.model }, currentName + effortSuffix)
+                        : h('span', null, t('未设置'))),
+                  h(Btn, {
+                    disabled: modelsApi.loading,
+                    onClick: () => { modelsApi.reload(); defaultApi.reload(); limitsApi.reload(); },
+                  }, t('刷新模型'))),
                 current && current.routable === false
                   ? h(Alert, { bad: true }, t('默认模型已失效（不在当前目录里），请重新选一个。'))
                   : null,
@@ -11258,45 +11521,50 @@ const probeOne = async (id) => {
                           ? '额度已用尽'
                           : '触发了限流') + '）'))
                   : null,
-                h(DropdownSelect, {
-                  value: picked,
-                  options: modelOptions,
-                  placeholder: t('请选择'),
-                  ariaLabel: t('模型'),
-                  onChange: (e) => {
-                    setDraftModel(e.target.value);
-                    setDraftEffort('');
-                    setNotice({ text: '', bad: false });
-                  },
-                }),
-                pickedEfforts.length && !short
-                  ? h('div', { className: 'wb-rail-effort' },
-                    h('div', { className: 'wb-rail-effort-head' },
-                      h('span', null, t('思考强度')),
-                      chosenEffort ? h('span', { className: 'wb-rail-mono' }, chosenEffort) : null),
-                    h('div', { className: 'wb-rail-chips', role: 'group', 'aria-label': t('思考强度') },
-                      pickedEfforts.map((lv) => {
-                        const active = chosenEffort === lv;
-                        return h('button', {
-                          key: lv,
-                          type: 'button',
-                          className: 'wb-rail-chip' + (active ? ' on' : ''),
-                          'aria-pressed': active,
-                          onClick: () => {
-                            if (lv === baseEffortForPicked && !modelChanged) setDraftEffort('');
-                            else setDraftEffort(lv);
-                            setNotice({ text: '', bad: false });
-                          },
-                        }, EFFORT_LABELS[lv] || lv);
-                      })))
-                  : null,
+                /*
+                 * 宽档：选择器与思考强度**并排**（两个 .wb-rail-cols 子项）；
+                 * 其余档位它是块级容器、子项自然堆叠，行为与改造前完全一致。
+                 * 并排只由 CSS（@container）决定，JS 不参与判断 —— 拖宽拖窄时
+                 * 不需要重算，也不会出现"宽度变了但布局没跟上"。
+                 */
+                h('div', { className: 'wb-rail-cols' },
+                  h('div', null,
+                    h(DropdownSelect, {
+                      value: picked,
+                      options: modelOptions,
+                      placeholder: t('请选择'),
+                      ariaLabel: t('模型'),
+                      onChange: (e) => {
+                        setDraftModel(e.target.value);
+                        setDraftEffort('');
+                        setNotice({ text: '', bad: false });
+                      },
+                    })),
+                  pickedEfforts.length && !short
+                    ? h('div', { className: 'wb-rail-effort' },
+                      h('div', { className: 'wb-rail-effort-head' },
+                        h('span', null, t('思考强度')),
+                        chosenEffort ? h('span', { className: 'wb-rail-mono' }, chosenEffort) : null),
+                      h('div', { className: 'wb-rail-chips', role: 'group', 'aria-label': t('思考强度') },
+                        pickedEfforts.map((lv) => {
+                          const active = chosenEffort === lv;
+                          return h('button', {
+                            key: lv,
+                            type: 'button',
+                            className: 'wb-rail-chip' + (active ? ' on' : ''),
+                            'aria-pressed': active,
+                            onClick: () => {
+                              if (lv === baseEffortForPicked && !modelChanged) setDraftEffort('');
+                              else setDraftEffort(lv);
+                              setNotice({ text: '', bad: false });
+                            },
+                          }, EFFORT_LABELS[lv] || lv);
+                        })))
+                    : null),
                 dirty
                   ? h('p', { className: 'wb-note' }, t('改完记得设为默认，否则只影响下次新会话的初值。'))
                   : h('div', { className: 'wb-rail-foot' },
-                    h(Btn, {
-                      disabled: modelsApi.loading,
-                      onClick: () => { modelsApi.reload(); defaultApi.reload(); limitsApi.reload(); },
-                    }, t('刷新模型')),
+                    /* 刷新已移到「当前默认」那一行；这里只留"受限了去哪处理" */
                     pickedLimit
                       ? h(Btn, { onClick: () => switchTab('account') }, t('查看上限'))
                       : null))),
@@ -11330,51 +11598,57 @@ const probeOne = async (id) => {
                   effective > 0
                     ? h('span', { className: 'wb-rail-mono' }, fmtContextLength(effective))
                     : h('span', null, t('跟随官方默认'))),
-                picks.length
-                  ? h('div', { className: 'wb-rail-foot' },
-                    picks.map((n) => h(Btn, {
-                      key: 'ctx-' + n,
-                      primary: shown === n,
-                      disabled: busyCtx,
-                      onClick: () => saveContextWindow(modelId, n),
-                    }, fmtContextLength(n))))
-                  : null,
-                h('div', { className: 'wb-rail-ctx-row' },
-                  h('input', {
-                    className: 'wb-input wb-rail-ctx-input',
-                    type: 'number',
-                    min: 0,
-                    step: 1000,
-                    value: shown > 0 ? String(shown) : '',
-                    placeholder: t('自动（留空）'),
-                    'aria-label': t('输入上下文 tokens'),
-                    onChange: (e) => {
-                      const raw = e.target.value;
-                      setCtxDraft((prev) => ({ ...prev, [modelId]: raw === '' ? 0 : Number(raw) }));
-                    },
-                    onKeyDown: (e) => {
-                      if (e.key === 'Enter' && editing && validDraft && !busyCtx) {
-                        e.preventDefault();
-                        saveContextWindow(modelId, Number(draft) || 0);
-                      } else if (e.key === 'Escape' && editing) {
-                        e.preventDefault();
-                        setCtxDraft((prev) => {
-                          const next = { ...prev };
-                          delete next[modelId];
-                          return next;
-                        });
-                      }
-                    },
-                  }),
-                  h(Btn, {
-                    primary: editing && validDraft,
-                    disabled: busyCtx || !editing || !validDraft,
-                    onClick: () => saveContextWindow(modelId, Number(draft) || 0),
-                  }, busyCtx ? t('保存中…') : t('保存上下文')),
-                  h(Btn, {
-                    disabled: busyCtx || (effective === 0 && !editing),
-                    onClick: () => saveContextWindow(modelId, 0),
-                  }, t('自动'))),
+                /*
+                 * 宽档并排：左「预设档位」/ 右「输入 + 保存」。
+                 * 窄档是块级容器、子项自然堆叠 —— 全靠 CSS（@container）切换，
+                 * JS 不判断宽度，拖动时不会出现"布局没跟上"。
+                 */
+                h('div', { className: 'wb-rail-cols-ctx' },
+                  picks.length
+                    ? h('div', { className: 'wb-rail-foot' },
+                      picks.map((n) => h(Btn, {
+                        key: 'ctx-' + n,
+                        primary: shown === n,
+                        disabled: busyCtx,
+                        onClick: () => saveContextWindow(modelId, n),
+                      }, fmtContextLength(n))))
+                    : null,
+                  h('div', { className: 'wb-rail-ctx-row' },
+                    h('input', {
+                      className: 'wb-input wb-rail-ctx-input',
+                      type: 'number',
+                      min: 0,
+                      step: 1000,
+                      value: shown > 0 ? String(shown) : '',
+                      placeholder: t('自动（留空）'),
+                      'aria-label': t('输入上下文 tokens'),
+                      onChange: (e) => {
+                        const raw = e.target.value;
+                        setCtxDraft((prev) => ({ ...prev, [modelId]: raw === '' ? 0 : Number(raw) }));
+                      },
+                      onKeyDown: (e) => {
+                        if (e.key === 'Enter' && editing && validDraft && !busyCtx) {
+                          e.preventDefault();
+                          saveContextWindow(modelId, Number(draft) || 0);
+                        } else if (e.key === 'Escape' && editing) {
+                          e.preventDefault();
+                          setCtxDraft((prev) => {
+                            const next = { ...prev };
+                            delete next[modelId];
+                            return next;
+                          });
+                        }
+                      },
+                    }),
+                    h(Btn, {
+                      primary: editing && validDraft,
+                      disabled: busyCtx || !editing || !validDraft,
+                      onClick: () => saveContextWindow(modelId, Number(draft) || 0),
+                    }, busyCtx ? t('保存中…') : t('保存上下文')),
+                    h(Btn, {
+                      disabled: busyCtx || (effective === 0 && !editing),
+                      onClick: () => saveContextWindow(modelId, 0),
+                    }, t('自动')))),
                 editing && !validDraft
                   ? h('p', { className: 'wb-note', style: { color: 'light-dark(#a40e26,#ffb3ad)' } },
                     t('输入合法正整数 tokens（或留空恢复自动）'))
@@ -11476,9 +11750,23 @@ const probeOne = async (id) => {
         const status = checkinApi.data?.status ? checkinApi.data.status : (checkinApi.data || {});
         const autoInfo = checkinApi.data?.auto || null;
         const rows = acctCheckinApi.data?.accounts || [];
-        const signed = rows.filter((a) => a.status && a.status.todayCheckedIn).length;
-        const credited = rows.reduce((sum, a) => sum + (a.status && Number(a.status.todayCredit) || 0), 0);
-        const pct = rows.length ? Math.round((signed / rows.length) * 100) : 0;
+        /*
+         * 与设置页**同一套口径**（两处必须同源，否则一个页面对、另一个对不上）：
+         *   · 无签到活动的账号不出行、不计入分母、不计入完成度；
+         *   · 「今日共领」只累加真的签到了的账号。
+         *
+         * 分母用「有活动的账号数」而不是本机账号总数：列表既然只渲染有活动的，
+         * `2/4` 就会和"我只看到 2 行"打架，进度条也会永远填不满（用户实测反馈：
+         * 2/4 已签、条子却停在 50%）。
+         */
+        const activeRows = rows.filter((a) => !a.noActivity);
+        const signed = activeRows.filter((a) => a.status && a.status.todayCheckedIn).length;
+        const credited = activeRows.reduce((sum, a) => sum
+          + (a.status && a.status.todayCheckedIn && Number(a.status.todayCredit) > 0
+            ? Number(a.status.todayCredit)
+            : 0), 0);
+        const activeTotal = activeRows.length;
+        const pct = activeTotal ? Math.round((signed / activeTotal) * 100) : 0;
         const claimable = status.active !== false && status.todayCheckedIn !== true;
         const claimLabel = status.active === false
           ? t('无签到活动')
@@ -11536,8 +11824,14 @@ const probeOne = async (id) => {
                 rows.length
                   ? h(Fragment, null,
                     h('div', { className: 'wb-stats' },
+                      /*
+                       * 分母用**有签到活动的账号数**（`activeTotal`），不是本机账号总数。
+                       * 列表既然只渲染有活动的，`2/4` 就会和"我只看到 2 行"打架，
+                       * 进度条也永远填不满（用户实测：2/4 已签、条子停在 50%）。
+                       * 这两个数字必须与下面渲染出来的行数**严格一致**。
+                       */
                       h('div', { className: 'wb-stat' },
-                        h('b', null, signed + '/' + rows.length),
+                        h('b', null, signed + '/' + activeTotal),
                         h('span', null, t('个账号今日已签'))),
                       credited && !short
                         ? h('div', { className: 'wb-stat' },
@@ -11554,9 +11848,25 @@ const probeOne = async (id) => {
                     }, h('i', { style: { width: pct + '%' } })))
                   : null,
                 h('div', { className: 'wb-rail-list' + (short ? ' is-short' : '') },
-                  rows.length
-                    ? rows.map((a) => {
-                      const tone = a.error ? 'bad' : a.noActivity ? 'warn' : (a.status && a.status.todayCheckedIn) ? 'ok' : 'warn';
+                  /*
+                   * 与设置页同一口径：**无签到活动的账号不占行**（用户明确要求），
+                   * 只在下方留一句说明。`error` 的账号照常出行 —— 那是要处理的事。
+                   */
+                  (() => {
+                    const activeRows = rows.filter((a) => !a.noActivity);
+                    const noActivityRows = rows.filter((a) => a.noActivity);
+                    if (!rows.length) {
+                      return h('div', { className: 'wb-rail-empty' }, t('没有找到本机已登录的账号。'));
+                    }
+                    /*
+                     * 一行账号的渲染。抽出来是因为它有两处用途：正常列表 + 展开后的
+                     * 「无活动」列表 —— 展开出来的行必须与正常行**完全一致**，
+                     * 否则用户能看出"这是另一套简化视图"，反而更疑心。
+                     */
+                    const rowRender = (a) => {
+                      const tone = a.error ? 'bad'
+                        : a.noActivity ? 'warn'
+                          : (a.status && a.status.todayCheckedIn) ? 'ok' : 'warn';
                       const text = a.error ? t('失败')
                         : a.noActivity ? t('无签到活动')
                           : (a.status && a.status.todayCheckedIn)
@@ -11583,15 +11893,79 @@ const probeOne = async (id) => {
                         h('span', { className: 'wb-rail-item-side' },
                           narrow || !a.current ? null : h(Pill, { tone: 'ok', text: t('当前') }),
                           h(Pill, { tone, text, title: a.error || undefined })));
-                    })
-                    : h('div', { className: 'wb-rail-empty' }, t('没有找到本机已登录的账号。'))),
+                    };
+                    if (!activeRows.length) {
+                      /* 一个可签的都没有：不留空列表，直接说明 + 仍可展开那些号 */
+                      return h(Fragment, null,
+                        h('div', { className: 'wb-rail-empty' }, t('本机账号都没有签到活动')),
+                        noActivityRows.length
+                          ? h(Fragment, null,
+                            h('button', {
+                              type: 'button',
+                              className: 'wb-acct-toggle',
+                              'aria-expanded': showNoActivityRail ? 'true' : 'false',
+                              onClick: () => setShowNoActivityRail((v) => !v),
+                            },
+                              h('span', { className: 'wb-acct-toggle-caret', 'aria-hidden': 'true' },
+                                showNoActivityRail ? '▾' : '▸'),
+                              /*
+                               * 窄档用短文案：240px 下「N 个账号无签到活动，已折叠」+
+                               * 「展开」放不进一行，会被拆成两行半（实测）。
+                               * 短文案把"数量 + 无活动"说清楚，是否折叠由
+                               * 「展开/收起」本身表达 —— 不必再写一遍。
+                               */
+                              h('span', null, narrow
+                                ? String(noActivityRows.length) + t(' 个无活动')
+                                : String(noActivityRows.length) + t(' 个账号无签到活动，已折叠')),
+                              h('span', { className: 'wb-acct-toggle-hint' },
+                                showNoActivityRail ? t('收起') : t('展开'))),
+                            showNoActivityRail ? noActivityRows.map(rowRender) : null)
+                          : null);
+                    }
+                    return h(Fragment, null,
+                      ...activeRows.map(rowRender),
+                      /*
+                       * 无活动的账号折叠成**一行可点开的摘要**，点开就在同一位置
+                       * 展开它们的真实行，再点收起。只折叠不给入口等于把账号藏起来
+                       * （实测反馈：用户以为号丢了）。
+                       */
+                      noActivityRows.length
+                        ? h(Fragment, null,
+                          h('button', {
+                            type: 'button',
+                            className: 'wb-acct-toggle',
+                            'aria-expanded': showNoActivityRail ? 'true' : 'false',
+                            onClick: () => setShowNoActivityRail((v) => !v),
+                          },
+                            h('span', { className: 'wb-acct-toggle-caret', 'aria-hidden': 'true' },
+                              showNoActivityRail ? '▾' : '▸'),
+                            /* 窄档短文案，理由同上（240px 放不下完整说明） */
+                            h('span', null, narrow
+                              ? String(noActivityRows.length) + t(' 个无活动')
+                              : String(noActivityRows.length) + t(' 个账号无签到活动，已折叠')),
+                            h('span', { className: 'wb-acct-toggle-hint' },
+                              showNoActivityRail ? t('收起') : t('展开'))),
+                          showNoActivityRail ? noActivityRows.map(rowRender) : null)
+                        : null);
+                  })()),
                 h('div', { className: 'wb-rail-foot' },
                   h(Btn, {
                     primary: claimableAll,
                     disabled: busy === 'claimAll' || !claimableAll,
                     onClick: claimAll,
-                    title: claimableAll ? undefined : t('明天再来'),
-                  }, busy === 'claimAll' ? t('领取中…') : t('全部领取')),
+                    /*
+                     * 不可领时**既禁用也改文案**：只禁用会让用户盯着一个灰按钮猜
+                     * "为什么不能点"。文案与设置页那张卡保持同一套说法。
+                     */
+                    title: claimableAll ? undefined : t('本机所有账号今天都已处理过（已签到或无签到活动）'),
+                  /*
+                   * 窄档（<300px）这里只占整行的 1/3（约 68px），「今天都领完了」
+                   * 六个汉字放不下 —— 写死省略号会让它变成「今天都…」，比短文案难读。
+                   * 窄档改用两个字「已领完」，宽档保留完整说明。
+                   */
+                  }, busy === 'claimAll'
+                    ? t('领取中…')
+                    : (claimableAll ? t('全部领取') : (narrow ? t('已领完') : t('今天都领完了')))),
                   h(Btn, {
                     disabled: acctCheckinApi.loading,
                     onClick: () => { acctCheckinApi.reload(); checkinApi.reload(); },

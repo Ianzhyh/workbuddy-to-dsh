@@ -620,7 +620,16 @@ export function buildRoutes(data) {
         expired: false,
         noActivity: true,
         expiresAt: now + 300 * 86_400_000,
-        status: { active: false },
+        /*
+         * **真实网关在这里会给 `today_credit`**（哪怕这个号没签到、甚至没有活动）。
+         *
+         * 这条 fixture 原先是 `{ active: false }`，于是「今天共领」无条件累加
+         * `todayCredit` 的 bug 恰好算对（1×100），永远暴露不出来 —— 而线上是
+         * 4 个号一起显示 `+400`、明细只有两行 `+100`（用户截图）。
+         *
+         * 现在按真实形状带上 `todayCredit`：汇总必须**只算已签到的**，否则这条会红。
+         */
+        status: { active: false, todayCheckedIn: false, dailyCredit: 100, todayCredit: 100 },
       }],
     },
     '/workbuddy/checkin/all': { ok: true, totals: { accounts: 2, claimed: 1, already: 1, failed: 0, skipped: 0, credit: 100 } },

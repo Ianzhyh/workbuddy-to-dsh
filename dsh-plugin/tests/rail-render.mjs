@@ -697,6 +697,44 @@ try {
       const btns = [...rail.querySelectorAll('.wb-btn')];
       const btnBoxes = btns.map((b) => { const r = b.getBoundingClientRect(); return { w: Math.round(r.width), h: Math.round(r.height) }; });
       const body = rail.querySelector('.wb-rail-body');
+      /*
+       * dropdown **收起时**的触发框宽度，以及展开后菜单的宽度。
+       *
+       * 为什么要在这里逐档测：菜单的包含块是 .wb-dropdown（容器），宽档曾经给它
+       * max-width:460px，于是 740px 栏里触发框 280px、点开却是 460px
+       * —— 用户实测反馈「这个下拉栏怎么这么宽」。
+       *
+       * 判据只有一条：**菜单不能比触发框宽**。反过来放宽也不行（那说明档位
+       * 上限丢了），所以用绝对值比较而不是"不超过 N px"。
+       */
+      const dd = rail.querySelector('.wb-dropdown');
+      const ddTrigger = dd ? dd.querySelector('.wb-dropdown-trigger') : null;
+      const triggerW = ddTrigger ? Math.round(ddTrigger.getBoundingClientRect().width) : 0;
+      /*
+       * 模型卡「选择器 / 思考强度」的排布：宽档两列、其余档单列。
+       *
+       * 用户实测（760px 内容宽）：单列时控件只占左侧，右边整片空白 ——
+       * 卡片被拉宽、信息密度没变。宽档必须真的变成两列（用 grid 的列数判，
+       * 不看 class 在不在：class 挂着但没生效是最容易漏的一种）。
+       */
+      const cols = rail.querySelector('.wb-rail-cols');
+      const colsGrid = cols ? getComputedStyle(cols).gridTemplateColumns : '';
+      const colsCtx = rail.querySelector('.wb-rail-cols-ctx');
+      const colsCtxGrid = colsCtx ? getComputedStyle(colsCtx).gridTemplateColumns : '';
+      /*
+       * 「刷新模型」必须与「当前默认」在**同一行**（宽档），且不再单独占一行。
+       * 读两者的 rect：纵向重叠即同一行。
+       */
+      const inlineHead = rail.querySelector('.wb-rail-inline-head');
+      const refreshBtn = inlineHead
+        ? [...inlineHead.querySelectorAll('.wb-btn')].find((b) => b.textContent.trim() === '刷新模型')
+        : null;
+      let refreshSameRow = null;
+      if (inlineHead && refreshBtn) {
+        const headRect = inlineHead.getBoundingClientRect();
+        const btnRect = refreshBtn.getBoundingClientRect();
+        refreshSameRow = btnRect.top >= headRect.top - 2 && btnRect.bottom <= headRect.bottom + 2;
+      }
       const bodyCs = body ? getComputedStyle(body) : null;
       /* 对齐线：标题 / 页签 / 第一张卡各自的实际左边界（相对视口） */
       const leftOf = (el) => (el ? Math.round(el.getBoundingClientRect().left) : null);
@@ -722,6 +760,8 @@ try {
         hasSubNode: Boolean(sub),
         title: rail.querySelector('.wb-rail-title') ? rail.querySelector('.wb-rail-title').textContent : '',
         btnWidths: btnBoxes,
+        triggerW,
+        colsGrid,
         clipped: btns.some((b) => { const r = b.getBoundingClientRect(); return r.width < 12 || r.height < 12; }),
         text: rail.innerText,
       };
@@ -734,6 +774,50 @@ try {
     if (probe.railOverflow) problems.push(`宽度 ${width}：rail 出现横向溢出`);
     if (probe.docOverflow) problems.push(`宽度 ${width}：页面出现横向溢出`);
     if (probe.clipped) problems.push(`宽度 ${width}：有按钮被压到点不到（<12px）`);
+
+    /*
+     * 模型卡的并排布局：**宽档两列、其余档单列**。
+     *
+     * 判据取实际计算出来的 grid-template-columns 的列数（不是 class 有没有挂上）：
+     * class 在但 CSS 没生效是最容易漏的形态。
+     */
+    {
+      const colCount = (probe.colsGrid || '').trim().split(/\s+/).filter(Boolean).length;
+      if (tier === 'wide') {
+        if (colCount !== 2) {
+          problems.push(`宽度 ${width}：宽档模型卡应为两列（选择器 + 思考强度并排），实际 ${colCount} 列（${probe.colsGrid}）`);
+        }
+      } else if (colCount > 1) {
+        problems.push(`宽度 ${width}：${tier} 档不该并排两列（会挤成多行），实际 ${colCount} 列`);
+      }
+    }
+
+    /*
+     * dropdown 展开后不能比触发框宽（用户实测：「这个下拉栏怎么这么宽」）。
+     *
+     * 逐档都测：这个 bug 只在宽档出现（宽档曾经把容器放到 460px），
+     * 极窄/常规档一直是对的 —— 只测一档会漏。
+     */
+    if (probe.triggerW > 0) {
+      await page.cdp.evaluate(`(() => {
+        const t = document.querySelector('[data-workbuddy-rail] .wb-dropdown-trigger');
+        if (t && !document.querySelector('[data-workbuddy-rail] .wb-dropdown.open')) t.click();
+      })()`);
+      await sleep(260);
+      const menuW = Number(await page.cdp.evaluate(`(() => {
+        const m = document.querySelector('[data-workbuddy-rail] .wb-dropdown-menu');
+        return m ? Math.round(m.getBoundingClientRect().width) : 0;
+      })()`) || 0);
+      if (menuW > probe.triggerW + 2) {
+        problems.push(`宽度 ${width}：dropdown 菜单 ${menuW}px 比触发框 ${probe.triggerW}px 宽（应同宽）`);
+      }
+      // 收起，避免影响后续断言
+      await page.cdp.evaluate(`(() => {
+        const t = document.querySelector('[data-workbuddy-rail] .wb-dropdown-trigger');
+        if (t) t.click();
+      })()`);
+      await sleep(200);
+    }
 
     if (tier === 'narrow') {
       // 减法：副行节点根本不渲染（不是 display:none），标题换成短名
@@ -917,6 +1001,16 @@ try {
         cardBtns: [...el.querySelectorAll('.wb-btn')]
           .filter((b) => !dock || !dock.contains(b))
           .map((b) => b.textContent.trim()),
+        /*
+         * 「哪些按钮是禁用的」也要探出来。
+         *
+         * 只收集文本的话，「一个点了什么都不会发生的按钮仍可点」这类缺陷
+         * 完全测不到 —— 实测就是这么漏掉「全部领取」在全部签完之后还亮着的。
+         * 返回 { text, disabled } 让断言能直接问"它该不该可点"。
+         */
+        cardBtnStates: [...el.querySelectorAll('.wb-btn')]
+          .filter((b) => !dock || !dock.contains(b))
+          .map((b) => ({ text: b.textContent.trim(), disabled: b.disabled === true })),
       };
     });
     const first = rails.find((r) => r.visible) || rails[0] || {};
@@ -1050,6 +1144,24 @@ try {
   if (!dockDone.cardBtns.some((t) => t.includes('今日已领完'))) {
     problems.push(`签到已签完时卡片里应有写明原因的「今日已领完」，实际按钮：${JSON.stringify(dockDone.cardBtns)}`);
   }
+  /*
+   * 账号卡片里的「全部领取」在**没有可领账号**时必须禁用。
+   *
+   * fixture 里 1 个已签 + 1 个无活动 = 没有可领的；旧实现只判 `acctBusy`，
+   * 按钮亮着可点，点完只会回一句「新领 0」（用户截图）。一个点了什么都不会
+   * 发生的按钮不该看起来可点 —— 这类缺陷只有探 `disabled` 才测得到。
+   */
+  {
+    const states = dockDone.cardBtnStates || [];
+    const claimAll = states.find((b) => /全部领取|今天都领完了/.test(b.text));
+    if (!claimAll) {
+      problems.push(`账号签到卡片里找不到「全部领取」按钮：${JSON.stringify(states)}`);
+    } else if (!claimAll.disabled) {
+      problems.push(`没有可领账号时「全部领取」仍可点（应禁用并说明原因）：${JSON.stringify(claimAll)}`);
+    } else if (!/今天都领完了/.test(claimAll.text)) {
+      problems.push(`禁用的「全部领取」应改写成「今天都领完了」说明原因，实际：${JSON.stringify(claimAll)}`);
+    }
+  }
   await page.cdp.evaluate(`(() => {
     window.__routes['/workbuddy/checkin'] = window.__savedCheckin;
     delete window.__savedCheckin;
@@ -1106,6 +1218,20 @@ try {
             return a.right > b.left + 1;
           }).length,
           rowCount: rows.length,
+          /*
+           * 折叠条在窄档不能折行：实测 240px 下「N 个账号无签到活动，已折叠」+
+           * 「展开」放不进一行，会被拆成两行半、行高错位（像错版）。
+           * 判据取实际高度：单行高度 = lineHeight + padding，超过 1.6 倍即有折行。
+           */
+          toggleLines: (() => {
+            const t = rail.querySelector('.wb-acct-toggle');
+            if (!t) return 0;
+            const s = getComputedStyle(t);
+            const lineH = parseFloat(s.lineHeight) || 16;
+            const padY = parseFloat(s.paddingTop) + parseFloat(s.paddingBottom);
+            const inner = t.getBoundingClientRect().height - padY;
+            return Math.max(1, Math.round(inner / lineH));
+          })(),
         };
       })())`));
       console.log(`${pageLabel}页 ${width}px：tier=${p2.tier} 行=${p2.rowCount} 重叠=${p2.overlaps} 溢出=${p2.overflow}`);
@@ -1113,6 +1239,13 @@ try {
       if (p2.clippedButtons) problems.push(`${pageLabel}页 ${width}：有 ${p2.clippedButtons} 个按钮被压到点不到`);
       if (p2.overlaps) problems.push(`${pageLabel}页 ${width}：有 ${p2.overlaps} 行主文案与按钮重叠`);
       if (p2.rowCount === 0) problems.push(`${pageLabel}页 ${width}：清单是空的（夹具没喂到？）`);
+      /*
+       * 折叠条必须**单行**。窄档文案已按档位缩短，这里防的是它又被写长回去
+       * （或者 CSS 又把 flex 换行打开）—— 两种都会在 240px 下折成两行。
+       */
+      if (p2.toggleLines > 1) {
+        problems.push(`${pageLabel}页 ${width}：折叠条折成了 ${p2.toggleLines} 行（窄档应单行）`);
+      }
       if (width === 240) await shot(`rail-${pageLabel === '签到' ? 'checkin' : 'account'}-narrow-240.png`);
     }
   }
@@ -1272,11 +1405,36 @@ try {
     const bar = meter ? meter.querySelector('i') : null;
     const hasAutoRow = /自动签到/.test(rail.innerText);
     const hasDockNormal = Boolean(rail.querySelector('.wb-rail-dock'));
+    /*
+     * 「今日共领 Credits」必须**等于**下面每行明细的和。
+     *
+     * 实测（用户截图）：4 个账号里 2 个已签、2 个国际版无活动，汇总显示 +400，
+     * 而明细只有两行 +100 —— 因为上游的 todayCredit 是「活动面额」，没签到的
+     * 账号也带着同一个数字，旧代码无条件累加了。汇总与明细自相矛盾，用户只会
+     * 觉得数字是编的。
+     *
+     * 判据直接从渲染结果反推：抓汇总的大数字，再抓每行胶囊里的 +N 求和。
+     */
+    const statB = [...rail.querySelectorAll('.wb-stat b')].map((b) => b.textContent.trim());
+    const creditedLabel = [...rail.querySelectorAll('.wb-stat')]
+      .find((s) => /今日共领/.test(s.textContent));
+    const creditedText = creditedLabel
+      ? (creditedLabel.querySelector('b') || {}).textContent || ''
+      : '';
+    const detailSum = [...rail.querySelectorAll('.wb-rail-item .wb-pill')]
+      .map((p) => {
+        const m = String(p.textContent || '').match(/\\+(\\d+)/);
+        return m ? Number(m[1]) : 0;
+      })
+      .reduce((a, b) => a + b, 0);
     return {
       hasMeter: Boolean(meter && bar),
       valuenow: meter ? meter.getAttribute('aria-valuenow') : null,
       hasAutoRow,
       hasDockNormal,
+      statB,
+      creditedText: creditedText.trim(),
+      detailSum,
     };
   })())`));
   await resize(340, 320);
@@ -1288,6 +1446,18 @@ try {
   if (checkinFeat.hasDockNormal) problems.push('常规高度下签到页不应额外显示底栏 dock（动作在每日签到卡内）');
   if (!checkinShortDock.hasDock || !checkinShortDock.dockText.includes('立即领取')) {
     problems.push(`矮面板（320px）签到页未将「立即领取」升入常驻底栏（${JSON.stringify(checkinShortDock)}）`);
+  }
+  /*
+   * 汇总 = 明细求和。fixture 里是「1 个已签(+100) + 1 个无活动(也带 todayCredit=100)」，
+   * 所以无条件累加会得到 +200，而明细只有 +100 —— 正是线上那个症状的缩小版。
+   */
+  {
+    const shown = String(checkinFeat.creditedText || '').replace(/[^0-9]/g, '');
+    const shownNum = shown ? Number(shown) : 0;
+    if (shownNum !== checkinFeat.detailSum) {
+      problems.push(`签到页「今日共领」与明细对不上：汇总 +${shownNum}，明细求和 +${checkinFeat.detailSum}`
+        + '（没签到的账号不该计入）');
+    }
   }
 
   // 回到模型页 + 默认宽度（后面的动画/英文用例沿用）
