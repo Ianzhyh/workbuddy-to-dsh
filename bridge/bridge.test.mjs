@@ -7052,11 +7052,20 @@ test('桥：连接池排队超过上限时按超时失败，不能无限挂着',
      * `fetch failed`（error 为空、栈在 undici 内部），测试拿到的是客户端异常，
      * 而不是桥的 504。
      *
-     * 实测：CI 上稳定复现 `not ok 287`，本机（快）几乎不出现 —— 典型的
-     * 「只有慢机器才暴露的**测试缺陷**」，不是桥的行为问题。
+     * ## 更不能靠 `setTimeout(200)` 猜"第一条已经占住 socket"
      *
-     * 改用 `agentRequest`（文件里已有的原始 http 助手）+ 每请求独立 agent：
-     * 连接池约束只剩**桥这一侧**，测的才是我们要测的东西。
+     * 第一版修法改完 http 之后仍然是红的，只是失败变了形状：
+     *
+     *   expected "socket queue timeout"
+     *   actual   "upstream first-byte timeout after 5000ms"
+     *
+     * 都是 504，但含义完全不同 —— 说明在 CI 上 200ms 之内第一条**还没真正
+     * 建立起到上游的连接**，第二条于是直接拿到了 socket（没排队），最后因首字节
+     * 超时被判 504。也就是说断言在等一个"从未发生的排队"。
+     *
+     * 现在改成**确定的同步点**：等 stub 真正收到第一条的上游请求（`chatHang`
+     * 路径下它会挂住不回），此时桥的唯一 socket 一定已被占用，再发第二条。
+     * 这不依赖任何耗时假设，慢机器上也成立。
      */
     const firstAgent = new HttpAgent({ keepAlive: false, maxSockets: 1 });
     const secondAgent = new HttpAgent({ keepAlive: false, maxSockets: 1 });
@@ -7064,12 +7073,23 @@ test('桥：连接池排队超过上限时按超时失败，不能无限挂着',
     let firstError = null;
     const first = agentRequest(firstAgent, port, '/v1/chat/completions', { body: payload })
       .catch((error) => { firstError = error; return null; });
-    await new Promise((r) => setTimeout(r, 200)); // 让第一条占住唯一 socket
+    /*
+     * 同步点：stub 的命中计数。`startStubUpstream({ chatHang: true })` 收到请求后
+     * 不回包（挂住），但会记进 `seen`。等到它 ≥1 才继续 —— 那一刻桥的 socket
+     * 一定被占用，第二条必然进入桥的排队分支。
+     */
+    const deadline = Date.now() + 8000;
+    while (Date.now() < deadline) {
+      if (stub.seen.length >= 1) break;
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    assert.ok(stub.seen.length >= 1,
+      `第一条请求没有到达上游桩，无法构造排队场景（seen=${stub.seen.length}）`);
     const second = await agentRequest(secondAgent, port, '/v1/chat/completions', { body: payload });
     assert.equal(second.status, 504,
       `排队超时应回 504，实际 ${second.status}：${String(second.body).slice(0, 200)}`);
     assert.match(second.body, /socket queue timeout/i,
-      `响应体要说明是排队超时，实际：${String(second.body).slice(0, 300)}`);
+      `响应体要说明是**排队**超时（不是首字节超时），实际：${String(second.body).slice(0, 300)}`);
     firstAgent.destroy();
     secondAgent.destroy();
     await first;
