@@ -201,7 +201,7 @@ try {
   console.log('模型页：cards=', JSON.stringify(s.cards), 'tabs=', s.tabs, 'checkbox', s.checked + '/' + s.checkboxes, 'dropdowns=', s.dropdowns);
   if (s.width !== 340) problems.push(`rail 宽度应为 340，实际 ${s.width}`);
   if (s.overflowX) problems.push('模型页出现横向滚动（窄列里不该有）');
-  if (s.tabs.length !== 3) problems.push(`分段控件应有 3 项，实际 ${s.tabs.length}`);
+  if (s.tabs.length !== 4) problems.push(`分段控件应有 4 项（模型/签到/账号/用量），实际 ${s.tabs.length}`);
   if (s.dropdowns !== 1) problems.push(`模型页应有 1 个下拉，实际 ${s.dropdowns}`);
   if (s.checkboxes < 3) problems.push(`模型勾选清单没渲染（${s.checkboxes} 项）`);
   if (!/当前默认/.test(s.text)) problems.push('模型页缺少「当前默认」行');
@@ -1109,6 +1109,53 @@ try {
   if (!dockAccount.cardBtns.length) problems.push('账号页既没有常驻条、卡片里也没有按钮');
 
   /*
+   * ── 「用量」页（用户要求：右侧栏给我加上用量）──
+   *
+   * 断三件事：
+   *   1. 这一页真的渲染出读数（不是空白）；
+   *   2. 读数**来自接口**（夹具里 7 天消耗 18），不是自己编的；
+   *   3. 平衡口径："今日消耗"取**当天日桶**，不是 7 天合计。
+   *      （早期实现直接拿 total.credit 当"今天"，会大好几倍。）
+   */
+  await clickTab('用量');
+  await sleep(700);
+  // 先把页面报错捞出来：求值异常时最需要知道的是"渲染时抛了什么"
+  const pageErrs = await page.cdp.evaluate('JSON.stringify(window.__errors || [])');
+  console.log('用量页渲染错误：', pageErrs);
+  const usageProbe = await page.cdp.evaluate(`JSON.stringify((() => {
+    const rail = document.querySelector('[data-workbuddy-rail]');
+    const card = [...rail.querySelectorAll('.wb-card')].find((c) => /用量/.test(c.textContent));
+    return {
+      hasCard: Boolean(card),
+      text: card ? card.innerText.replace(/\\s+/g, ' ').trim() : '',
+      stats: card ? [...card.querySelectorAll('.wb-stat')].map((s) => {
+        const b = s.querySelector('b');
+        const label = s.querySelector('span');
+        return { value: b ? b.textContent.trim() : '', label: label ? label.textContent.trim() : '' };
+      }) : [],
+    };
+  })())`);
+  const usage = JSON.parse(usageProbe);
+  console.log('用量页：', usageProbe);
+  // 这一页是新增的，留一张截图供评审（其余页都有）
+  await resize(340, 900);
+  await shot('rail-usage.png');
+  if (!usage.hasCard) problems.push('右栏「用量」页没有渲染出用量卡片');
+  if (!usage.stats.length) problems.push('用量页没有任何读数（.wb-stat 为空）');
+  if (!/剩余积分|近 7 天/.test(usage.text)) {
+    problems.push(`用量页缺少关键读数：${usage.text.slice(0, 160)}`);
+  }
+  // 夹具的 7 天消耗是 18：不能显示成别的数（说明取错字段或自己算了）
+  const weekStat = usage.stats.find((s) => /近 7 天消耗/.test(s.label)) || (usage.text.match(/近 7 天消耗 ([0-9.]+)/) || []);
+  if (weekStat) {
+    const shown = Array.isArray(weekStat) ? weekStat[1] : weekStat.value;
+    // 夹具 total.credit = 1.24（见 _panel-fixtures 的 usage.total）
+    if (String(shown).replace(/[^0-9.]/g, '') !== '1.24') {
+      problems.push(`用量页「近 7 天消耗」应为 1.24（来自接口 total.credit），实际 ${JSON.stringify(shown)}`);
+    }
+  }
+
+  /*
    * B2：签到已签完 → 不该有常驻条，但卡片里要留一个写明原因的禁用按钮。
    *
    * 顺序很重要：先切到签到页（`useJson` 的 enabled 只在 tab=checkin 时为真，
@@ -1641,7 +1688,7 @@ try {
     if (info.residue.length) problems.push(`英文模式下「${page}」页仍有中文：${info.residue.join(' / ')}`);
   }
   const enTabs = englishScan.__tabs || [];
-  if (enTabs.join(',') !== 'Model,Check-in,Account') {
+  if (enTabs.join(',') !== 'Model,Check-in,Account,Usage') {
     problems.push(`英文模式下分段控件没翻：${JSON.stringify(enTabs)}`);
   }
 

@@ -5154,6 +5154,66 @@ async function quotaBalance(auth) {
   }
 }
 
+/**
+ * 用**权威余额差值**兜底本轮积分消耗。
+ *
+ * ## 用户诉求（原话）
+ *
+ *   · 「你用量统计优先取权威数据而不是自己猜测」
+ *   · 「本轮积分怎么重进应用就消失了（没有准确数据你就用之前积分减去当前不就是消耗吗）」
+ *
+ * 两条其实是同一件事：上游 usage 里有时**不回** `credit`，而本地账本只在有该
+ * 字段时才记 —— 于是面板那条「本轮积分」在重进应用后匹配不到，只能显示"未读到"。
+ * 而账号余额是**上游账务系统**给的权威值，请求前后各读一次，差值就是真实消耗。
+ *
+ * ## 边界（不做的部分）
+ *
+ *   · 余额读不到（未登录 / 超时）时不写字段，绝不编造；
+ *   · 差值**小于 0**（充值、活动加积分）当作"无法判断"，不写成负数消耗；
+ *   · 并发请求会让差值互相污染：同一时刻两条请求都在跑，谁的后采样都包含对方
+ *     的消耗。所以只在**该请求独占采样窗口**时才写入 —— 用 `CREDIT_DELTA_INFLIGHT`
+ *     计数判断；> 1 时放弃这次采样（宁可没有，也不给一个错数）。
+ *   · 结果写进 ALS 的 `creditDelta`，由 `usageOf()` 统一取用，三条协议路径共用。
+ *
+ * @param {object|null} auth
+ * @param {() => Promise<any>} fn 真正的工作（一次上游对话）
+ * @returns {Promise<any>}
+ */
+let CREDIT_DELTA_INFLIGHT = 0;
+async function withCreditDelta(auth, fn) {
+  const store = requestScope.getStore();
+  // 已经在上游回报里拿到 credit 的路径不需要采样；没有 ALS 也无法写结果。
+  if (!store || !auth || typeof auth !== 'object') return fn();
+  // 并发保护：两个请求同时采样会互相包含对方的消耗，差值不可信。
+  if (CREDIT_DELTA_INFLIGHT > 0) {
+    CREDIT_DELTA_INFLIGHT += 1;
+    try { return await fn(); } finally { CREDIT_DELTA_INFLIGHT -= 1; }
+  }
+  CREDIT_DELTA_INFLIGHT += 1;
+  try {
+    const before = await quotaBalance(auth);
+    let result;
+    try {
+      result = await fn();
+    } finally {
+      /*
+       * 后采样放在 finally：**失败请求也可能扣分**（上游已经开始计费后才报错）。
+       * 只有确实拿到两端数值且差值为非负时才写进 ALS。
+       */
+      if (typeof before === 'number' && before >= 0) {
+        const after = await quotaBalance(auth).catch(() => null);
+        if (typeof after === 'number' && after >= 0) {
+          const delta = before - after;
+          if (Number.isFinite(delta) && delta >= 0) store.creditDelta = delta;
+        }
+      }
+    }
+    return result;
+  } finally {
+    CREDIT_DELTA_INFLIGHT -= 1;
+  }
+}
+
 // ── 媒体提交幂等（防客户端超时重试造成重复扣费）──────────────────────────
 const MEDIA_IDEMPOTENCY_MS = numEnv('WORKBUDDY_MEDIA_IDEMPOTENCY_MS', 10 * 60 * 1000, { min: 0 });
 const mediaIdemCache = new Map();
@@ -7607,8 +7667,7 @@ async function aggregateStream(res) {
  */
 const usageOf = (u) => ({
   promptTokens: Number(u?.prompt_tokens) || 0,
-  completionTokens: Number(u?.completion_tokens) || 0,
-  /*
+  completionTokens: Number(u?.completion_tokens) || 0,  /*
    * 提示缓存命中量（2026-10-13 加）。
    *
    * ## 为什么必须记它
@@ -7648,8 +7707,32 @@ const usageOf = (u) => ({
     if (Number.isFinite(miss) && miss >= 0) out.cacheMissTokens = miss;
     return out;
   })(),
-  // 上游在 usage 里回报本次实际扣减的积分，一并记进本地账本（只记数字）
-  ...(typeof u?.credit === 'number' ? { credit: u.credit } : {}),
+  /*
+   * 本轮积分：上游给了就记上游的；**没给就用余额差值兜底**。
+   *
+   * ## 为什么需要兜底（用户两个诉求合成一条）
+   *
+   *   1. 「本轮积分怎么重进应用就消失了」—— 面板的 `ChatTurnCost` 完全依赖
+   *      本地账本里的 `credit` 字段去匹配；上游不回 `credit` 时账本里根本没有
+   *      这个字段，重进应用后匹配不到就只能显示「未读到」。
+   *   2. 「没有准确数据你就用之前积分减去当前不就是消耗吗」—— 完全正确：
+   *      余额是**权威值**（上游账务系统给的），前后相减就是这一轮真实消耗。
+   *
+   * 值由 `withCreditDelta()` 在请求前后采样余额算好，放在 ALS 里（`creditDelta`），
+   * 所以三条协议路径（chat / messages / responses）共用同一份兜底，不必各写一遍。
+   *
+   * `creditSource` 明确标出来源，面板据此区分「上游回报」与「余额差值」 ——
+   * 后者可能被同一时刻的其它请求影响（并发时两次采样之间混入了别人的消耗），
+   * 不标出来源就是在把估算冒充权威。
+   */
+  ...(typeof u?.credit === 'number'
+    ? { credit: u.credit, creditSource: 'upstream' }
+    : (() => {
+      const delta = requestScope.getStore()?.creditDelta;
+      return typeof delta === 'number' && delta >= 0
+        ? { credit: delta, creditSource: 'balance-delta' }
+        : {};
+    })()),
 });
 
 // ── Anthropic Messages API 兼容层（POST /v1/messages）─────────────────────
@@ -14425,7 +14508,16 @@ async function handleRequest(req, res) {
       // 从这一刻起的任何异常都要落账：否则「登录文件坏了 / 取密钥失败」这类故障
       // 在控制台上完全不可见（只有原始日志里有），用户只能看到一个 500。
       try {
-        const attempt = await callUpstreamWithChannelFallback(upstream, model, conversationId, ac.signal);
+        /*
+         * 用余额差值兜底本轮积分（见 withCreditDelta 的长注释）。
+         *
+         * `resolveAuth()` 在这里只是一次轻量解析（已经缓存过），拿它去采样余额；
+         * 采样失败 / 并发时不写 `creditDelta`，`usageOf()` 就不会凭空编一个数。
+         */
+        const creditAuth = await resolveAuth().catch(() => null);
+        const attempt = await withCreditDelta(creditAuth, () => (
+          callUpstreamWithChannelFallback(upstream, model, conversationId, ac.signal)
+        ));
         const up = attempt.res;
         const upstreamStartedAt = attempt.upstreamStartedAt;
         const text = attempt.bodyText ?? (up.ok ? '' : await up.text().catch(() => ''));
@@ -15070,12 +15162,15 @@ async function handleRequest(req, res) {
         if (conv.source !== 'client') {
           log(`conversation id: source=${conv.source} id=${conv.id.slice(0, 8)}…`);
         }
-        const attempt = await callUpstreamWithChannelFallback(
-          upstreamPayload,
-          model,
-          conv.id,
-          ac.signal,
-        );
+        const creditAuthMessages = await resolveAuth().catch(() => null);
+        const attempt = await withCreditDelta(creditAuthMessages, () => (
+          callUpstreamWithChannelFallback(
+            upstreamPayload,
+            model,
+            conv.id,
+            ac.signal,
+          )
+        ));
         const up = attempt.res;
         const upstreamStartedAt = attempt.upstreamStartedAt;
         const text = attempt.bodyText ?? (up.ok ? '' : await up.text().catch(() => ''));
@@ -15356,12 +15451,15 @@ async function handleRequest(req, res) {
         if (conv.source !== 'client') {
           log(`conversation id: source=${conv.source} id=${conv.id.slice(0, 8)}…`);
         }
-        const attempt = await callUpstreamWithChannelFallback(
-          upstreamPayload,
-          model,
-          conv.id,
-          ac.signal,
-        );
+        const creditAuthA = await resolveAuth().catch(() => null);
+        const attempt = await withCreditDelta(creditAuthA, () => (
+          callUpstreamWithChannelFallback(
+            upstreamPayload,
+            model,
+            conv.id,
+            ac.signal,
+          )
+        ));
         const up = attempt.res;
         const upstreamStartedAt = attempt.upstreamStartedAt;
         const text = attempt.bodyText ?? (up.ok ? '' : await up.text().catch(() => ''));

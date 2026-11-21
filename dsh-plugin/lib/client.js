@@ -2589,6 +2589,16 @@ body.dark .wb-root,
       'WorkBuddy 设置': 'WorkBuddy settings',
       '概览': 'Overview',
       '用量': 'Usage',
+        '剩余积分': 'Credits left',
+        '今日消耗': 'Spent today',
+        '今日调用': 'Calls today',
+        '近 7 天消耗': 'Spent (7d)',
+        '近 7 天调用': 'Calls (7d)',
+        '其中失败': 'Failed',
+        '用量读取失败：': 'Failed to read usage: ',
+        '正在读取用量…': 'Reading usage…',
+        '数据来自本地账本与上游余额；完整图表与 CSV 在设置页的「用量」。':
+          'From the local ledger and the upstream balance; full charts and CSV live in Settings → Usage.',
       '请求': 'Requests',
       '签到': 'Check-in',
       '诊断': 'Diagnose',
@@ -9810,6 +9820,17 @@ const probeOne = async (id) => {
     const NO_CHAT_SELECT = (selector) => {
       try { return selector(null); } catch (e) { return null; }
     };
+    /**
+     * WorkBuddy 模型目录（id 列表）的**模块级**缓存。
+     *
+     * 「本轮积分」那条尾巴每个回合都会挂一个；长会话里几十个实例各自去拉
+     * `/workbuddy/models` 是不可接受的。这里只拉一次并共享，`pending` 让并发的
+     * 首个请求合并成一次网络往返。
+     *
+     * `value` 为 null = 还没拉到（判据退化成"不知道"，此时不隐藏尾巴 ——
+     * 不能因为一次请求没回来就把功能关掉）。
+     */
+    const workbuddyModelIdCache = { value: null, pending: null };
     /** 登录成功后通知所有聊天页组件刷新（顶部胶囊不必等下一个 60 秒轮询）。 */
     const authChangedSubs = new Set();
     function notifyAuthChanged() {
@@ -10100,6 +10121,13 @@ const probeOne = async (id) => {
                   credit: Math.round(windowRows.reduce((a, r) => a + n(r.credit), 0) * 10000) / 10000,
                   prompt: promptSum,
                   completion: completionSum,
+                  /*
+                   * 来源标注：多条里只要有一条是「余额差值」兜底，合计就不能再
+                   * 声称是上游权威值 —— 面板据此决定要不要标"约/按余额差推算"。
+                   */
+                  creditSource: windowRows.every((r) => r.creditSource === 'upstream')
+                    ? 'upstream'
+                    : (windowRows.some((r) => r.creditSource === 'balance-delta') ? 'balance-delta' : ''),
                   exact: true,
                   calls: windowRows.length,
                 };
@@ -10174,6 +10202,30 @@ const probeOne = async (id) => {
         ? [turnUsage.uncachedInputTokens, turnUsage.cacheReadTokens, turnUsage.cacheWriteTokens, turnUsage.outputTokens, routeKey].join('|')
         : '';
       const timingKey = timing ? String(timing.startTime) + '|' + String(timing.endTime) : '';
+      /*
+       * WorkBuddy 目录（哪些模型归我们管）。模块级缓存 + 一次拉取，
+       * 不在每个 turn-tail 上各拉一次 —— 长会话里有几十个 tail。
+       * 拉不到时保持 null：判据退化成"不知道"，此时不隐藏（见下面的注释）。
+       */
+      const [workbuddyModelIds, setWorkbuddyModelIds] = useState(() => workbuddyModelIdCache.value);
+      useEffect(() => {
+        if (Array.isArray(workbuddyModelIdCache.value)) return undefined;
+        let alive = true;
+        if (!workbuddyModelIdCache.pending) {
+          workbuddyModelIdCache.pending = getJson('/workbuddy/models')
+            .then((res) => {
+              // 形状与模型页一致：`{ ok, models: [...] }`（见 useJson('/workbuddy/models')）
+              const list = Array.isArray(res?.data?.models) ? res.data.models : [];
+              const ids = list.map((m) => String((m && m.id) || '')).filter(Boolean);
+              workbuddyModelIdCache.value = ids;
+              return ids;
+            })
+            .catch(() => [])
+            .finally(() => { workbuddyModelIdCache.pending = null; });
+        }
+        workbuddyModelIdCache.pending.then((ids) => { if (alive) setWorkbuddyModelIds(ids); });
+        return () => { alive = false; };
+      }, []);
 
       useEffect(() => {
         setInfo(null);
@@ -10266,6 +10318,31 @@ const probeOne = async (id) => {
 
       if (!isLast || !domLast) return null;
       /*
+       * 本轮用的**不是 WorkBuddy 的模型**时，不显示「本轮积分」。
+       *
+       * 用户原话：「换别的不是workbuddy模型不要出现本轮积分」。
+       * 原因很实在：这条尾巴读的是**桥的本地账本**，只有经过桥的请求才有记录；
+       * 用户把 dsh 切到别的 provider（DeepSeek 官方、其它中转）时，账本里本来
+       * 就没有这一轮，硬显示只会得到「本轮积分：账本无记录」这种噪音 ——
+       * 它不是 WorkBuddy 的账，我们也没资格对它下结论。
+       *
+       * 判据取**本轮实际路由到的模型**（`turnUsage.routes[].model`）：
+       *   · 有 routes 且**一个都不在** WorkBuddy 目录里 → 与我们无关，整条隐藏；
+       *   · 没有任何 routes 信息（旧宿主）→ 保持原行为（照常尝试匹配），
+       *     不能因为"不知道"就把功能关掉。
+       * 目录来自 `/workbuddy/models`（已经按账号过滤），是"哪些模型归我们管"的
+       * 唯一权威来源。
+       */
+      const railModels = Array.isArray(workbuddyModelIds) ? workbuddyModelIds : null;
+      if (railModels && railModels.length && turnUsage) {
+        const routeIds = (Array.isArray(turnUsage.routes) ? turnUsage.routes : [])
+          .map((r) => String((r && (r.model || r.id)) || r || ''))
+          .filter(Boolean);
+        if (routeIds.length && !routeIds.some((id) => railModels.some((m) => m.id === id))) {
+          return null;
+        }
+      }
+      /*
        * 还在对账：给一个**看得见**的占位，别让这几秒是空白。
        *
        * 时序是 400ms → 1200ms → 2400ms（共约 4 秒才定论）。旧实现这 4 秒里
@@ -10312,13 +10389,26 @@ const probeOne = async (id) => {
       const creditText = info.credit === 0
         ? (en ? 'free' : '免费')
         : fmtCreditShort(info.credit) + (en ? ' credits' : ' 积分');
-      // 估算值在可见文案里就标 ≈，不让用户必须悬停才知道。
-      const approx = info.exact || info.credit === 0 ? '' : '≈';
+      /*
+       * `≈` 的判据：**不是上游权威值**就要标。
+       *
+       * 两种非权威来源：
+       *   · `balance-delta` —— 本次改动新增的兜底（请求前后余额相减）。它是
+       *     **真实消耗**的度量，但并发时会被同机其它请求污染，且精度受上游余额
+       *     刷新延迟影响，所以不该冒充"上游回报"。
+       *   · 没有精确匹配（`exact === false`）—— 按最近一次请求估算。
+       */
+      const isBalanceDelta = info.creditSource === 'balance-delta';
+      const approx = info.exact && !isBalanceDelta || info.credit === 0 ? '' : '≈';
       const text = info.credit === 0
         ? (en ? 'Free this turn' : '本轮免费')
         : (en ? 'This turn: ' + approx : '本轮 ' + approx) + fmtCreditShort(info.credit) + (en ? ' credits' : ' 积分');
       const title = (info.exact
-        ? (en ? 'Matched against this turn’s tokens and the local request ledger: ' : '按本轮 tokens 与本地账本核对：')
+        ? (isBalanceDelta
+          ? (en
+            ? 'Computed from the account balance before and after this turn (upstream did not report per-request credits): '
+            : '按本轮前后的账号余额差计算（上游没有回报单次扣费）：')
+          : (en ? 'Matched against this turn’s tokens and the local request ledger: ' : '按本轮 tokens 与本地账本核对：'))
         : (en ? 'Estimated from the latest model request (may belong to another session): ' : '按最近一次模型请求估算（并发时可能对到另一会话）：'))
         + (info.model || '—') + ' · ' + creditText
         + (info.prompt != null && info.completion != null ? ' · tokens ' + info.prompt + ' → ' + info.completion : '')
@@ -10330,6 +10420,7 @@ const probeOne = async (id) => {
         title,
         'data-workbuddy-turn-cost': String(info.credit),
         'data-exact': info.exact ? '1' : '0',
+        'data-credit-source': info.creditSource || '',
       }, text);
     }
 
@@ -11069,6 +11160,21 @@ const probeOne = async (id) => {
         enabled: tab === 'checkin',
       });
       const loginApi = useJson('/workbuddy/login', { interval: 60000, enabled: tab === 'account' });
+      /*
+       * 右栏「用量」：只在这里拉（`enabled` 随标签页），7 天窗口。
+       *
+       * 数据源与设置页的 UsagePanel **完全同一个接口**（`/workbuddy/usage`），
+       * 不另算一套 —— 否则同一个数字在两处会对不上，那比不显示更糟。
+       * 60 秒足够：账本是按请求落盘的，用户不会盯着它秒级变化。
+       */
+      const usageApi = useJson('/workbuddy/usage?days=7', {
+        interval: 60000,
+        enabled: tab === 'usage',
+      });
+      const quotaApi = useJson('/workbuddy/quota', {
+        interval: 120000,
+        enabled: tab === 'usage',
+      });
       const accountApi = useConsoleApi(CONSOLE_API + '/accounts', {
         interval: 60000,
         enabled: tab === 'account',
@@ -11974,6 +12080,97 @@ const probeOne = async (id) => {
                     t('换账号'))))));
       };
 
+      /**
+       * 右栏「用量」页。
+       *
+       * 与设置页的完整用量页（图表 / 逐模型表 / CSV）**刻意不同**：这一列只有
+       * 320–480px，塞图表既看不清也挤掉结论。这里只回答用户切到这一页时真正
+       * 想知道的三件事：
+       *   1. 现在还剩多少积分（权威余额，来自 `/workbuddy/quota`）；
+       *   2. 最近 7 天花了多少、调了多少次（本地账本，`/workbuddy/usage`）；
+       *   3. 今天花了多少（同上，取当天的日桶）。
+       *
+       * 数据源与设置页完全一致，不重算口径 —— 两处数字必须对得上。
+       */
+      const usagePage = () => {
+        /*
+         * 注意：这里**不能调 hook**。`usagePage` 是普通渲染函数（不是组件），
+         * 在任何分支里多/少调一次 hook 都会让整列 hooks 顺序错位 ——
+         * 表现是 React #310（"Rendered more/fewer hooks than expected"），
+         * 整个右栏白屏。语言请从外层 `WorkBuddyRail` 的 `useLang()` 传进来
+         * （那一个 hook 已经让整列重渲染，这里只需读它算好的值）。
+         */
+        // 两种形状都认：新版摊平 `{ok,total,days}`，旧版套一层 `{usage:{…}}`
+        const u = usageApi.data && usageApi.data.usage ? usageApi.data.usage : usageApi.data;
+        const total = u?.total || {};
+        const quota = quotaApi.data?.quota || quotaApi.data?.data?.quota || null;
+        const balance = quotaIsUnlimited(quota)
+          ? '∞'
+          : (typeof quota?.total === 'number' ? fmtInt(quota.total) : '—');
+        /*
+         * 今日消耗：取**当天日桶**，不是滚动 24 小时。
+         * `total.credit` 是窗口内合计（7 天），直接拿来当"今天"会大好几倍。
+         */
+        const today = (() => {
+          const days = Array.isArray(u?.days) ? u.days : [];
+          // localDayKey 收的是 Date 对象（见模块级定义），传时间戳会抛 TypeError
+          const key = localDayKey(new Date());
+          return days.find((d) => d && d.day === key) || null;
+        })();
+        const todayCredit = today && typeof today.credit === 'number' ? today.credit : null;
+        const todayCalls = today && typeof today.calls === 'number' ? today.calls : null;
+        const totalCredit = typeof total.credit === 'number' ? total.credit : null;
+        const totalCalls = typeof total.calls === 'number' ? total.calls : null;
+        const failed = typeof total.failed === 'number' ? total.failed : 0;
+        const loading = usageApi.loading && !usageApi.data;
+        const num = (v) => (typeof v === 'number' ? fmtCreditShort(v) : '—');
+        return h(Fragment, null,
+          h(Card, { title: t('用量') },
+            usageApi.error ? h(Alert, { bad: true }, t('用量读取失败：') + usageApi.error) : null,
+            loading
+              ? h(RailSkeleton, { label: t('正在读取用量…') })
+              : h(Fragment, null,
+                h('div', { className: 'wb-stats' },
+                  h('div', { className: 'wb-stat' },
+                    h('b', null, balance),
+                    h('span', null, t('剩余积分'))),
+                  todayCredit !== null
+                    ? h('div', { className: 'wb-stat' },
+                      h('b', null, '-' + num(todayCredit)),
+                      h('span', null, t('今日消耗')))
+                    : null,
+                  todayCalls !== null
+                    ? h('div', { className: 'wb-stat' },
+                      h('b', null, fmtInt(todayCalls)),
+                      h('span', null, t('今日调用')))
+                    : null),
+                h('div', { className: 'wb-rail-list' },
+                  h('div', { className: 'wb-rail-item' },
+                    h('span', { className: 'wb-rail-item-main' },
+                      h('span', { className: 'wb-rail-item-name' }, t('近 7 天消耗'))),
+                    h('span', { className: 'wb-rail-item-side' },
+                      h(Pill, { tone: '', text: num(totalCredit) }))),
+                  h('div', { className: 'wb-rail-item' },
+                    h('span', { className: 'wb-rail-item-main' },
+                      h('span', { className: 'wb-rail-item-name' }, t('近 7 天调用'))),
+                    h('span', { className: 'wb-rail-item-side' },
+                      h(Pill, { tone: '', text: totalCalls === null ? '—' : fmtInt(totalCalls) }))),
+                  failed
+                    ? h('div', { className: 'wb-rail-item' },
+                      h('span', { className: 'wb-rail-item-main' },
+                        h('span', { className: 'wb-rail-item-name' }, t('其中失败'))),
+                      h('span', { className: 'wb-rail-item-side' },
+                        h(Pill, { tone: 'warn', text: fmtInt(failed) })))
+                    : null)),
+            h('p', { className: 'wb-note', style: { margin: '8px 0 0' } },
+              t('数据来自本地账本与上游余额；完整图表与 CSV 在设置页的「用量」。'))),
+          h('div', { className: 'wb-rail-foot' },
+            h(Btn, {
+              disabled: usageApi.loading || quotaApi.loading,
+              onClick: () => { usageApi.reload(); quotaApi.reload(); },
+            }, t('刷新'))));
+      };
+
       const accountPage = () => {
         const consoleDown = accountApi.availability.state === 'console-down';
         const rows = desktopAccounts;
@@ -12208,6 +12405,11 @@ const probeOne = async (id) => {
         { id: 'model', label: t('模型') },
         { id: 'checkin', label: t('签到') },
         { id: 'account', label: t('账号'), badge: limits.length > 0 ? (hasSevereLimit ? 'bad' : 'warn') : '' },
+        /*
+         * 「用量」放在最后：它是**查看类**页面，前三个是"要动手"的页面。
+         * 用户诉求原话：「右侧栏给我加上用量」—— 位置按"主操作在前、读数在后"排。
+         */
+        { id: 'usage', label: t('用量') },
       ];
       const tabIndex = tabs.findIndex((x) => x.id === tab);
       const prevIndex = tabs.findIndex((x) => x.id === prevTab);
@@ -12332,7 +12534,8 @@ const probeOne = async (id) => {
             h('div', { className: 'wb-rail-scroll' },
               tab === 'model' ? modelPage() : null,
               tab === 'checkin' ? checkinPage() : null,
-              tab === 'account' ? accountPage() : null)),
+              tab === 'account' ? accountPage() : null,
+              tab === 'usage' ? usagePage() : null)),
           (() => {
             const actions = primaryActions();
             if (!actions || (Array.isArray(actions) && actions.filter(Boolean).length === 0)) return null;

@@ -2162,8 +2162,15 @@ export function apply(ctx, rawConfig = {}) {
             try {
               if (arg === 'console' || arg === 'ui') {
                 const result = await consoleSupervisor.ensure({ signal });
+                /* 用户显式要控制台 → 就绪后打开一次浏览器（见 openInBrowser 注释） */
+                const opened = result.ok ? consoleSupervisor.openInBrowser() : { ok: false };
                 return result.ok
-                  ? { kind: 'success', text: `控制台已就绪：${consoleSupervisor.url}${result.reused ? '（复用已在运行的实例）' : '（本次新拉起）'}\n逐条请求、趋势图、CSV 导出、账号切换、签到与诊断都在那里。` }
+                  ? {
+                    kind: 'success',
+                    text: `控制台已就绪：${consoleSupervisor.url}${result.reused ? '（复用已在运行的实例）' : '（本次新拉起）'}`
+                      + (opened.ok ? '\n已在浏览器中打开。' : '\n（没能自动打开浏览器，请手动访问上面的地址）')
+                      + '\n逐条请求、趋势图、CSV 导出、账号切换、签到与诊断都在那里。',
+                  }
                   : { kind: 'error', text: `控制台启动失败：${result.error}` };
               }
               if (arg === 'start' || arg === 'restart') {

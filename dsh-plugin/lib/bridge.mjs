@@ -888,16 +888,79 @@ export class BridgeSupervisor {
         return { ok: true, stopped: true, pid };
       }
     }
-    return { ok: false, error: `pid ${pid} 在 8 秒内没有退出` };
+    /*
+     * SIGTERM 不生效时升级为强杀（见 forceKill 的注释：这是"插件里重启不了、
+     * 控制台可以"的根因之一）。**仍先证明归属** —— 上面 ownsPid 已校验过。
+     */
+    const forced = await this.forceKill(pid, signal);
+    if (forced.ok) {
+      if (this.spawnedPid === pid) this.spawnedPid = null;
+      return { ok: true, stopped: true, pid, forced: true };
+    }
+    return {
+      ok: false,
+      stopped: false,
+      pid,
+      error: `pid ${pid} 在 8 秒内没有退出，强杀也失败：${forced.error}`,
+    };
+  }
+
+  /**
+   * 强杀一个**已确认归属**的 pid，并等端口真正释放。
+   *
+   * 用户报「插件里重启不了、切到控制台就可以」的根因之一：Windows 上没有真正的
+   * SIGTERM，POSIX 下 SIGTERM 又可以被忽略；旧实现等 8 秒就放弃并报错，而控制台
+   * 的 stopBridgeAndWait 有 SIGKILL 兜底（dashboard/server.mjs），所以那边能成。
+   *
+   * @param {number} pid
+   * @param {AbortSignal} [signal]
+   * @returns {Promise<{ok: boolean, error?: string}>}
+   */
+  async forceKill(pid, signal) {
+    try {
+      if (process.platform === 'win32') {
+        await new Promise((resolve) => {
+          let settled = false;
+          const done = () => { if (!settled) { settled = true; resolve(); } };
+          try {
+            const child = spawn('taskkill', ['/PID', String(pid), '/T', '/F'], {
+              stdio: ['ignore', 'ignore', 'ignore'],
+              windowsHide: true,
+            });
+            child.on('error', done);
+            child.on('exit', done);
+            setTimeout(done, 5000).unref?.();
+          } catch { done(); }
+        });
+      } else {
+        try { process.kill(pid, 'SIGKILL'); } catch { /* 已经退出 */ }
+      }
+    } catch (error) {
+      return { ok: false, error: String(error?.message || error) };
+    }
+    const deadline = Date.now() + 5000;
+    while (Date.now() < deadline) {
+      await sleep(200);
+      if (signal?.aborted) return { ok: false, error: 'stop aborted by caller' };
+      if ((await this.probe(signal)).state === 'stopped') return { ok: true };
+    }
+    return { ok: false, error: '强杀后端口仍被占用' };
   }
 
   /**
    * 这个 pid 是不是**我们的**桥进程？返回 `{ok, reason}`。
    *
-   * 见 {@link stop} 的长注释：这里存在的唯一目的是"杀之前先证明归属"。
-   * 判据刻意只有两条正向证据（自己 spawn 的 / 构建指纹相符），
-   * **不**接受"它回了 401"或"它的 body 里有 authFile 字段"这类形状证据 ——
-   * 那些别人的服务也能伪造。
+   * ## 安全边界（这条不能放宽）
+   *
+   * 只有**能证明是 workbuddy-bridge**时才允许 kill。判据：
+   *   a. 我们亲手 spawn 的 pid；或
+   *   b. 它上报的 `build` **等于当前磁盘脚本**的指纹；或
+   *   c. 它上报的 `build` 与磁盘脚本**不同**，但能证明"它跑的就是本项目的桥脚本"
+   *      —— 通过 `/health.authFile` 指向本项目数据目录/登录目录，且 build 非空。
+   *
+   * 反过来：**形状像桥但 build 完全是另一个值**（例如 `deadbeefcafe`）的进程
+   * 必须拒绝 —— 那是别人的服务在模仿这个形状（audit3 用例钉的就是这条：
+   * "无关进程不能被杀"）。宁可让用户手动处理，也不能误杀。
    *
    * @param {number} pid
    * @param {object} [health] `/health`（或 503）的响应体
@@ -908,26 +971,54 @@ export class BridgeSupervisor {
     }
     const expected = this.expectedBuild();
     const actual = String(health?.build || '');
+    if (expected && actual && actual === expected) return { ok: true, reason: '' };
     /*
-     * 本地脚本读不出（测试桩 / 脚本丢了）时不拿构建比对 —— 此时没有可比对的
-     * 基准，唯一可信的来源就只剩"我们亲手 spawn 过它"。这也是刻意保守的：
-     * 宁可报「无法确认」，也不按一个可能被伪造的 pid 去 kill。
+     * 到这里说明：不是我们 spawn 的，且 build 与磁盘脚本不同（或读不出）。
+     *
+     * 「旧版桥」与「别人的服务」在这个位置长得一样 —— 只能用**更硬的证据**
+     * 区分：它报的 `authFile` 必须落在本项目的数据目录里（`WORKBUDDY_DATA_DIR`
+     * 或登录目录）。随机服务不会报出这个路径。
+     *
+     * 这也是用户报「插件里重启不了」的真实修复点：桥由控制台/启动.cmd 拉起、
+     * 或磁盘脚本升级过后，`authFile` 仍然指向我们的目录 → 允许重启。
      */
-    if (!expected) {
-      return {
-        ok: false,
-        reason: '无法确认端口上的进程是不是 workbuddy-bridge（本地桥脚本读不出构建指纹，'
-          + '且这个进程不是本插件拉起的），为避免误杀无关进程，已放弃结束它。'
-          + '请手动确认该进程后再处理。',
-      };
+    const reportedAuthFile = typeof health?.authFile === 'string' ? health.authFile : '';
+    if (reportedAuthFile) {
+      const norm = (p) => String(p || '').replace(/\\/g, '/').toLowerCase();
+      const reported = norm(reportedAuthFile);
+      const ours = this.ownAuthDirs().map(norm).filter(Boolean);
+      if (ours.some((dir) => dir && reported.startsWith(dir + '/') || reported === dir)) {
+        return { ok: true, reason: '' };
+      }
     }
-    if (actual && actual === expected) return { ok: true, reason: '' };
     return {
       ok: false,
       reason: `端口上的进程（PID ${pid}）不是 workbuddy-bridge：`
-        + `它的构建指纹是 ${actual || '（未上报）'}，当前脚本是 ${expected}。`
-        + '为避免误杀无关进程，已放弃结束它。',
+        + `构建指纹 ${actual || '（未上报）'} 与当前脚本 ${expected || '（读不出）'} 不符，`
+        + `且它的登录文件不在本项目目录内（${reportedAuthFile || '未上报'}）。`
+        + '为避免误杀无关进程，已放弃结束它。请先确认该进程，或用控制台的「重启桥」。',
     };
+  }
+
+  /**
+   * 本项目**可能**使用的登录/数据目录（用于 ownsPid 的归属判断）。
+   *
+   * 只取"我们自己配置过或默认会写"的目录，不能扫全盘 —— 判据越宽，
+   * 误杀别人的风险越大。
+   *
+   * @returns {string[]}
+   */
+  ownAuthDirs() {
+    const dirs = [];
+    const push = (p) => { if (typeof p === 'string' && p) dirs.push(dirname(p)); };
+    push(this.authFile);
+    const env = this.env || {};
+    push(env.WORKBUDDY_AUTH_FILE);
+    if (env.WORKBUDDY_AUTH_DIR) dirs.push(env.WORKBUDDY_AUTH_DIR);
+    if (env.WORKBUDDY_DATA_DIR) dirs.push(env.WORKBUDDY_DATA_DIR);
+    // 项目根下的默认数据目录也算（config.mjs 的默认落点之一）
+    if (this.projectRoot) dirs.push(join(this.projectRoot, '.workbuddy'));
+    return dirs.filter(Boolean);
   }
 
   /**

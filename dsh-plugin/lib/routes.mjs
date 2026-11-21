@@ -961,7 +961,30 @@ export function createRouteTable(deps) {
             return sendJson(res, 200, { ok: result.ok, action, url: consoleSupervisor.url, result });
           }
           const result = await consoleSupervisor.ensure({});
-          return sendJson(res, 200, { ok: result.ok, action: 'start', url: consoleSupervisor.url, result });
+          /*
+           * 用户点了「启动控制台」→ 就绪后**直接用系统浏览器打开**。
+           *
+           * 不再依赖控制台自己的 DASHBOARD_OPEN_BROWSER（插件拉起它时恒为 0）：
+           * 那是进程级开关，一旦为 1，dsh 后台自动拉起、闲置退出后重新拉起都会
+           * 弹窗。这里按"这一次点击"打开一次，语义才对。打不开浏览器不影响服务
+           * 本身，所以把结果如实带回，面板据此提示"请手动打开"。
+           *
+           * `typeof` 守卫是必要的：装配测试的桩 supervisor 不一定实现它，
+           * 缺一个可选能力不该让「启动控制台」整条链路 500。
+           */
+          const opened = result.ok && typeof consoleSupervisor.openInBrowser === 'function'
+            ? consoleSupervisor.openInBrowser()
+            : { ok: false, error: 'openInBrowser unavailable' };
+          return sendJson(res, 200, {
+            ok: result.ok,
+            action: 'start',
+            url: consoleSupervisor.url,
+            opened: opened.ok === true,
+            ...(opened.ok === false && opened.error && typeof consoleSupervisor.openInBrowser === 'function'
+              ? { openError: opened.error }
+              : {}),
+            result,
+          });
         } catch (error) {
           log('panel console action failed', error);
           sendJson(res, 500, { ok: false, error: String(error?.message || error) });

@@ -307,6 +307,39 @@ export class ConsoleSupervisor {
     return this.pendingEnsure;
   }
 
+  /**
+   * 用系统默认浏览器打开控制台地址。
+   *
+   * 用户诉求：「启动控制台给我自动跳浏览器」。
+   *
+   * 为什么不复用控制台自己的 `DASHBOARD_OPEN_BROWSER=1`：
+   *   · 那是**进程级**开关，一旦为 1，之后每次控制台被拉起都会弹窗 ——
+   *     包括 dsh 后台自动拉起的那次、以及闲置退出后又被 ensure 拉起来时；
+   *   · 而用户要的是「我点了一下，给我打开」：一次性动作，不是持久偏好。
+   *
+   * 所以由插件在这里按需调用；控制台进程本身继续以
+   * `DASHBOARD_OPEN_BROWSER=0` 启动（保持"不骚扰"的既有行为）。
+   *
+   * @returns {{ok: boolean, error?: string}}
+   */
+  openInBrowser() {
+    const url = this.url;
+    const table = {
+      win32: ['cmd', ['/c', 'start', '', url]],
+      darwin: ['open', [url]],
+    };
+    const [file, args] = table[process.platform] || ['xdg-open', [url]];
+    try {
+      const child = spawn(file, args, { detached: true, stdio: 'ignore', windowsHide: true });
+      // 打不开浏览器不影响服务本身，但要能如实回报（面板据此提示"请手动打开"）
+      child.on('error', () => {});
+      child.unref();
+      return { ok: true };
+    } catch (error) {
+      return { ok: false, error: String(error?.message || error) };
+    }
+  }
+
   async #ensure({ signal, readyTimeoutMs }) {
     const status = await this.probe({ signal });
     let restartedForBuild = false;
