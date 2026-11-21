@@ -1409,6 +1409,7 @@ body.dark .wb-root,
   .wb-rail-list{max-height:min(52vh,460px)}
   .wb-rail .wb-card+.wb-card{margin-top:2px}
 }
+
 `;
 
 /* 高度档位的**内容**规则（JS 侧）：
@@ -2599,6 +2600,20 @@ body.dark .wb-root,
         '正在读取用量…': 'Reading usage…',
         '数据来自本地账本与上游余额；完整图表与 CSV 在设置页的「用量」。':
           'From the local ledger and the upstream balance; full charts and CSV live in Settings → Usage.',
+        '上游已回报': 'reported by upstream',
+        '未回报扣分': 'no per-request credit',
+        'Tokens': 'Tokens',
+        '入 ': 'in ',
+        '出 ': 'out ',
+        '按已回报请求': 'over reporting calls',
+        '逐日调用趋势': 'Daily call trend',
+        '输入（未命中缓存） ': 'Input (cache miss) ',
+        '缓存命中 ': 'Cache hit ',
+        '输出 ': 'Output ',
+        '缓存': 'Cache',
+        '共 ': 'in total ',
+        ' 个模型，这里显示前 5；完整图表与 CSV 在设置页的「用量」。':
+          ' model(s), showing the top 5; full charts and CSV live in Settings → Usage.',
       '请求': 'Requests',
       '签到': 'Check-in',
       '诊断': 'Diagnose',
@@ -9820,17 +9835,6 @@ const probeOne = async (id) => {
     const NO_CHAT_SELECT = (selector) => {
       try { return selector(null); } catch (e) { return null; }
     };
-    /**
-     * WorkBuddy 模型目录（id 列表）的**模块级**缓存。
-     *
-     * 「本轮积分」那条尾巴每个回合都会挂一个；长会话里几十个实例各自去拉
-     * `/workbuddy/models` 是不可接受的。这里只拉一次并共享，`pending` 让并发的
-     * 首个请求合并成一次网络往返。
-     *
-     * `value` 为 null = 还没拉到（判据退化成"不知道"，此时不隐藏尾巴 ——
-     * 不能因为一次请求没回来就把功能关掉）。
-     */
-    const workbuddyModelIdCache = { value: null, pending: null };
     /** 登录成功后通知所有聊天页组件刷新（顶部胶囊不必等下一个 60 秒轮询）。 */
     const authChangedSubs = new Set();
     function notifyAuthChanged() {
@@ -10202,30 +10206,6 @@ const probeOne = async (id) => {
         ? [turnUsage.uncachedInputTokens, turnUsage.cacheReadTokens, turnUsage.cacheWriteTokens, turnUsage.outputTokens, routeKey].join('|')
         : '';
       const timingKey = timing ? String(timing.startTime) + '|' + String(timing.endTime) : '';
-      /*
-       * WorkBuddy 目录（哪些模型归我们管）。模块级缓存 + 一次拉取，
-       * 不在每个 turn-tail 上各拉一次 —— 长会话里有几十个 tail。
-       * 拉不到时保持 null：判据退化成"不知道"，此时不隐藏（见下面的注释）。
-       */
-      const [workbuddyModelIds, setWorkbuddyModelIds] = useState(() => workbuddyModelIdCache.value);
-      useEffect(() => {
-        if (Array.isArray(workbuddyModelIdCache.value)) return undefined;
-        let alive = true;
-        if (!workbuddyModelIdCache.pending) {
-          workbuddyModelIdCache.pending = getJson('/workbuddy/models')
-            .then((res) => {
-              // 形状与模型页一致：`{ ok, models: [...] }`（见 useJson('/workbuddy/models')）
-              const list = Array.isArray(res?.data?.models) ? res.data.models : [];
-              const ids = list.map((m) => String((m && m.id) || '')).filter(Boolean);
-              workbuddyModelIdCache.value = ids;
-              return ids;
-            })
-            .catch(() => [])
-            .finally(() => { workbuddyModelIdCache.pending = null; });
-        }
-        workbuddyModelIdCache.pending.then((ids) => { if (alive) setWorkbuddyModelIds(ids); });
-        return () => { alive = false; };
-      }, []);
 
       useEffect(() => {
         setInfo(null);
@@ -10318,30 +10298,29 @@ const probeOne = async (id) => {
 
       if (!isLast || !domLast) return null;
       /*
-       * 本轮用的**不是 WorkBuddy 的模型**时，不显示「本轮积分」。
+       * ## 「本轮积分」只在**能对到账本记录**时显示
        *
-       * 用户原话：「换别的不是workbuddy模型不要出现本轮积分」。
-       * 原因很实在：这条尾巴读的是**桥的本地账本**，只有经过桥的请求才有记录；
-       * 用户把 dsh 切到别的 provider（DeepSeek 官方、其它中转）时，账本里本来
-       * 就没有这一轮，硬显示只会得到「本轮积分：账本无记录」这种噪音 ——
-       * 它不是 WorkBuddy 的账，我们也没资格对它下结论。
+       * 覆盖用户两条诉求：
+       *   · 「换别的不是 workbuddy 模型不要出现本轮积分」；
+       *   · 「本轮积分怎么重进应用就消失了」。
        *
-       * 判据取**本轮实际路由到的模型**（`turnUsage.routes[].model`）：
-       *   · 有 routes 且**一个都不在** WorkBuddy 目录里 → 与我们无关，整条隐藏；
-       *   · 没有任何 routes 信息（旧宿主）→ 保持原行为（照常尝试匹配），
-       *     不能因为"不知道"就把功能关掉。
-       * 目录来自 `/workbuddy/models`（已经按账号过滤），是"哪些模型归我们管"的
-       * 唯一权威来源。
+       * 判据用**证据本身**（账本里有没有匹配这一轮的记录），不是拿模型目录做
+       * 白名单。第一版实现就是拿 `/workbuddy/models` 当白名单，结果把正常回合
+       * 也藏了，两个原因：
+       *   · 那个接口只在用户打开模型页时才拉（`enabled: tab === 'models'`），
+       *     聊天页挂载时目录往往还是空的；
+       *   · 目录是"当前账号可用模型"，随账号/上游变化，不该拿它做历史判据。
+       * 实测：panel-render 的「每轮积分没有渲染」「一轮多次请求的回合没有渲染积分」
+       * 两条当场红。
+       *
+       * 现在的行为：
+       *   · 匹配到记录（`info` 有 credit）→ 显示，并经 `creditSource` 区分
+       *     上游回报与余额差值；
+       *   · 匹配不到 → **不显示**。用户切到别的 provider 时自然消失（正是要的效果），
+       *     而且不需要任何额外请求；
+       *   · 读接口本身失败（`info.unknown && reason === 'read-failed'`）→ 仍然
+       *     显示「未读到」：那是**真故障**，静默会让人以为免费。
        */
-      const railModels = Array.isArray(workbuddyModelIds) ? workbuddyModelIds : null;
-      if (railModels && railModels.length && turnUsage) {
-        const routeIds = (Array.isArray(turnUsage.routes) ? turnUsage.routes : [])
-          .map((r) => String((r && (r.model || r.id)) || r || ''))
-          .filter(Boolean);
-        if (routeIds.length && !routeIds.some((id) => railModels.some((m) => m.id === id))) {
-          return null;
-        }
-      }
       /*
        * 还在对账：给一个**看得见**的占位，别让这几秒是空白。
        *
@@ -10361,20 +10340,19 @@ const probeOne = async (id) => {
         }, pendingText);
       }
       /*
-       * 读不到本轮扣费：如实说"没读到"，不要静默消失。
+       * 账本里**没有**与这一轮对上的记录：不显示。
        *
-       * 为什么必须有一个可见态：静默隐藏时，"本轮免费（扣 0）""账本里没这条"
-       * 与"账本读失败"在屏幕上是同一个样子 —— 用户会按"免费"理解。
-       * 文案区分两种原因：接口失败 vs 接口正常但没有这一轮的记录。
+       * 这正是用户要的「换别的不是 workbuddy 模型不要出现本轮积分」——
+       * 切到别的 provider 时账本里本来就没有这一轮，自然消失，无需判断模型。
+       *
+       * 但**读接口失败**要照说：那是真故障，静默会让人以为这一轮免费。
+       * （旧实现在这里对两种情况都显示提示；"账本无记录"那半现在按用户要求隐去。）
        */
       if (info.unknown) {
-        const failed = info.reason === 'read-failed';
-        const text = failed
-          ? (en ? 'This turn: credits unavailable' : '本轮积分：未读到')
-          : (en ? 'This turn: no ledger record' : '本轮积分：账本无记录');
-        const title = (failed
-          ? (en ? 'Could not read the local request ledger, so this turn’s cost is unknown: ' : '本地账本读取失败，因此这一轮花了多少积分未知：')
-          : (en ? 'The ledger has no request matching this turn (it may have been cleared, or the record has not landed yet): ' : '本地账本里没有与这一轮对上的请求（可能刚被清空，或记录还没落盘）：'))
+        if (info.reason !== 'read-failed') return null;
+        const title = (en
+          ? 'Could not read the local request ledger, so this turn’s cost is unknown: '
+          : '本地账本读取失败，因此这一轮花了多少积分未知：')
           + (info.detail || '')
           + (en ? '\nThe credits shown in the header are still the account balance.' : '\n顶部显示的积分是账号余额，不受影响。');
         return h('span', {
@@ -10384,7 +10362,7 @@ const probeOne = async (id) => {
           'aria-label': title,
           'data-workbuddy-turn-cost': 'unknown',
           'data-turn-cost-reason': info.reason,
-        }, text);
+        }, en ? 'This turn: credits unavailable' : '本轮积分：未读到');
       }
       const creditText = info.credit === 0
         ? (en ? 'free' : '免费')
@@ -11161,20 +11139,13 @@ const probeOne = async (id) => {
       });
       const loginApi = useJson('/workbuddy/login', { interval: 60000, enabled: tab === 'account' });
       /*
-       * 右栏「用量」：只在这里拉（`enabled` 随标签页），7 天窗口。
+       * 右栏「用量」**不再在这里拉数据**。
        *
-       * 数据源与设置页的 UsagePanel **完全同一个接口**（`/workbuddy/usage`），
-       * 不另算一套 —— 否则同一个数字在两处会对不上，那比不显示更糟。
-       * 60 秒足够：账本是按请求落盘的，用户不会盯着它秒级变化。
+       * 上一版我在这一层自己 useJson('/workbuddy/usage') 并重算了一套 KPI，
+       * 结果功能比设置页少一大截（没有时间范围 / 图表视图切换 / 模型展开），
+       * 数字倒是同源但也只是重复实现。现在直接渲染 UsagePanel 本体：
+       * 它内部自己拉数据，重复的请求与重复的聚合都删掉了。
        */
-      const usageApi = useJson('/workbuddy/usage?days=7', {
-        interval: 60000,
-        enabled: tab === 'usage',
-      });
-      const quotaApi = useJson('/workbuddy/quota', {
-        interval: 120000,
-        enabled: tab === 'usage',
-      });
       const accountApi = useConsoleApi(CONSOLE_API + '/accounts', {
         interval: 60000,
         enabled: tab === 'account',
@@ -12092,84 +12063,24 @@ const probeOne = async (id) => {
        *
        * 数据源与设置页完全一致，不重算口径 —— 两处数字必须对得上。
        */
-      const usagePage = () => {
-        /*
-         * 注意：这里**不能调 hook**。`usagePage` 是普通渲染函数（不是组件），
-         * 在任何分支里多/少调一次 hook 都会让整列 hooks 顺序错位 ——
-         * 表现是 React #310（"Rendered more/fewer hooks than expected"），
-         * 整个右栏白屏。语言请从外层 `WorkBuddyRail` 的 `useLang()` 传进来
-         * （那一个 hook 已经让整列重渲染，这里只需读它算好的值）。
-         */
-        // 两种形状都认：新版摊平 `{ok,total,days}`，旧版套一层 `{usage:{…}}`
-        const u = usageApi.data && usageApi.data.usage ? usageApi.data.usage : usageApi.data;
-        const total = u?.total || {};
-        const quota = quotaApi.data?.quota || quotaApi.data?.data?.quota || null;
-        const balance = quotaIsUnlimited(quota)
-          ? '∞'
-          : (typeof quota?.total === 'number' ? fmtInt(quota.total) : '—');
-        /*
-         * 今日消耗：取**当天日桶**，不是滚动 24 小时。
-         * `total.credit` 是窗口内合计（7 天），直接拿来当"今天"会大好几倍。
-         */
-        const today = (() => {
-          const days = Array.isArray(u?.days) ? u.days : [];
-          // localDayKey 收的是 Date 对象（见模块级定义），传时间戳会抛 TypeError
-          const key = localDayKey(new Date());
-          return days.find((d) => d && d.day === key) || null;
-        })();
-        const todayCredit = today && typeof today.credit === 'number' ? today.credit : null;
-        const todayCalls = today && typeof today.calls === 'number' ? today.calls : null;
-        const totalCredit = typeof total.credit === 'number' ? total.credit : null;
-        const totalCalls = typeof total.calls === 'number' ? total.calls : null;
-        const failed = typeof total.failed === 'number' ? total.failed : 0;
-        const loading = usageApi.loading && !usageApi.data;
-        const num = (v) => (typeof v === 'number' ? fmtCreditShort(v) : '—');
-        return h(Fragment, null,
-          h(Card, { title: t('用量') },
-            usageApi.error ? h(Alert, { bad: true }, t('用量读取失败：') + usageApi.error) : null,
-            loading
-              ? h(RailSkeleton, { label: t('正在读取用量…') })
-              : h(Fragment, null,
-                h('div', { className: 'wb-stats' },
-                  h('div', { className: 'wb-stat' },
-                    h('b', null, balance),
-                    h('span', null, t('剩余积分'))),
-                  todayCredit !== null
-                    ? h('div', { className: 'wb-stat' },
-                      h('b', null, '-' + num(todayCredit)),
-                      h('span', null, t('今日消耗')))
-                    : null,
-                  todayCalls !== null
-                    ? h('div', { className: 'wb-stat' },
-                      h('b', null, fmtInt(todayCalls)),
-                      h('span', null, t('今日调用')))
-                    : null),
-                h('div', { className: 'wb-rail-list' },
-                  h('div', { className: 'wb-rail-item' },
-                    h('span', { className: 'wb-rail-item-main' },
-                      h('span', { className: 'wb-rail-item-name' }, t('近 7 天消耗'))),
-                    h('span', { className: 'wb-rail-item-side' },
-                      h(Pill, { tone: '', text: num(totalCredit) }))),
-                  h('div', { className: 'wb-rail-item' },
-                    h('span', { className: 'wb-rail-item-main' },
-                      h('span', { className: 'wb-rail-item-name' }, t('近 7 天调用'))),
-                    h('span', { className: 'wb-rail-item-side' },
-                      h(Pill, { tone: '', text: totalCalls === null ? '—' : fmtInt(totalCalls) }))),
-                  failed
-                    ? h('div', { className: 'wb-rail-item' },
-                      h('span', { className: 'wb-rail-item-main' },
-                        h('span', { className: 'wb-rail-item-name' }, t('其中失败'))),
-                      h('span', { className: 'wb-rail-item-side' },
-                        h(Pill, { tone: 'warn', text: fmtInt(failed) })))
-                    : null)),
-            h('p', { className: 'wb-note', style: { margin: '8px 0 0' } },
-              t('数据来自本地账本与上游余额；完整图表与 CSV 在设置页的「用量」。'))),
-          h('div', { className: 'wb-rail-foot' },
-            h(Btn, {
-              disabled: usageApi.loading || quotaApi.loading,
-              onClick: () => { usageApi.reload(); quotaApi.reload(); },
-            }, t('刷新'))));
-      };
+      /**
+       * 右栏「用量」= **设置页的 UsagePanel 本体**（迁移，不是复制）。
+       *
+       * 用户要求原话：「设置里面页面不能迁移吗」。能，而且应该：
+       * 我原先在右栏重写了一个精简版，结果时间范围切换、图表切换、模型展开、
+       * 清空账本这些全都没有，配色还因为外层容器被压成灰的 —— 典型的重复实现
+       * 反而更差。
+       *
+       * UsagePanel 自带的适应性已经够用：
+       *   · 内部全是 h(Card, …)，右栏直接得到同样的卡片式设计；
+       *   · 图表用 viewBox + width:100%，340px 下等比缩放；
+       *   · 工具栏本来就在卡片头部右侧（时间范围 / 指标 / 视图切换）。
+       *
+       * 这里只做一件右栏特有的事：**不再套外层 Card**（它自己就是一叠卡片），
+       * 也不给它传 onOpenTab —— 右栏没有"跳设置页内标签"的能力，
+       * 传了会得到一个点了没反应的按钮。
+       */
+      const usagePage = () => h(UsagePanel, {});
 
       const accountPage = () => {
         const consoleDown = accountApi.availability.state === 'console-down';

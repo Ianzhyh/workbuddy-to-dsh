@@ -6305,6 +6305,93 @@ const quotaResetStats = new Map();
 let rateLimitIdentity = '';
 
 const rateLimitKey = (auth, model) => `${auth?.source || ''}:${auth?.uid || auth?.userId || ''}\0${model || ''}`;
+
+/*
+ * ── 限流 / 触顶状态的落盘（用户：「账号触顶为什么我退出应用就没了」）──
+ *
+ * 这几张表原先都是纯内存 Map，桥一退出就清零。对 429 瞬时限流（10 分钟窗口）
+ * 影响不大；但**账号级额度上限（6004 / 14018）的重置时刻在数小时后**，
+ * 重启就等于把"这个号已触顶、几点恢复"的事实删掉 —— 用户会看到面板上
+ * 什么都没有，然后立刻又撞一次墙。
+ *
+ * 只落盘这三个"事实型"表：
+ *   · rateLimitStats        —— 429 时间戳数组（窗口内才有意义，读取侧照旧 prune）
+ *   · quotaResetStats       —— 额度上限 + 重置时刻
+ *   · accountRestrictedStats—— 账号风控
+ * 不落盘 modelBusyStats / queueStats：那是"当前这一刻忙不忙"，跨进程没有意义。
+ *
+ * 文件损坏 / 半截写入一律当作空表：这是**缓存**，绝不能因为它读取失败而让桥起不来。
+ */
+function rateStateFile() {
+  return join(RUNTIME_DATA_DIR, 'rate-state.json');
+}
+
+/** 读回上次落盘的状态（启动时调一次）。 */
+function loadRateState() {
+  let raw;
+  try {
+    raw = readFileSync(rateStateFile(), 'utf8');
+  } catch {
+    return; // 首次运行 / 文件不存在：正常情况，不必吵闹
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    log('rate-state.json 解析失败，按空状态启动');
+    return;
+  }
+  const now = Date.now();
+  const restore = (map, entries, valid) => {
+    if (!Array.isArray(entries)) return;
+    for (const [key, value] of entries) {
+      if (typeof key !== 'string' || !valid(value, now)) continue;
+      map.set(key, value);
+    }
+  };
+  // 数组型：清掉窗口外的旧时间戳，保留仍有效的
+  restore(rateLimitStats, parsed?.rateLimit, (v, nowMs) => (
+    Array.isArray(v) && pruneRateLimitList(v, nowMs).length > 0
+  ));
+  // 额度上限：重置时刻已过的直接丢（这条最关键：重启后不该继续报已恢复的触顶）
+  restore(quotaResetStats, parsed?.quotaReset, (v, nowMs) => (
+    v && typeof v === 'object'
+      && Number(v.lastAt) > 0
+      && nowMs - Number(v.lastAt) < 24 * 3_600_000
+      && (!Number(v.resetAt) || Number(v.resetAt) > nowMs)
+  ));
+  restore(accountRestrictedStats, parsed?.accountRestricted, (v, nowMs) => (
+    v && typeof v === 'object' && Number(v.lastAt) > 0 && nowMs - Number(v.lastAt) < 24 * 3_600_000
+  ));
+  if (typeof parsed?.identity === 'string') rateLimitIdentity = parsed.identity;
+  log('restored rate state: '
+    + `429=${rateLimitStats.size} quota=${quotaResetStats.size} restricted=${accountRestrictedStats.size}`);
+}
+
+/** 把当前状态写回磁盘。调用点是**变更之后**（低频，不是每次请求）。 */
+let rateStateSaveTimer = null;
+function saveRateStateSoon() {
+  // 合并同一轮里的多次变更：一次请求可能同时记 429 与队列，避免重复写盘
+  if (rateStateSaveTimer) return;
+  rateStateSaveTimer = setTimeout(() => {
+    rateStateSaveTimer = null;
+    try {
+      mkdirSync(RUNTIME_DATA_DIR, { recursive: true });
+      writeFileSync(rateStateFile(), JSON.stringify({
+        v: 1,
+        savedAt: Date.now(),
+        identity: rateLimitIdentity,
+        rateLimit: [...rateLimitStats],
+        quotaReset: [...quotaResetStats],
+        accountRestricted: [...accountRestrictedStats],
+      }), 'utf8');
+    } catch (error) {
+      // 写不了盘不影响服务：这些状态本来就是"尽力记住"
+      log('save rate state failed', String(error?.message || error));
+    }
+  }, 2000);
+  rateStateSaveTimer.unref?.();
+}
 const pruneRateLimitList = (list, now) => list.filter((at) => now - at < RATE_LIMIT_STATS_WINDOW_MS && at <= now);
 
 function noteQuotaReset(auth, model, text, now = Date.now()) {
@@ -6317,6 +6404,8 @@ function noteQuotaReset(auth, model, text, now = Date.now()) {
       if (now - info.lastAt > 24 * 3_600_000) quotaResetStats.delete(key);
     }
   }
+  // 触顶事实要跨进程保留：用户退出应用再进来，仍应看到「这个号已触顶、几点恢复」
+  saveRateStateSoon();
 }
 
 /**
@@ -6508,6 +6597,8 @@ function noteUpstream429(auth, model, now = Date.now()) {
       else rateLimitStats.delete(k);
     }
   }
+  // 429 计数跨进程保留（窗口内才有意义，读取侧会照旧 prune）
+  saveRateStateSoon();
 }
 
 function rateLimitSummary(auth) {
@@ -15746,6 +15837,13 @@ server.listen(PORT, HOST, async () => {
    */
   console.log(`workbuddy-bridge listening on http://${HOST}:${PORT}/v1`);
   console.log(`auth file  : ${AUTH_PATH}`);
+  /*
+   * 读回上次落盘的限流 / 触顶状态（见 loadRateState 的注释）。
+   *
+   * 放在 listen 回调里、且在服务真正被请求之前：此时 RUNTIME_DATA_DIR 已确定，
+   * 而还没有任何请求会读这些表。读失败一律当空状态 —— 它是缓存，不是真相源。
+   */
+  loadRateState();
   // 只报**已经定位过**的 exe：这里不触发探测。探测要起 PowerShell（数秒），
   // 启动日志不该为一行诊断信息付这个代价；真正需要时 atRestKey 会异步定位。
   console.log(`client exe : ${atRestUsedExe || wbExeCache || '未定位（首次读取桌面凭据时再探测）'}`);

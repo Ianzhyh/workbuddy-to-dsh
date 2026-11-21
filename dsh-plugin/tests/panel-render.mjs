@@ -2128,7 +2128,15 @@ try {
         const out = {
           early,
           exists: !!el,
-          display: el ? getComputedStyle(el).display : null,
+          /*
+           * 节点**不存在**也归一成 'none'。
+           *
+           * 「不显示」有两种实现：不渲染节点（React 返回 null），或渲染了但
+           * CSS display:none。断言只关心"用户看不看得见"，所以这里统一成
+           * 一个判据 —— 否则 display=null 会让"应该隐藏"的用例看起来像失败
+           * （实测：账本无记录隐藏后，断言拿到 display=null 直接红了）。
+           */
+          display: el ? getComputedStyle(el).display : 'none',
           text: el ? el.textContent : '',
           marker: el ? el.getAttribute('data-workbuddy-turn-cost') : null,
           reason: el ? el.getAttribute('data-turn-cost-reason') : null,
@@ -2187,8 +2195,20 @@ try {
       problems.push(`账本读失败被静默隐藏（与「本轮免费」不可区分）：display=${rd.display} marker=${rd.marker} reason=${rd.reason}`);
     }
     if (!/账本读取失败|未知/.test(rd.title || '')) problems.push(`账本读失败的 tooltip 没说明原因：${String(rd.title).slice(0, 50)}`);
-    if (nf.display === 'none' || nf.marker !== 'unknown' || nf.reason !== 'not-found') {
-      problems.push(`账本无记录没有与「读失败」区分：display=${nf.display} marker=${nf.marker} reason=${nf.reason}`);
+    /*
+     * 「账本里没有这一轮」→ **不显示**。
+     *
+     * 这条原先要求它像「读失败」一样给出可区分的提示，理由是"静默消失会让人
+     * 以为免费"。但用户明确要求：
+     *   「换别的不是 workbuddy 模型不要出现本轮积分」
+     * 而切到别的 provider 时，账本里**就是**没有这一轮 —— 它与"记录还没落盘"
+     * 在数据上无法区分（都可能只是慢）。按用户要求选择隐藏，代价是极少数
+     * "真走了桥、账本恰好没对上"的回合也不提示。
+     *
+     * 「读失败」仍然必须可见（那是真故障），上面那条断言保留。
+     */
+    if (nf.display !== 'none') {
+      problems.push(`账本无记录时应隐藏本轮积分（不是我们的模型就不显示），实际 display=${nf.display} text=${String(nf.text).slice(0, 40)}`);
     }
     if (fr.display === 'none' || fr.marker !== '0' || !/免费/.test(fr.text || '')) {
       problems.push(`「本轮免费」被误判成未读到：marker=${fr.marker} text=${fr.text}`);

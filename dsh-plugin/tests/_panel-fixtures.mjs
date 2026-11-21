@@ -168,17 +168,32 @@ export const FIXTURES = {
         { model: 'glm-5.3', calls: 12, promptTokens: 50000, completionTokens: 8000, credit: 0.48, creditCalls: 10 },
       ],
       // 趋势图数据（离线模式下也要有，否则"用量页必须渲染 SVG"的断言会失败）
-      days: [
-        { key: '2026-09-28', calls: 3, promptTokens: 12000, completionTokens: 3000, credit: 0.08, searches: 2, searchFailed: 0 },
-        { key: '2026-09-29', calls: 5, promptTokens: 21000, completionTokens: 5200, credit: 0.14 },
-        { key: '2026-09-30', calls: 4, promptTokens: 18000, completionTokens: 4100, credit: 0.1 },
-        { key: '2026-10-01', calls: 7, promptTokens: 32000, completionTokens: 7600, credit: 0.22 },
-        { key: '2026-10-02', calls: 6, promptTokens: 27000, completionTokens: 6300, credit: 0.19 },
-        { key: '2026-10-03', calls: 8, promptTokens: 41000, completionTokens: 9800, credit: 0.31 },
-        { key: '2026-10-04', calls: 3, promptTokens: 15000, completionTokens: 4000, credit: 0.2 },
-      ],
+      /*
+       * 日桶按 FIXTURE_NOW **往前推**生成，不能写死日期。
+       *
+       * UsagePanel 的「7 天」是截至今天（页面里的 Date 被钉在 FIXTURE_NOW）
+       * 补一批日桶再塞数据；写死 2026-09-xx 会全部落在窗口外，
+       * 于是"合计/峰值/日均/活跃"都是 0 —— 上一版图表看着空就是这个原因。
+       */
+      days: (() => {
+        const shape = [
+          { calls: 3, promptTokens: 12000, completionTokens: 3000, credit: 0.08, searches: 2, searchFailed: 0 },
+          { calls: 5, promptTokens: 21000, completionTokens: 5200, credit: 0.14 },
+          { calls: 4, promptTokens: 18000, completionTokens: 4100, credit: 0.1 },
+          { calls: 7, promptTokens: 32000, completionTokens: 7600, credit: 0.22 },
+          { calls: 6, promptTokens: 27000, completionTokens: 6300, credit: 0.19 },
+          { calls: 8, promptTokens: 41000, completionTokens: 9800, credit: 0.31 },
+          { calls: 3, promptTokens: 15000, completionTokens: 4000, credit: 0.2 },
+        ];
+        const pad = (n) => String(n).padStart(2, "0");
+        return shape.map((row, i) => {
+          const d = new Date(now - (shape.length - 1 - i) * 86400000);
+          const key = d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate());
+          return { key, ...row };
+        });
+      })(),
       hours: [
-        { key: '2026-10-04T10', calls: 1, promptTokens: 4000, completionTokens: 900, credit: 0.03 },
+        { key: new Date(now).toISOString().slice(0, 13), calls: 1, promptTokens: 4000, completionTokens: 900, credit: 0.03 },
         { key: '2026-10-04T11', calls: 2, promptTokens: 9000, completionTokens: 2100, credit: 0.07 },
       ],
       failures: [

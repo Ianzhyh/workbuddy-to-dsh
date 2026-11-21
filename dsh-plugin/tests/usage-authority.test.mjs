@@ -59,16 +59,29 @@ test('④ 三条协议路径都接上了余额差值（chat / messages / respons
 
 test('⑤ 不是 WorkBuddy 的模型时不显示「本轮积分」', () => {
   const src = read('dsh-plugin/lib/client.js');
-  assert.match(src, /workbuddyModelIdCache/, '需要一个模型目录缓存来判断归属');
-  // 判据：本轮路由到的模型一个都不在我们的目录里 → 整条隐藏
-  assert.match(src, /routeIds\.length && !routeIds\.some\(/, 
-    '路由模型全部不在 WorkBuddy 目录时应隐藏本轮积分');
   /*
-   * 但"不知道"时不能隐藏：目录还没拉到（null）要按原行为继续尝试匹配，
-   * 否则首屏几秒会闪一下消失。
+   * 判据现在是"**账本里对不上这一轮**就不显示"。
+   *
+   * 第一版拿 /workbuddy/models 当白名单（routes 的模型全不在目录里就藏），
+   * 结果把正常回合也藏了：那个接口只在打开模型页时才拉，聊天页挂载时目录
+   * 还是空的 —— panel-render 的「每轮积分没有渲染」「一轮多次请求的回合
+   * 没有渲染积分」当场红。
    */
-  assert.match(src, /railModels && railModels\.length && turnUsage/,
-    '目录未知时不能隐藏（否则首屏会闪）');
+  assert.match(src, /if \(info\.reason !== 'read-failed'\) return null;/,
+    '账本里对不上这一轮时应隐藏（不是我们经手的轮次就别显示）');
+  /*
+   * 但"读接口失败"要照说 —— 那是真故障，静默会让人以为这一轮免费。
+   *
+   * 实现形态是「reason 不是 read-failed 就返回 null」，所以这里断它的反面：
+   * 只有 read-failed 这一种原因会继续往下渲染。
+   */
+  assert.match(src, /info\.reason !== 'read-failed'\) return null;/,
+    '读接口失败时仍要显示「未读到」（不能把真故障静默掉）');
+  /*
+   * 不能再有"模型目录白名单"那套：它会把正常回合误藏。
+   */
+  assert.doesNotMatch(src, /workbuddyModelIdCache/,
+    '不应再用模型目录白名单判断归属（会误藏正常回合）');
 });
 
 test('⑥ 余额差值的显示必须标 ≈，不能冒充精确值', () => {
@@ -82,16 +95,24 @@ test('⑥ 余额差值的显示必须标 ≈，不能冒充精确值', () => {
 
 test('④「今日消耗」取当天日桶，不是 7 天合计', () => {
   const src = read('dsh-plugin/lib/client.js');
-  const block = src.slice(src.indexOf('const usagePage = () =>'), src.indexOf('const accountPage = () =>'));
-  assert.match(block, /localDayKey\(new Date\(\)\)/, '今日要按本地日期取桶');
-  assert.match(block, /days\.find\(\(d\) => d && d\.day === key\)/, '在 days 里找当天那条');
   /*
-   * 今日消耗必须来自 `todayCredit`（当天的桶），不能来自 `totalCredit`（窗口合计）。
-   * 判据直接看渲染那一行，别用跨段落的正则 —— 注释里也会提到 total.credit，
-   * 那种"匹配到注释"的假失败会让人去改根本没错的代码。
+   * 右栏「用量」现在**迁移**了设置页的 UsagePanel，不再自己算一套。
+   *
+   * 所以断言从"右栏怎么取今天的桶"改成"右栏没有另起一套口径" ——
+   * 今天的口径由 UsagePanel 负责（它按页面日期补日桶），右栏不该重复实现。
    */
-  assert.match(block, /h\('b', null, '-' \+ num\(todayCredit\)\)/,
-    '「今日消耗」必须渲染 todayCredit（当天的桶）');
-  assert.doesNotMatch(block, /今日消耗'\)[\s\S]{0,80}num\(totalCredit\)/,
-    '「今日消耗」不能用 totalCredit（那是 7 天合计）');
+  const railUsage = src.slice(src.indexOf('const usagePage = () =>'), src.indexOf('const accountPage = () =>'));
+  assert.match(railUsage, /h\(UsagePanel, \{\}\)/,
+    '右栏用量应直接渲染设置页的 UsagePanel（迁移，不是复制）');
+  assert.doesNotMatch(railUsage, /totalCredit/,
+    '右栏不该自己算"今日消耗"（那是设置页组件的职责，重算必然口径漂移）');
+  /*
+   * 设置页那份必须仍然是"当天日桶"，不能是窗口合计 —— 那是本条断言的真正含义。
+   *
+   * UsagePanel 的做法：把上游返回的日数据按 day 建成 Map，再从**今天**倒推
+   * 逐天取（取不到就补一个空桶）。所以判据是这两步，不是某个具体写法。
+   */
+  assert.match(src, /localDayKey\(date\)/, '今日要按本地日期取桶');
+  assert.match(src, /byKey\.get\(key\)/, '按当天日期键从日数据里取值');
+  assert.match(src, /const byKey = new Map\(source\.map/, '日数据要先按 day 建索引');
 });

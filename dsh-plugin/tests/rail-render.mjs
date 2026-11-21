@@ -1124,15 +1124,34 @@ try {
   console.log('用量页渲染错误：', pageErrs);
   const usageProbe = await page.cdp.evaluate(`JSON.stringify((() => {
     const rail = document.querySelector('[data-workbuddy-rail]');
-    const card = [...rail.querySelectorAll('.wb-card')].find((c) => /用量/.test(c.textContent));
+    const card = [...rail.querySelectorAll('.wb-card')].find((c) => /用量统计/.test(c.textContent));
+    const text = card ? card.innerText.replace(/\\s+/g, " ").trim() : "";
     return {
       hasCard: Boolean(card),
-      text: card ? card.innerText.replace(/\\s+/g, ' ').trim() : '',
-      stats: card ? [...card.querySelectorAll('.wb-stat')].map((s) => {
-        const b = s.querySelector('b');
-        const label = s.querySelector('span');
-        return { value: b ? b.textContent.trim() : '', label: label ? label.textContent.trim() : '' };
-      }) : [],
+      text,
+      /* 时间范围切换（24 小时 / 7 天 / 30 天）—— 自造版没有，这是迁移的核心理由之一 */
+      hasRangeSwitch: /24 小时/.test(text) && /7 天/.test(text) && /30 天/.test(text),
+      /* 刷新 / 导出 CSV / 清空账本：设置页的三个动作，一个都不许少 */
+      hasRefresh: /刷新/.test(text),
+      hasExport: /导出 CSV/.test(text),
+      hasClear: /清空账本/.test(text),
+      /* 设置页的 6 个 KPI 文案 */
+      hasKpiCalls: /模型调用/.test(text),
+      hasKpiTokens: /Tokens/.test(text),
+      hasKpiCredit: /消耗积分/.test(text),
+      hasKpiSuccess: /成功率/.test(text),
+      hasKpiCache: /缓存命中率/.test(text),
+      hasKpiLatency: /平均耗时/.test(text),
+      /* 图表真的渲染出来了（svg），不是几个色块 */
+      chartSvg: card ? card.querySelectorAll("svg").length : 0,
+      /* 卡片式设计：UsagePanel 自己就是一叠 Card，右栏不该再套一层 */
+      cardCount: (() => {
+        /* card 自身就是 .wb-card，querySelectorAll 不含自身 —— 从父级数 */
+        const scope = card && card.parentElement;
+        return scope ? scope.querySelectorAll(".wb-card").length : 0;
+      })(),
+      /* 若右栏又套了一层 Card，卡片就会嵌在卡片里 */
+      nestedCard: card ? Boolean(card.querySelector(".wb-card")) : false,
     };
   })())`);
   const usage = JSON.parse(usageProbe);
@@ -1141,19 +1160,31 @@ try {
   await resize(340, 900);
   await shot('rail-usage.png');
   if (!usage.hasCard) problems.push('右栏「用量」页没有渲染出用量卡片');
-  if (!usage.stats.length) problems.push('用量页没有任何读数（.wb-stat 为空）');
-  if (!/剩余积分|近 7 天/.test(usage.text)) {
-    problems.push(`用量页缺少关键读数：${usage.text.slice(0, 160)}`);
+  /*
+   * ── 迁移语义：设置页的 UsagePanel 有什么，右栏就要有什么 ──
+   *
+   * 用户要求原话：「设置里面页面不能迁移吗」。所以这里断的是**同一个组件**
+   * 的能力是否都在：时间范围切换、三个动作、六个 KPI、真实图表、卡片式设计。
+   * 上一版自造的简化面板就是在这几条上全灭（没有时间切换、图表是红块）。
+   */
+  if (!usage.hasRangeSwitch) problems.push('用量页缺少时间范围切换（24 小时 / 7 天 / 30 天）—— 应迁移设置页组件');
+  if (!usage.hasRefresh) problems.push('用量页缺少「刷新」');
+  if (!usage.hasExport) problems.push('用量页缺少「导出 CSV」（设置页有，右栏也要有）');
+  if (!usage.hasClear) problems.push('用量页缺少「清空账本」');
+  for (const [flag, label] of [
+    ['hasKpiCalls', '模型调用'], ['hasKpiTokens', 'Tokens'], ['hasKpiCredit', '消耗积分'],
+    ['hasKpiSuccess', '成功率'], ['hasKpiCache', '缓存命中率'], ['hasKpiLatency', '平均耗时'],
+  ]) {
+    if (!usage[flag]) problems.push(`用量页缺少 KPI「${label}」（应与设置页一样丰富）`);
   }
-  // 夹具的 7 天消耗是 18：不能显示成别的数（说明取错字段或自己算了）
-  const weekStat = usage.stats.find((s) => /近 7 天消耗/.test(s.label)) || (usage.text.match(/近 7 天消耗 ([0-9.]+)/) || []);
-  if (weekStat) {
-    const shown = Array.isArray(weekStat) ? weekStat[1] : weekStat.value;
-    // 夹具 total.credit = 1.24（见 _panel-fixtures 的 usage.total）
-    if (String(shown).replace(/[^0-9.]/g, '') !== '1.24') {
-      problems.push(`用量页「近 7 天消耗」应为 1.24（来自接口 total.credit），实际 ${JSON.stringify(shown)}`);
-    }
-  }
+  if (usage.chartSvg < 1) problems.push('用量页没有渲染图表（svg）—— 用户明确问过「图表呢」');
+  if (usage.nestedCard) problems.push('用量页出现卡片嵌套（右栏不该再套一层 Card，UsagePanel 自己就是一叠卡片）');
+  if (usage.cardCount < 1) problems.push('用量页没有卡片式设计（应是 UsagePanel 自带的多张卡片）');
+  /*
+   * 「今日消耗」不能出现负号：账本 credit 本身是正数，再拼 '-' 会变成
+   * -343.76 那种像"余额倒扣"的数字（用户截图）。
+   */
+  if (/-\\d/.test(usage.text)) problems.push(`用量页出现负数读数：${usage.text.slice(0, 160)}`);
 
   /*
    * B2：签到已签完 → 不该有常驻条，但卡片里要留一个写明原因的禁用按钮。
