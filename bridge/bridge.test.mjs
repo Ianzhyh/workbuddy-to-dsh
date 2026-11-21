@@ -2092,12 +2092,21 @@ test('目录：上游 401 时必须刷新令牌后重试（不能把目录缩成
       res.writeHead(200, { 'content-type': 'application/json' });
       return res.end(JSON.stringify({ code: 0, data: { accessToken: 'fresh-token', refreshToken: 'rotated', expiresIn: 3600, refreshExpiresIn: 86400 } }));
     }
+    const tokenOk = /fresh-token/.test(String(req.headers.authorization || ''));
+    if (!tokenOk) {
+      /*
+       * **所有**目录端点都必须回 401（不只是 `/v2/enterprises/personal/models`）。
+       *
+       * 原来的 stub 让其它目录路径回 `200 {models:[]}`，于是这条用例的结果取决于
+       * `catalogPathsFor()` 的顺序与 `merged.size === 0` 这个刷新前置条件：
+       * 只要有别的路径先返回了"成功"，401 分支就进不去，`refreshed` 恒为 0 ——
+       * 表现就是**偶发**失败（`release:check` 串跑多个套件时遇到过）。
+       * 真实的令牌过期本来就会让所有端点一起 401，这样才与现场一致。
+       */
+      res.writeHead(401, { 'content-type': 'application/json' });
+      return res.end(JSON.stringify({ code: 401, msg: 'token expired' }));
+    }
     if (path === '/v2/enterprises/personal/models') {
-      const tokenOk = /fresh-token/.test(String(req.headers.authorization || ''));
-      if (!tokenOk) {
-        res.writeHead(401, { 'content-type': 'application/json' });
-        return res.end(JSON.stringify({ code: 401, msg: 'token expired' }));
-      }
       res.writeHead(200, { 'content-type': 'application/json' });
       return res.end(JSON.stringify({
         code: 0,
