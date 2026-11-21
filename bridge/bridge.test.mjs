@@ -7038,30 +7038,44 @@ test('桥：连接池排队超过上限时按超时失败，不能无限挂着',
     { auth: READABLE_FAKE_AUTH },
   );
   try {
-    const ac = new AbortController();
     const payload = JSON.stringify({
       model: 'queue-model',
       stream: false,
       messages: [{ role: 'system', content: 'You are a helpful assistant.' }, { role: 'user', content: 'hi' }],
     });
-    const first = fetch(bridge.baseUrl + '/v1/chat/completions', {
-      method: 'POST',
-      headers: { ...auth, 'content-type': 'application/json' },
-      body: payload,
-      signal: ac.signal,
-    }).catch(() => null);
+    /*
+     * ## 两条请求都必须走 `node:http` 独立 agent，不能用 fetch
+     *
+     * 这条用例要验的是「**桥**的连接池排队超时」（WORKBUDDY_MAX_SOCKETS=1）。
+     * 但 `fetch` 走 undici 自己的连接池：第一条占住 per-origin 连接后，第二条会
+     * 先在**客户端**排队 —— CI 上（2 核）这一步就能耗掉几秒，最后 undici 自己抛
+     * `fetch failed`（error 为空、栈在 undici 内部），测试拿到的是客户端异常，
+     * 而不是桥的 504。
+     *
+     * 实测：CI 上稳定复现 `not ok 287`，本机（快）几乎不出现 —— 典型的
+     * 「只有慢机器才暴露的**测试缺陷**」，不是桥的行为问题。
+     *
+     * 改用 `agentRequest`（文件里已有的原始 http 助手）+ 每请求独立 agent：
+     * 连接池约束只剩**桥这一侧**，测的才是我们要测的东西。
+     */
+    const firstAgent = new HttpAgent({ keepAlive: false, maxSockets: 1 });
+    const secondAgent = new HttpAgent({ keepAlive: false, maxSockets: 1 });
+    const port = Number(new URL(bridge.baseUrl).port);
+    let firstError = null;
+    const first = agentRequest(firstAgent, port, '/v1/chat/completions', { body: payload })
+      .catch((error) => { firstError = error; return null; });
     await new Promise((r) => setTimeout(r, 200)); // 让第一条占住唯一 socket
-    const second = await fetch(bridge.baseUrl + '/v1/chat/completions', {
-      method: 'POST',
-      headers: { ...auth, 'content-type': 'application/json' },
-      body: payload,
-      signal: AbortSignal.timeout(5000),
-    });
-    assert.equal(second.status, 504);
-    const body = await second.json();
-    assert.match(body.error.message, /socket queue timeout/i);
-    ac.abort();
+    const second = await agentRequest(secondAgent, port, '/v1/chat/completions', { body: payload });
+    assert.equal(second.status, 504,
+      `排队超时应回 504，实际 ${second.status}：${String(second.body).slice(0, 200)}`);
+    assert.match(second.body, /socket queue timeout/i,
+      `响应体要说明是排队超时，实际：${String(second.body).slice(0, 300)}`);
+    firstAgent.destroy();
+    secondAgent.destroy();
     await first;
+    // 第一条最后被 socket 关闭带走时可能报 ECONNRESET —— 那是预期内的收尾，不是缺陷
+    assert.ok(firstError === null || /socket|hang|ECONNRESET/i.test(String(firstError?.message || firstError)),
+      `第一条不该以无关错误收场：${firstError?.message || firstError}`);
   } finally {
     await bridge.stop();
     try { await stub.close(); } catch { /* 忽略 */ }
