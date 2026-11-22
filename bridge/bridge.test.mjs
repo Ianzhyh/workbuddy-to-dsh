@@ -3136,7 +3136,18 @@ test('桥：6004 账号用量上限 —— 不等待重试、按 insufficient_qu
     assert.ok((body.error?.message || '').includes(resetStamp), '重置时刻不能被吞掉');
     assert.equal(stub.seen.filter((s) => JSON.parse(s.body || '{}').model).length, 1,
       '6004 不得触发桥侧等待重发');
-    assert.ok(elapsed < 3000, `6004 不应等待 WORKBUDDY_429_WAITS（实际 ${elapsed}ms）`);
+    /*
+     * 「没等 WORKBUDDY_429_WAITS」的时间证明。
+     *
+     * 真正要排除的是**等满 5 秒的退避**（WORKBUDDY_429_WAITS: '5000'），
+     * 所以阈值必须贴着 5000 取，不能取 3000：
+     *   实测（2026-11-21，机器被 release:check 其它套件压着）
+     *   elapsed = 4116ms 直接红了 —— 而 4116ms 恰好说明**没有**等 5000ms，
+     *   是断言本身在慢机器上误报。
+     * `stub.seen.length === 1`（上一行）才是"没重发"的硬证据；
+     * 这条只兜"桥内部自己 await 了退避"那种情况，留 1.2 秒余量给调度抖动。
+     */
+    assert.ok(elapsed < 4200, `6004 不应等待 WORKBUDDY_429_WAITS=5000ms（实际 ${elapsed}ms）`);
 
     await new Promise((r) => setTimeout(r, 100)); // 等账本落盘
     const ledger = readFileSync(join(bridge.dir, 'usage.jsonl'), 'utf8')

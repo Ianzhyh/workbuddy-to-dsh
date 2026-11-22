@@ -2735,6 +2735,9 @@ body.dark .wb-root,
       '？（将中断正在进行的请求）': '? (In-flight requests will be interrupted)',
       '官方目录外模型，需在设置页开启「显示官方目录外的模型」':
         'Unofficial model; enable "Show models outside the official catalog" in Settings',
+      '官方 GUI 默认不列出；仍可勾选':
+        'Not in the official GUI list; you can still check it',
+      '未列出': 'Not listed',
       '输入合法正整数 tokens（或留空恢复自动）':
         'Enter a positive integer of tokens (or leave empty for Auto)',
     };
@@ -8137,8 +8140,12 @@ body.dark .wb-root,
         return visibility.includes(id) && (model?.official !== false || includeUnofficial);
       };
       const toggleVisible = (id) => {
-        const model = models.find((m) => m.id === id);
-        if (model?.official === false && !includeUnofficial) return;
+        /*
+         * 「官方未上架」不再拦截勾选 —— 理由同右栏：officialPicker 只有 16 个，
+         * 而 /v3/config 全量 58 个，fast-model / hy4-preview-* 这类档位模型
+         * 被误标成"目录外"而禁勾。默认可见性归 isVisible()；用户手动勾上
+         * 灰度/档位模型是他的选择，能不能用最终由上游决定。
+         */
         setVisibility((prev) => {
           const base = Array.isArray(prev)
             ? prev
@@ -8896,15 +8903,13 @@ const probeOne = async (id) => {
                 h('td', null, h('input', {
                   type: 'checkbox',
                   checked: isVisible(m.id),
-                  disabled: denied.includes(m.id) || (m.official === false && !includeUnofficial),
+                  disabled: denied.includes(m.id),
                   onChange: () => toggleVisible(m.id),
                   // 窄卡片布局会隐藏表头，复选框必须自己说清是哪个模型。
                   'aria-label': t(isVisible(m.id) ? '隐藏' : '显示') + ' ' + m.id,
                   title: denied.includes(m.id)
                     ? '配置里被 modelDeny 排除，勾选不会让它出现在 dsh 选择器里'
-                    : (m.official === false && !includeUnofficial
-                      ? '先开启「显示官方目录外的模型」'
-                      : (isVisible(m.id) ? '已显示在 dsh 选择器' : '已隐藏（保存后 dsh 选择器不再出现）')),
+                    : (isVisible(m.id) ? '已显示在 dsh 选择器' : '已隐藏（保存后 dsh 选择器不再出现）'),
                 })),
                 h('td', null, m.id + (m.id === sampleModel ? ' ★' : '')),
                 h('td', null, m.name ? h(Raw, { text: String(m.name) }) : '',
@@ -11339,7 +11344,11 @@ const probeOne = async (id) => {
         return list.includes(m.id) && (m.official !== false || prefs?.includeUnofficial === true);
       };
       const toggleShown = (m) => {
-        if (m.official === false && prefs?.includeUnofficial !== true) return;
+        /*
+         * 「官方目录外」不再拦截勾选 —— 理由见渲染处（unofficialDisabled）的长注释：
+         * 那 37 个"目录外"模型其实来自官方自己的 /v3/config，只是 GUI 默认不铺。
+         * 「默认不显示」归 isShown()，勾不勾交给用户。
+         */
         const base = draftVisible !== null
           ? draftVisible
           : models.filter((x) => isShown(x)).map((x) => x.id);
@@ -11782,14 +11791,31 @@ const probeOne = async (id) => {
                 shownList.length
                   ? shownList.map((m) => {
                     const shown = isShown(m);
-                    const unofficialDisabled = m.official === false && prefs?.includeUnofficial !== true;
+                    /*
+                     * 「官方目录外」**不再禁用勾选**。
+                     *
+                     * 原实现：`official === false` 时把 checkbox 禁掉，理由是
+                     * "这类模型官方 GUI 不列，默认也别显示"。但用户实测（1.24.4）：
+                     * 右栏 53 个模型里 37 个全是灰的 —— 那 37 个（fast-model /
+                     * balanced-model / hy4-preview-* 等）**同样来自 /v3/config**
+                     * （官方目录端点，productModels=58），只是不在官方 GUI 的
+                     * picker 名单（16 个）里。它们不是第三方模型，是官方自己的
+                     * 档位名与灰度，只是 GUI 默认不铺出来。
+                     *
+                     * 「默认不显示」与「禁止手动勾选」是两件事：
+                     *   · 默认可见性由 `isShown()` 管（official===false 默认不勾）；
+                     *   · 用户想手动勾上某个灰度/档位模型，是他的选择 ——
+                     *     能不能用最终由上游决定（发请求时才知道）。
+                     * 设置页的「显示官方目录外的模型」开关仍管默认可见性，不受影响。
+                     */
+                    const unofficialDisabled = false;
                     const mLimit = limitByModel.get(m.id);
                     const limitTone = mLimit ? (mLimit.kind === 'credits' || mLimit.kind === 'account_restricted' ? 'bad' : 'warn') : '';
                     return h('label', {
                       className: 'wb-rail-item' + (shown ? ' on' : ''),
                       key: m.id,
                       title: String(m.name || m.id) + ' · ' + m.id
-                        + (unofficialDisabled ? ' · ' + t('官方目录外模型，需在设置页开启「显示官方目录外的模型」') : ''),
+                        + (m.official === false ? ' · ' + t('官方 GUI 默认不列出；仍可勾选') : ''),
                     },
                       h('input', {
                         type: 'checkbox',
@@ -11807,10 +11833,20 @@ const probeOne = async (id) => {
                             h(Raw, {
                               text: m.id + (roomy && m.contextWindow ? ' · ' + fmtContextLength(m.contextWindow) : ''),
                             }))),
-                      !narrow && (mLimit || m.free || current?.model === m.id)
+                      !narrow && (mLimit || m.free || current?.model === m.id || m.official === false)
                         ? h('span', { className: 'wb-rail-item-side' },
                           mLimit ? h(Pill, { tone: limitTone, text: t('受限') }) : null,
                           m.free ? h(Pill, { tone: 'ok', text: t('免费') }) : null,
+                          /*
+                           * 「官方 GUI 默认不列出」的模型给一个**可见的**徽标：
+                           * 悬停 title 只有鼠标停上去才看得到，之前那 37 个档位
+                           * /灰度模型既禁了勾又没有任何可见标记，用户只能看到
+                           * 一片灰（用户原话：「不让选你给个提示说明原因啊」）。
+                           * 现在不再禁勾，但保留徽标说明它的身份。
+                           */
+                          m.official === false && !mLimit && !m.free && current?.model !== m.id
+                            ? h(Pill, { tone: '', text: t('未列出') })
+                            : null,
                           !mLimit && !m.free && current?.model === m.id ? h(Pill, { tone: '', text: t('默认') }) : null)
                         : null);
                   })
