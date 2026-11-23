@@ -5510,7 +5510,7 @@ async function handleOpenAIImagesGenerations(req, res) {
         ok: false, status: 413, code: 'IMAGE_PAYLOAD_TOO_LARGE',
         error: `image request body exceeds ${MAX_BODY_BYTES} bytes`,
       });
-      return rejectTooLarge(req, res, 'openai', `image request body too large (limit ${MAX_BODY_BYTES} bytes)`,
+      return rejectTooLarge(req, res, 'openai', oversizeMessage(e, 'image'),
         'IMAGE_PAYLOAD_TOO_LARGE');
     }
     if (isClientAbortError(e)) return; // 客户端已断开：不回响应、不记失败
@@ -12887,8 +12887,22 @@ const readBody = (req, limit = MAX_BODY_BYTES) => new Promise((resolve, reject) 
     size += c.length;
     if (size > limit) {
       done = true;
-      const err = /** @type {Error & { code?: string }} */ (new Error(`request body exceeds ${limit} bytes`));
+      const err = /** @type {Error & { code?: string, actualBytes?: number, limitBytes?: number }} */ (
+        new Error(`request body exceeds ${limit} bytes`)
+      );
       err.code = 'BODY_TOO_LARGE';
+      /*
+       * 把**已经读到的字节数**带出去。
+       *
+       * 用户在客户端只看到「limit 33554432 bytes」，无从判断自己是 33MB 还是
+       * 300MB，也就不知道该不该去调 WORKBUDDY_MAX_BODY_BYTES。带上实际值后，
+       * 413 能直接说「你的请求至少 N MB，上限 M MB」——可行动的信息。
+       *
+       * 注意这是**下界**：超限那一刻就停了，真实体积只会更大（所以我们写
+       * "at least"）。停在这里也正是内存上限的意义。
+       */
+      err.actualBytes = size;
+      err.limitBytes = limit;
       // 先停住继续灌数据，再 reject —— 顺序反过来的话，pause 之前可能又塞进来
       // 几个 chunk（Node 的 data 事件是同步派发的），白占内存。
       // 注意这里**只是暂停**：真正丢弃剩余字节要等 413 写完之后（见调用方）。
@@ -12920,6 +12934,100 @@ const json = (res, status, obj, extraHeaders = {}) => {
   res.writeHead(status, { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body), ...extraHeaders, ...SECURITY_HEADERS });
   res.end(body);
 };
+
+/**
+ * 把体积说成人话（MB / KB）。
+ *
+ * 413 原文里给的是字节数（33554432）——用户得自己换算才知道是 32MB。
+ * 换算一次、两边都带上，读起来才不费劲。
+ */
+function fmtBytes(n) {
+  const v = Number(n);
+  if (!Number.isFinite(v) || v < 0) return '?';
+  if (v >= 1024 * 1024) return `${(v / (1024 * 1024)).toFixed(1)} MB`;
+  if (v >= 1024) return `${Math.round(v / 1024)} KB`;
+  return `${v} B`;
+}
+
+/**
+ * 超限时给用户的**可执行**建议。
+ *
+ * 三档递进，对应三种真实场景：
+ *   1. 差得不多（≤2 倍）→ 调环境变量最省事；
+ *   2. 差很多 → 更可能是上下文/工具输出失控，先看是不是重复发送；
+ *   3. 无论如何都给调大的具体写法（不要只说"raise ..."，得给命令行）。
+ */
+function oversizeHint(actualBytes, limitBytes) {
+  const ratio = Number.isFinite(actualBytes) && limitBytes > 0 ? actualBytes / limitBytes : 1;
+  const parts = [];
+  if (ratio > 2) {
+    parts.push('体积远超上限，通常不是"差点不够"，而是上下文里有超长工具输出/日志被反复带入；'
+      + '先清一次会话或减少附带内容往往比调大上限更有效。');
+  }
+  parts.push(`确属合法长上下文时：设 WORKBUDDY_MAX_BODY_BYTES=${Math.max(
+    limitBytes * 2,
+    Math.ceil((Number(actualBytes) || limitBytes) * 1.5),
+  )} 后重启桥。`);
+  return parts.join('');
+}
+
+/**
+ * 从 `readBody` 抛出的超限错误生成**可行动**的 413 文案。
+ *
+ * 用户原文反馈：
+ *   `workbuddy-bridge: request body too large (limit 33554432 bytes);
+ *    raise WORKBUDDY_MAX_BODY_BYTES if this is a legitimate multi-modal request`
+ *
+ * ## 为什么文案里**必须**出现 "context window"
+ *
+ * dsh 的自动压缩（`dsh-compaction-basic`）只在收到
+ * `code === 'CONTEXT_WINDOW_EXCEEDED'` 时才触发「压缩后重试」：
+ *
+ *     ctx.on('agent/request-error', ...) {
+ *       if (failure.code !== CONTEXT_WINDOW_EXCEEDED_CODE) return next();
+ *       ...compactIfNeeded(agent, 'context-overflow', ...)
+ *     }
+ *
+ * 而这个 code 由 `dsh-llm-deepseek` 从**错误文案**里正则匹配得出：
+ *   · `context[ _-](length|window)[ _-](exceeded|overflow|limit-exceeded)`
+ *   · `(request|prompt|input|messages?) too (large|long) for ... context`
+ *   · `(input|prompt|request) ... exceed ... context (length|window)`
+ * 三条都要求出现 "context" 这个词。
+ *
+ * 旧文案只说 "request body too large"，一个 context 都没有 → 被判成
+ * `INVALID_REQUEST`（413 的兜底分支）→ **不触发压缩** → 整轮直接失败。
+ * 实测（本机）：prompt 47.5 万 tokens、压缩阈值只有 10.6 万，本该早就压缩，
+ * 却因为文案对不上而从未触发。
+ *
+ * 所以这里主动写出 "exceeds the model context window" —— 既让 dsh 能识别并
+ * 压缩重试，也是**更准确的描述**：这个请求确实是因为上下文太长而超限。
+ *
+ * @param {Error & { actualBytes?: number, limitBytes?: number }} err
+ * @param {string} [what] 场景名（如 'web_search'），用于区分非对话端点
+ */
+function oversizeMessage(err, what = '') {
+  const limit = Number(err?.limitBytes) || MAX_BODY_BYTES;
+  const actual = Number(err?.actualBytes) || 0;
+  /*
+   * "at least" 是必须的：超限那一刻就停止累计了，真实体积只会更大。
+   * 写成精确值会让人以为量准了，反而误导。
+   */
+  /*
+   * 文案要同时满足两类读者：
+   *   ① **dsh 的溢出识别**：必须出现 "context window" + exceed 类措辞，
+   *      否则被判成 INVALID_REQUEST、不触发压缩（见上面的因果链）；
+   *   ② **人和既有契约**：413 要说明"太大"（`/too large/i`，bridge-input-guard
+   *      用例也钉着这条），否则别处按词判断的代码/人都会懵。
+   * 所以两句都写：先"too large"给人，再"exceeds the model context window"给机器。
+   */
+  const sizePart = actual > 0
+    ? `request body too large: at least ${fmtBytes(actual)} (bridge limit ${fmtBytes(limit)})`
+    : `request body too large (bridge limit ${fmtBytes(limit)})`;
+  const contextHint = what
+    ? ''
+    : ' — the request exceeds the model context window; dsh can compact and retry';
+  return `workbuddy-bridge: ${what ? `${what}: ` : ''}${sizePart}${contextHint}. ${oversizeHint(actual, limit)}`;
+}
 
 /**
  * 统一的「请求体超限」出口。
@@ -12972,7 +13080,7 @@ async function readJsonBody(req, res, protocol = 'openai') {
     text = await readBody(req);
   } catch (e) {
     if (e?.code === 'BODY_TOO_LARGE') {
-      rejectTooLarge(req, res, protocol);
+      rejectTooLarge(req, res, protocol, oversizeMessage(e));
       return { ok: false };
     }
     // 客户端半路断开：socket 没了，写响应没有意义
@@ -14338,7 +14446,7 @@ async function handleRequest(req, res) {
         raw = await readBody(req, 64 * 1024);
       } catch (e) {
         if (e.code === 'BODY_TOO_LARGE') {
-          return rejectTooLarge(req, res, 'openai', 'web_search body too large');
+          return rejectTooLarge(req, res, 'openai', oversizeMessage(e, 'web_search'));
         }
         throw e;
       }
@@ -14443,9 +14551,7 @@ async function handleRequest(req, res) {
            * 没有任何东西被累计进内存，D2 的内存上限目标依然成立，而契约
            * （"明确的 413 JSON"）才真的兑现了。
            */
-          return rejectTooLarge(req, res, 'openai',
-            `workbuddy-bridge: request body too large (limit ${MAX_BODY_BYTES} bytes);`
-              + ' raise WORKBUDDY_MAX_BODY_BYTES if this is a legitimate multi-modal request');
+          return rejectTooLarge(req, res, 'openai', oversizeMessage(e));
         }
         throw e;
       }
@@ -15019,7 +15125,7 @@ async function handleRequest(req, res) {
         raw = await readBody(req);
       } catch (e) {
         if (e.code === 'BODY_TOO_LARGE') {
-          return rejectTooLarge(req, res, 'anthropic');
+          return rejectTooLarge(req, res, 'anthropic', oversizeMessage(e));
         }
         throw e;
       }
@@ -15057,7 +15163,7 @@ async function handleRequest(req, res) {
       } catch (e) {
         if (e.code === 'BODY_TOO_LARGE') {
           // 同 /v1/web_search：先把剩余字节读掉，保证 413 后连接仍可复用。
-          return rejectTooLarge(req, res, 'anthropic');
+          return rejectTooLarge(req, res, 'anthropic', oversizeMessage(e));
         }
         throw e;
       }
@@ -15381,7 +15487,7 @@ async function handleRequest(req, res) {
         raw = await readBody(req);
       } catch (e) {
         if (e.code === 'BODY_TOO_LARGE') {
-          return rejectTooLarge(req, res, 'openai');
+          return rejectTooLarge(req, res, 'openai', oversizeMessage(e));
         }
         throw e;
       }
