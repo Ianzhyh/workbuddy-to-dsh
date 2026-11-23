@@ -683,10 +683,26 @@ test('安全：file 只能是存档目录里的纯文件名（相对路径/绝�
       '.',
     ];
     for (const file of attacks) {
-      const res = await fetch(`${bridge.baseUrl}/v1/accounts/restore`, {
-        method: 'POST', headers: auth,
-        body: JSON.stringify({ key: sub, file }), signal: AbortSignal.timeout(20_000),
-      });
+      /*
+       * 超时要与"没拒绝"分开报。
+       *
+       * 这里 timeout 也给到 20 秒，但在 `release:check` 串跑多个套件时，机器
+       * 被压满会让某次请求直接抛 TimeoutError —— 而 catch 之前 if 只看到
+       * `res.status !== 400`，报出来的却是「必须被拒绝」，把"机器太慢"
+       * 说成"安全漏洞"（实测踩过一次，单独跑 13/13 全过）。
+       * 现在把超时单独识别并给出可区分的消息。
+       */
+      let res;
+      try {
+        res = await fetch(`${bridge.baseUrl}/v1/accounts/restore`, {
+          method: 'POST', headers: auth,
+          body: JSON.stringify({ key: sub, file }), signal: AbortSignal.timeout(20_000),
+        });
+      } catch (e) {
+        throw new Error(`file=${JSON.stringify(file)} 的请求未完成（${e?.name || ''}: ${e?.message || e}）`
+          + ' —— 这通常意味着机器过载导致超时，而不是"没有被拒绝"。请单独重跑本文件确认。',
+        { cause: e });
+      }
       const body = await res.json();
       assert.equal(res.status, 400, `file=${JSON.stringify(file)} 必须被拒绝`);
       assert.equal(body.ok, false);

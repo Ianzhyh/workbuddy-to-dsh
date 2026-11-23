@@ -61,51 +61,30 @@ try {
   await waitFor(page.cdp, "document.querySelector('[data-workbuddy-rail]') !== null", 15000, 'rail');
   await sleep(900);
 
-  // ── ① 点「未列出」徽标 ──
-  const badge = await page.cdp.evaluate(`JSON.stringify((() => {
-    const rail = document.querySelector('[data-workbuddy-rail]');
-    const btn = rail.querySelector('.wb-rail-badge-btn');
-    if (!btn) return { error: '没有「未列出」徽标', badges: 0 };
-    const before = {
-      badges: rail.querySelectorAll('.wb-rail-badge-btn').length,
-      hintBlocks: rail.querySelectorAll('.wb-rail-unlisted-hint').length,
-      expanded: btn.getAttribute('aria-expanded'),
-      // 记下同行的 checkbox 状态：点徽标不该动它
-      checked: btn.closest('.wb-rail-item') ? btn.closest('.wb-rail-item').querySelector('input[type=checkbox]')?.checked : null,
-    };
-    btn.click();
-    return { before };
-  })())`);
-  const b1 = JSON.parse(badge);
-  if (b1.error) problems.push(b1.error);
-  else {
-    if (b1.before.badges < 1) problems.push('没有可点击的「未列出」徽标');
-    if (b1.before.expanded !== 'false') problems.push(`徽标初始 aria-expanded 应为 false，实际 ${b1.before.expanded}`);
-  }
-  await sleep(300);
-  const afterClick = JSON.parse(await page.cdp.evaluate(`JSON.stringify((() => {
-    const rail = document.querySelector('[data-workbuddy-rail]');
-    const hint = rail.querySelector('.wb-rail-unlisted-hint');
-    const btn = rail.querySelector('.wb-rail-badge-btn.on');
-    const cb = rail.querySelector('.wb-rail-badge-btn')?.closest('.wb-rail-item')?.querySelector('input[type=checkbox]');
+  // ── ① 点「未列出」徽标 → 出一个 toast（不重复提醒；详见 rail-unlisted-toast.mjs） ──
+  /*
+   * 这一段的详细断言（恰好一个 toast、浮层可见、aria、自动消失、不误勾选）
+   * 都在 `rail-unlisted-toast.mjs` 里。这里只做最小确认：徽标可点、
+   * 且**没有**行内说明块残留（那会与 toast 重复，用户明确要求不要）。
+   */
+  const badge = JSON.parse(await page.cdp.evaluate(`JSON.stringify((() => {
+    const rail = document.querySelector("[data-workbuddy-rail]");
+    const btn = rail.querySelector(".wb-rail-badge-btn");
     return {
-      hintShown: Boolean(hint),
-      hintText: hint ? hint.innerText.replace(/\\s+/g, ' ').trim() : '',
-      hintSentences: hint ? hint.querySelectorAll('p').length : 0,
-      hasDismiss: hint ? [...hint.querySelectorAll('button')].some((b) => /知道了/.test(b.textContent)) : false,
-      expandedNow: btn ? btn.getAttribute('aria-expanded') : null,
-      checkboxChecked: cb ? cb.checked : null,
+      badges: rail.querySelectorAll(".wb-rail-badge-btn").length,
+      inlineHints: rail.querySelectorAll(".wb-rail-unlisted-hint").length,
+      hasExpanded: btn ? btn.hasAttribute("aria-expanded") : null,
+      label: btn ? (btn.getAttribute("aria-label") || "") : "",
     };
   })())`));
-  console.log('点徽标后：', JSON.stringify(afterClick).slice(0, 260));
-  if (!afterClick.hintShown) problems.push('点「未列出」徽标没有出现任何说明（用户明确反馈过这条）');
-  if (afterClick.hintSentences < 3) problems.push(`说明应有 3 段（是什么/为什么不在名单/还能不能用），实际 ${afterClick.hintSentences}`);
-  if (!/官方/.test(afterClick.hintText)) problems.push(`说明内容不对：${afterClick.hintText.slice(0, 120)}`);
-  if (!afterClick.hasDismiss) problems.push('说明块缺少「知道了」收起按钮');
-  if (afterClick.expandedNow !== 'true') problems.push(`展开后 aria-expanded 应为 true，实际 ${afterClick.expandedNow}`);
-  if (b1.before.checked !== null && afterClick.checkboxChecked !== b1.before.checked) {
-    problems.push(`点徽标顺带改了勾选状态（${b1.before.checked} → ${afterClick.checkboxChecked}）—— 徽标必须在 label 外`);
+  console.log("徽标：", JSON.stringify(badge));
+  if (badge.badges < 1) problems.push("没有可点击的「未列出」徽标");
+  if (badge.inlineHints !== 0) {
+    problems.push(`仍有行内说明块（${badge.inlineHints} 个）—— 与 toast 重复，用户要求不要重复提醒`);
   }
+  /* 没有展开态了，就不该再挂 aria-expanded（否则读屏会念一个不存在的状态） */
+  if (badge.hasExpanded === true) problems.push("徽标仍有 aria-expanded，但已无展开态");
+  if (!/点击查看说明/.test(badge.label)) problems.push(`徽标 aria-label 应说明可点击，实际「${badge.label}」`);
 
   // ── ② 隐藏未列出 ──
   const beforeHide = JSON.parse(await page.cdp.evaluate(`JSON.stringify((() => {

@@ -1139,22 +1139,33 @@ body.dark .wb-root,
   border-color:var(--dsw-alias-brand-primary,light-dark(#6366f1,#8b93ff));
   border-style:solid;
 }
-/*
- * 「未列出」的展开说明块。
- *
- * 左边一条细竖线把它和模型行绑在一起（否则浮在列表里像另一条模型）。
- * 字号比正文小一档、行高松一点 —— 这段是要被**读完**的解释文字。
- */
-.wb-rail-unlisted-hint{
-  margin:2px 0 8px;padding:8px 10px;
-  border-left:2px solid var(--dsw-alias-brand-primary,light-dark(#6366f1,#8b93ff));
-  border-radius:0 8px 8px 0;
-  background:var(--dsw-alias-interactive-bg-hover,light-dark(#2631480f,#ffffff0d));
-  font-size:11.5px;line-height:1.6;
-  color:var(--dsw-alias-label-secondary,light-dark(#61666b,#cfd3d6));
-}
-.wb-rail-unlisted-hint p{margin:0 0 6px}
-.wb-rail-unlisted-hint p:last-of-type{margin-bottom:8px}
+  /*
+   * 「未列出」的浮层 toast（**唯一**的提示，不再有行内说明块）。
+   *
+   * 为什么必须是浮层而不是行内元素：模型列表有 max-height 且可滚动，
+   * 行内提示可能整个落在可视区外 —— 用户点了会觉得"什么都没发生"。
+   * 这条挂在 rail 根节点上，fixed 定位，滚到哪儿都看得见。
+   *
+   * 用 fixed 而不是 absolute：卡片内部有多层 overflow（列表、页面、body），
+   * absolute 会被最近的可滚动祖先裁掉，那正好又回到"看不见"的老问题。
+   */
+  .wb-rail-toast{
+    position:fixed;left:50%;bottom:24px;transform:translateX(-50%);
+    z-index:60;max-width:min(92vw,520px);
+    padding:10px 14px;border-radius:10px;cursor:pointer;
+    font-size:12px;line-height:1.55;
+    color:var(--dsw-alias-label-primary-foreground,light-dark(#ffffff,#0f1115));
+    background:var(--dsw-alias-label-primary,light-dark(#1f2126,#f2f3f5));
+    box-shadow:0 6px 24px light-dark(rgba(0,0,0,.22),rgba(0,0,0,.5));
+    animation:wb-rail-toast-in .18s var(--wb-ease) both;
+  }
+  @keyframes wb-rail-toast-in{
+    from{opacity:0;transform:translateX(-50%) translateY(6px)}
+    to{opacity:1;transform:translateX(-50%) translateY(0)}
+  }
+  @media (prefers-reduced-motion:reduce){
+    .wb-rail-toast{animation:none}
+  }
 .wb-rail-search-clear{appearance:none;display:inline-flex;align-items:center;justify-content:center;flex:none;width:22px;height:22px;margin-right:4px;border:0;border-radius:6px;background:transparent;color:var(--dsw-alias-label-tertiary,light-dark(#81858c,#adb2b8));font:inherit;font-size:15px;line-height:1;cursor:pointer;transition:background-color var(--wb-anim-fast),color var(--wb-anim-fast)}
 .wb-rail-search-clear:hover{background:var(--dsw-alias-interactive-bg-hover,light-dark(#2631480f,#ffffff14));color:var(--dsw-alias-label-primary,light-dark(#0f1115,#f9fafb))}
 .wb-rail-search-clear:focus-visible{outline:2px solid var(--dsw-alias-brand-primary,#6366f1);outline-offset:1px}
@@ -2810,17 +2821,13 @@ body.dark .wb-root,
       '隐藏未列出': 'Hide not-listed',
       '只列免费': 'Free only',
       '点击查看说明': 'Click for details',
-      '这个模型来自官方网关目录，但不在 WorkBuddy 官方模型选择器的默认名单里。':
-        'This model comes from the official gateway catalog, but it is not in the WorkBuddy '
-        + 'model picker\'s default list.',
-      '它通常是官方自己的档位名或灰度型号（例如「快速 / 均衡 / 极致」与 hy4-preview 系列），所以默认不铺出来；这不代表它不可用。':
-        'It is usually one of the official tier names or a preview model (e.g. Fast / Balanced / '
-        + 'Extreme, or the hy4-preview series), so it is simply not surfaced by default — '
-        + 'that does not mean it is unusable.',
-      '你可以照常勾选它。能不能真正调用取决于你的账号权益，最终由上游决定 —— 建议先勾上再发一条小请求验证。':
-        'You can still check it. Whether it actually works depends on your account entitlements and '
-        + 'is ultimately decided upstream — check it, then send a small request to verify.',
       '知道了': 'Got it',
+      '这个模型不在官方选择器的默认名单里（通常是官方自己的档位名或灰度型号），但仍可勾选；能否调用取决于你的账号权益。':
+        'This model is not in the official picker\'s default list (it is usually an official tier '
+        + 'name or preview model), but you can still check it; whether it works depends on your '
+        + 'account entitlements.',
+      '已收起说明。': 'Explanation dismissed.',
+      '点击关闭': 'Click to dismiss',
       '输入合法正整数 tokens（或留空恢复自动）':
         'Enter a positive integer of tokens (or leave empty for Auto)',
     };
@@ -11189,13 +11196,32 @@ const probeOne = async (id) => {
       const [hideUnlisted, setHideUnlisted] = useState(false);
       const [onlyFree, setOnlyFree] = useState(false);
       /*
-       * 点开「未列出」徽标时要展示说明的模型 id。
+       * 「未列出」徽标的提示 —— **只用 toast，不重复提醒**。
        *
-       * 用户反馈：「点击未列出怎么没有提示」——徽标原先只是一个 span，
-       * 既不可点也没有反馈。只靠 title 悬停不够：触屏/触控板没有 hover，
-       * 而"为什么未列出、还能不能用"这句话值得被完整读一遍。
+       * 用户先问「点击未列出怎么没有提示」，接着说「点未列出不应该给个 toast
+       * 提醒吗」，最后明确「不要重复提醒」：曾经同时做了"行内展开说明 + toast"，
+       * 同一件事说了两遍。
+       *
+       * 现在只留 toast，而且它必须是**浮层**：模型列表有 `max-height` 且可滚动，
+       * 行内元素（无论展开块还是内联提示）都可能落在可视区外 —— 那正是
+       * 第一次"点了没反应"的真正原因。
+       *
+       * `at` 只用于重放动画与"连点同一个徽标时重新计时"。
        */
-      const [unlistedHintFor, setUnlistedHintFor] = useState('');
+      const [unlistedToast, setUnlistedToast] = useState(null);
+      /*
+       * toast 自动消失。
+       *
+       * 依赖里放 `unlistedToast?.at` 而不是整个对象：连点两次"未列出"（同一个
+       * 徽标）会产生两个**内容相同**的对象，用对象做依赖时 React 认为变了、
+       * 计时器重置，行为上正是我们要的"重新计时"；但写成 `at` 更明确，
+       * 也避免把不必要的对象引用放进依赖数组。
+       */
+      useEffect(() => {
+        if (!unlistedToast) return undefined;
+        const timer = setTimeout(() => setUnlistedToast(null), 4200);
+        return () => clearTimeout(timer);
+      }, [unlistedToast?.at]);
       // 勾选清单的草稿：null = 还没动过（显示服务端值）；数组 = 用户改过
       const [draftVisible, setDraftVisible] = useState(null);
       /*
@@ -11437,14 +11463,28 @@ const probeOne = async (id) => {
 
       /** 勾选状态：与服务端同一套三种语义（跟随配置 / 全隐藏 / 白名单）。 */
       const isShown = (m) => {
+        /*
+         * ## 「官方未上架」不再参与**可勾选性**判断
+         *
+         * 这里原来每条分支都带 `(m.official !== false || prefs.includeUnofficial === true)`。
+         * 于是即使把 disabled 和 toggleShown 的拦截都去掉，勾选后 `draftVisible`
+         * 明明加进了这个 id，`isShown()` 仍然返回 false —— checkbox 看起来
+         * **完全没反应**（用户反馈：「现在也勾选不了啊，你这就完全不然我勾」）。
+         *
+         * 现在 `official === false` 只影响「**默认**可见性」：
+         *   · 未设置（list === null 且无 prefs.visible）时默认不勾 —— 保持原行为，
+         *     这样用户不必手动取消一大片灰度模型；
+         *   · 一旦用户显式勾选（list 里有它），就必须真的显示为已勾。
+         * 至于"能不能用"，最终由上游决定，不由这一层拦。
+         */
         const list = draftVisible;
         if (list === null) {
-          if (!prefs) return m.official !== false || prefs?.includeUnofficial === true;
+          if (!prefs) return m.official !== false;
           if (prefs.hideAll) return false;
-          if (!Array.isArray(prefs.visible)) return m.official !== false || prefs.includeUnofficial === true;
-          return prefs.visible.includes(m.id) && (m.official !== false || prefs.includeUnofficial === true);
+          if (!Array.isArray(prefs.visible)) return m.official !== false;
+          return prefs.visible.includes(m.id);
         }
-        return list.includes(m.id) && (m.official !== false || prefs?.includeUnofficial === true);
+        return list.includes(m.id);
       };
       const toggleShown = (m) => {
         /*
@@ -12015,38 +12055,32 @@ const probeOne = async (id) => {
                           m.official === false && !mLimit && !m.free && current?.model !== m.id
                             ? h('button', {
                               type: 'button',
-                              className: 'wb-rail-badge-btn' + (unlistedHintFor === m.id ? ' on' : ''),
-                              'aria-expanded': unlistedHintFor === m.id ? 'true' : 'false',
+                              className: 'wb-rail-badge-btn',
+                              /*
+                               * 只说一次，不重复提醒（用户要求）。
+                               *
+                               * 原先点它 = 行内展开说明块 + toast 两份内容，
+                               * 用户看到的是同一件事说了两遍。现在只保留 toast：
+                               * 它浮在最上层、不随列表滚动，看得见也看得完。
+                               *
+                               * 因此不再需要 aria-expanded（没有展开态了）；
+                               * aria-label 直接说明点了会发生什么。
+                               */
                               'aria-label': t('未列出') + '：' + t('点击查看说明'),
                               title: t('点击查看说明'),
                               onClick: (e) => {
-                                // 按钮在 <label> 外了，但仍拦一次：避免冒泡到列表容器
+                                // 整行是 <label>，不拦下来点徽标会顺带切换勾选
                                 e.preventDefault();
                                 e.stopPropagation();
-                                setUnlistedHintFor((v) => (v === m.id ? '' : m.id));
+                                setUnlistedToast({
+                                  text: t('这个模型不在官方选择器的默认名单里（通常是官方自己的档位名或灰度型号），但仍可勾选；能否调用取决于你的账号权益。'),
+                                  at: Date.now(),
+                                });
                               },
                             }, t('未列出'))
                             : null,
                           !mLimit && !m.free && current?.model === m.id ? h(Pill, { tone: '', text: t('默认') }) : null)
-                        : null),
-                      /*
-                       * 「未列出」的说明块 —— 点徽标才出现，再点收起。
-                       *
-                       * 放在 label **外面**：label 内点击会切换 checkbox，
-                       * 否则"点开说明"会顺带把模型勾上/取消（静默误操作）。
-                       * 说清三件事：它是什么、为什么不在官方名单、还能不能用。
-                       */
-                      unlistedHintFor === m.id
-                        ? h('div', { className: 'wb-rail-unlisted-hint', role: 'note' },
-                          h('p', null, t('这个模型来自官方网关目录，但不在 WorkBuddy 官方模型选择器的默认名单里。')),
-                          h('p', null, t('它通常是官方自己的档位名或灰度型号（例如「快速 / 均衡 / 极致」与 hy4-preview 系列），所以默认不铺出来；这不代表它不可用。')),
-                          h('p', null, t('你可以照常勾选它。能不能真正调用取决于你的账号权益，最终由上游决定 —— 建议先勾上再发一条小请求验证。')),
-                          h('button', {
-                            type: 'button',
-                            className: 'wb-rail-badge-btn',
-                            onClick: (e) => { e.preventDefault(); setUnlistedHintFor(''); },
-                          }, t('知道了')))
-                        : null);
+                        : null));
                   })
                   : h('div', { className: 'wb-rail-empty' },
                     filter.trim() ? t('没有匹配的模型。') : t('无可用模型。'))),
@@ -12685,7 +12719,24 @@ const probeOne = async (id) => {
             const actions = primaryActions();
             if (!actions || (Array.isArray(actions) && actions.filter(Boolean).length === 0)) return null;
             return h('div', { className: 'wb-rail-dock' }, actions);
-          })())));
+          })())),
+      /*
+       * 徽标说明的浮层 toast。
+       *
+       * 挂在 rail 根节点（而不是模型卡片里）：卡片在滚动容器内，把它放进
+       * 去就会被一起滚走 —— 而这条提示的意义正是"不论你滚到哪儿点，都能看到"。
+       * `role="status"` + `aria-live="polite"`：读屏会念出来，但不打断当前操作。
+       * 点它自身也能立刻关掉（不必等 4.2 秒）。
+       */
+      unlistedToast
+        ? h('div', {
+          className: 'wb-rail-toast',
+          role: 'status',
+          'aria-live': 'polite',
+          title: t('点击关闭'),
+          onClick: () => setUnlistedToast(null),
+        }, unlistedToast.text)
+        : null);
     }
     /**
      * 客户端插件入口：把一个设置页注册进 `settings.section`。
