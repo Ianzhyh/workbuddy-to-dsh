@@ -1086,6 +1086,75 @@ body.dark .wb-root,
 .wb-rail-search-icon{display:inline-flex;align-items:center;flex:none;margin-left:9px;color:var(--dsw-alias-label-tertiary,light-dark(#81858c,#adb2b8))}
 .wb-rail-search-input{flex:1 1 auto;width:auto!important;min-width:0;max-width:none!important;min-height:28px;padding:4px 6px;border:0!important;border-radius:0;background:transparent!important;box-shadow:none!important;outline:none!important;color:inherit;font:inherit;font-size:12px}
 .wb-rail-search-input::placeholder{color:var(--dsw-alias-label-tertiary,light-dark(#81858c,#adb2b8))}
+/*
+ * 列表筛选开关（隐藏未列出 / 只列免费）。
+ *
+ * 用**紧凑的 chip 式复选框**而不是普通一行两个 checkbox：右栏只有 340px，
+ * 原生 checkbox + 文字会占掉一整行高度，而这里只是两个开关。
+ * 勾上时整块变色由 .on 类控制（不依赖 :has()，旧内核也能用），
+ * 功能本身只依赖 checkbox 状态，样式退化不影响可用性。
+ */
+.wb-rail-filters{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}
+.wb-rail-filter{
+  display:inline-flex;align-items:center;gap:5px;min-width:0;
+  padding:4px 8px;border-radius:8px;cursor:pointer;
+  font-size:11.5px;line-height:1.4;
+  color:var(--dsw-alias-label-secondary,light-dark(#61666b,#cfd3d6));
+  background:var(--dsw-alias-interactive-bg-hover,light-dark(#2631480f,#ffffff14));
+  border:.5px solid var(--dsw-alias-border-l2,light-dark(#0000001f,#ffffff2e));
+  transition:background-color var(--wb-anim-fast),border-color var(--wb-anim-fast),color var(--wb-anim-fast);
+}
+.wb-rail-filter:hover{border-color:var(--dsw-alias-border-l3,light-dark(#00000033,#ffffff42))}
+.wb-rail-filter.on{
+  color:var(--dsw-alias-label-primary,light-dark(#0f1115,#f9fafb));
+  border-color:var(--dsw-alias-brand-primary,light-dark(#6366f1,#8b93ff));
+  background:light-dark(rgba(99,102,241,.10),rgba(139,147,255,.16));
+}
+/* checkbox 本体缩到 12px：默认尺寸在 340px 行里太抢眼 */
+.wb-rail-filter input[type="checkbox"]{flex:none;width:12px;height:12px;margin:0;accent-color:var(--dsw-alias-brand-primary,#6366f1)}
+.wb-rail-filter>span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/*
+ * 可点击的「未列出」徽标。
+ *
+ * 做成 button 而不是 Pill：需要可聚焦、键盘可触发、读屏能念 aria-expanded。
+ * 视觉上仍是一个小徽标（虚线边框暗示"可点"），不是主按钮。
+ */
+.wb-rail-badge-btn{
+  appearance:none;flex:none;cursor:pointer;
+  padding:1px 6px;border-radius:6px;
+  font:inherit;font-size:10.5px;line-height:16px;
+  color:var(--dsw-alias-label-secondary,light-dark(#61666b,#cfd3d6));
+  background:transparent;
+  border:.5px dashed var(--dsw-alias-border-l3,light-dark(#00000033,#ffffff42));
+  transition:color var(--wb-anim-fast),border-color var(--wb-anim-fast),background-color var(--wb-anim-fast);
+}
+.wb-rail-badge-btn:hover{
+  color:var(--dsw-alias-label-primary,light-dark(#0f1115,#f9fafb));
+  border-color:var(--dsw-alias-brand-primary,light-dark(#6366f1,#8b93ff));
+  background:light-dark(rgba(99,102,241,.08),rgba(139,147,255,.14));
+}
+.wb-rail-badge-btn:focus-visible{outline:2px solid var(--dsw-alias-brand-primary,#6366f1);outline-offset:1px}
+.wb-rail-badge-btn.on{
+  color:var(--dsw-alias-brand-primary,light-dark(#4046d8,#a5b4ff));
+  border-color:var(--dsw-alias-brand-primary,light-dark(#6366f1,#8b93ff));
+  border-style:solid;
+}
+/*
+ * 「未列出」的展开说明块。
+ *
+ * 左边一条细竖线把它和模型行绑在一起（否则浮在列表里像另一条模型）。
+ * 字号比正文小一档、行高松一点 —— 这段是要被**读完**的解释文字。
+ */
+.wb-rail-unlisted-hint{
+  margin:2px 0 8px;padding:8px 10px;
+  border-left:2px solid var(--dsw-alias-brand-primary,light-dark(#6366f1,#8b93ff));
+  border-radius:0 8px 8px 0;
+  background:var(--dsw-alias-interactive-bg-hover,light-dark(#2631480f,#ffffff0d));
+  font-size:11.5px;line-height:1.6;
+  color:var(--dsw-alias-label-secondary,light-dark(#61666b,#cfd3d6));
+}
+.wb-rail-unlisted-hint p{margin:0 0 6px}
+.wb-rail-unlisted-hint p:last-of-type{margin-bottom:8px}
 .wb-rail-search-clear{appearance:none;display:inline-flex;align-items:center;justify-content:center;flex:none;width:22px;height:22px;margin-right:4px;border:0;border-radius:6px;background:transparent;color:var(--dsw-alias-label-tertiary,light-dark(#81858c,#adb2b8));font:inherit;font-size:15px;line-height:1;cursor:pointer;transition:background-color var(--wb-anim-fast),color var(--wb-anim-fast)}
 .wb-rail-search-clear:hover{background:var(--dsw-alias-interactive-bg-hover,light-dark(#2631480f,#ffffff14));color:var(--dsw-alias-label-primary,light-dark(#0f1115,#f9fafb))}
 .wb-rail-search-clear:focus-visible{outline:2px solid var(--dsw-alias-brand-primary,#6366f1);outline-offset:1px}
@@ -2738,6 +2807,20 @@ body.dark .wb-root,
       '官方 GUI 默认不列出；仍可勾选':
         'Not in the official GUI list; you can still check it',
       '未列出': 'Not listed',
+      '隐藏未列出': 'Hide not-listed',
+      '只列免费': 'Free only',
+      '点击查看说明': 'Click for details',
+      '这个模型来自官方网关目录，但不在 WorkBuddy 官方模型选择器的默认名单里。':
+        'This model comes from the official gateway catalog, but it is not in the WorkBuddy '
+        + 'model picker\'s default list.',
+      '它通常是官方自己的档位名或灰度型号（例如「快速 / 均衡 / 极致」与 hy4-preview 系列），所以默认不铺出来；这不代表它不可用。':
+        'It is usually one of the official tier names or a preview model (e.g. Fast / Balanced / '
+        + 'Extreme, or the hy4-preview series), so it is simply not surfaced by default — '
+        + 'that does not mean it is unusable.',
+      '你可以照常勾选它。能不能真正调用取决于你的账号权益，最终由上游决定 —— 建议先勾上再发一条小请求验证。':
+        'You can still check it. Whether it actually works depends on your account entitlements and '
+        + 'is ultimately decided upstream — check it, then send a small request to verify.',
+      '知道了': 'Got it',
       '输入合法正整数 tokens（或留空恢复自动）':
         'Enter a positive integer of tokens (or leave empty for Auto)',
     };
@@ -11093,6 +11176,26 @@ const probeOne = async (id) => {
       const [draftModel, setDraftModel] = useState('');
       const [draftEffort, setDraftEffort] = useState('');
       const [filter, setFilter] = useState('');
+      /*
+       * 列表筛选开关（用户要求：「再加个隐藏未列出，和只列出免费」）。
+       *
+       * 两个独立布尔，而不是一个"筛选模式"枚举：
+       *   · 它们可以**同时**生效（"只看免费、且隐藏未列出"是合理组合）；
+       *   · 枚举在开启第二个时会把第一个挤掉，用户还得回来重开。
+       *
+       * 与文本搜索是**并列**关系（AND）：搜索负责"我要找的那几个"，
+       * 这两个开关负责"我不想看到的那些"。
+       */
+      const [hideUnlisted, setHideUnlisted] = useState(false);
+      const [onlyFree, setOnlyFree] = useState(false);
+      /*
+       * 点开「未列出」徽标时要展示说明的模型 id。
+       *
+       * 用户反馈：「点击未列出怎么没有提示」——徽标原先只是一个 span，
+       * 既不可点也没有反馈。只靠 title 悬停不够：触屏/触控板没有 hover，
+       * 而"为什么未列出、还能不能用"这句话值得被完整读一遍。
+       */
+      const [unlistedHintFor, setUnlistedHintFor] = useState('');
       // 勾选清单的草稿：null = 还没动过（显示服务端值）；数组 = 用户改过
       const [draftVisible, setDraftVisible] = useState(null);
       /*
@@ -11546,10 +11649,28 @@ const probeOne = async (id) => {
       const modelPage = () => {
         const modelsInitial = isInitialLoading(modelsApi.loading, modelsApi.data, modelsApi.error);
         const shownList = models.filter((m) => {
+          /*
+           * 三个条件是 **AND**：
+           *   · 文本搜索（找特定模型）；
+           *   · 隐藏未列出（`official === false`：官方 GUI 不铺的档位/灰度模型）；
+           *   · 只列免费（`m.free === true`：上游标了免费的那些）。
+           *
+           * 隐藏类开关放在搜索**之前**判断：否则搜一个未列出的模型名又把它翻出来，
+           * "隐藏"就名不副实。同一个 filter 里天然满足这个顺序。
+           */
+          if (hideUnlisted && m.official === false) return false;
+          if (onlyFree && m.free !== true) return false;
           if (!filter.trim()) return true;
           const q = filter.trim().toLowerCase();
           return m.id.toLowerCase().includes(q) || String(m.name || '').toLowerCase().includes(q);
         });
+        /*
+         * 两个筛选开关的数字提示：让用户在**打开开关之前**就知道会少掉多少行。
+         * 只在全量目录上算（不受另一个开关影响），否则同时开两个时数字会互相
+         * 依赖、看起来像 bug。
+         */
+        const unlistedCount = models.filter((m) => m.official === false).length;
+        const freeCount = models.filter((m) => m.free === true).length;
         const currentName = current?.model ? routingName(current.model) : '';
         const currentEffort = current?.reasoningEffort || '';
         const effortSuffix = currentEffort ? ' · ' + currentEffort : '';
@@ -11746,12 +11867,48 @@ const probeOne = async (id) => {
               ? null
               : h('p', { className: 'wb-note' }, t('只显示勾选的模型；保存后立即生效。')),
             h('div', { className: 'wb-rail-sumbar' },
+              /*
+               * 计数条：`已选 N / M`。
+               *
+               * M 用**当前可见**的总数（`shownList.length`），而不是目录全量：
+               * 隐藏了 37 个未列出的模型后，还写「已选 16 / 53」会让人以为
+               * 自己漏看了一大半。有筛选时额外标出"筛掉了多少个"，避免用户
+               * 以为模型凭空少了。
+               */
               h('span', { className: 'wb-rail-count' },
-                t('已选 ') + shownCount + ' / ' + models.length
-                + (filter.trim() ? ' · ' + t('匹配 ' + shownList.length + ' / ' + models.length) : '')),
+                t('已选 ') + shownCount + ' / ' + shownList.length
+                + (shownList.length !== models.length
+                  ? ' · ' + t('共 ' + models.length + ' 个，已筛掉 ' + (models.length - shownList.length))
+                  : '')),
               hasDraftVisible
                 ? h(Pill, { tone: 'warn', text: t('未保存') })
                 : h(Pill, { tone: 'ok', text: t('已生效') })),
+            /*
+             * 两个列表筛选开关（用户要求：「再加个隐藏未列出，和只列出免费」）。
+             *
+             * 用 checkbox 而不是"筛选按钮组"：它们是**独立可叠加**的布尔状态，
+             * 按钮组会暗示单选。同时给出未列出的数量（`unlistedCount`），
+             * 否则用户不知道打开这个开关会少掉多少行、要不要开。
+             */
+            models.length
+              ? h('div', { className: 'wb-rail-filters' },
+                h('label', { className: 'wb-rail-filter' + (hideUnlisted ? ' on' : '') },
+                  h('input', {
+                    type: 'checkbox',
+                    checked: hideUnlisted,
+                    onChange: () => setHideUnlisted((v) => !v),
+                  }),
+                  h('span', null, t('隐藏未列出')
+                    + (unlistedCount > 0 ? ' (' + unlistedCount + ')' : ''))),
+                h('label', { className: 'wb-rail-filter' + (onlyFree ? ' on' : '') },
+                  h('input', {
+                    type: 'checkbox',
+                    checked: onlyFree,
+                    onChange: () => setOnlyFree((v) => !v),
+                  }),
+                  h('span', null, t('只列免费')
+                    + (freeCount > 0 ? ' (' + freeCount + ')' : ''))))
+              : null,
             models.length
               ? h('div', { className: 'wb-rail-search' },
                 h0('svg', {
@@ -11811,19 +11968,25 @@ const probeOne = async (id) => {
                     const unofficialDisabled = false;
                     const mLimit = limitByModel.get(m.id);
                     const limitTone = mLimit ? (mLimit.kind === 'credits' || mLimit.kind === 'account_restricted' ? 'bad' : 'warn') : '';
-                    return h('label', {
-                      className: 'wb-rail-item' + (shown ? ' on' : ''),
-                      key: m.id,
-                      title: String(m.name || m.id) + ' · ' + m.id
-                        + (m.official === false ? ' · ' + t('官方 GUI 默认不列出；仍可勾选') : ''),
-                    },
-                      h('input', {
-                        type: 'checkbox',
-                        checked: shown,
-                        disabled: unofficialDisabled,
-                        onChange: () => toggleShown(m),
-                        'aria-label': m.name || m.id,
-                      }),
+                    /*
+                     * 行 = label（负责勾选）+ 可选的说明块（在 label **外面**）。
+                     *
+                     * 说明块必须离开 label：label 内的任何点击都会切换 checkbox，
+                     * 那样"点徽标看说明"会顺带把模型勾上/取消，是一次静默的误操作。
+                     */
+                    return h(Fragment, { key: m.id },
+                      h('label', {
+                        className: 'wb-rail-item' + (shown ? ' on' : ''),
+                        title: String(m.name || m.id) + ' · ' + m.id
+                          + (m.official === false ? ' · ' + t('官方 GUI 默认不列出；仍可勾选') : ''),
+                      },
+                        h('input', {
+                          type: 'checkbox',
+                          checked: shown,
+                          disabled: unofficialDisabled,
+                          onChange: () => toggleShown(m),
+                          'aria-label': m.name || m.id,
+                        }),
                       h('span', { className: 'wb-rail-item-main' },
                         h('span', { className: 'wb-rail-item-name', 'data-wb-raw': '' },
                           h(Raw, { text: String(m.name || m.id) })),
@@ -11838,16 +12001,51 @@ const probeOne = async (id) => {
                           mLimit ? h(Pill, { tone: limitTone, text: t('受限') }) : null,
                           m.free ? h(Pill, { tone: 'ok', text: t('免费') }) : null,
                           /*
-                           * 「官方 GUI 默认不列出」的模型给一个**可见的**徽标：
-                           * 悬停 title 只有鼠标停上去才看得到，之前那 37 个档位
-                           * /灰度模型既禁了勾又没有任何可见标记，用户只能看到
-                           * 一片灰（用户原话：「不让选你给个提示说明原因啊」）。
-                           * 现在不再禁勾，但保留徽标说明它的身份。
+                           * 「官方 GUI 默认不列出」的徽标：**可点击**。
+                           *
+                           * 用户原话：「点击未列出怎么没有提示」——它原先只是个
+                           * 静态 Pill，点它没有任何反应。只靠 title 悬停也不够：
+                           * 触屏/触控板没有 hover，而"为什么未列出、还能不能用"
+                           * 这句话值得被完整读一遍。
+                           *
+                           * 现在点它 = 在行下方展开一段说明（再点收起）。
+                           * 用 button 而不是 span：可聚焦、可用键盘触发、
+                           * 读屏会念出 aria-expanded。
                            */
                           m.official === false && !mLimit && !m.free && current?.model !== m.id
-                            ? h(Pill, { tone: '', text: t('未列出') })
+                            ? h('button', {
+                              type: 'button',
+                              className: 'wb-rail-badge-btn' + (unlistedHintFor === m.id ? ' on' : ''),
+                              'aria-expanded': unlistedHintFor === m.id ? 'true' : 'false',
+                              'aria-label': t('未列出') + '：' + t('点击查看说明'),
+                              title: t('点击查看说明'),
+                              onClick: (e) => {
+                                // 按钮在 <label> 外了，但仍拦一次：避免冒泡到列表容器
+                                e.preventDefault();
+                                e.stopPropagation();
+                                setUnlistedHintFor((v) => (v === m.id ? '' : m.id));
+                              },
+                            }, t('未列出'))
                             : null,
                           !mLimit && !m.free && current?.model === m.id ? h(Pill, { tone: '', text: t('默认') }) : null)
+                        : null),
+                      /*
+                       * 「未列出」的说明块 —— 点徽标才出现，再点收起。
+                       *
+                       * 放在 label **外面**：label 内点击会切换 checkbox，
+                       * 否则"点开说明"会顺带把模型勾上/取消（静默误操作）。
+                       * 说清三件事：它是什么、为什么不在官方名单、还能不能用。
+                       */
+                      unlistedHintFor === m.id
+                        ? h('div', { className: 'wb-rail-unlisted-hint', role: 'note' },
+                          h('p', null, t('这个模型来自官方网关目录，但不在 WorkBuddy 官方模型选择器的默认名单里。')),
+                          h('p', null, t('它通常是官方自己的档位名或灰度型号（例如「快速 / 均衡 / 极致」与 hy4-preview 系列），所以默认不铺出来；这不代表它不可用。')),
+                          h('p', null, t('你可以照常勾选它。能不能真正调用取决于你的账号权益，最终由上游决定 —— 建议先勾上再发一条小请求验证。')),
+                          h('button', {
+                            type: 'button',
+                            className: 'wb-rail-badge-btn',
+                            onClick: (e) => { e.preventDefault(); setUnlistedHintFor(''); },
+                          }, t('知道了')))
                         : null);
                   })
                   : h('div', { className: 'wb-rail-empty' },

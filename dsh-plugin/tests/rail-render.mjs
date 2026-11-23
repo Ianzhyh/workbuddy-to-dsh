@@ -237,7 +237,15 @@ try {
 
   // 勾一个模型 → 保存 → 断言请求体
   await page.cdp.evaluate(`(() => {
-    const box = document.querySelector('[data-workbuddy-rail] input[type=checkbox]');
+    /*
+     * 必须限定在**模型行内**（.wb-rail-item）。
+     *
+     * 页面上不止一处 checkbox：卡片底部还有「隐藏未列出 / 只列免费」两个
+     * 筛选开关。不限定的话 querySelector 会拿到列表外的那一个 —— 点了它
+     * 只是切换筛选，不产生勾选草稿，于是"保存"按钮不出现、也没有 POST，
+     * 报错却是"保存请求体里没有 visible"（实测踩过，排查了半天）。
+     */
+    const box = document.querySelector('[data-workbuddy-rail] .wb-rail-item input[type=checkbox]');
     if (box && !box.disabled) box.click();
   })()`);
   await sleep(200);
