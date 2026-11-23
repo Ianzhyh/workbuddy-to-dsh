@@ -3643,10 +3643,37 @@ async function resolveAuthInner() {
   try { return await readPluginAuth(); }
   catch (e) {
     /** @type {Error & { code?: string }} */
-    const err = new Error(`no usable credential (auto): desktop: ${desktopError.message}; plugin: ${e.message}`);
+    const err = new Error(noCredentialMessage(desktopError, e));
     err.code = 'NO_CREDENTIAL';
     throw err;
   }
+}
+
+/**
+ * 本地读不到凭据时给**人**看的文案。
+ *
+ * 旧文案：`no usable credential (auto): desktop: <底层错误>; plugin: <底层错误>`
+ * ——把内部来源名（auto/desktop/plugin）与底层报错原文直接摊给用户，既没说
+ * 要做什么，也容易在客户端里被简化成一句 "api invalid"（用户原话：不要说
+ * api invalid）。
+ *
+ * 现在明确三件事：
+ *   1. 发生了什么：**本机没有可用的登录凭据**。不是"key 无效"——这条路径
+ *      根本没走到上游鉴权，一个字节都没发出去；
+ *   2. 怎么修：在 WorkBuddy 客户端重新登录，或用面板里的插件登录；
+ *   3. 细节留在末尾括号里给排障（截断，且不含任何令牌）。
+ *
+ * 措辞刻意避开 "api key"：说 key 无效会把人引去改一个并不存在的问题。
+ *
+ * @param {Error} desktopError
+ * @param {Error} pluginError
+ */
+function noCredentialMessage(desktopError, pluginError) {
+  const clip = (v) => String(v?.message || v || '').replace(/\s+/g, ' ').trim().slice(0, 120);
+  const detail = `desktop: ${clip(desktopError)}; plugin: ${clip(pluginError)}`;
+  return 'workbuddy-bridge: no local login credential — sign in again in the WorkBuddy desktop app '
+    + '(or use the plugin login in the panel), then retry. Nothing was sent upstream. '
+    + `(${detail})`;
 }
 
 async function resolveAuth() {
@@ -3746,7 +3773,19 @@ async function credentialStatus() {
       region: auth.region || '',
       endpoint: auth.endpoint || '',
       expiresAt: auth.expiresAt ? new Date(auth.expiresAt).toISOString() : '',
+      /*
+       * 过期判定与 200 分支的 `auth.expired` **同一套规则**（提前 60 秒、无
+       * expiresAt 时 null=不适用）。两处若各写一份，迟早漂移成"200 说过期、
+       * 503 说没过期"这种自相矛盾的状态。
+       */
+      expired: typeof auth.expiresAt === 'number' && auth.expiresAt > 0
+        ? Date.now() >= auth.expiresAt - 60_000
+        : null,
     };
+    if (status.effective.expired === true) {
+      status.effective.hint = 'workbuddy-bridge: upstream login expired — re-login in the '
+        + 'WorkBuddy desktop app (or use the plugin login in the panel), then retry';
+    }
   } catch (e) { status.error = String(e?.message || e).slice(0, 400); }
   // 读取凭据时才真正加载密钥：字段在对象字面量里可能还是空，这里补齐
   status.storeMode = credentialStoreMode();
@@ -13598,7 +13637,27 @@ async function handleRequest(req, res) {
           ...(isLocalCaller ? { userId: a.userId || a.uid || '' } : {}),
           endpoint: a.endpoint,
           expiresAt: a.expiresAt ? new Date(a.expiresAt).toISOString() : '',
-          expired: a.expiresAt ? a.expiresAt < Date.now() : false,
+          /*
+           * 登录态是否已过期。
+           *
+           * 这个字段本来就有，但只写 `expiresAt < now` —— 两个缺陷：
+           *   · 没有提前量：刚好卡在边界时，面板会一会儿说有效一会儿说过期；
+           *   · 只有布尔、没有"该怎么办"，用户看到 `expired: true` 仍不知道下一步。
+           * 用户问的正是这个（「账号令牌过期桥有提示吗不要说 api invalid」）。
+           *
+           * 现在提前 60 秒判过期（与内部刷新阈值同向：宁可早提醒），
+           * 并在过期时附带 `hint` 说清"重新登录即可"。措辞刻意不提 api key ——
+           * 这是登录态过期，与客户端里填的 key 无关。
+           */
+          expired: typeof a.expiresAt === 'number' && a.expiresAt > 0
+            ? Date.now() >= a.expiresAt - 60_000
+            : false,
+          ...(typeof a.expiresAt === 'number' && a.expiresAt > 0 && Date.now() >= a.expiresAt - 60_000
+            ? {
+              hint: 'workbuddy-bridge: upstream login expired — re-login in the WorkBuddy desktop app '
+                + '(or use the plugin login in the panel), then retry',
+            }
+            : {}),
           changedAt: authIdentity.changedAt ? new Date(authIdentity.changedAt).toISOString() : '',
         };
       } catch (e) {
