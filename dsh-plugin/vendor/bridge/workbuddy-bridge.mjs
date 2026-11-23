@@ -12368,6 +12368,25 @@ async function handleCheckinAccounts(req, res, claim) {
 // 与**桥自己的定时器**（见 startAutoCheckinTimer 的说明）。
 const AUTO_CHECKIN_COOLDOWN_MS = numEnv('WORKBUDDY_CHECKIN_COOLDOWN_MS', 3600000, { min: 0 }); // 失败后冷却 1 小时再试
 const AUTO_CHECKIN_MAX_PER_DAY = 3;       // 当天最多试 3 次，避免对上游打无效请求
+/*
+ * 「全部账号今天都结束了」之后，隔多久允许**重新扫一次账号清单**。
+ *
+ * 为什么需要：全部 settled 的快速退出原来会一路静默到跨天，于是当天新登录的
+ * 账号（尤其是只在插件里 OAuth 登录、桌面目录没有痕迹的那种）永远发现不了。
+ * 30 分钟是折中：新账号最多等半小时就被捡到，而热路径仍然是内存判断
+ * （只有到点那一次才真的扫目录/解凭据）。
+ *
+ * 0 表示禁用重新发现（退化成旧行为），给排障留出口。
+ */
+const AUTO_CHECKIN_REDISCOVER_MS = numEnv('WORKBUDDY_CHECKIN_REDISCOVER_MS', 30 * 60_000, { min: 0 });
+/*
+ * 暂时性失败（网络抖动 / 5xx / 超时）的**重试间隔**。
+ *
+ * 比默认的 1 小时短得多：网络抖动通常在几分钟内就恢复了，让用户白等一小时
+ * 才补签是没有必要的。默认 5 分钟，且只在当天内生效（跨天归零）。
+ * 可用 `WORKBUDDY_CHECKIN_TRANSIENT_COOLDOWN_MS` 调整。
+ */
+const AUTO_CHECKIN_TRANSIENT_COOLDOWN_MS = numEnv('WORKBUDDY_CHECKIN_TRANSIENT_COOLDOWN_MS', 5 * 60_000, { min: 0 });
 
 /**
  * 每个账号各自的当天签到进度（issue #32）。
@@ -12389,7 +12408,7 @@ const AUTO_CHECKIN_MAX_PER_DAY = 3;       // 当天最多试 3 次，避免对�
  * 都只影响它自己。当前账号仍然排在最前面（兼容单账号与 `api-key` 这类没有
  * uid 的来源，它们共用 `key` 为空的桶）。
  *
- * @type {Map<string, { day: string, done: boolean, tries: number, lastAt: number, result: string, credit: number | null }>}
+ * @type {Map<string, { day: string, done: boolean, tries: number, lastAt: number, result: string, credit: number | null, cooldownMs?: number }>}
  */
 const autoCheckinByAccount = new Map();
 
@@ -12397,6 +12416,14 @@ const autoCheckinByAccount = new Map();
 let autoCheckinState = null;
 /** 是否有一轮 autoCheckin 正在进行（全局闸门：别让定时器与请求路径同时开跑）。 */
 let autoCheckinInflight = null;
+/**
+ * 上次**真正扫过**账号清单（桌面登录目录 + 插件凭据）的时刻。
+ *
+ * 与 `autoCheckinByAccount` 配合实现"周期性重新发现"：全部账号都已 settled 时
+ * 快速退出只挡 `AUTO_CHECKIN_REDISCOVER_MS` 之内，超过就放行再扫一次，
+ * 这样当天新登录的账号不会永远发现不了。
+ */
+let autoCheckinLastScanAt = 0;
 
 /**
  * 给**非管理面**调用方看的自动签到状态。
@@ -12423,27 +12450,63 @@ function autoCheckinSlot(accountKey, today) {
   const key = String(accountKey || '');
   let slot = autoCheckinByAccount.get(key);
   if (!slot || slot.day !== today) {
-    slot = { day: today, done: false, tries: 0, lastAt: 0, result: '', credit: null };
+    // `cooldownMs` 逐槽可覆盖：暂时性失败用短冷却，业务错误回落到全局默认
+    slot = { day: today, done: false, tries: 0, lastAt: 0, result: '', credit: null, cooldownMs: 0 };
     autoCheckinByAccount.set(key, slot);
   }
   return slot;
 }
 
 /**
+ * 这个失败是**暂时性**的吗（网络抖动 / 上游 5xx / 超时）？
+ *
+ * 用户反馈（issue #32 后续）：「实际日志曾出现 `fetch failed`；连续三次失败后
+ * 当天停止尝试，网络恢复后也没有再次自动重试。」
+ *
+ * 区分它的意义：`tries >= 3` 的**当天上限**是为了别对上游打无效请求 ——
+ * 那是给"业务错误"（令牌过期、参数不对、活动不存在）设的，因为重试一万次
+ * 结果也一样。但网络抖动不一样：网一恢复就该能签，把它也锁到跨天是过度惩罚。
+ *
+ * 判据只认明确的暂时性特征（ENOTFOUND / ECONNRESET / timeout / 5xx / 网关错误），
+ * 业务错误不会被误判成暂时性 —— 宁可少重试，也不要对真错误反复打。
+ *
+ * @param {unknown} error
+ */
+function isTransientCheckinError(error) {
+  const err = /** @type {{ code?: unknown, message?: unknown }} */ (error) || {};
+  const code = String(err.code || '');
+  const msg = String(err.message || error || '');
+  if (/^(ENOTFOUND|EAI_AGAIN|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EPIPE|EHOSTUNREACH|ENETUNREACH)$/.test(code)) {
+    return true;
+  }
+  // 上游 5xx / 网关错误 / 明确的重置连接
+  return /\b(50[0-9]|502|503|504)\b/.test(msg)
+    || /fetch failed|socket hang up|network|timeout|timed out|ECONNRESET|ENOTFOUND/i.test(msg);
+}
+/**
  * 这个账号今天还需要试吗？
  *
- * 三种"今天不用再管"的情形分开表达，日志里才能看出到底卡在哪一条：
- * `done`（已签/无活动）、`tries`（试满 3 次）、`cooldown`（失败后 1 小时内）。
+ * 四种"今天不用再管"的情形分开表达，日志里才能看出到底卡在哪一条：
+ * `done`（已签/无活动）、`tries`（暂时性失败试满上限）、`cooldown`（失败后间隔内）。
+ *
+ * 注意 `tries` 现在只挡**暂时性失败**：业务错误（令牌过期、活动不存在）第一次
+ * 就该收工，而网络抖动最多试 `AUTO_CHECKIN_MAX_PER_DAY` 次；跨过上限后再遇到
+ * 一次成功就会 `done`，不会因为历史失败被永久挡住（跨天也会归零）。
  */
 function autoCheckinSkipReason(slot, now) {
   if (slot.done) return 'done';
   if (slot.tries >= AUTO_CHECKIN_MAX_PER_DAY) return 'tries';
-  if (slot.lastAt && now - slot.lastAt < AUTO_CHECKIN_COOLDOWN_MS) return 'cooldown';
+  /*
+   * 冷却时长**逐槽可覆盖**：暂时性失败用短冷却（5 分钟），业务错误用默认的
+   * 1 小时。`slot.cooldownMs` 为 0/未设时回落到全局默认。
+   */
+  const cooldownMs = Number(slot.cooldownMs) > 0 ? Number(slot.cooldownMs) : AUTO_CHECKIN_COOLDOWN_MS;
+  if (slot.lastAt && now - slot.lastAt < cooldownMs) return 'cooldown';
   return '';
 }
 
 /** 一个待签账号：`{ key, label, auth }`。`auth` 是**该账号自己**的凭据。 */
-function autoCheckinTargets(currentAuth, localAccounts) {
+function autoCheckinTargets(currentAuth, localAccounts, pluginAccounts = []) {
   const targets = [];
   const seen = new Set();
   const push = (key, label, auth) => {
@@ -12453,12 +12516,57 @@ function autoCheckinTargets(currentAuth, localAccounts) {
   };
   // 当前账号优先：单账号机器就走这一个，行为与旧版一致。
   if (currentAuth) push(String(currentAuth.userId || currentAuth.uid || ''), 'current', currentAuth);
+  /*
+   * 桌面登录态（`AUTH_DIRS` 里的 .info）。
+   *
+   * 这一步只覆盖**桌面端登录过**的账号。用户报的混合场景里，有些号只在
+   * 插件里做过 OAuth 登录、从未在桌面端登录过 —— 那些号在登录目录里
+   * 一点痕迹都没有，只看这里必然漏掉（issue #32 的后续反馈）。
+   *
+   * 过期的桌面凭据同样跳过：`readLocalAccounts()` 本身不判过期（它要服务
+   * "列出来给用户看"的场景，过期号也该显示），但**签到**拿过期令牌去打上游
+   * 只会换来一次 401，白白占用当天的重试额度。
+   */
   for (const account of localAccounts || []) {
     const key = String(account.userId || '');
     if (!key) continue;
+    if (!account.access) continue;
+    if (typeof account.expiresAt === 'number' && account.expiresAt > 0 && account.expiresAt <= Date.now()) continue;
     push(key, account.nickname || key.slice(0, 8), account);
   }
+  /*
+   * 插件 OAuth 凭据（`CREDENTIAL_DIR` 里的 .cred）。
+   *
+   * 与桌面账号**按 uid 去重**：同一个号两边都登录过时只签一次，且优先用
+   * 桌面那份（上面先 push，`seen` 会挡掉插件这份）。理由：桌面凭据是用户
+   * 当前实际在用的账号，令牌更新更及时；插件那份可能已经过期。
+   *
+   * 只读凭据、不改 active uid、不写任何文件 —— 签到用的是"这个号自己的令牌"，
+   * 模型供给的当前账号一个字都没动（红线仍是单账号供给）。
+   */
+  for (const cred of pluginAccounts || []) {
+    const key = String(cred?.uid || cred?.userId || '');
+    if (!key) continue;
+    // 过期/缺令牌的插件凭据不该被拿去打上游（只会多一条必然失败的日志）
+    if (!cred.accessToken) continue;
+    if (typeof cred.expiresAt === 'number' && cred.expiresAt > 0 && cred.expiresAt <= Date.now()) continue;
+    push(key, cred.nickname || key.slice(0, 8), cred);
+  }
   return targets;
+}
+
+/**
+ * 插件 OAuth 凭据（只给自动签到用）。
+ *
+ * 失败一律当成"没有插件账号"：自动签到是后台补偿动作，读不到凭据不该
+ * 把桌面账号也拖住（与 `safeLocalAccounts` 同一策略）。
+ */
+async function safePluginAccounts() {
+  try {
+    return await readAllPluginCredentials();
+  } catch {
+    return [];
+  }
 }
 
 /**
@@ -12505,19 +12613,22 @@ function maybeAutoCheckin() {
    * 这个函数挂在 `/v1/chat/completions`、`/v1/messages`、`/v1/responses` 三个
    * 入口上（fire-and-forget），也就是每个 token 流都会碰一次。而 issue #32 之后
    * 它要做的事比原来重得多：`resolveAuth()` + `readLocalAccounts()`（扫目录、
-   * 逐个解 at-rest 信封、解 JWT）+ 最多三次上游往返。
+   * 逐个解 at-rest 信封、解 JWT）+ 插件凭据 + 最多三次上游往返。
    *
    * 原先只有一个「已签」闸门，一次网络往返就可能撞上好几条并发请求 ——
    * 每次都要把上面这套全跑一遍，纯属白烧 CPU 和目录 I/O。这里在**进入异步之前**
    * 就按"今天还有没有活要干"挡掉：
    *
    *   · 所有已知账号今天都已结束（done / 试满 / 冷却中）→ 直接返回；
-   *   · 例外：`autoCheckinByAccount` 为空（桥刚起、还没跑过）时必须放行，
-   *     否则第一次永远等不到。
+   *   · 例外 1：`autoCheckinByAccount` 为空（桥刚起、还没跑过）时必须放行；
+   *   · 例外 2：**距上次真正扫过账号已超过 `AUTO_CHECKIN_REDISCOVER_MS`** 也放行。
    *
-   * 判据只看内存，不碰磁盘 —— 这正是它能挂在热路径上的前提。
+   * 例外 2 是用户反馈的修复（issue #32 后续）：原来"全部结束"等于**永久**静默
+   * 到跨天 —— 当天新登录的账号（尤其是只在插件里 OAuth 登录、桌面目录没有痕迹
+   * 的那种）永远发现不了。现在每 30 分钟允许重新扫一次账号清单，热路径成本
+   * 仍然只是内存判断，只有到点那一次才真的碰磁盘。
    */
-  if (autoCheckinByAccount.size) {
+  if (autoCheckinByAccount.size && now - autoCheckinLastScanAt < AUTO_CHECKIN_REDISCOVER_MS) {
     let allSettled = true;
     for (const slot of autoCheckinByAccount.values()) {
       if (!autoCheckinSkipReason(slot, now)) { allSettled = false; break; }
@@ -12531,17 +12642,28 @@ function maybeAutoCheckin() {
     try { currentAuth = await resolveAuth(); } catch (e) { currentError = e; }
 
     /*
-     * 只有**当前账号**还没结束时才去枚举本机其它账号。
+     * 枚举账号清单：桌面登录态 + 插件 OAuth 凭据。
      *
-     * 单账号机器上这个分支永远不会走 —— 而它恰恰是最贵的一步（扫目录 + 解密）。
-     * 多账号机器上，一旦两个号今天都签完了，热路径同样不会再来这里。
+     * **不再因为"当前账号已结束"就跳过枚举**。原来那句
+     * `currentSettled ? [] : await safeLocalAccounts()` 会让当前账号签完之后
+     * 其它账号当天再也进不来 —— 尤其是只在插件里 OAuth 登录、桌面目录没有
+     * 痕迹的那些号（issue #32 后续反馈）。
+     * 成本由上面的 `AUTO_CHECKIN_REDISCOVER_MS` 闸门控制（30 分钟才真扫一次），
+     * 不是每条模型请求都付。
      */
-    const currentKey = String(currentAuth?.userId || currentAuth?.uid || '');
-    const currentSettled = autoCheckinByAccount.size
-      ? Boolean(autoCheckinSkipReason(autoCheckinSlot(currentKey, today), now))
-      : false;
-    const accounts = currentSettled ? [] : await safeLocalAccounts();
-    const targets = autoCheckinTargets(currentAuth, accounts);
+    const [accounts, pluginAccounts] = await Promise.all([
+      safeLocalAccounts(),
+      safePluginAccounts(),
+    ]);
+    /*
+     * 扫描**真正成功**（目标清单已算出来）之后才记录时刻。
+     *
+     * 两个 safe* 都吞异常，但 `autoCheckinTargets` 本身仍可能因数据形状意外
+     * 抛错。抢先把时间戳推前，会让这一轮的失败被记成"刚扫过"，
+     * 于是又白等 AUTO_CHECKIN_REDISCOVER_MS（30 分钟）才重试。
+     */
+    const targets = autoCheckinTargets(currentAuth, accounts, pluginAccounts);
+    autoCheckinLastScanAt = Date.now();
     if (!targets.length) {
       // 一个凭据都拿不到：如实记账（面板据此显示原因），但不制造无谓重试。
       autoCheckinState = {
@@ -12593,7 +12715,34 @@ function maybeAutoCheckin() {
          */
         const noActivity = NO_CHECKIN_ACTIVITY_RE.test(msg);
         slot.result = noActivity ? 'no-activity' : 'error';
-        if (noActivity) slot.done = true;
+        if (noActivity) {
+          // 这个号永远不会有活动：当天收工，但只收它自己
+          slot.done = true;
+        } else if (isTransientCheckinError(e)) {
+          /*
+           * 暂时性失败（网络抖动 / 5xx / 超时）：用**短冷却**并保留 `done=false`，
+           * 让网络一恢复就能补签。
+           *
+           * 用户反馈：「实际日志曾出现 `fetch failed`；连续三次失败后当天停止
+           * 尝试，网络恢复后也没有再次自动重试。」—— 三次上限本来是给业务错误
+           * 设的（重试一万次结果一样），套在网络失败上就是过度惩罚。
+           * 现在网络失败走 `AUTO_CHECKIN_TRANSIENT_COOLDOWN_MS`（默认 5 分钟），
+           * 配合 30 分钟一次的重新发现闸门，当天会持续有机会补上；跨天自然归零。
+           */
+          slot.cooldownMs = AUTO_CHECKIN_TRANSIENT_COOLDOWN_MS;
+          results.push({
+            key: target.key,
+            label: target.label,
+            result: slot.result,
+            error: msg,
+            transient: true,
+          });
+          log('auto checkin', `${target.label || target.key}:transient`, msg);
+          continue;
+        } else {
+          // 业务错误（令牌过期 / 权限 / 参数）：重试没有意义，当天收工并保留原因
+          slot.done = true;
+        }
         results.push({
           key: target.key,
           label: target.label,
