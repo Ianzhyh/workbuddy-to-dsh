@@ -124,6 +124,15 @@
     }
 
     const PANEL_HEADERS = { 'x-workbuddy-panel': '1', 'content-type': 'application/json' };
+/*
+ * GET 只带面板头，**不带 content-type**。
+ *
+ * 理由有两条：
+ *   · GET 没有请求体，声明 `content-type: application/json` 没有意义；
+ *   · 它会把一个"简单请求"变成需要 CORS 预检的请求 —— 本机回环上虽然没人
+ *     拦，但没必要给自己增加一条可能失败的 OPTIONS 往返。
+ */
+const PANEL_GET_HEADERS = { 'x-workbuddy-panel': '1' };
     const CONSOLE_API = '/workbuddy/console-api';
 /** 思考档位的显示名（id → 文案；中文档位交给 i18n 表翻译）。 */
 const EFFORT_LABELS = { minimal: 'Minimal', low: '低', medium: '中', high: '高', xhigh: 'Extra High', max: 'Max' };
@@ -3481,7 +3490,28 @@ body.dark .wb-root,
       const opts = options || {};
       const retries = opts.retries === undefined ? 3 : opts.retries;
       for (let attempt = 0; ; attempt += 1) {
-        const res = await fetch(path, { cache: 'no-store', signal: requestSignal() });
+        /*
+         * GET 也要带面板头。
+         *
+         * 绝大多数读路由走 `readOnly()`（GET 放行），但**有一类读路由必须要求
+         * `x-workbuddy-panel`**：`GET /workbuddy/log`。它读 bridge.log，而桥在
+         * 未显式配令牌时会把 `WORKBUDDY_LOCAL_TOKEN=<值>` 打进启动 banner，
+         * banner 正落在那个日志里 —— 于是"同机任意进程 + 任意网页都能 fetch 到
+         * 桥令牌"（`fetch('http://127.0.0.1:PORT/workbuddy/log')` 是简单请求，
+         * 不触发 CORS 预检）。
+         *
+         * 服务端那道闸门是对的，错的是**客户端没带头**：`PANEL_HEADERS` 只被
+         * postJson 用上，getJson 一直是裸 fetch。于是日志页直接看到
+         * `missing x-workbuddy-panel header`、0 行（用户截图报的就是这个）。
+         *
+         * 统一带上不会有副作用：面板本来就是可信调用方，读路由也不会因为多了
+         * 这个头而变得更宽松。
+         */
+        const res = await fetch(path, {
+          cache: 'no-store',
+          headers: PANEL_GET_HEADERS,
+          signal: requestSignal(),
+        });
         const text = await res.text();
         let data;
         try { data = JSON.parse(text); } catch (e) { data = { ok: false, error: text.slice(0, 200) }; }

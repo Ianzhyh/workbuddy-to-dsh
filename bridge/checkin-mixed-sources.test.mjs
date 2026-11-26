@@ -41,64 +41,90 @@ function grabFunction(name) {
   throw new Error(`${name} 括号不配对`);
 }
 
-test('① 插件 OAuth 账号必须进入 autoCheckinTargets（并与桌面账号去重）', () => {
-  const autoCheckinTargets = new Function(
-    `${grabFunction('autoCheckinTargets')}\nreturn autoCheckinTargets;`,
-  )();
 
-  const currentAuth = { userId: 'uid-intl-current', access: 't-current' };
+test('① 签到账号清单合并桌面与插件 OAuth（唯一实现，三处共用）', async () => {
+  /*
+   * 直接求值 checkinAccountList()，把两个「读来源」的函数替换成测试数据。
+   *
+   * 这样验的是**真正的合并规则**（去重优先级、过期过滤、形状统一），
+   * 而不是某个调用点碰巧写对了 —— issue #34 的教训正是「调用点各写一份」：
+   * 上一轮修了自动签到，签到页与「全部领取」却还是旧的一份。
+   */
+  const src = readFileSync(new URL('./workbuddy-bridge.mjs', import.meta.url), 'utf8');
+  const grab = (name) => {
+    let at = src.indexOf('function ' + name + '(');
+    if (at < 0) throw new Error('找不到 ' + name);
+    /* 把可能的前缀 `async ` 一起带上：否则 async 函数被取成普通函数，
+       里面的 await 会在 new Function 里直接抛错（本用例踩过）。 */
+    if (src.slice(Math.max(0, at - 6), at) === 'async ') at -= 6;
+    let i = src.indexOf('{', at);
+    let depth = 0;
+    for (; i < src.length; i += 1) {
+      if (src[i] === '{') depth += 1;
+      else if (src[i] === '}') { depth -= 1; if (depth === 0) return src.slice(at, i + 1); }
+    }
+    throw new Error(name + ' 括号不配对');
+  };
+
+  const now = Date.now();
   const desktop = [
-    // 桌面凭据的形状：`access`（不是 accessToken）+ `expiresAt`
-    { userId: 'uid-cn-desktop', nickname: '桌面国内号', access: 't-desktop', expiresAt: Date.now() + 86_400_000 },
+    // 桌面凭据的形状：access（不是 accessToken）+ expiresAt（毫秒）
+    { source: 'desktop', userId: 'uid-cn-desktop', nickname: '桌面国内号', access: 't-desktop', domain: 'www.workbuddy.cn', expiresAt: now + 86_400_000 },
     // 已过期的桌面凭据：不该被打上游（签到路径不会刷新令牌）
-    { userId: 'uid-desktop-expired', nickname: '过期桌面号', access: 't-old', expiresAt: Date.now() - 1000 },
+    { source: 'desktop', userId: 'uid-desktop-expired', nickname: '过期桌面号', access: 't-old', expiresAt: now - 1000 },
     // 缺 access 的坏条目
-    { userId: 'uid-desktop-no-access', nickname: '无令牌桌面号' },
+    { source: 'desktop', userId: 'uid-desktop-no-access', nickname: '无令牌桌面号' },
   ];
   const plugin = [
-    // 只在插件里登录过、桌面目录没有痕迹的那种
-    { uid: 'uid-cn-plugin', nickname: '插件国内号', accessToken: 't-plugin', expiresAt: Date.now() + 86_400_000 },
-    // 与桌面同一个号：必须去重，且优先桌面那份（令牌更新更及时）
-    { uid: 'uid-cn-desktop', nickname: '插件里的同名号', accessToken: 't-plugin-dup', expiresAt: Date.now() + 86_400_000 },
-    // 已过期的插件凭据：不该被打上游
-    { uid: 'uid-expired', nickname: '过期号', accessToken: 't-old', expiresAt: Date.now() - 1000 },
+    // 只在插件里登录过、桌面目录没有痕迹的那种（issue #34 的核心）
+    { uid: 'uid-cn-plugin', nickname: '插件国内号', accessToken: 't-plugin', domain: 'www.workbuddy.cn', expiresAtMs: now + 86_400_000 },
+    // 与桌面同一个号：必须去重，且优先桌面那份
+    { uid: 'uid-cn-desktop', nickname: '插件里的同名号', accessToken: 't-plugin-dup', expiresAtMs: now + 86_400_000 },
+    // 已过期的插件凭据
+    { uid: 'uid-expired', nickname: '过期号', accessToken: 't-old', expiresAtMs: now - 1000 },
     // 没有 accessToken 的坏条目
     { uid: 'uid-no-token', nickname: '无令牌' },
   ];
 
-  const targets = autoCheckinTargets(currentAuth, desktop, plugin);
-  const keys = targets.map((t) => t.key);
-  console.log('targets =', JSON.stringify(keys));
+  const code = [grab('pluginAccountShape'), grab('checkinAccountList'), 'return checkinAccountList;'].join('\n');
+  /*
+   * checkinAccountList 是 async 函数，而 new Function 的函数体默认不是 async
+   * —— 直接 return 它会在调用时抛「await is only valid in async functions」。
+   * 包一层 async IIFE，函数体里就能正常 await；IIFE 内**调用**它再返回结果。
+   */
+  const factory = new Function('safeLocalAccounts', 'safePluginAccounts',
+    'return (async () => {\n' + code.replace('return checkinAccountList;', '') + '\nreturn checkinAccountList();\n})();');
+  const accounts = await factory(async () => desktop, async () => plugin);
+
+  const keys = accounts.map((a) => a.userId);
+  console.log('checkinAccountList =', JSON.stringify(keys));
 
   assert.ok(keys.includes('uid-cn-plugin'),
-    `插件 OAuth 账号必须被纳入（修复前只扫桌面 .info）。实际：${JSON.stringify(keys)}`);
-  assert.ok(keys.includes('uid-intl-current'), '当前账号仍要在列');
+    '插件 OAuth 账号必须出现在签到清单里（issue #34）。实际：' + JSON.stringify(keys));
   assert.ok(keys.includes('uid-cn-desktop'), '桌面账号仍要在列');
   assert.ok(!keys.includes('uid-expired'), '已过期的插件凭据不该被打上游');
   assert.ok(!keys.includes('uid-no-token'), '没有 accessToken 的条目要跳过');
-  /*
-   * 桌面凭据同样要过滤过期 / 缺令牌：
-   * 签到路径（billingHeaders）直接用 `auth.access`，**不会刷新令牌**，
-   * 拿过期的去打上游只会换来 401，白占当天的重试额度。
-   */
   assert.ok(!keys.includes('uid-desktop-expired'), '已过期的桌面凭据不该被打上游');
   assert.ok(!keys.includes('uid-desktop-no-access'), '缺 access 的桌面条目要跳过');
 
-  /* 去重：同一个 uid 只能出现一次，且用桌面那份 */
+  /* 去重：同一 uid 只出现一次，且用桌面那份 */
   assert.equal(keys.filter((k) => k === 'uid-cn-desktop').length, 1, '同一 uid 必须只出现一次');
-  const dup = targets.find((t) => t.key === 'uid-cn-desktop');
-  /*
-   * 桌面凭据的令牌字段是 `access`（插件凭据用 `accessToken`）—— 断言要按
-   * 各自形状取，否则会拿到 undefined 并误判成"没用到桌面那份"。
-   */
-  const tokenOf = (auth) => auth.access ?? auth.accessToken;
-  assert.equal(tokenOf(dup.auth), 't-desktop',
-    '同号去重时必须优先桌面凭据（插件那份可能已过期）');
+  const dup = accounts.find((a) => a.userId === 'uid-cn-desktop');
+  assert.equal(dup.access, 't-desktop', '同号去重时必须优先桌面凭据（插件那份可能已过期）');
 
-  /* 向后兼容：不传插件数组时行为与旧版一致（单账号机器走一个） */
-  const onlyCurrent = autoCheckinTargets(currentAuth, []);
-  assert.equal(onlyCurrent.length, 1, '不传插件账号时只签当前账号');
+  /*
+   * 形状统一：插件来源必须被转成 userId / access，
+   * 因为 accountCheckinRow() 与 billingHeaders() 只认这两个字段。
+   * 不转一手会在签到页显示成空字段、领取时拿到 Bearer undefined。
+   */
+  const pluginRow = accounts.find((a) => a.userId === 'uid-cn-plugin');
+  assert.ok(pluginRow, '插件账号必须在清单里');
+  assert.equal(pluginRow.access, 't-plugin', '插件凭据的 accessToken 要映射到 access');
+  assert.equal(pluginRow.source, 'plugin', '要标明来源，面板据此区分');
+  assert.equal(pluginRow.nickname, '插件国内号', '昵称要保留');
+  assert.equal(pluginRow.domain, 'www.workbuddy.cn', '域名要保留（region 判定靠它）');
 });
+
 
 test('② 全部 settled 后的重新发现闸门存在，且可关闭', () => {
   /*

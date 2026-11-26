@@ -74,17 +74,29 @@ async function startStub({ sseFrames = [], status = 200, errorBody = null, captu
 
 function makeAdapter(baseUrl, capture, overrides = {}) {
   const client = new BridgeClient({ baseUrl, token: 't', timeoutMs: 15000 });
-  return new WorkBuddyAdapter({
+  /*
+   * 把 adapter 的日志收进 `adapter.__logs`。
+   *
+   * 原来这里是 `log: () => {}`，于是流式用例失败时**看不到原因** ——
+   * 实测在 `release:check` 并发压力下偶发「只收到 finish、前面几帧全丢」，
+   * 而 adapter 在 catch 分支里会 `this.log('stream interrupted …', error.message)`；
+   * 那句日志正是唯一能区分"上游真的断了"和"解析错了"的证据。
+   * 现在断言失败时把它带进错误消息（见文本流用例的 finally）。
+   */
+  const logs = [];
+  const adapter = new WorkBuddyAdapter({
     provider: 'workbuddy',
     displayName: 'WorkBuddy',
     client,
     ensureReady: async () => client,
     resolveImage: async (ref) => `data:image/png;base64,${ref?.attachmentId ?? 'AAAA'}`,
-    log: () => {},
+    log: (...args) => { logs.push(args.map(String).join(' ')); },
     filter: { allow: [], deny: [] },
     catalogTtlMs: 0,
     ...overrides,
   });
+  adapter.__logs = logs;
+  return adapter;
 }
 
 const delta = (d, finish = null) => ({ choices: [{ index: 0, delta: d, finish_reason: finish }] });
@@ -230,7 +242,16 @@ test('文本流：block-start → text-delta → block-end → usage → finish'
     const out = [];
     for await (const chunk of adapter.stream({ provider: 'workbuddy', model: 'stub-model', messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }] })) out.push(chunk);
 
-    assert.deepEqual(out.map((c) => c.type), ['block-start', 'text-delta', 'text-delta', 'block-end', 'usage', 'finish']);
+    /*
+     * 失败时把 adapter 自己的日志带进消息。
+     *
+     * 这条用例在 release:check 并发压力下偶发「只收到 finish、前面几帧全丢」，
+     * 而 adapter 的 catch 分支会打 stream interrupted … —— 那是唯一能区分
+     * "上游连接真的断了"和"解析逻辑错了"的证据。没有它只能反复重跑猜原因。
+     */
+    assert.deepEqual(out.map((c) => c.type),
+      ['block-start', 'text-delta', 'text-delta', 'block-end', 'usage', 'finish'],
+      `流式帧顺序不对；adapter 日志：${JSON.stringify(adapter.__logs)}`);
     assert.equal(out[0].blockType, 'text');
     assert.equal(out[3].block.text, '你好');
     assert.deepEqual(out[4].usage, { inputTokens: 11, outputTokens: 2, totalTokens: 13 });

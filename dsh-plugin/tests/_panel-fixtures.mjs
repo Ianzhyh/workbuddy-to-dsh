@@ -406,6 +406,13 @@ window.confirm = function (message) { window.__dialogs.push(String(message)); re
    * JSON.stringify 进 HTML 的**副本**，改那边不生效（实测过：断言一直是假失败）。
    */
   window.__routes = ROUTES;
+  /*
+   * 需要面板头的**读**路由（写路由由下面"非 GET"那条统一覆盖）。
+   *
+   * 与 dsh-plugin/lib/routes.mjs 里显式写 guard(req) 的 GET 路由保持一致。
+   * 目前只有日志：bridge.log 里有桥的启动 banner，含本地令牌。
+   */
+  const PANEL_GUARDED_PATHS = new Set(['/workbuddy/log']);
   const original = window.fetch;
   window.fetch = function (input, init) {
     const url = typeof input === 'string' ? input : (input && input.url) || '';
@@ -420,6 +427,32 @@ window.confirm = function (message) { window.__dialogs.push(String(message)); re
       window.__reqs.push({ path, method, body: parsed });
     } catch (e) { /* ignore */ }
     if (!(path in ROUTES)) return original.apply(this, arguments); // 未命中：透传真实网络
+    /*
+     * 模拟服务端那道 「x-workbuddy-panel」 闸门（**必须真实**，否则测不出来）。
+     *
+     * 用户实测（1.24.5）：日志页报红条 「missing x-workbuddy-panel header」、
+     * 「0 / 0 行」。根因是 「getJson」 一直是裸 fetch，没带这个头 —— 而
+     * 「GET /workbuddy/log」 有意要求它（bridge.log 里有桥的启动 banner，
+     * 内含 「WORKBUDDY_LOCAL_TOKEN=<值>」）。
+     *
+     * 桩以前无条件 200，等于替客户端把这道闸门"演"过去了：面板少了头也照样
+     * 有数据，测试全绿而真机报错。现在桩照真实语义返回 403 ——
+     * 客户端再漏头，「panel-render」 的日志页断言会当场红。
+     */
+    const needPanelHeader = PANEL_GUARDED_PATHS.has(path)
+      || (typeof method === 'string' && method !== 'GET' && path.startsWith('/workbuddy/'));
+    if (needPanelHeader) {
+      const headers = (init && init.headers) || {};
+      const has = (name) => Object.keys(headers)
+        .some((k) => k.toLowerCase() === name)
+        || (typeof headers.get === 'function' && Boolean(headers.get(name)));
+      if (!has('x-workbuddy-panel')) {
+        return Promise.resolve(new Response(
+          JSON.stringify({ ok: false, error: 'missing x-workbuddy-panel header' }),
+          { status: 403, headers: { 'content-type': 'application/json' } },
+        ));
+      }
+    }
     // firstStatus：模拟「刷新页面时宿主还没挂上路由」的 404 窗口 —— 第一次 404，
     // 之后正常。用来钉住「404 必须自动重试、不能把红字挂一分钟」这条回归。
     const route = ROUTES[path];

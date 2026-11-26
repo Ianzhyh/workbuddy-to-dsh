@@ -12301,16 +12301,17 @@ function accountCheckinRow(account, currentUserId) {
  *
  * 逐个串行：这些请求打向**不同网关**，并发没有收益，反而更容易触发上游限流。
  * 单个账号失败只落进它自己那一行 —— 一个账号令牌过期，不能让其它账号也领不到。
+ *
+ * ## 账号清单来自 `checkinAccountList()`（issue #34）
+ *
+ * 这里原先自己调 `readLocalAccounts()`，于是**只覆盖桌面来源**：仅通过插件
+ * OAuth 登录、桌面目录没有痕迹的账号既不显示、也不被「全部领取」处理。
+ * 现在与自动签到共用同一个清单函数，去重与过滤规则只有一份。
  */
 async function handleCheckinAccounts(req, res, claim) {
   let current = null;
   try { current = await resolveAuth(); } catch { /* 当前账号不可用不影响其它账号 */ }
-  let accounts;
-  try {
-    accounts = await readLocalAccounts();
-  } catch (e) {
-    return json(res, 502, { ok: false, error: shortError(e.message || String(e)) });
-  }
+  const accounts = await checkinAccountList();
   const rows = [];
   const totals = { accounts: accounts.length, claimed: 0, already: 0, failed: 0, skipped: 0, credit: 0 };
   for (const account of accounts) {
@@ -12505,62 +12506,121 @@ function autoCheckinSkipReason(slot, now) {
   return '';
 }
 
-/** 一个待签账号：`{ key, label, auth }`。`auth` 是**该账号自己**的凭据。 */
-function autoCheckinTargets(currentAuth, localAccounts, pluginAccounts = []) {
+/**
+ * 一个待签账号：`{ key, label, auth }`。`auth` 是**该账号自己**的凭据。
+ *
+ * 账号清单由 {@link checkinAccountList} 提供（桌面 + 插件已合并去重），
+ * 这里只做两件无害的事：
+ *   1. 当前账号排在最前（单账号机器走这一个，行为与旧版一致）；
+ *   2. 把统一记录转成签到循环要的 `{ key, label, auth }` 形状。
+ *
+ * **去重与过期过滤不在这一层**：它们属于"本机有哪些可用账号"的语义，
+ * 与签到页共用一份实现。早先把它们写在这里，结果 issue #34 的签到页
+ * 漏掉插件账号时，改完这边那边还是错的。
+ */
+function autoCheckinTargets(currentAuth, accounts) {
   const targets = [];
   const seen = new Set();
   const push = (key, label, auth) => {
-    if (!auth || seen.has(key)) return;
+    if (!auth || !key || seen.has(key)) return;
     seen.add(key);
     targets.push({ key, label, auth });
   };
-  // 当前账号优先：单账号机器就走这一个，行为与旧版一致。
+  // 当前账号优先：它的结果会作为 /health 的顶层结论
   if (currentAuth) push(String(currentAuth.userId || currentAuth.uid || ''), 'current', currentAuth);
-  /*
-   * 桌面登录态（`AUTH_DIRS` 里的 .info）。
-   *
-   * 这一步只覆盖**桌面端登录过**的账号。用户报的混合场景里，有些号只在
-   * 插件里做过 OAuth 登录、从未在桌面端登录过 —— 那些号在登录目录里
-   * 一点痕迹都没有，只看这里必然漏掉（issue #32 的后续反馈）。
-   *
-   * 过期的桌面凭据同样跳过：`readLocalAccounts()` 本身不判过期（它要服务
-   * "列出来给用户看"的场景，过期号也该显示），但**签到**拿过期令牌去打上游
-   * 只会换来一次 401，白白占用当天的重试额度。
-   */
-  for (const account of localAccounts || []) {
+  for (const account of accounts || []) {
     const key = String(account.userId || '');
     if (!key) continue;
-    if (!account.access) continue;
-    if (typeof account.expiresAt === 'number' && account.expiresAt > 0 && account.expiresAt <= Date.now()) continue;
     push(key, account.nickname || key.slice(0, 8), account);
-  }
-  /*
-   * 插件 OAuth 凭据（`CREDENTIAL_DIR` 里的 .cred）。
-   *
-   * 与桌面账号**按 uid 去重**：同一个号两边都登录过时只签一次，且优先用
-   * 桌面那份（上面先 push，`seen` 会挡掉插件这份）。理由：桌面凭据是用户
-   * 当前实际在用的账号，令牌更新更及时；插件那份可能已经过期。
-   *
-   * 只读凭据、不改 active uid、不写任何文件 —— 签到用的是"这个号自己的令牌"，
-   * 模型供给的当前账号一个字都没动（红线仍是单账号供给）。
-   */
-  for (const cred of pluginAccounts || []) {
-    const key = String(cred?.uid || cred?.userId || '');
-    if (!key) continue;
-    // 过期/缺令牌的插件凭据不该被拿去打上游（只会多一条必然失败的日志）
-    if (!cred.accessToken) continue;
-    if (typeof cred.expiresAt === 'number' && cred.expiresAt > 0 && cred.expiresAt <= Date.now()) continue;
-    push(key, cred.nickname || key.slice(0, 8), cred);
   }
   return targets;
 }
 
 /**
- * 插件 OAuth 凭据（只给自动签到用）。
+ * 插件凭据 → 与桌面账号**同形状**的记录。
  *
- * 失败一律当成"没有插件账号"：自动签到是后台补偿动作，读不到凭据不该
- * 把桌面账号也拖住（与 `safeLocalAccounts` 同一策略）。
+ * 为什么必须统一形状：`accountCheckinRow()` 读 `userId` / `uin` / `authFile` /
+ * `expiresAt`（毫秒数），`claimDailyCheckin()` 经由 `billingHeaders()` 读 `access`。
+ * 而插件凭据的字段名不同（`uid` / `accessToken` / `expiresAtMs`），不转一手
+ * 就会在签到页显示成一堆空字段、领取时拿到 `Bearer undefined`。
+ *
+ * `authFile` / `uin` 留空：插件凭据里没有这两个信息，伪造只会让面板显示假数据。
+ *
+ * @param {{
+ *   uid?: string, userId?: string,
+ *   accessToken?: string, refreshToken?: string,
+ *   enterpriseId?: string,
+ *   expiresAtMs?: number, expiresAt?: number,
+ *   domain?: string, endpoint?: string, nickname?: string,
+ * }} cred `readAllPluginCredentials()` 的产物
  */
+function pluginAccountShape(cred) {
+  const uid = String(cred?.uid || cred?.userId || '');
+  return {
+    source: 'plugin',
+    access: String(cred?.accessToken || ''),
+    refresh: String(cred?.refreshToken || ''),
+    userId: uid,
+    enterpriseId: String(cred?.enterpriseId || ''),
+    expiresAt: Number(cred?.expiresAtMs || cred?.expiresAt || 0),
+    domain: String(cred?.domain || ''),
+    endpoint: String(cred?.endpoint || ''),
+    nickname: String(cred?.nickname || ''),
+    uin: '',
+    authFile: '',
+    mtimeMs: 0,
+  };
+}
+
+/**
+ * 签到链路共用的账号清单：**桌面登录态 + 插件 OAuth**，按 uid 去重。
+ *
+ * ## 为什么要有这一个函数（issue #34）
+ *
+ * 上一轮我给**自动签到**加了插件来源，但用户随即发现**签到页与「全部领取」**
+ * 仍然只覆盖桌面来源 —— 因为 `handleCheckinAccounts()` 还自己调
+ * `readLocalAccounts()`。同一份"本机有哪些账号"的语义散在两处，必然一处修了
+ * 另一处漏。
+ *
+ * 现在三处（自动签到 / `GET /v1/checkin/accounts` / `POST /v1/checkin/all`）
+ * 全部走这里，去重与过滤规则只有一份：
+ *   · 按 uid 去重，**桌面凭据优先**（桌面那份随用户实际登录刷新，插件那份可能
+ *     已过期；同一账号两边都登录过时用桌面那份去领）；
+ *   · 跳过**已过期**与**缺令牌**的条目 —— `billingHeaders()` 不会刷新令牌，
+ *     拿过期的去打上游只会换来 401，还白占当天的重试额度。
+ *
+ * 这里**不**过滤 `noActivity`：国际版无活动是"领取时才知道"的事实，
+ * 签到页要把它显示出来，而不是从清单里悄悄消失。
+ *
+ * @returns {Promise<Array<object>>} 同形状的账号记录（桌面优先顺序）
+ */
+async function checkinAccountList() {
+  const [desktopRaw, pluginRaw] = await Promise.all([
+    safeLocalAccounts(),
+    safePluginAccounts(),
+  ]);
+  const now = Date.now();
+  const usable = (rec) => {
+    if (!rec || !rec.userId || !rec.access) return false;
+    return !(rec.expiresAt > 0 && rec.expiresAt <= now);
+  };
+  const byUid = new Map();
+  // 桌面在前：同一 uid 时它先占位，插件那份不会覆盖（去重优先级）
+  for (const rec of desktopRaw || []) {
+    if (!usable(rec)) continue;
+    const key = String(rec.userId);
+    if (!byUid.has(key)) byUid.set(key, rec);
+  }
+  for (const cred of pluginRaw || []) {
+    const rec = pluginAccountShape(cred);
+    if (!usable(rec)) continue;
+    const key = String(rec.userId);
+    if (!key || byUid.has(key)) continue;
+    byUid.set(key, rec);
+  }
+  return [...byUid.values()];
+}
+
 async function safePluginAccounts() {
   try {
     return await readAllPluginCredentials();
@@ -12651,18 +12711,15 @@ function maybeAutoCheckin() {
      * 成本由上面的 `AUTO_CHECKIN_REDISCOVER_MS` 闸门控制（30 分钟才真扫一次），
      * 不是每条模型请求都付。
      */
-    const [accounts, pluginAccounts] = await Promise.all([
-      safeLocalAccounts(),
-      safePluginAccounts(),
-    ]);
     /*
      * 扫描**真正成功**（目标清单已算出来）之后才记录时刻。
      *
-     * 两个 safe* 都吞异常，但 `autoCheckinTargets` 本身仍可能因数据形状意外
-     * 抛错。抢先把时间戳推前，会让这一轮的失败被记成"刚扫过"，
+     * `checkinAccountList()` 内部两个 safe* 都吞异常，但它自己仍可能因数据形状
+     * 意外抛错。抢先把时间戳推前，会让这一轮的失败被记成"刚扫过"，
      * 于是又白等 AUTO_CHECKIN_REDISCOVER_MS（30 分钟）才重试。
      */
-    const targets = autoCheckinTargets(currentAuth, accounts, pluginAccounts);
+    const accounts = await checkinAccountList();
+    const targets = autoCheckinTargets(currentAuth, accounts);
     autoCheckinLastScanAt = Date.now();
     if (!targets.length) {
       // 一个凭据都拿不到：如实记账（面板据此显示原因），但不制造无谓重试。
