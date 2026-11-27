@@ -1559,6 +1559,21 @@ body.dark .wb-root,
   .wb-rail .wb-card+.wb-card{margin-top:2px}
 }
 
+/*
+ * 账号余额胶囊（放在样式表末尾，确保在任何 @container 之外）。
+ *
+ * 与同一行「受限」「当前使用」那些 Pill 同形状：圆角 + 等宽数字。
+ * 读不到余额时渲染破折号，本样式不做特殊弱化 —— 数字位宽一致才好横向比较。
+ */
+.wb-balance-badge{
+  display:inline-flex;align-items:center;flex:none;
+  padding:1px 9px;border-radius:999px;
+  font-size:12px;font-weight:600;line-height:18px;
+  font-variant-numeric:tabular-nums;
+  background:var(--dsw-alias-interactive-bg-hover,light-dark(#2631480f,#ffffff1a));
+  color:var(--dsw-alias-label-primary,light-dark(#0f1115,#f9fafb));
+  box-shadow:inset 0 0 0 .5px var(--dsw-alias-border-l2,light-dark(#0000001a,#ffffff26));
+}
 `;
 
 /* 高度档位的**内容**规则（JS 侧）：
