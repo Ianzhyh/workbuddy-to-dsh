@@ -81,11 +81,15 @@ try {
       buttons: btns,
       /* 账号卡里的余额徽标 */
       balances: [...document.querySelectorAll('.wb-balance-badge')].map((b) => b.textContent.trim()),
+      cardTitle: sw && sw.closest('.wb-card') ? ((sw.closest('.wb-card').querySelector('h3') || {}).textContent || '') : '',
     };
   })())`));
   console.log('设置页账号标签：', JSON.stringify(info));
 
   if (!info.hasSwitch) {
+    if (info.hasSwitch && info.inCard === false) {
+      problems.push(`换号开关不在卡片内（用户：怎么还是单独出现），实际在 ${JSON.stringify(info.cardTitle)}`);
+    }
     problems.push(`设置页「账号」标签没有自动换号开关（用户两次反馈）`);
   } else {
     for (const n of ['关闭', '3 次', '5 次', '10 次']) {

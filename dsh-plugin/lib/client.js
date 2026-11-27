@@ -6911,31 +6911,31 @@ body.dark .wb-root,
        */
       const firstRun = distinct.length === 0 && pluginOnly.length === 0;
       return h(Fragment, null,
-        /*
-         * 自动换号开关。管的是"所有账号之间怎么切"，所以放在列表之前、
-         * 不放进某一行 —— 那会让人以为只对该账号生效。
-         */
-        h('div', { className: 'wb-auto-switch' },
-          h('div', { className: 'wb-auto-switch-head' },
-            h('span', null, t('自动换号')),
-            h(Pill, {
-              tone: panelAutoAfter > 0 ? 'ok' : '',
-              text: panelAutoAfter > 0 ? t('已开启') : t('已关闭'),
-            })),
-          h('div', { className: 'wb-rail-seg' },
-            [0, 3, 5, 10].map((v) => h(Btn, {
-              key: v,
-              sm: true,
-              primary: panelAutoAfter === v,
-              disabled: panelAutoSwitchBusy,
-              onClick: () => { void savePanelAutoSwitch(v); },
-            }, v === 0 ? t('关闭') : String(v) + ' ' + t('次'))),
-          ),
-          h('p', { className: 'wb-note' },
-            t('同一模型 10 分钟内被限流达到这个次数后，自动切到下一个可用账号；账号用量上限与风控是一次即切，不受此阈值影响。')),
-        ),
         firstRun ? loginCard : null,
         h(Card, { title: '账号' },
+          /*
+          * 自动换号开关。管的是"所有账号之间怎么切"，所以放在列表之前、
+          * 不放进某一行 —— 那会让人以为只对该账号生效。
+          */
+          h('div', { className: 'wb-auto-switch' },
+          h('div', { className: 'wb-auto-switch-head' },
+          h('span', null, t('自动换号')),
+          h(Pill, {
+          tone: panelAutoAfter > 0 ? 'ok' : '',
+          text: panelAutoAfter > 0 ? t('已开启') : t('已关闭'),
+          })),
+          h('div', { className: 'wb-rail-seg' },
+          [0, 3, 5, 10].map((v) => h(Btn, {
+          key: v,
+          sm: true,
+          primary: panelAutoAfter === v,
+          disabled: panelAutoSwitchBusy,
+          onClick: () => { void savePanelAutoSwitch(v); },
+          }, v === 0 ? t('关闭') : String(v) + ' ' + t('次'))),
+          ),
+          h('p', { className: 'wb-note' },
+          t('同一模型 10 分钟内被限流达到这个次数后，自动切到下一个可用账号；账号用量上限与风控是一次即切，不受此阈值影响。')),
+          ),
           error ? h(Alert, { bad: true }, error) : null,
           quotaLimit
             ? h(Alert, null,
