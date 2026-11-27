@@ -144,6 +144,23 @@
       <span class="spacer"></span>
     </div>
     <div id="accountSourceNote" class="hint" hidden>当前实际使用插件账号；桌面端账号若与插件端同账号，会在该行显示「双凭据」和「用插件凭据」。</div>
+      <!--
+        自动换号：阈值决定"同一模型 10 分钟内被限流多少次后换到下一个账号"。
+        账号用量上限与风控是账号级判定，一次即切，不受这个阈值影响。
+      -->
+      <div id="autoSwitchBox" class="acct-autoswitch">
+        <div class="acct-autoswitch-head">
+          <span>自动换号</span>
+          <span class="tag" id="autoSwitchState">—</span>
+        </div>
+        <div class="acct-autoswitch-opts" role="group" aria-label="自动换号阈值">
+          <button class="mini" type="button" data-autoswitch="0">关闭</button>
+          <button class="mini" type="button" data-autoswitch="3">3 次</button>
+          <button class="mini" type="button" data-autoswitch="5">5 次</button>
+          <button class="mini" type="button" data-autoswitch="10">10 次</button>
+        </div>
+        <p class="hint">同一模型 10 分钟内被限流达到这个次数后，自动切到下一个可用账号；账号用量上限与风控是一次即切，不受此阈值影响。</p>
+      </div>
     <div id="accountList"><div class="skeleton" role="status" aria-label="正在读取…"><i style="width:70%"></i><i style="width:92%"></i><i style="width:58%"></i></div></div>
   </section>
 
@@ -5498,6 +5515,8 @@ async function usePluginCredential(uid) {
 }
 
 async function loadAccounts() {
+  /* 换号状态与账号列表一起刷新：两处数据源不同，但用户期望同时更新 */
+  void loadAutoSwitch();
   const el = $('accountList');
   const d = await api('/api/accounts');
   setStamp('accountsStamp');
@@ -5597,6 +5616,10 @@ async function loadAccounts() {
         '<span class="acct-grip" draggable="false" data-grip="' + escapeAttr(a.name) + '"' +
           ' title="拖动排序" aria-label="拖动排序">⋮⋮</span>' +
         '<div class="acct-name"><span data-i18n-skip>' + escapeAttr(label) + '</span>' + activeTag + dualTag +
+          /* 余额胶囊：与插件面板同一形状。null 显示破折号 —— 那是读不到不是没钱了 */
+          (typeof a.balance === 'number'
+            ? ' <span class="acct-balance">' + escapeAttr(a.balance.toLocaleString('en-US')) + '</span>'
+            : (a.balance === null ? ' <span class="acct-balance none">—</span>' : '')) +
           (a.hidden ? ' <span class="tag">已隐藏</span>' : '') + '</div>' +
         '<div class="acct-act">' + status +
           '<button class="mini" data-alias="' + escapeAttr(a.name) + '"' +
@@ -5664,6 +5687,68 @@ async function loadAccounts() {
     btn.onclick = () => hideAccount(all.find(x => x.name === btn.dataset.hide), btn.dataset.hidden !== '1');
   });
   wireAccountDrag(el);
+}
+
+/**
+ * 自动换号：读当前阈值并高亮，点按钮保存。
+ *
+ * 与插件面板共用 .env 里同一个键（后端 /api/auto-switch 用共享模块写），
+ * 所以在哪儿改都一样，另一边刷新可见。
+ */
+/**
+ * 在账号区顶部临时显示一条结果。
+ *
+ * 控制台没有 toast 机制，而这里只需要"保存成功/失败"一句话 ——
+ * 复用已有的 accountSourceNote（本来就在账号列表上方），3 秒后恢复原内容。
+ */
+function flashAccountNote(text, bad) {
+  const el = $('accountSourceNote');
+  if (!el) return;
+  if (!el.dataset.original) el.dataset.original = el.innerHTML;
+  el.hidden = false;
+  el.textContent = text;
+  el.classList.toggle('bad', bad === true);
+  clearTimeout(el.__flashTimer);
+  el.__flashTimer = setTimeout(() => {
+    el.innerHTML = el.dataset.original;
+    el.classList.remove('bad');
+    el.hidden = el.dataset.original.trim() === '';
+  }, 3000);
+}
+
+async function loadAutoSwitch() {
+  const box = $('autoSwitchBox');
+  if (!box) return;
+  let d = null;
+  try { d = await api('/api/auto-switch'); } catch (e) { d = null; }
+  const after = Number(d && d.after) || 0;
+  const state = $('autoSwitchState');
+  if (state) {
+    state.textContent = after > 0 ? '已开启（' + after + ' 次）' : '已关闭';
+    state.classList.toggle('ok', after > 0);
+  }
+  box.querySelectorAll('[data-autoswitch]').forEach((b) => {
+    b.classList.toggle('on', Number(b.dataset.autoswitch) === after);
+  });
+}
+
+async function saveAutoSwitch(after) {
+  try {
+    const res = await fetch('/api/auto-switch', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ after: Number(after) || 0 }),
+    });
+    const d = await res.json().catch(() => null);
+    if (d && d.ok) {
+      flashAccountNote(after > 0 ? '已开启自动换号' : '已关闭自动换号');
+    } else {
+      flashAccountNote(d && d.error ? String(d.error) : '保存失败', true);
+    }
+  } catch (e) {
+    flashAccountNote(String(e && e.message ? e.message : e), true);
+  }
+  await loadAutoSwitch();
 }
 
 /**

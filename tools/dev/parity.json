@@ -1,0 +1,52 @@
+{
+  "_comment": "插件面板 ⇄ 控制台功能对照。check-parity.mjs 读它来核对两边是否同步。",
+  "_howToAdd": "新增跨端功能时加一条：plugin/console 里的 markers 是『该实现留下的可检索痕迹』；只在一端有意为之的项写 intentional，并说明理由。",
+  "features": [
+    {
+      "name": "账号余额显示",
+      "plugin": { "file": "dsh-plugin/lib/client.js", "markers": ["wb-balance-badge"] },
+      "console": { "file": "dashboard/public/index.html", "markers": ["acct-balance"] }
+    },
+    {
+      "name": "自动换号开关",
+      "plugin": { "file": "dsh-plugin/lib/client.js", "markers": ["wb-auto-switch"] },
+      "console": { "file": "dashboard/public/index.html", "markers": ["autoSwitchBox"] }
+    },
+    {
+      "name": "自动换号后端",
+      "plugin": { "file": "dsh-plugin/lib/routes.mjs", "markers": ["/workbuddy/auto-switch"] },
+      "console": { "file": "dashboard/server.mjs", "markers": ["/api/auto-switch"] }
+    },
+    {
+      "name": "余额批量端点",
+      "plugin": { "file": "dsh-plugin/lib/routes.mjs", "markers": ["/workbuddy/quota-all"] },
+      "console": { "file": "dashboard/server.mjs", "markers": ["/v1/quota/all"] }
+    },
+    {
+      "name": ".env 读写（共用实现）",
+      "plugin": { "file": "dsh-plugin/lib/index.js", "markers": ["env-file.mjs"] },
+      "console": { "file": "dashboard/server.mjs", "markers": ["env-file.mjs"] },
+      "shared": { "file": "lib/env-file.mjs", "markers": ["export function updateProjectEnv"] }
+    },
+    {
+      "name": "用量上限按账号分组",
+      "plugin": { "file": "dsh-plugin/lib/client.js", "markers": ["wb-limit-acct"] },
+      "console": { "file": "dashboard/public/index.html", "markers": ["用量上限"] }
+    },
+    {
+      "name": "签到（单账号 + 全部领取）",
+      "plugin": { "file": "dsh-plugin/lib/client.js", "markers": ["checkin/all"] },
+      "console": { "file": "dashboard/server.mjs", "markers": ["checkin"] }
+    },
+    {
+      "name": "模型测速",
+      "plugin": { "file": "dsh-plugin/lib/client.js", "markers": ["wb-rail-tps"] },
+      "intentional": "控制台是看数据的地方；测速是发一次真请求（花积分），属于对话侧操作，放控制台会让人以为它只影响控制台。"
+    },
+    {
+      "name": "隐藏未列出 / 只列免费",
+      "plugin": { "file": "dsh-plugin/lib/client.js", "markers": ["wb-rail-filters"] },
+      "intentional": "这两个筛选作用于插件自己的模型选择器列表；控制台没有那个列表。"
+    }
+  ]
+}

@@ -119,6 +119,16 @@
      * 带 `data-wb-raw` 标记，验收脚本（panel-i18n.test.mjs）据此跳过整棵子树：
      * 否则「上游返回的中文」会被当成「漏翻的界面文案」报出来。
      */
+    /**
+     * 余额显示：数字带千分位；null/undefined 显示破折号。
+     *
+     * 为什么不显示 0：那是"读不到"而不是"没钱了"，两者对用户含义完全不同。
+     */
+     function fmtBalance(n) {
+       if (typeof n !== 'number' || !Number.isFinite(n)) return '—';
+       return n.toLocaleString('en-US');
+     }
+
     function Raw(props) {
       return h0('span', { className: props.className, 'data-wb-raw': '' }, props.text);
     }
@@ -6551,6 +6561,42 @@ body.dark .wb-root,
       /** 递增后让插件卡片立即重拉（切换插件凭据后不必等 15 秒轮询）。 */
       const [pluginRefreshKey, setPluginRefreshKey] = useState(0);
       /*
+       * 每个账号的余额 + 自动换号状态。
+       *
+       * 余额走 /workbuddy/quota-all（一次拿全部，桥侧 60 秒缓存）；
+       * 换号阈值与右栏、控制台共用同一个 .env 键，在哪儿改都一样。
+       */
+      const panelQuotaApi = useJson('/workbuddy/quota-all', { interval: 300000 });
+      const panelAutoSwitchApi = useJson('/workbuddy/auto-switch', { interval: 0 });
+      const [panelAutoSwitchBusy, setPanelAutoSwitchBusy] = useState(false);
+      /** uid → 余额（读不到为 null，显示破折号而不是 0）。 */
+      const panelQuotaByUid = (() => {
+        const map = new Map();
+        const list = panelQuotaApi.data && Array.isArray(panelQuotaApi.data.accounts)
+          ? panelQuotaApi.data.accounts : [];
+        for (const row of list) {
+          if (!row || !row.uid) continue;
+          map.set(String(row.uid), typeof row.total === 'number' ? row.total : null);
+        }
+        return map;
+      })();
+      /** 当前阈值（0 = 关）。 */
+      const panelAutoAfter = Number(panelAutoSwitchApi.data && panelAutoSwitchApi.data.after) || 0;
+      const savePanelAutoSwitch = async (after) => {
+        if (panelAutoSwitchBusy) return;
+        setPanelAutoSwitchBusy(true);
+        try {
+          const res = await postJson('/workbuddy/auto-switch', { after });
+          const d = res.data || {};
+          setMessage(d.ok
+            ? (after > 0 ? t('已开启自动换号。') : t('已关闭自动换号。'))
+            : t('保存失败：') + (d.error || res.status));
+          panelAutoSwitchApi.reload();
+        } finally {
+          setPanelAutoSwitchBusy(false);
+        }
+      };
+      /*
        * 实际生效的凭据来源（来自桥的 /health.credential.source）。
        * 「使用中」只能有一个：插件来源生效时，桌面端那一行只是在桌面来源下
        * 会选中的账号 —— 标成「使用中」会和下面的插件账号同时出现两个"使用中"。
@@ -6800,6 +6846,29 @@ body.dark .wb-root,
        */
       const firstRun = distinct.length === 0 && pluginOnly.length === 0;
       return h(Fragment, null,
+        /*
+         * 自动换号开关。管的是"所有账号之间怎么切"，所以放在列表之前、
+         * 不放进某一行 —— 那会让人以为只对该账号生效。
+         */
+        h('div', { className: 'wb-auto-switch' },
+          h('div', { className: 'wb-auto-switch-head' },
+            h('span', null, t('自动换号')),
+            h(Pill, {
+              tone: panelAutoAfter > 0 ? 'ok' : '',
+              text: panelAutoAfter > 0 ? t('已开启') : t('已关闭'),
+            })),
+          h('div', { className: 'wb-rail-seg' },
+            [0, 3, 5, 10].map((v) => h(Btn, {
+              key: v,
+              sm: true,
+              primary: panelAutoAfter === v,
+              disabled: panelAutoSwitchBusy,
+              onClick: () => { void savePanelAutoSwitch(v); },
+            }, v === 0 ? t('关闭') : String(v) + ' ' + t('次'))),
+          ),
+          h('p', { className: 'wb-note' },
+            t('同一模型 10 分钟内被限流达到这个次数后，自动切到下一个可用账号；账号用量上限与风控是一次即切，不受此阈值影响。')),
+        ),
         firstRun ? loginCard : null,
         h(Card, { title: '账号' },
           error ? h(Alert, { bad: true }, error) : null,
@@ -6876,6 +6945,10 @@ body.dark .wb-root,
                         : null)
                     : null,
                   pluginFor ? h(Pill, { tone: '', text: '双凭据' }) : null,
+                  /* 余额：放在徽标之后，与右栏同一形状（胶囊 + 等宽数字） */
+                  a.userId && panelQuotaByUid.has(String(a.userId))
+                  ? h('span', { className: 'wb-balance-badge' }, fmtBalance(panelQuotaByUid.get(String(a.userId))))
+                  : null,
                   a.hidden ? h(Pill, { tone: '', text: '已隐藏' }) : null),
                 h('div', { className: 'wb-account-primary' },
                   h(Btn, { disabled: saving, onClick: () => startEdit(a) }, '改名'),
@@ -11379,6 +11452,45 @@ const probeOne = async (id) => {
        */
       const limitsApi = useJson('/workbuddy/limits', { interval: 15000 });
       /*
+       * 每个账号的余额 + 自动换号状态。
+       *
+       * 余额走 /workbuddy/quota-all（一次拿全部，桥侧 60 秒缓存）；
+       * 换号阈值与设置页、控制台共用同一个 .env 键。
+       */
+      const railQuotaApi = useJson('/workbuddy/quota-all', { interval: 300000 });
+      const railSwitchApi = useJson('/workbuddy/auto-switch', { interval: 0, enabled: tab === 'account' });
+      const [railSwitchBusy, setRailSwitchBusy] = useState(false);
+      /** uid → 余额（读不到为 null，显示破折号而不是 0）。 */
+      const railQuotaByUid = (() => {
+        const map = new Map();
+        const list = railQuotaApi.data && Array.isArray(railQuotaApi.data.accounts)
+          ? railQuotaApi.data.accounts : [];
+        for (const row of list) {
+          if (!row || !row.uid) continue;
+          map.set(String(row.uid), typeof row.total === 'number' ? row.total : null);
+        }
+        return map;
+      })();
+      /** 当前阈值（0 = 关）。 */
+      const railAutoAfter = Number(railSwitchApi.data && railSwitchApi.data.after) || 0;
+      const saveRailSwitch = async (after) => {
+        if (railSwitchBusy) return;
+        setRailSwitchBusy(true);
+        try {
+          const res = await postJson('/workbuddy/auto-switch', { after });
+          const d = res.data || {};
+          setNotice({
+            text: d.ok
+              ? (after > 0 ? t('已开启自动换号。') : t('已关闭自动换号。'))
+              : t('保存失败：') + (d.error || res.status),
+            bad: !d.ok,
+          });
+          railSwitchApi.reload();
+        } finally {
+          setRailSwitchBusy(false);
+        }
+      };
+      /*
        * 有人报告"可能刚触顶"时立刻重拉 —— 不等下一个 15 秒。
        *
        * 触发点见 `notifyLimitsSuspect()`：任何模型请求失败都会广播一次。
@@ -12595,6 +12707,10 @@ const probeOne = async (id) => {
                           : h('span', { className: 'wb-rail-item-sub' },
                             (a.domain || '') + (a.expired ? ' · ' + t('已过期') : ''))),
                       h('span', { className: 'wb-rail-item-side' },
+                        /* 余额胶囊：与设置页、控制台同形状 */
+                        a.userId && railQuotaByUid.has(String(a.userId)) && !narrow
+                          ? h('span', { className: 'wb-balance-badge' }, fmtBalance(railQuotaByUid.get(String(a.userId))))
+                          : null,
                         lim && !narrow ? h(Pill, { tone: lim.severe ? 'bad' : 'warn', text: t('受限 ' + lim.count) }) : null,
                         active
                           ? h(Pill, { tone: 'ok', text: t('当前使用') })
@@ -12610,6 +12726,29 @@ const probeOne = async (id) => {
                 disabled: accountApi.loading,
                 onClick: () => { accountApi.reload(); loginApi.reload(); limitsApi.reload(); },
               }, t('刷新')))),
+              /*
+               * 自动换号开关：放在账号列表**下方**（用户指定位置）。
+               * 它管"所有账号之间怎么切"，不属于某一个账号。
+               */
+              h('div', { className: 'wb-auto-switch' },
+                h('div', { className: 'wb-auto-switch-head' },
+                  h('span', null, t('自动换号')),
+                  h(Pill, {
+                    tone: railAutoAfter > 0 ? 'ok' : '',
+                    text: railAutoAfter > 0 ? t('已开启') : t('已关闭'),
+                  })),
+                h('div', { className: 'wb-rail-seg' },
+                  [0, 3, 5, 10].map((v) => h(Btn, {
+                    key: v,
+                    sm: true,
+                    primary: railAutoAfter === v,
+                    disabled: railSwitchBusy,
+                    onClick: () => { void saveRailSwitch(v); },
+                  }, v === 0 ? t('关闭') : String(v) + ' ' + t('次'))),
+                ),
+                h('p', { className: 'wb-note' },
+                  t('同一模型 10 分钟内被限流达到这个次数后，自动切到下一个可用账号；账号用量上限与风控是一次即切，不受此阈值影响。')),
+              ),
           h('div', { className: 'wb-card' },
             h('div', { className: 'wb-rail-cardhead' },
               h('h3', null, t('凭据')),

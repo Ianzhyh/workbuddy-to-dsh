@@ -26,7 +26,7 @@
  */
 
 import {
-  existsSync, mkdirSync, readFileSync, writeFileSync, chmodSync, unlinkSync, renameSync,
+  existsSync, mkdirSync, readFileSync, writeFileSync, chmodSync, unlinkSync,
 } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
@@ -37,6 +37,7 @@ import { fileURLToPath } from 'node:url';
 import { BridgeClient, BridgeSupervisor, BRIDGE_SCRIPT_REL } from './bridge.mjs';
 import { ConsoleSupervisor } from './console.mjs';
 import { failoverSignal, pickAccountFailoverTarget, pickFailoverTarget } from '../vendor/lib/failover.mjs';
+import { updateProjectEnv } from '../vendor/lib/env-file.mjs';
 import { WorkBuddyAdapter } from './adapter.mjs';
 import { toDirectory, pickDefaultModel } from './models.mjs';
 import { createTools } from './tools.mjs';
@@ -946,54 +947,6 @@ export function readProjectEnv(projectRoot) {
  * @param {string} value 空串 = 删除该行
  * @returns {{ ok: boolean, file: string, error?: string }}
  */
-export function updateProjectEnv(projectRoot, key, value) {
-  if (!projectRoot) return { ok: false, file: '', error: '找不到项目根目录' };
-  const name = String(key || '').trim();
-  if (!/^[A-Z_][A-Z0-9_]*$/.test(name)) {
-    return { ok: false, file: '', error: '非法的变量名：' + name };
-  }
-  const file = join(projectRoot, '.env');
-  let lines = [];
-  try {
-    lines = existsSync(file) ? readFileSync(file, 'utf8').split(/\r?\n/) : [];
-  } catch (e) {
-    return { ok: false, file, error: String(e?.message || e) };
-  }
-
-  const text = String(value ?? '').trim();
-  /* 同时匹配 KEY= / export KEY= / KEY = ... 三种写法 */
-  const re = new RegExp('^(\\s*)(export\\s+)?' + name + '\\s*=');
-  let replaced = false;
-  const next = [];
-  for (const line of lines) {
-    if (re.test(line)) {
-      /* 重复键只保留第一条：.env 里后者覆盖前者，留着重键更让人困惑 */
-      if (replaced) continue;
-      replaced = true;
-      if (!text) continue;
-      next.push(name + '=' + text);
-      continue;
-    }
-    next.push(line);
-  }
-  if (!replaced && text) {
-    /* 追加前去掉结尾空行，避免每次保存都多一个空行 */
-    while (next.length && next[next.length - 1].trim() === '') next.pop();
-    next.push(name + '=' + text);
-    next.push('');
-  }
-
-  const body = next.join('\n');
-  const tmp = file + '.' + process.pid + '.tmp';
-  try {
-    writeFileSync(tmp, body, { encoding: 'utf8', mode: 0o600 });
-    renameSync(tmp, file);
-  } catch (e) {
-    try { unlinkSync(tmp); } catch { /* 临时文件可能没建起来 */ }
-    return { ok: false, file, error: String(e?.message || e) };
-  }
-  return { ok: true, file };
-}
 
 /**
  * `.env` 里**只给子进程**的机密变量。
@@ -3163,7 +3116,48 @@ onUpstreamMutation: invalidateUpstreamCaches,
    */
   let autoSwitchBusy = false;
   let lastAutoSwitchAt = 0;
-  async function maybeAutoSwitchAccount() {
+  /**
+ * 给账号列表补上 `quota`（余额）。排序用它决定"先花谁的钱"。
+ *
+ * 走桥的 `/v1/quota/all`：一次请求拿全部账号，桥侧串行打上游 + 60 秒缓存。
+ * 逐个调 `/v1/quota` 会有 N 轮往返，且拿不到别的账号的余额。
+ *
+ * @param {Array<object>} [accounts] 控制台返回的账号数组
+ * @returns {Promise<Array<object>>} 原数组（补了 quota 字段）
+ */
+async function attachQuotas(accounts) {
+  const list = Array.isArray(accounts) ? accounts : [];
+  if (!list.length) return list;
+  let byUid = new Map();
+  try {
+    const data = await client.quotaAll({ signal: AbortSignal.timeout(30_000) });
+    const rows = Array.isArray(data?.accounts) ? data.accounts : [];
+    byUid = new Map(rows.filter((r) => r && r.uid).map((r) => [String(r.uid), r]));
+  } catch (e) {
+    log(`余额读取失败，切号按原顺序：${e?.message || e}`);
+    return list;
+  }
+  return list.map((a) => {
+    const uid = String(a?.userId ?? a?.account ?? '');
+    const q = byUid.get(uid);
+    if (!q || typeof q.total !== 'number') return a;
+    /*
+     * 形状要对上 `rankAccounts` 的期望：`quota.packages` 是数组（它逐条算临期）。
+     * 这里只有总量、没有分包的到期时间，所以给一个"单包"的最小形状 ——
+     * 排序键 ③（总量）生效，键 ①②（临期）不掺假数据。
+     */
+    return {
+      ...a,
+      quota: {
+        ...(a.quota && typeof a.quota === 'object' ? a.quota : {}),
+        packages: Array.isArray(a.quota?.packages) && a.quota.packages.length
+          ? a.quota.packages
+          : [{ remain: q.total, size: q.total, monthly: false }],
+      },
+    };
+  });
+}
+async function maybeAutoSwitchAccount() {
     if (autoSwitchBusy || Date.now() - lastAutoSwitchAt < 60_000) return;
     autoSwitchBusy = true;
     try {
@@ -3182,7 +3176,17 @@ onUpstreamMutation: invalidateUpstreamCaches,
         signal: AbortSignal.timeout(10_000),
       })
         .then((r) => r.json()).catch(() => null);
-      const target = pickFailoverTarget(listed?.accounts, health?.auth?.userId || '');
+      /*
+     * 把余额合进账号对象再排序。
+     *
+     * `rankAccounts` 的排序键 ③ 读的是 `account.quota.packages`，而控制台
+     * `/api/accounts` 返回的对象里**没有** quota —— 不补这一步，排序会跳过
+     * 余额，退化成"凭据更晚过期的优先"。
+     *
+     * 取余额失败时照旧切号：用户当下正被限流，切号比排序精确更重要。
+     */
+    const withQuota = await attachQuotas(listed?.accounts).catch(() => listed?.accounts);
+    const target = pickFailoverTarget(withQuota, health?.auth?.userId || '');
       const why = signal.reason === 'quota'
         ? `账号用量已达上限（${signal.model || '?'}${signal.resetAt ? `，上游提示 ${signal.resetAt} 重置` : ''}）`
         : signal.reason === 'account_restricted'

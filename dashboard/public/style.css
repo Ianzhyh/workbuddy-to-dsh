@@ -2256,6 +2256,24 @@ input[type="checkbox"]:active {
   flex-wrap: wrap;
   color: var(--text);
 }
+/*
+ * 账号余额胶囊：与插件面板同一形状（那边是 .wb-balance-badge）。
+ * 数字用等宽 + tabular-nums，多个账号横向比较时能对齐。
+ * `.none` = 读不到（显示破折号），弱化处理避免被当成 0。
+ */
+.acct-balance {
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+  padding: 1px 9px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 18px;
+  font-variant-numeric: tabular-nums;
+  background: rgba(255, 255, 255, .08);
+}
+.acct-balance.none { opacity: .6; font-weight: 400; }
 .acct-sub {
   color: var(--muted);
   font-size: var(--fs-label);
@@ -4473,3 +4491,29 @@ html[data-theme="dark"][data-accent="teal"] {
     outline-offset: 2px;
   }
 }
+
+/*
+ * 自动换号开关：账号列表上方的一条设置。
+ * 与插件面板的 .wb-auto-switch 语义一致（同一个 .env 键）。
+ */
+.acct-autoswitch {
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, .08);
+  background: rgba(255, 255, 255, .03);
+}
+.acct-autoswitch-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+  font-size: 13px;
+}
+.acct-autoswitch-opts { display: flex; gap: 6px; flex-wrap: wrap; }
+.acct-autoswitch-opts .mini.on {
+  background: rgba(99, 102, 241, .25);
+  border-color: rgba(99, 102, 241, .6);
+}
+.acct-autoswitch .hint { margin: 8px 0 0; font-size: 12px; }

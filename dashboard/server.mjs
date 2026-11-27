@@ -67,6 +67,7 @@ import {
 } from '../lib/client-connect.mjs';
 import { effectiveAuthFile, readState, writeAccountAlias, writeAccountHidden, writeAccountOrder, writeState, writeStateStrict } from '../lib/state.mjs';
 import { failoverSignal, pickAccountFailoverTarget, pickFailoverTarget } from '../lib/failover.mjs';
+import { updateProjectEnv } from '../lib/env-file.mjs';
 
 // ── 基础工具 ────────────────────────────────────────────────────────────
 
@@ -1017,12 +1018,12 @@ let accountFailoverBusy = false;
 let lastAccountFailoverAt = 0;
 
 async function maybeAutoSwitchAccount() {
-  if (!ACCOUNT_FAILOVER_AFTER || accountFailoverBusy || Date.now() - lastAccountFailoverAt < 60_000) return;
+  if (!(Number(config.dashboard.accountFailoverAfter) > 0) || accountFailoverBusy || Date.now() - lastAccountFailoverAt < 60_000) return;
   accountFailoverBusy = true;
   try {
     const health = await bridgeHealth();
     if (!health.running || !health.ok) return;
-    const signal = failoverSignal(health.body, ACCOUNT_FAILOVER_AFTER);
+    const signal = failoverSignal(health.body, Number(config.dashboard.accountFailoverAfter) || 0);
     if (!signal) return;
     lastAccountFailoverAt = Date.now();
     const listed = await listAccounts();
@@ -1049,11 +1050,18 @@ async function maybeAutoSwitchAccount() {
   }
 }
 
+let accountFailoverTimer = null;
 function startAccountFailoverWatchdog() {
   if (!ACCOUNT_FAILOVER_AFTER) return;
-  const timer = setInterval(() => { void maybeAutoSwitchAccount(); }, 10_000);
-  timer.unref?.();
-  console.log(`限流自动切号已开启：同一模型 10 分钟内 ${ACCOUNT_FAILOVER_AFTER} 次瞬时 429 后切换桌面账号；账号用量上限（6004/14018）一次即切`);
+  if (accountFailoverTimer) return; // 幂等
+  accountFailoverTimer = setInterval(() => { void maybeAutoSwitchAccount(); }, 10_000);
+  accountFailoverTimer.unref?.();
+  console.log(`限流自动切号已开启：同一模型 10 分钟内 ${ACCOUNT_FAILOVER_AFTER} 次瞬时 429 后切换账号；账号用量上限（6004/14018）一次即切`);
+}
+/** 阈值改了之后重启看门狗：参数变化靠每次读 `config.dashboard.accountFailoverAfter` 生效。 */
+function restartAccountFailoverWatchdog() {
+  if (accountFailoverTimer) { clearInterval(accountFailoverTimer); accountFailoverTimer = null; }
+  startAccountFailoverWatchdog();
 }
 
 /**
@@ -2070,7 +2078,41 @@ const server = createServer(async (req, res) => {
       }
     }
 
-    if (route === '/api/accounts') {
+    /*
+   * 自动换号：读写阈值。与插件面板共用 .env 里同一个键，
+   * 所以用户在哪儿改都一样，两边看到同一个值。
+   */
+  if (route === '/api/auto-switch') {
+    if (req.method === 'GET') {
+      sendJson(res, 200, {
+        ok: true,
+        after: Number(config.dashboard.accountFailoverAfter) || 0,
+        envKey: 'WORKBUDDY_ACCOUNT_FAILOVER_AFTER',
+      });
+      return;
+    }
+    if (req.method !== 'POST') { sendJson(res, 405, { ok: false, error: 'GET or POST only' }); return; }
+    try {
+      const body = await readBody(req).catch(() => null);
+      const raw = Number(body && body.after);
+      const after = Number.isFinite(raw) && raw > 0 ? Math.min(50, Math.floor(raw)) : 0;
+      /*
+       * 写 .env（下次启动生效）+ 改内存（本次立即生效）。
+       *
+       * 看门狗 `startAccountFailoverWatchdog()` 在启动时按阈值决定要不要起定时器；
+       * 这里改完必须让它重新判断，否则"开了但不起作用"要等下次重启。
+       */
+      const written = updateProjectEnv(config.projectRoot, "WORKBUDDY_ACCOUNT_FAILOVER_AFTER", after > 0 ? String(after) : "");
+      config.dashboard.accountFailoverAfter = after;
+      try { restartAccountFailoverWatchdog(); } catch { /* 看门狗不存在时忽略 */ }
+      sendJson(res, 200, { ok: true, after, saved: written.ok, envFile: written.file });
+    } catch (error) {
+      sendJson(res, 200, { ok: false, error: String(error?.message || error) });
+    }
+    return;
+  }
+
+  if (route === '/api/accounts') {
       /*
        * 先校正"钉住的快照 vs 桌面端当前账号"：用户在 WorkBuddy 客户端里换号后，
        * 这里解除旧钉住并让桥跟着桌面走（issue #6）。列表随后再读，active 标记
@@ -2105,26 +2147,42 @@ const server = createServer(async (req, res) => {
          */
         const alive = await bridgeHealth(1200);
         if (alive?.running === true) {
-          const [quotaNow, health] = await Promise.all([
-            fetch(`${config.bridge.url}/v1/quota`, {
+    const [quotaAll] = await Promise.all([
+            fetch(`${config.bridge.url}/v1/quota/all`, {
               headers: { Authorization: `Bearer ${config.bridge.token}` },
-              signal: AbortSignal.timeout(5000),
+              signal: AbortSignal.timeout(15000),
             }).then((r) => (r.ok ? r.json() : null)).catch(() => null),
-            /*
-             * 「正在服务的是哪个账号」以**桥自己的回答**为准，不用 `.state.json`
-             * 里的钉住项：桌面端换号后桥可能已经跟随到别的文件，钉住项会过期
-             * （与 `pickAccountFailoverTarget` 的注释同一条理由）。
-             */
-            Promise.resolve(alive.body || null),
-          ]);
-          const serving = String(health?.auth?.userId || '');
-          if (quotaNow && Array.isArray(quotaNow.packages) && Array.isArray(listed?.accounts)) {
-            for (const a of listed.accounts) {
-              if (!a || typeof a !== 'object') continue;
-              const id = String(a.userId || a.account || '');
-              if (id && serving && id === serving) a.quota = { packages: quotaNow.packages };
-            }
-          }
+    ]);
+    /*
+     * 每个账号一行余额：`balance` 给界面显示，`quota.packages` 给切号排序
+     * （`rankAccounts` 的排序键读这个字段）。
+     *
+     * 用 `/v1/quota/all`：桥内部串行打上游、一次拿全部账号，带 60 秒缓存。
+     * 原先只给"正在服务"的那个账号附积分包，是因为 `/v1/quota` 只读当前凭据；
+     * 那个约束在 quota-all 出现后不再成立。
+     *
+     * 读不到就不设/设 null：`expiringCredits()` 用 `known` 区分"没有到期信息"
+     * 与"零积分"，编一个 0 会把后者说成前者。
+     */
+    if (quotaAll && Array.isArray(quotaAll.accounts) && Array.isArray(listed?.accounts)) {
+      const byUid = new Map(quotaAll.accounts
+        .filter((r) => r && r.uid)
+        .map((r) => [String(r.uid), r]));
+      for (const a of listed.accounts) {
+        if (!a || typeof a !== 'object') continue;
+        const id = String(a.userId || a.account || '');
+        const row = id ? byUid.get(id) : null;
+        if (!row) continue;
+        if (typeof row.total === 'number') {
+          a.balance = row.total;
+          a.quota = { packages: [{ remain: row.total, size: row.total, monthly: false }] };
+        } else {
+          /* 读不到：明确给 null，前端据此显示破折号 */
+          a.balance = null;
+        }
+        if (row.error) a.balanceError = String(row.error).slice(0, 160);
+      }
+    }
         }
       } catch (error) {
         /*
