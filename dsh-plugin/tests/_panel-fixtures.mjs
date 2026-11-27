@@ -603,6 +603,33 @@ export function buildRoutes(data) {
      * 而不是测一个随机数。`timeToFirstTokenMs` 与 `samples` 都要有：
      * 面板会把它们拼成 "416 tok/s · 首字节 815ms"。
      */
+    /*
+     * 自动换号设置：读默认关（0），写回成功。
+     *
+     * 桩必须能被面板改：否则测不到"点按钮真的发了请求"。
+     */
+    /*
+     * 每个账号的余额（面板「账号旁显示余额」用）。
+     *
+     * 与 /workbuddy/quota 不同：这里一次给全部账号。桩里给两个真实形状的账号，
+     * 其中一个 total=null（模拟读不到），用来验"读不到显示破折号而不是 0"。
+     */
+    '/workbuddy/quota-all': {
+      ok: true,
+      cached: false,
+      at: new Date().toISOString(),
+      accounts: [
+        { uid: 'uid-fixture-0001', nickname: 'Fixture', source: 'desktop', total: 1027, packages: 3 },
+        { uid: 'uid-fixture-0002', nickname: 'Fixture Other', source: 'desktop', total: null, packages: 0 },
+      ],
+    },
+    '/workbuddy/auto-switch': {
+      ok: true,
+      after: 0,
+      envKey: 'WORKBUDDY_ACCOUNT_FAILOVER_AFTER',
+      envFile: '/tmp/fixture/.env',
+      consoleWarning: '',
+    },
     '/workbuddy/tps': {
       ok: true,
       cached: false,

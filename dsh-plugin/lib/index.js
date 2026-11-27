@@ -26,7 +26,7 @@
  */
 
 import {
-  existsSync, mkdirSync, readFileSync, writeFileSync, chmodSync, unlinkSync,
+  existsSync, mkdirSync, readFileSync, writeFileSync, chmodSync, unlinkSync, renameSync,
 } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
@@ -925,6 +925,74 @@ export function readProjectEnv(projectRoot) {
     }
   } catch { /* .env 不可读就当作没有 */ }
   return out;
+}
+
+/**
+ * 把**一个键**写回 .env，其余内容（注释、顺序、其它键）原样保留。
+ *
+ * 为什么需要它：面板上的「自动换号」开关要落到一个持久位置。写 dsh 的
+ * settings.yaml 容易撞坏用户其它配置且要重启 dsh；只放内存重启就丢；
+ * 另建配置文件又多一个用户不知道的地方。.env 是用户本来就在编辑、
+ * 插件也已经在读的文件 —— 写它、下次启动照常生效。
+ *
+ * · 键已存在（含 export KEY= 与引号形式）→ 就地替换，位置不变；
+ * · 键不存在 → 追加到末尾；
+ * · value 为空串 → 删除该行（回到默认），而不是留一个空值行。
+ *
+ * 写入走临时文件 + rename：中途崩溃不会留下半个 .env。
+ *
+ * @param {string} projectRoot
+ * @param {string} key 必须是大写下划线形式（防注入）
+ * @param {string} value 空串 = 删除该行
+ * @returns {{ ok: boolean, file: string, error?: string }}
+ */
+export function updateProjectEnv(projectRoot, key, value) {
+  if (!projectRoot) return { ok: false, file: '', error: '找不到项目根目录' };
+  const name = String(key || '').trim();
+  if (!/^[A-Z_][A-Z0-9_]*$/.test(name)) {
+    return { ok: false, file: '', error: '非法的变量名：' + name };
+  }
+  const file = join(projectRoot, '.env');
+  let lines = [];
+  try {
+    lines = existsSync(file) ? readFileSync(file, 'utf8').split(/\r?\n/) : [];
+  } catch (e) {
+    return { ok: false, file, error: String(e?.message || e) };
+  }
+
+  const text = String(value ?? '').trim();
+  /* 同时匹配 KEY= / export KEY= / KEY = ... 三种写法 */
+  const re = new RegExp('^(\\s*)(export\\s+)?' + name + '\\s*=');
+  let replaced = false;
+  const next = [];
+  for (const line of lines) {
+    if (re.test(line)) {
+      /* 重复键只保留第一条：.env 里后者覆盖前者，留着重键更让人困惑 */
+      if (replaced) continue;
+      replaced = true;
+      if (!text) continue;
+      next.push(name + '=' + text);
+      continue;
+    }
+    next.push(line);
+  }
+  if (!replaced && text) {
+    /* 追加前去掉结尾空行，避免每次保存都多一个空行 */
+    while (next.length && next[next.length - 1].trim() === '') next.pop();
+    next.push(name + '=' + text);
+    next.push('');
+  }
+
+  const body = next.join('\n');
+  const tmp = file + '.' + process.pid + '.tmp';
+  try {
+    writeFileSync(tmp, body, { encoding: 'utf8', mode: 0o600 });
+    renameSync(tmp, file);
+  } catch (e) {
+    try { unlinkSync(tmp); } catch { /* 临时文件可能没建起来 */ }
+    return { ok: false, file, error: String(e?.message || e) };
+  }
+  return { ok: true, file };
 }
 
 /**
@@ -3002,7 +3070,38 @@ export function apply(ctx, rawConfig = {}) {
         paths: dshPaths,
         provider: config.provider,
         log,
-        onUpstreamMutation: invalidateUpstreamCaches,
+        /*
+ * 自动换号：读当前阈值、写回 .env 并立刻生效。
+ *
+ * 「立刻生效」很重要：用户在设置页拨了开关，不该被告知"重启后生效"。
+ * 配置对象是 `config`，而 `maybeAutoSwitchAccount`（看门狗）每次都实时读它，
+ * 所以改完下一个 10 秒周期就按新值工作。
+ */
+getAutoSwitch: () => ({
+  after: Number(config.accountFailoverAfter) || 0,
+  envKey: 'WORKBUDDY_ACCOUNT_FAILOVER_AFTER',
+  envFile: join(projectRoot, '.env'),
+  consoleWarning: Number(config.accountFailoverAfter) > 0
+    ? '同时开了控制台侧的同名功能时，一次触顶会各切一次号；建议只开一边'
+    : '',
+}),
+setAutoSwitch: async (after) => {
+  const value = Number(after) > 0 ? String(Math.floor(after)) : '';
+  const written = updateProjectEnv(projectRoot, 'WORKBUDDY_ACCOUNT_FAILOVER_AFTER', value);
+  /* 立刻改内存里的配置：`.env` 只在启动时读一次，不重读的话要等重启 */
+  config.accountFailoverAfter = Number(after) > 0 ? Math.floor(after) : 0;
+  /*
+   * 开/关的转变要立刻安排看门狗：它在启动时按阈值决定要不要起定时器，
+   * 现在值变了必须同步 —— 否则"开了但不起作用"要等到下次重启。
+   */
+  try { startAccountFailoverWatchdog(); } catch { /* 已在跑就忽略 */ }
+  return {
+    saved: written.ok,
+    envFile: written.file,
+    ...(written.ok ? {} : { error: written.error }),
+  };
+},
+onUpstreamMutation: invalidateUpstreamCaches,
         readPrefs: readModelPrefs,
         onWritePrefs: writeModelPrefs,
         notifyAdaptersUpdated,
@@ -3171,14 +3270,32 @@ export function apply(ctx, rawConfig = {}) {
       }
     })();
   }
-  if (config.accountFailoverAfter > 0) {
-    const timer = setInterval(() => { void maybeAutoSwitchAccount(); }, 10_000);
-    timer.unref?.();
+  /*
+   * 自动换号的定时器。
+   *
+   * 做成模块级变量 + 具名函数，是因为它现在要能被**运行时开关**驱动：
+   * 用户在设置页拨开时立刻起、拨关时立刻停，而不是等下次重启。
+   * 原来它只是一段启动时的 if，拨开之后功能静默不生效 —— 那是最难排查的一种。
+   */
+  let accountFailoverTimer = null;
+  function startAccountFailoverWatchdog() {
+    if (!(Number(config.accountFailoverAfter) > 0)) return false;
+    if (accountFailoverTimer) return true; // 已在跑，幂等
+    accountFailoverTimer = setInterval(() => { void maybeAutoSwitchAccount(); }, 10_000);
+    accountFailoverTimer.unref?.();
     if (typeof ctx.effect === 'function') {
-      ctx.effect(() => () => clearInterval(timer), 'workbuddy.account-failover');
+      ctx.effect(() => () => stopAccountFailoverWatchdog(), 'workbuddy.account-failover');
     }
     log(`限流自动切号已开启：同一模型 10 分钟内 ${config.accountFailoverAfter} 次瞬时 429 后切换账号；账号用量上限（6004/14018）一次即切`);
+    return true;
   }
+  function stopAccountFailoverWatchdog() {
+    if (!accountFailoverTimer) return;
+    clearInterval(accountFailoverTimer);
+    accountFailoverTimer = null;
+    log('限流自动切号已关闭');
+  }
+  startAccountFailoverWatchdog();
 
   /*
    * 启动即尝试自动接入搜索（issue #7）。放在 `autoStart` 分支之外：

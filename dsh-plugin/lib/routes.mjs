@@ -80,7 +80,15 @@ export function createRouteTable(deps) {
     verifyWebSearch = async () => { throw new Error('web search verification is unavailable'); },
     revertWebSearch = async () => { throw new Error('web search restore is unavailable'); },
     disableWebSearch = async () => { throw new Error('web search switching is unavailable'); },
-    readDefaultModel = () => null,
+    /*
+   * 自动换号（账号触顶/限流后切到另一个号）。
+   *
+   * 读写都交给插件侧：那里既知道 .env 在哪，也能立刻改当前进程的配置。
+   * 路由层不该重复实现这套逻辑。
+   */
+  getAutoSwitch = () => ({ after: 0, envKey: '', envFile: '' }),
+  setAutoSwitch = async () => { throw new Error('auto-switch editing is unavailable'); },
+  readDefaultModel = () => null,
     saveDefaultModel = async () => { throw new Error('default model editing is unavailable'); },
     /** 用量上限快照：哪个账号的哪个模型触顶了（见 /workbuddy/limits）。 */
     limitsSnapshot = async () => ({ limiting: [], accounts: [], at: null }),
@@ -474,6 +482,63 @@ export function createRouteTable(deps) {
       },
     },
     {
+      kind: 'exact',
+      path: '/workbuddy/quota-all',
+      async handler(req, res) {
+        if (readOnly(req, res)) return;
+        try {
+          const url = new URL(req.url, 'http://127.0.0.1');
+          const refresh = url.searchParams.get('refresh') === '1';
+          /*
+           * 转发桥的 /v1/quota/all：一次拿每个账号的余额。
+           *
+           * 面板自己循环调 /v1/quota 的话，N 个账号就 N 轮请求，而且
+           * 「哪个失败了」的口径会和桥不一致。
+           */
+          const result = await client.quotaAll({ refresh, signal: AbortSignal.timeout(60_000) });
+          return sendJson(res, 200, result);
+        } catch (error) {
+          log('panel quota-all failed', error);
+          return sendJson(res, 200, { ok: false, error: String(error?.message || error) });
+        }
+      },
+    },
+      {
+        kind: 'exact',
+      path: '/workbuddy/auto-switch',
+      async handler(req, res) {
+        if (req.method === 'GET') {
+          if (readOnly(req, res)) return;
+          try {
+            return sendJson(res, 200, { ok: true, ...getAutoSwitch() });
+          } catch (error) {
+            log('panel auto-switch read failed', error);
+            return sendJson(res, 200, { ok: false, error: String(error?.message || error) });
+          }
+        }
+        if (req.method !== 'POST') return sendJson(res, 405, { ok: false, error: 'GET or POST only' });
+        if (!guard(req)) return sendJson(res, 403, { ok: false, error: 'missing x-workbuddy-panel header' });
+        try {
+          const body = await readJsonBody(req);
+          if (!body || typeof body !== 'object') {
+            return sendJson(res, 400, { ok: false, error: 'invalid body' });
+          }
+          /*
+           * `after` 是阈值：同一账号同一模型在 10 分钟内被上游 429 这么多次就换号。
+           * `0` = 关。账号用量上限（6004/14018）与风控（11140）是账号级，
+           * 一次即换，不受这个阈值影响。
+           */
+          const raw = Number(body.after);
+          const after = Number.isFinite(raw) && raw > 0 ? Math.min(50, Math.floor(raw)) : 0;
+          const result = await setAutoSwitch(after);
+          return sendJson(res, 200, { ok: true, after, ...result });
+        } catch (error) {
+          log('panel auto-switch write failed', error);
+          return sendJson(res, 200, { ok: false, error: String(error?.message || error) });
+        }
+      },
+    },
+      {
       kind: 'exact',
       path: '/workbuddy/tps',
       async handler(req, res) {

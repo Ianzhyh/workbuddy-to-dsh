@@ -90,7 +90,7 @@
     "test:ui": "node tools/dev/run-ui-tests.mjs",
     "panel:i18n": "node dsh-plugin/tests/panel-i18n.mjs",
     "panel:drag": "node dsh-plugin/tests/panel-drag.mjs",
-    "panel:check": "node dsh-plugin/tests/panel-render.mjs && node dsh-plugin/tests/panel-drag.mjs && node dsh-plugin/tests/panel-i18n.mjs && node dsh-plugin/tests/panel-sticky-tabs.mjs && node dsh-plugin/tests/rail-render.mjs && node dsh-plugin/tests/rail-filters.mjs && node dsh-plugin/tests/rail-unlisted-toast.mjs && node dsh-plugin/tests/rail-tps.mjs",
+    "panel:check": "node dsh-plugin/tests/panel-render.mjs && node dsh-plugin/tests/panel-drag.mjs && node dsh-plugin/tests/panel-i18n.mjs && node dsh-plugin/tests/panel-sticky-tabs.mjs && node dsh-plugin/tests/rail-render.mjs && node dsh-plugin/tests/rail-filters.mjs && node dsh-plugin/tests/rail-unlisted-toast.mjs && node dsh-plugin/tests/rail-tps.mjs && node dsh-plugin/tests/rail-auto-switch.mjs && node dsh-plugin/tests/rail-head-layout.mjs",
     "verify:release": "node tools/dev/verify-release.mjs",
     "publish:npm": "npm run release:check && npm publish --access public",
     "check:i18n": "node tools/dev/check-i18n-coverage.mjs",

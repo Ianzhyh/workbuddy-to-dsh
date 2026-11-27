@@ -11882,7 +11882,7 @@ const probeOne = async (id) => {
                   h(Btn, {
                     disabled: modelsApi.loading,
                     onClick: () => { modelsApi.reload(); defaultApi.reload(); limitsApi.reload(); },
-                  }, t('刷新模型'))),
+                  }, t('刷新模型')),
                 /*
                  * 输出速度测速（tokens/second）。
                  *
@@ -11903,21 +11903,22 @@ const probeOne = async (id) => {
                  * 都放按钮会让界面变重，也让误点成本变高。
                  */
                 current?.model
+                  ? h(Btn, {
+                    disabled: tpsForCurrent?.busy === true,
+                    title: t('测三次取中位数，花费约 0.01–0.15 积分'),
+                    onClick: () => { void runTps(current.model); },
+                  }, tpsForCurrent?.busy ? t('测速中…') : t('测速'))
+                  : null),  /* ← 这里闭合 head：模型名 + 两个按钮 */
+                tpsForCurrent && (tpsForCurrent.sample || tpsForCurrent.error)
                   ? h('div', { className: 'wb-rail-tps' },
-                    h(Btn, {
-                      disabled: tpsForCurrent?.busy === true,
-                      title: t('测三次取中位数，花费约 0.01–0.15 积分'),
-                      onClick: () => { void runTps(current.model); },
-                    }, tpsForCurrent?.busy ? t('测速中…') : t('测速')),
-                    tpsForCurrent?.error
-                      ? h('span', { className: 'wb-rail-tps-err', role: 'alert' }, tpsForCurrent?.error)
-                      : (tpsForCurrent?.sample
-                        ? h('span', { className: 'wb-rail-tps-val' },
-                          tpsSummary(tpsForCurrent?.sample),
-                          tpsForCurrent?.sample.complete === false && tpsForCurrent?.sample.samples > 0
-                            ? h('span', { className: 'wb-rail-tps-note' }, t('（样本不完整）'))
-                            : null)
-                        : null))
+                    tpsForCurrent.error
+                      ? h('span', { className: 'wb-rail-tps-err', role: 'alert' }, tpsForCurrent.error)
+                      : h(Fragment, null,
+                        h('span', { className: 'wb-rail-tps-val' }, tpsSummary(tpsForCurrent.sample)),
+                        tpsForCurrent.sample && tpsForCurrent.sample.complete === false
+                          && tpsForCurrent.sample.samples > 0
+                          ? h('span', { className: 'wb-rail-tps-note' }, t('（样本不完整）'))
+                          : null))
                   : null,
                 current && current.routable === false
                   ? h(Alert, { bad: true }, t('默认模型已失效（不在当前目录里），请重新选一个。'))

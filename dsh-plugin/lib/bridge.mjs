@@ -247,6 +247,16 @@ export class BridgeClient {
     return this.#json(`/v1/requests?limit=${limit}`, { signal });
   }
 
+  /**
+   * 每个账号一份余额（面板的「账号旁显示余额」用）。
+   *
+   * 一次请求拿全部：面板自己循环调 /v1/quota 会有 N 轮往返，
+   * 而且"哪个失败了"的口径会和桥不一致。
+   */
+  quotaAll({ refresh = false, signal } = {}) {
+    return this.#json(`/v1/quota/all${refresh ? '?refresh=1' : ''}`, { signal, timeoutMs: 60_000 });
+  }
+
   quota(signal) {
     return this.#json('/v1/quota', { signal, timeoutMs: 20000 });
   }

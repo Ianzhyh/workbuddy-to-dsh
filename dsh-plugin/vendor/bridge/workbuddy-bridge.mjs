@@ -12962,7 +12962,12 @@ function pluginAccountShape(cred) {
  * 这里**不**过滤 `noActivity`：国际版无活动是"领取时才知道"的事实，
  * 签到页要把它显示出来，而不是从清单里悄悄消失。
  *
- * @returns {Promise<Array<object>>} 同形状的账号记录（桌面优先顺序）
+ * @returns {Promise<Array<{
+ *   source?: string, userId?: string, uid?: string,
+ *   access?: string, refresh?: string, expiresAt?: number,
+ *   domain?: string, endpoint?: string, nickname?: string,
+ *   enterpriseId?: string, uin?: string, authFile?: string, mtimeMs?: number,
+ * }>>} 同形状的账号记录（桌面优先顺序）
  */
 async function checkinAccountList() {
   const [desktopRaw, pluginRaw] = await Promise.all([
@@ -14901,8 +14906,52 @@ async function handleRequest(req, res) {
       // staleMs 只在「刷新失败、退回过期缓存」时出现；成功时不带这个字段
       return json(res, 200, { object: 'list', data: list, ...(staleMs !== null ? { staleMs } : {}) });
     }
+/** `/v1/quota/all` 的进程内缓存。60 秒：用户不会 1 分钟内反复刷新余额，但会拖窗口。 */
+let quotaAllCache = { at: 0, body: { at: null, accounts: [] } };
+const QUOTA_ALL_TTL_MS = numEnv('WORKBUDDY_QUOTA_ALL_TTL_MS', 60_000, { min: 0 });
 
-    if (url.pathname === '/v1/quota') {
+/*
+ * `GET /v1/quota/all` —— 每个账号一份余额（面板的「账号旁显示余额」用）。
+ *
+ * 与 `/v1/quota` 的区别：那个只报**当前**账号。面板列所有账号时若自己循环调
+ * N 次，会有 N 轮 HTTP + N 次上游请求，且错误口径与桥不一致。
+ *
+ * 串行打上游：这些请求打向不同网关，并发没有收益反而容易触发限流。
+ * 单账号失败只落进它自己那行 —— 一个号令牌过期不该让整批显示不出来。
+ */
+if (url.pathname === '/v1/quota/all') {
+  const wantRefresh = url.searchParams.get('refresh') === '1';
+  if (!wantRefresh && quotaAllCache.at && Date.now() - quotaAllCache.at < QUOTA_ALL_TTL_MS) {
+    return json(res, 200, { ok: true, cached: true, ...quotaAllCache.body });
+  }
+  try {
+    const accounts = await checkinAccountList();
+    const rows = [];
+    for (const account of accounts) {
+      const uid = String(account.userId || '');
+      try {
+        const quota = await fetchQuota(account);
+        rows.push({
+          uid,
+          nickname: account.nickname || '',
+          source: account.source || '',
+          total: typeof quota.total === 'number' ? quota.total : null,
+          packages: Array.isArray(quota.packages) ? quota.packages.length : 0,
+        });
+      } catch (e) {
+        /* 单账号失败：只标它自己，不影响其它账号 */
+        rows.push({ uid, nickname: account.nickname || '', source: account.source || '', error: shortError(e?.message || e, 160) });
+      }
+    }
+    const body = { at: new Date().toISOString(), accounts: rows };
+    quotaAllCache = { at: Date.now(), body };
+    return json(res, 200, { ok: true, cached: false, ...body });
+  } catch (e) {
+    return json(res, 502, { ok: false, error: shortError(e?.message || e, 200) });
+  }
+}
+
+if (url.pathname === '/v1/quota') {
       try {
         /*
          * 把「这份余额属于哪个账号」一并带回。

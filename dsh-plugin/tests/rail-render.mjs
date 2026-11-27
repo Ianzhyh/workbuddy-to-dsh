@@ -329,7 +329,10 @@ try {
    */
   const limitRows = JSON.parse(await page.cdp.evaluate(`JSON.stringify((() => {
     const rail = document.querySelector('[data-workbuddy-rail]');
-    const card = [...rail.querySelectorAll('.wb-card')].find((c) => /用量上限/.test(c.textContent));
+    const card = [...rail.querySelectorAll('.wb-card')].find((c) => {
+  const h = c.querySelector('.wb-rail-cardhead h3') || c.querySelector('h3');
+  return h && (h.textContent || '').trim() === '用量上限';
+});
     if (!card) return [];
     return [...card.querySelectorAll('.wb-rail-item')].map((row) => ({
       text: row.innerText.replace(/\\s+/g, ' ').trim(),
@@ -346,7 +349,10 @@ try {
    */
   const limitCards = JSON.parse(await page.cdp.evaluate(`JSON.stringify((() => {
     const rail = document.querySelector('[data-workbuddy-rail]');
-    const card = [...rail.querySelectorAll('.wb-card')].find((c) => /用量上限/.test(c.textContent));
+    const card = [...rail.querySelectorAll('.wb-card')].find((c) => {
+  const h = c.querySelector('.wb-rail-cardhead h3') || c.querySelector('h3');
+  return h && (h.textContent || '').trim() === '用量上限';
+});
     if (!card) return [];
     return [...card.querySelectorAll('.wb-limit-acct')].map((g) => ({
       name: (g.querySelector('.wb-limit-acct-name') || {}).textContent || '',
@@ -477,7 +483,10 @@ try {
   await sleep(1200);
   const afterAuto = JSON.parse(await page.cdp.evaluate(`JSON.stringify((() => {
     const rail = document.querySelector('[data-workbuddy-rail]');
-    const card = [...rail.querySelectorAll('.wb-card')].find((c) => /用量上限/.test(c.textContent));
+    const card = [...rail.querySelectorAll('.wb-card')].find((c) => {
+  const h = c.querySelector('.wb-rail-cardhead h3') || c.querySelector('h3');
+  return h && (h.textContent || '').trim() === '用量上限';
+});
     return {
       requests: window.__reqs.filter((r) => r.path === '/workbuddy/limits').length,
       text: card ? card.innerText.replace(/\\s+/g, ' ').trim() : '',
