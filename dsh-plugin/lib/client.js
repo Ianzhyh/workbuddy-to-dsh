@@ -1581,17 +1581,22 @@ body.dark .wb-root,
  * 阈值用按钮组而不是下拉：只有四个选项，点一下就选完。
  */
 .wb-auto-switch{
-  margin:10px 0 0;
-  padding:10px 0 0;
+  /*
+   * 上下都要留白 + 下边框：上面和卡片标题分开、下面和账号列表分开。
+   * 原来只有上边框，说明文字与列表说明紧挨着，两段不同性质的文字糊成一片。
+   */
+  margin:12px 0 14px;
+  padding:12px 0 14px;
   border-top:.5px solid var(--dsw-alias-border-l1,light-dark(#00000010,#ffffff1a));
+  border-bottom:.5px solid var(--dsw-alias-border-l1,light-dark(#00000010,#ffffff1a));
 }
 .wb-auto-switch-head{
   display:flex;align-items:center;justify-content:space-between;gap:8px;
-  margin:0 0 8px;font-size:12.5px;font-weight:600;
+  margin:0 0 7px;font-size:12.5px;font-weight:600;
 }
 .wb-auto-switch .wb-rail-seg{display:flex;flex-wrap:wrap;gap:6px}
 .wb-auto-switch .wb-note{
-  margin:8px 0 0;font-size:11.5px;line-height:1.55;
+  margin:9px 0 0;font-size:11.5px;line-height:1.55;
   color:var(--dsw-alias-label-tertiary,light-dark(#81858c,#adb2b8));
 }
 
