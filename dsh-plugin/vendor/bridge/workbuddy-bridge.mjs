@@ -2272,7 +2272,14 @@ async function readStoredAuth() {
       `${previousAuth.userId || '?'} -> ${result.userId || '?'}`);
   }
   authFileCache = { mtimeMs: stat.mtimeMs, size: stat.size, auth: result };
-  return result;
+  /*
+   * 桌面文件里的令牌可能**已经过期**（桌面端几小时没开、没自己续期），
+   * 而桥在某次续期时拿到过一份有效的新令牌 —— 只是它当初只留在内存里。
+   * 重启后内存清空，这里就用缓存的续期结果顶上，避免"重启就要重登"。
+   *
+   * 只在**文件里的确实过期**时才用缓存：桌面端自己续期过说明它才是权威。
+   */
+  return preferFreshDesktopAuth(result);
 }
 
 function decodeJwt(token) {
@@ -4339,7 +4346,22 @@ async function doRefreshAuth(auth) {
     // 名字原先叫 persistRefreshed —— 承诺「持久化」，行为却是明确不持久化，
     // 读代码的人很容易以为令牌已经落盘。这条「绝不回写」是项目的硬约束，
     // 代码不该长得像在回写。
-    logWriteBackSkipped();
+    /*
+   * 续期结果落盘到**桥自己的**缓存（不是桌面登录文件 —— 那个文件是桌面端的
+   * AES-GCM 信封，写明文会毁掉它，而密钥在桌面端手里）。
+   *
+   * 为什么必须落盘：桌面令牌 1 小时过期，桥每 55 分钟续一次；不落盘的话
+   * 重启桥 = 内存清空 → 重新读桌面文件 → 里面还是旧的已过期令牌。
+   * 桌面端若恰好几小时没开（没自己续期），用户就得重新登录。
+   *
+   * 失败只记日志：内存里已经有新令牌，本次调用不受影响。
+   */
+  try {
+    await persistDesktopRefresh(memoryAuth);
+    log('desktop credential refreshed (cached for restarts)');
+  } catch (e) {
+    log('desktop refresh cache write failed', shortError(e?.message || e, 160));
+  }
     log('refreshed access token (in memory; file untouched)');
     return memoryAuth;
   } catch (e) {
@@ -4409,13 +4431,80 @@ async function doRefreshPluginAuth(auth) {
 }
 
 /** 说明性日志：刷新出的令牌只留内存，登录文件归桌面端所有。 */
-function logWriteBackSkipped() {
-  // The login file now holds AES-256-GCM envelopes and the desktop app owns its
-  // own refresh cycle. Writing a decrypted token back would corrupt that store,
-  // so a refreshed token is kept in memory for this process only.
-  log('write-back skipped: the at-rest credential store belongs to the desktop app');
+/** 桌面端续期缓存文件（与插件凭据同一目录、同一把钥匙）。 */
+const desktopRefreshCacheFile = () => join(CREDENTIAL_DIR, 'desktop-refresh.cred');
+
+/**
+ * 把续期后的桌面凭据写进桥自己的缓存。
+ *
+ * 存的是 `{ userId, access, refresh, expiresAt, domain, endpoint, enterpriseId }`
+ * —— 只够"重启后不必重新登录"，不含任何界面偏好。
+ *
+ * 用 `sealCredential` 加密（与插件凭据同一条路径）：它不是明文令牌躺在磁盘上。
+ */
+async function persistDesktopRefresh(auth) {
+  if (!auth || !auth.access || auth.source === "api-key") return;
+  const record = {
+    uid: String(auth.userId || auth.uid || ""),
+    access: String(auth.access),
+    refresh: String(auth.refresh || ""),
+    expiresAt: Number(auth.expiresAt) || 0,
+    domain: String(auth.domain || ""),
+    endpoint: String(auth.endpoint || ""),
+    enterpriseId: String(auth.enterpriseId || ""),
+    savedAt: Date.now(),
+  };
+  if (!record.uid) return;
+  ensureCredentialDir();
+  writeFileAtomic(desktopRefreshCacheFile(), await sealCredential(record), 0o600);
 }
 
+/**
+ * 读回续期缓存。读不到/解不开一律返回 null（当作没有缓存）。
+ *
+ * 刻意**不抛错**：这是"少登录一次"的优化，坏了不该让桥起不来。
+ */
+async function readDesktopRefreshCache() {
+  try {
+    const text = readFileSync(desktopRefreshCacheFile(), "utf8");
+    const rec = await openCredential(text);
+    if (!rec || !rec.uid || !rec.access) return null;
+    return rec;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 桌面凭据从缓存里"续命"：桌面文件里的令牌**没有比缓存更新**时才用它。
+ *
+ * 为什么以桌面文件为优先：桌面端自己续期过，说明它才是权威；拿我们缓存的
+ * 旧值盖掉它会让本来能用的账号失效。
+ *
+ * @param {{
+ *   source?: string, userId?: string, uid?: string,
+ *   access?: string, refresh?: string, expiresAt?: number,
+ *   domain?: string, endpoint?: string, enterpriseId?: string,
+ * }} fileAuth 从桌面登录文件读到的凭据
+ * @returns {Promise<object>} 仍然优先返回 fileAuth，只在它已过期而缓存有效时改用缓存
+ */
+async function preferFreshDesktopAuth(fileAuth) {
+  if (!fileAuth) return fileAuth;
+  const now = Date.now();
+  const fileOk = !(fileAuth.expiresAt > 0 && fileAuth.expiresAt <= now);
+  if (fileOk) return fileAuth; // 文件里的还能用，不必看缓存
+  const cached = await readDesktopRefreshCache();
+  if (!cached) return fileAuth;
+  if (cached.uid && fileAuth.userId && cached.uid !== fileAuth.userId) return fileAuth;
+  if (!(cached.expiresAt > now)) return fileAuth; // 缓存也过期了
+  log("desktop token expired; using the cached refresh instead of asking to sign in again");
+  return {
+    ...fileAuth,
+    access: cached.access,
+    refresh: cached.refresh || fileAuth.refresh,
+    expiresAt: cached.expiresAt,
+  };
+}
 // ── Upstream payload normalization ───────────────────────────────────────
 /**
  * 上游（copilot.tencent.com）比 OpenAI 规范更严：有几处「规范允许、上游拒绝」

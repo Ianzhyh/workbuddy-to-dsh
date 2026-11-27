@@ -602,6 +602,22 @@ export const DEFAULTS = {
   /**
    * 账号限流自动切换（高级，默认关闭 = 0）：同一账号同一模型在 10 分钟内被
    * 上游 429 达到 N 次后，切到下一个可用账号。会切换钱包，只在显式配置时生效。
+   *
+   * ## 为什么默认关
+   *
+   * 换号是在"改写用户正在用的账号"。默认开会让用户在完全不知情的情况下被换号
+   * —— 比如他正拿某个特定账号核对账单。这类动作必须显式开启。
+   *
+   * ## 取值语义
+   *
+   * 数字 = 阈值。「账号用量上限（6004/14018）」与「账号被风控（11140）」是
+   * 账号级判定，一次即换，不需要累计；只有「瞬时 429」才累计到阈值。
+   *
+   * ## 与控制台同名开关的关系
+   *
+   * 控制台侧也有一份（它自己的 `config.mjs` 读 `WORKBUDDY_ACCOUNT_FAILOVER_AFTER`），
+   * 两份判定复用同一个 `lib/failover.mjs`。**不要同时开**：各自有 60 秒冷却，
+   * 同时开会在一次触顶里各换一次号，白换一次。
    */
   accountFailoverAfter: 0,
   consoleHost: '127.0.0.1',
@@ -779,7 +795,20 @@ export function resolveConfig(raw = {}) {
     autoStartTimeoutMs: asPositiveMs(cfg.autoStartTimeoutMs, DEFAULTS.autoStartTimeoutMs),
     consoleAutoStart: asBool(cfg.consoleAutoStart, DEFAULTS.consoleAutoStart),
     consoleIdleExitMs: asMs(cfg.consoleIdleExitMs, DEFAULTS.consoleIdleExitMs),
-    accountFailoverAfter: Math.max(0, Math.floor(Number(cfg.accountFailoverAfter) || 0)),
+    accountFailoverAfter: Math.max(0, Math.floor(Number(
+    /*
+     * 显式配置优先，其次 `.env`（`WORKBUDDY_ACCOUNT_FAILOVER_AFTER`）。
+     *
+     * 为什么插件也必须认 `.env`：这个值原先只喂给控制台（控制台自己的
+     * `config.mjs` 读 env），而插件侧的自动换号看门狗（`maybeAutoSwitchAccount`）
+     * 只看 `rawConfig` —— 于是用户在 `.env` 里写了阈值，插件这边**一直是 0**，
+     * 功能静默不生效，界面上也没有任何地方能看出为什么。
+     *
+     * `.env` 只经 `projectEnvView` 读（见 `lookupProjectEnv`），不进
+     * `process.env`，密钥不扩散这条不变。
+     */
+    cfg.accountFailoverAfter ?? lookupProjectEnv('WORKBUDDY_ACCOUNT_FAILOVER_AFTER')
+  ) || 0)),
     consoleHost: asHost(cfg.consoleHost, DEFAULTS.consoleHost),
     consolePort: asPort(cfg.consolePort, DEFAULTS.consolePort),
     provider: String(cfg.provider || DEFAULTS.provider),

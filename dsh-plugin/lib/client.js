@@ -178,9 +178,12 @@ body.dark .wb-root,
 .wb-lang:focus-visible{outline:2px solid var(--dsw-alias-brand-primary,#6366f1);outline-offset:1px}
 .wb-title{margin:0;font-size:15px;font-weight:600;letter-spacing:-0.01em}
 .wb-sub{margin:4px 0 0;color:var(--dsw-alias-label-secondary,light-dark(#61666b,#cfd3d6));font-size:12px;overflow-wrap:anywhere;line-height:18px}
-.wb-tabs{position:relative;display:flex;gap:6px;flex-wrap:wrap;border-bottom:.5px solid var(--dsw-alias-border-l2,light-dark(#0000001a,#ffffff1f));padding-bottom:8px}
+.wb-tabs{position:sticky;top:8px;z-index:var(--wb-z-sticky,20);margin:0 0 6px;padding:4px;background:var(--dsw-alias-bg-module-platform,light-dark(#ffffff,#202226));border:.5px solid var(--dsw-alias-border-l1,light-dark(#00000010,#ffffff1a));border-radius:9999px;box-shadow:0 1px 4px light-dark(rgba(0,0,0,0.06),rgba(0,0,0,0.32));display:flex;gap:2px;flex-wrap:nowrap;overflow-x:auto;overflow-y:hidden;align-items:center}
+.wb-tabs::before{content:"";position:absolute;left:-1px;right:-1px;bottom:100%;height:9px;background:var(--dsw-alias-bg-module-platform,light-dark(#ffffff,#202226))}
+.wb-tabs{scrollbar-width:none}
+.wb-tabs::-webkit-scrollbar{display:none}
 .wb-tab-indicator{position:absolute;background:var(--dsw-alias-brand-primary,light-dark(#0f1115,#f9fafb));border-radius:999px;transition:left .22s var(--wb-ease),top .22s var(--wb-ease),width .22s var(--wb-ease),height .22s var(--wb-ease),opacity .15s ease;pointer-events:none;z-index:0;box-shadow:0 1px 3px light-dark(rgba(0,0,0,0.12),rgba(0,0,0,0.35))}
-.wb-tab{position:relative;z-index:var(--wb-z-base,1);appearance:none;border:0;border-radius:999px;padding:5px 12px;font:inherit;font-size:12.5px;cursor:pointer;background:transparent;color:var(--dsw-alias-label-secondary,light-dark(#61666b,#cfd3d6));transition:color var(--wb-anim-fast),transform var(--wb-anim-fast)}
+.wb-tab{position:relative;z-index:var(--wb-z-base,1);appearance:none;border:0;border-radius:999px;flex:1 0 auto;white-space:nowrap;text-align:center;padding:5px 11px;font:inherit;font-size:12.5px;cursor:pointer;background:transparent;color:var(--dsw-alias-label-secondary,light-dark(#61666b,#cfd3d6));transition:color var(--wb-anim-fast),transform var(--wb-anim-fast)}
 .wb-tab:hover{background:var(--dsw-alias-interactive-bg-hover,light-dark(#2631480f,#ffffff14));color:var(--dsw-alias-label-primary,light-dark(#0f1115,#f9fafb))}
 .wb-tab:active{transform:scale(0.96)}
 .wb-tab:focus-visible{outline:2px solid var(--dsw-alias-brand-primary,#6366f1);outline-offset:2px}
