@@ -223,6 +223,22 @@ export class BridgeClient {
     return this.#json(`/v1/usage?days=${days}${hours ? '&hours=1' : ''}`, { signal });
   }
 
+  /**
+   * 输出速度测速（tokens/second）。
+   *
+   * 这是**唯一一个会花积分**的读接口：每次约 0.01-0.15 积分（三次测量）。
+   * 所以它必须由用户显式点名模型触发，绝不在任何轮询路径上自动跑。
+   *
+   * 超时给 150 秒：三次测量串行 + 每次可能的长首字节；压太紧会让用户看到
+   * "测速失败"而不是一个（慢的）真实数字。
+   */
+  tps(model, { refresh = false, signal } = {}) {
+    if (!model) return Promise.reject(new Error('tps: model is required'));
+    const qs = new URLSearchParams({ model: String(model) });
+    if (refresh) qs.set('refresh', '1');
+    return this.#json(`/v1/tps?${qs}`, { signal, timeoutMs: 150_000 });
+  }
+
   clearUsage(signal) {
     return this.#json('/v1/usage', { method: 'DELETE', signal });
   }

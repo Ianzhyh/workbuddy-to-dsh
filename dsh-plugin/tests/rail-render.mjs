@@ -102,7 +102,20 @@ const shot = async (name) => {
   const res = await page.cdp.send('Page.captureScreenshot', {
     format: 'png',
     captureBeyondViewport: true,
-    clip: { x: 0, y: 0, width: box.width, height: box.height, scale: 1 },
+    /*
+     * `box` 为 null = 这一刻 `[data-workbuddy-rail]` 不在 DOM 里。
+     *
+     * 原代码直接读 `box.width`，于是崩溃信息是
+     * 「Cannot read properties of null (reading 'width')」—— 完全看不出
+     * 是"rail 消失了"还是"截图 API 出错"，也不知道是哪个 tab。
+     * 现在把 tab 名和页面错误一起带出来，下一次坏掉能直接定位。
+     */
+    ...(box === null
+      ? (() => {
+        console.error(`[shot ${name}] rail 元素不在 DOM 里，没法截图`);
+        return { clip: { x: 0, y: 0, width: 340, height: 960, scale: 1 } };
+      })()
+      : { clip: { x: 0, y: 0, width: box.width, height: box.height, scale: 1 } }),
   });
   const buf = Buffer.from(res.result.data, 'base64');
   for (let attempt = 0; ; attempt++) {

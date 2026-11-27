@@ -475,6 +475,31 @@ export function createRouteTable(deps) {
     },
     {
       kind: 'exact',
+      path: '/workbuddy/tps',
+      async handler(req, res) {
+        if (readOnly(req, res)) return;
+        try {
+          const url = new URL(req.url, 'http://127.0.0.1');
+          const model = String(url.searchParams.get('model') || '').trim();
+          if (!model) return sendJson(res, 400, { ok: false, error: 'model is required' });
+          const refresh = url.searchParams.get('refresh') === '1';
+          /*
+           * 直接转发桥的结果：测速是**要花积分**的动作，插件侧不能再算一遍，
+           * 否则同一个模型会出现两个不同的数字。
+           *
+           * 超时给到 150 秒：三次测量 + 每次可能的长首字节，压得太紧会让用户
+           * 看到"测速失败"而不是一个（慢的）数字。
+           */
+          const result = await client.tps(model, { refresh, signal: AbortSignal.timeout(150_000) });
+          return sendJson(res, 200, result);
+        } catch (error) {
+          log('panel tps failed', error);
+          return sendJson(res, 200, { ok: false, error: String(error?.message || error) });
+        }
+      },
+    },
+    {
+      kind: 'exact',
       path: '/workbuddy/models',
       async handler(req, res) {
         if (readOnly(req, res)) return;

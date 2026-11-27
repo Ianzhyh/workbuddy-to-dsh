@@ -525,14 +525,14 @@ test('apply() 装配：注册 llm 路由、10 个工具、命令、HTTP 路由',
     }
     assert.equal(calls.commands.length, 1);
     assert.equal(calls.commands[0].name, 'workbuddy');
-    assert.equal(calls.routes.length, 28, 'HTTP 数据面应有 28 条路由（27 条 exact + 1 条 console-api 前缀）');
+    assert.equal(calls.routes.length, 29, 'HTTP 数据面应有 29 条路由（28 条 exact + 1 条 console-api 前缀）');
     assert.deepEqual(calls.routes.map((r) => r.path).sort(), [
       '/workbuddy/bridge', '/workbuddy/checkin', '/workbuddy/checkin/accounts', '/workbuddy/checkin/all',
       '/workbuddy/console', '/workbuddy/console-api', '/workbuddy/default-model', '/workbuddy/identity',
       '/workbuddy/limits', '/workbuddy/log',
       '/workbuddy/login', '/workbuddy/login/active', '/workbuddy/login/cancel', '/workbuddy/login/logout',
       '/workbuddy/login/poll', '/workbuddy/login/source', '/workbuddy/login/start',
-      '/workbuddy/migrate', '/workbuddy/model-visibility', '/workbuddy/models', '/workbuddy/quota', '/workbuddy/requests', '/workbuddy/status', '/workbuddy/usage',
+      '/workbuddy/migrate', '/workbuddy/model-visibility', '/workbuddy/models', '/workbuddy/quota', '/workbuddy/requests', '/workbuddy/status', '/workbuddy/tps', '/workbuddy/usage',
       '/workbuddy/web-search/disable', '/workbuddy/web-search/enable', '/workbuddy/web-search/revert', '/workbuddy/web-search/verify',
     ]);
     const prefix = calls.routes.find((r) => r.path === '/workbuddy/console-api');

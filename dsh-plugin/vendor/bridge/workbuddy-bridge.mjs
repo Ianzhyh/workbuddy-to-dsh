@@ -38,6 +38,9 @@ import { spawn } from 'node:child_process';
 import { waitDrain } from './wait-drain.mjs';
 import { applyPromotion, groupPromotions } from './promotions.mjs';
 import {
+  summarizeTps, tpsSampleUsable, TPS_PROBE_MAX_TOKENS, TPS_PROBE_RUNS,
+} from '../lib/tps.mjs';
+import {
   BUSY_TTL_MS, BUSY_TIMEOUT_MS,
   fetchBusyLevels, probeableModelIds, busyLabel, isBusyLevel,
   /* 新鲜度判定抽成纯函数：过期是这条特性唯一会算错且看不出来的地方 */
@@ -2343,6 +2346,25 @@ const CREDENTIAL_DIR = (() => {
 
 /** DPAPI 失败后的进程内回退原因（空串 = 未回退）。 */
 let credentialStoreFallback = '';
+/**
+ * 回退发生在什么时刻（0 = 从未回退）。
+ *
+ * 用户痛点（issue #16）：「每次更新插件或重启服务都需要重新登录」。
+ * 根因是 `credentialStoreFallback` 一旦被设上，**整个进程永久**切到 memory
+ * 模式：磁盘上已有的凭据读不到、新登录只写内存 —— 重启必然要重登。
+ * 而触发它的事件（DPAPI 密钥服务暂时不可用、目录被占用…）通常是**瞬时**的。
+ *
+ * 记下时刻，配合下面的 `CREDENTIAL_FALLBACK_RETRY_MS` 做"降级可自愈"：
+ * 到点后重新尝试磁盘路径，成功就清掉回退标记。
+ */
+let credentialStoreFallbackAt = 0;
+/**
+ * 降级后多久重试一次磁盘存储。
+ *
+ * 60 秒：既不会在瞬时故障里反复砸磁盘，也不会让用户真的去重启才能恢复。
+ * 0 = 禁用自愈（退化成旧行为），给排障留出口。
+ */
+const CREDENTIAL_FALLBACK_RETRY_MS = numEnv('WORKBUDDY_CREDENTIAL_FALLBACK_RETRY_MS', 60_000, { min: 0 });
 /** 进程内凭据（memory 模式 / DPAPI 回退时使用）。 */
 const memoryCredentials = new Map();
 let memoryActiveUid = '';
@@ -2357,6 +2379,74 @@ function invalidatePluginAuthCache() {
 let credentialLockTail = Promise.resolve();
 
 const credentialStoreMode = () => (credentialStoreFallback ? 'memory' : CREDENTIAL_STORE_MODE);
+/**
+ * 降级是否**已到期**、该重新试一次磁盘了。
+ *
+ * 只读判断（不产生副作用）——副作用留给 {@link tryRecoverCredentialStore}，
+ * 因为这里可能被 `/health` 之类的高频路径调到。
+ */
+function credentialFallbackExpired(now = Date.now()) {
+  if (!credentialStoreFallback) return false;
+  if (CREDENTIAL_FALLBACK_RETRY_MS <= 0) return false;
+  return now - credentialStoreFallbackAt >= CREDENTIAL_FALLBACK_RETRY_MS;
+}
+
+/**
+ * 尝试从"仅内存"回退里恢复。
+ *
+ * 用户不需要重启就能恢复持久化：到点后用一次**真实的磁盘探测**（建目录 +
+ * 写删一个探针文件）确认存储可用，可用就清掉回退标记。
+ *
+ * 为什么不直接"下次保存时顺便试"：那要等到用户**再次登录**才恢复 ——
+ * 而用户此刻已经在受"重启就重登"的苦，不能把恢复推迟到下一次同样的事故。
+ *
+ * 探针而不是直接写凭据：写凭据有副作用（可能覆盖），而这里只想回答
+ * "磁盘这条路现在通不通"。
+ *
+ * @returns {Promise<boolean>} 是否已恢复
+ */
+async function tryRecoverCredentialStore() {
+  if (!credentialFallbackExpired()) return false;
+  if (CREDENTIAL_STORE_MODE === 'memory') {
+    // 用户显式选了 memory：那不是"降级"，没有可恢复的东西
+    return false;
+  }
+  const probe = join(CREDENTIAL_DIR, `.probe-${randomUUID().slice(0, 8)}`);
+  try {
+    ensureCredentialDir();
+    writeFileSync(probe, 'ok', { mode: 0o600 });
+    unlinkSync(probe);
+  } catch (e) {
+    // 还是不通：把时间戳往后推，避免每条请求都重试
+    credentialStoreFallbackAt = Date.now();
+    try { unlinkSync(probe); } catch { /* 探针没写成功，删不掉也无所谓 */ }
+    log('credential store still unavailable', shortError(e?.message || e, 160));
+    return false;
+  }
+  credentialStoreFallback = '';
+  credentialStoreFallbackAt = 0;
+  log('credential store recovered; persistent storage is usable again');
+  /*
+   * 内存里那份凭据要落盘：它可能是**降级期间**登录的，只存在于内存。
+   * 不落盘的话，"恢复了"对用户仍然是空的 —— 重启还是丢。
+   * 失败不影响恢复结论（磁盘探针已经通过，这里只是补写）。
+   */
+  for (const record of memoryCredentials.values()) {
+    try {
+      ensureCredentialDir();
+      writeFileAtomic(credentialFileFor(record.uid), await sealCredential(record), 0o600);
+    } catch (e) {
+      log('failed to persist an in-memory credential after recovery', shortError(e?.message || e, 160));
+    }
+  }
+  if (memoryActiveUid) {
+    try { writeActiveUid(memoryActiveUid); } catch { /* 同上：不影响恢复结论 */ }
+  }
+  memoryCredentials.clear();
+  memoryActiveUid = '';
+  invalidatePluginAuthCache();
+  return true;
+}
 const credentialFileFor = (uid) => join(CREDENTIAL_DIR, `${createHash('sha256').update(String(uid), 'utf8').digest('hex').slice(0, 24)}.cred`);
 
 /** 凭据目录里有没有凭据**文件**（只 stat 名称，不解密）。 */
@@ -2781,10 +2871,42 @@ let pluginCredentialError = '';
 async function readAllPluginCredentials() {
   const out = [];
   pluginCredentialError = '';
+  /*
+   * 降级到"仅内存"之后，**磁盘上的旧凭据不该就此消失**。
+   *
+   * 用户痛点：降级后读到的只有内存里那一份（通常还没有 —— 降级发生在
+   * 保存时），于是面板显示"没有账号"，即使磁盘上明明躺着可用的凭据。
+   * 先试一次自愈；没恢复也要把磁盘那份**读出来用**（只读不写，安全）。
+   */
+  await tryRecoverCredentialStore().catch(() => false);
   if (credentialStoreMode() === 'memory') {
     for (const cred of memoryCredentials.values()) out.push(cred);
+    /*
+     * 内存为空或不全时，磁盘上的凭据仍然属于这个用户 —— 读出来合并
+     * （memory 里同 uid 的优先，它是更新的那一份）。
+     */
+    if (CREDENTIAL_STORE_MODE !== 'memory') {
+      const seen = new Set(out.map((c) => String(c.uid)));
+      for (const cred of await readCredentialFiles({ tolerant: true })) {
+        if (seen.has(String(cred.uid))) continue;
+        out.push(cred);
+      }
+    }
     return out;
   }
+  return readCredentialFiles();
+}
+
+/**
+ * 从磁盘读出全部凭据（解密后的完整记录）。
+ *
+ * 抽出来是为了让"正常模式"与"降级模式"共用同一段读盘逻辑 —— 降级时也要能
+ * 看到磁盘上的旧凭据，否则用户会以为账号丢了（issue #16 的伴随症状）。
+ *
+ * @param {{ tolerant?: boolean }} [options] `tolerant` 时不把读失败记成全局错误
+ */
+async function readCredentialFiles({ tolerant = false } = {}) {
+  const out = [];
   let files;
   try { files = readdirSync(CREDENTIAL_DIR).filter((f) => f.endsWith('.cred')); }
   catch { return out; }
@@ -2792,8 +2914,10 @@ async function readAllPluginCredentials() {
     const full = join(CREDENTIAL_DIR, file);
     try { out.push(await openCredential(readFileSync(full, 'utf8'))); }
     catch (e) {
-      pluginCredentialError = `${file}: ${e.message}`;
-      log('credential file unreadable', shortError(pluginCredentialError, 160));
+      if (!tolerant) {
+        pluginCredentialError = `${file}: ${e.message}`;
+        log('credential file unreadable', shortError(pluginCredentialError, 160));
+      }
     }
   }
   return out;
@@ -11185,6 +11309,163 @@ let catalogGeneration = 0;
  *   unsupported: boolean,
  * }}
  */
+/**
+ * 测速结果缓存：modelId → { at, sample }。
+ *
+ * 为什么必须缓存：一次测速要发 3 个请求、花约 0.01-0.15 积分。用户在模型页
+ * 来回切换时反复点「测速」不该反复付费。
+ *
+ * TTL 默认 30 分钟：模型速度是上游状态（同一天不同时段能差 4%），缓存太久
+ * 会让用户拿一个过时的数字做选型决策。
+ */
+const tpsCache = new Map();
+const TPS_CACHE_TTL_MS = numEnv('WORKBUDDY_TPS_CACHE_MS', 30 * 60_000, { min: 0 });
+
+/**
+ * 跑一次测速：三次「极短输入 + 长输出」，取中位数。
+ *
+ * 为什么与可用性探测**相反**的形状：可用性探测灌 25k 输入、只让模型吐 1 个
+ * token —— 它量的是输入侧限流，那个耗时是首字节延迟。测速要的是吞吐，
+ * 需要极小输入 + 长输出。
+ *
+ * 为什么三次：实测同一模型五次能差 72%（110/105/177/103/109），单次会被
+ * 离群值骗。三次取中位数丢弃离群值，成本仍只有约三分之一分。
+ *
+ * @param {string} modelId
+ */
+async function measureTpsForModel(modelId) {
+  const runs = [];
+  let attempted = 0;
+  let lastError = '';
+  for (let i = 0; i < TPS_PROBE_RUNS; i += 1) {
+    attempted += 1;
+    try {
+      const reading = await measureOneRun(modelId);
+      if (reading) runs.push(reading);
+    } catch (e) {
+      /*
+       * 单次失败不终止整轮：一次网络抖动不该让用户看到「测速失败」。
+       * 但**必须记下原因** —— 三次全失败时那句 lastError 是唯一能回答
+       * 「为什么测不出来」的证据（否则面板只有一个 all-failed，用户无从下手）。
+       */
+      lastError = shortError(e?.message || e, 200);
+      log('tps probe run failed', lastError);
+    }
+  }
+  const sample = summarizeTps(modelId, runs, attempted);
+  // 有失败时把原因带上；成功则不写（避免误导）
+  return lastError && !sample.complete ? { ...sample, lastError } : sample;
+}
+
+/**
+ * 一次测速：发一个极短 prompt，读流，量「首字节」与「生成完成」两个时刻。
+ *
+ * 只统计**正文** token（不含 reasoning）：思考 token 的速度与正文差一个量级，
+ * 混在一起会让推理模型的数字失去意义。
+ *
+ * @param {string} modelId
+ * @returns {Promise<{firstContentMs?: number, generationMs?: number, outputTokens?: number, credit?: number} | null>}
+ */
+async function measureOneRun(modelId) {
+  const payload = {
+    model: modelId,
+    stream: true,
+    max_tokens: TPS_PROBE_MAX_TOKENS,
+    messages: [
+      /*
+       * 上游要求第一条必须是 system prompt（否则 400 code 11128
+       * "first message is not system prompt"）—— 所有出站对话都受这条约束，
+       * 新增调用点最容易漏。
+       */
+      { role: 'system', content: 'You are a helpful assistant.' },
+      // 极短输入：这一项只测「写得多快」，不需要长上下文
+      { role: 'user', content: 'Count upward from 1, one number per line. Do not stop early.' },
+    ],
+  };
+  const startedAt = Date.now();
+  /*
+   * callUpstream 返回 { res, bodyText, upstreamStartedAt } —— 不是裸 Response。
+   * 直接用 up.ok / up.text() / up.body 会一路 undefined，最终在 up.text()
+   * 上抛 "not a function"（本实现第一版就踩了这个，靠 lastError 才看见）。
+   */
+  const { res } = await callUpstream(JSON.stringify(payload), modelId, '', undefined);
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    throw new Error(withPrefix('upstream ', res.status, ': ', shortError(text, 160)));
+  }
+  if (!res.body) throw new Error('upstream returned no stream body');
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let firstContentMs;
+  let lastContentMs;
+  let textChars = 0;
+  let outputTokens;
+  let credit;
+  let finishKind = '';
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const now = Date.now();
+      buffer += decoder.decode(value, { stream: true });
+      const chunkLines = buffer.split('\n');
+      buffer = chunkLines.pop() ?? '';
+      for (const line of chunkLines) {
+        if (!line.startsWith('data:')) continue;
+        const chunk = line.slice(5).trim();
+        if (!chunk || chunk === '[DONE]') continue;
+        let j; try { j = JSON.parse(chunk); } catch { continue; }
+        const choice = Array.isArray(j.choices) ? j.choices[0] : null;
+        const delta = choice?.delta || {};
+        // 只算正文；reasoning 是「思考」阶段，速度口径不同
+        if (typeof delta.content === 'string' && delta.content.length) {
+          if (firstContentMs === undefined) firstContentMs = now - startedAt;
+          lastContentMs = now - startedAt;
+          textChars += delta.content.length;
+        }
+        if (choice?.finish_reason) finishKind = String(choice.finish_reason);
+        if (j.usage) {
+          if (typeof j.usage.completion_tokens === 'number') outputTokens = j.usage.completion_tokens;
+          if (typeof j.usage.credit === 'number') credit = j.usage.credit;
+        }
+      }
+    }
+  } finally {
+    try { reader.releaseLock(); } catch { /* 已释放 */ }
+  }
+  /*
+   * 输出 token 数：上游给 usage 就用它；否则按字符数估（约 4 字符/token）。
+   * 缺 usage 时**不静默丢整条测量** —— 那会让面板永远显示「测不出来」；
+   * 用估算并把样本数如实带出去，调用方能判断可信度。
+   */
+  const tokens = Number.isFinite(outputTokens)
+    ? outputTokens
+    : (textChars > 0 ? Math.max(1, Math.round(textChars / 4)) : undefined);
+  const generationMs = (firstContentMs !== undefined && lastContentMs !== undefined)
+    ? Math.max(1, lastContentMs - firstContentMs)
+    : undefined;
+  /*
+   * finish 不是 stop/length 的测量不可用（内容过滤 / 工具调用）——
+   * 那种情况下输出 token 数不代表「模型写得多快」。
+   */
+  if (!tpsSampleUsable({ kind: finishKind })) {
+    if (finishKind) throw new Error(withPrefix('finish=', finishKind));
+    if (!textChars) throw new Error('no content produced');
+  }
+  return {
+    ...(firstContentMs === undefined ? {} : { firstContentMs }),
+    ...(generationMs === undefined ? {} : { generationMs }),
+    ...(tokens === undefined ? {} : { outputTokens: tokens }),
+    ...(typeof credit === 'number' ? { credit } : {}),
+  };
+}
+
+/** 拼字符串的极简助手（避免在生成脚本里嵌套模板字符串）。 */
+function withPrefix(...parts) {
+  return parts.map((p) => String(p)).join('');
+}
+
 let busyCache = {
   /** 上次成功探测的时刻 */
   at: 0,
@@ -13760,6 +14041,17 @@ async function handleRequest(req, res) {
     }
 
     if (url.pathname === '/health') {
+      /*
+       * 探活端点**先试一次凭据存储自愈**（issue #16 的收尾）。
+       *
+       * 只在 readAllPluginCredentials() 里恢复是不够的：那条路径只有面板列账号、
+       * 或日志读凭据时才走；而 /health 是控制台每 4 秒、插件每 2 秒都在打的端点
+       * —— 用户不需要主动做任何事就能等到恢复。
+       *
+       * 这不会给探活增加磁盘负担：tryRecoverCredentialStore() 第一句就是纯内存的
+       * "窗口到了吗"，没到直接返回 false。
+       */
+      await tryRecoverCredentialStore().catch(() => false);
       let auth = null;
       let region = '';
       /*
@@ -14269,6 +14561,51 @@ async function handleRequest(req, res) {
      * 区域没有这个端点时（国际区实测 404）返回 200 + `unsupported: true`，
      * **不是错误** —— 那不是调用方的问题，也不该让面板显示一个红叉。
      */
+    /*
+     * `/v1/tps` —— 输出速度测速（tokens/second）。
+     *
+     * ## 为什么要有这个端点
+     *
+     * 用户选模型时只能看倍率与上下文窗口，但**输出速度才是决定总耗时的那一项**：
+     * dsh 把模型当子代理并发跑、每个还要多轮往返，于是"便宜的慢模型"可能比
+     * "贵的快模型"更费总时间。实测（同类项目）：同样倍率的四个模型中位速度差 3.8 倍。
+     *
+     * ## 为什么必须显式触发
+     *
+     * 它花的是真积分（每次约 0.01–0.15）。任何"自动跑"的设计都会让用户在
+     * 不知情的情况下付费，所以只能由调用方点名（`?model=`）。
+     *
+     * ## 缓存
+     *
+     * 默认 30 分钟内复用结果：同一段会话里反复点"测速"不该反复付费。
+     * `?refresh=1` 强制重测。
+     */
+    if (url.pathname === '/v1/tps') {
+      if (req.method !== 'GET') return json(res, 405, { ok: false, error: 'GET only' });
+      const modelId = String(url.searchParams.get('model') || '').trim();
+      if (!modelId) return json(res, 400, { ok: false, error: 'model is required' });
+      const wantRefresh = url.searchParams.get('refresh') === '1';
+      const cached = tpsCache.get(modelId);
+      if (!wantRefresh && cached && Date.now() - cached.at < TPS_CACHE_TTL_MS) {
+        return json(res, 200, { ok: true, cached: true, sample: cached.sample });
+      }
+      try {
+        const sample = await measureTpsForModel(modelId);
+        tpsCache.set(modelId, { at: Date.now(), sample });
+        return json(res, 200, { ok: true, cached: false, sample });
+      } catch (e) {
+        /*
+         * 测速失败**不撒谎**：如实回错误，且不往缓存里塞假数据 ——
+         * 否则用户会在 30 分钟内一直看到一个编出来的数字。
+         */
+        return json(res, 200, {
+          ok: false,
+          error: shortError(e?.message || e, 200),
+          sample: summarizeTps(modelId, [], TPS_PROBE_RUNS),
+        });
+      }
+    }
+
     if (url.pathname === '/v1/load') {
       const wantRefresh = url.searchParams.get('refresh') === '1';
       if (wantRefresh || !busyCache.at) {

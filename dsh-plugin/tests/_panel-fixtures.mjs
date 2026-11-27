@@ -392,6 +392,8 @@ export function harnessHtml(fixtures) {
 window.__errors = [];
 window.addEventListener('error', (e) => window.__errors.push(String(e.message)));
 window.__calls = [];
+    /* 完整 URL（含 query）——见下面 push 处的说明。 */
+    window.__urls = [];
 window.__reqs = [];
 window.__hits = {};
 window.__dialogs = [];
@@ -420,6 +422,13 @@ window.confirm = function (message) { window.__dialogs.push(String(message)); re
     try {
       const method = (init && init.method) || 'GET';
       window.__calls.push([path, method]);
+      /*
+       * 完整 URL（含 query）单独记一份。
+       *
+       * 「path」 上面的 split('?') 是为了命中路由表，但断言"请求里点名了哪个模型"
+       * 时只有 path 就看不出来 —— 测速必须带 ?model=，否则测的是谁都不知道。
+       */
+      window.__urls.push(String(url));
       let parsed = null;
       if (init && typeof init.body === 'string') {
         try { parsed = JSON.parse(init.body); } catch (e) { parsed = null; }
@@ -587,6 +596,26 @@ export function buildRoutes(data) {
       };
     })(),
     '/workbuddy/models': data.models,
+    /*
+     * 测速桩：模型页的「测速」按钮读这条。
+     *
+     * 返回一份**完整样本**（3 次、complete），这样断言能钉住"数字怎么显示"，
+     * 而不是测一个随机数。`timeToFirstTokenMs` 与 `samples` 都要有：
+     * 面板会把它们拼成 "416 tok/s · 首字节 815ms"。
+     */
+    '/workbuddy/tps': {
+      ok: true,
+      cached: false,
+      sample: {
+        modelId: ((data.models && data.models.models) || [{}])[0].id || 'glm-5.3',
+        tokensPerSecond: 416,
+        outputTokens: 256,
+        timeToFirstTokenMs: 815,
+        samples: 3,
+        credit: 0.05,
+        complete: true,
+      },
+    },
     // 右栏「模型」页读的 dsh 默认模型：钉一条在目录里的，好断言"当前默认"那行。
     '/workbuddy/default-model': {
       ok: true,

@@ -1328,6 +1328,29 @@ body.dark .wb-root,
   .wb-rail-inner{max-width:760px;width:100%;margin:0 auto;display:flex;flex-direction:column;gap:14px}
   /* 只有模型勾选清单值得双栏（几十项，一列太长）。账号 / 凭据通常 2–5 行，
      双栏只会把「名字」和「切换按钮」分到两块、读起来要来回扫。 */
+  /*
+   * 测速行（当前默认模型那条）。
+   *
+   * 与「刷新模型」同一条视线上、但**单独成行**：测速要花积分，和"刷新"（免费）
+   * 是两种性质的动作，挤在一行容易误点。
+   *
+   * 数字用等宽字体：tok/s 与 ms 会被反复比较，等宽让不同模型的数字能对齐着看。
+   */
+  .wb-rail-tps{
+    display:flex;align-items:center;flex-wrap:wrap;gap:8px;
+    margin:2px 0 8px;font-size:11.5px;
+  }
+  .wb-rail-tps-val{
+    font-family:var(--wb-font-mono,ui-monospace,SFMono-Regular,Menlo,monospace);
+    font-size:11.5px;
+    color:var(--dsw-alias-label-secondary,light-dark(#61666b,#cfd3d6));
+  }
+  .wb-rail-tps-note{margin-left:4px;opacity:.75}
+  .wb-rail-tps-err{
+    font-size:11.5px;
+    color:var(--dsw-alias-label-error,light-dark(#c02628,#ff8a8a));
+    word-break:break-word;
+  }
   .wb-rail-list.is-grid{
     display:grid;
     grid-template-columns:repeat(2,minmax(0,1fr));
@@ -2836,6 +2859,18 @@ body.dark .wb-root,
         + 'name or preview model), but you can still check it; whether it works depends on your '
         + 'account entitlements.',
       '已收起说明。': 'Explanation dismissed.',
+      '测速': 'Speed test',
+      '测速中…': 'Testing…',
+      '测速失败': 'Speed test failed',
+      '首字节': 'first token',
+      '样本': 'samples',
+      '三次都失败了': 'All three attempts failed',
+      '上游没回报用量': 'Upstream reported no usage',
+      '输出太短，量不准': 'Output too short to measure',
+      '没有数据': 'No data',
+      '（样本不完整）': '(partial samples)',
+      '测三次取中位数，花费约 0.01–0.15 积分':
+        'Three runs, median reported. Costs about 0.01–0.15 credits.',
       '点击关闭': 'Click to dismiss',
       '输入合法正整数 tokens（或留空恢复自动）':
         'Enter a positive integer of tokens (or leave empty for Auto)',
@@ -11255,6 +11290,18 @@ const probeOne = async (id) => {
       // 勾选清单的草稿：null = 还没动过（显示服务端值）；数组 = 用户改过
       const [draftVisible, setDraftVisible] = useState(null);
       /*
+       * 测速状态。
+       *
+       * 必须放在组件顶层，不能放进 modelPage() 这类渲染函数：那些函数只在
+       * 对应 tab 下被调用，hook 数量会随 tab 变化，React 直接抛 #300
+       * (rendered fewer hooks than expected)，整个右栏白屏。
+       * 第一版就写在 modelPage 里，切到签到页当场崩。
+       *
+       * model 记住这份结果属于哪个模型：用户切模型后旧结果不能继续显示，
+       * 否则会让人以为新模型也有这个速度。
+       */
+      const [tpsState, setTpsState] = useState({ model: '', busy: false, sample: null, error: '' });
+      /*
        * 右栏的「上下文预算」草稿（每个模型一条，单位 tokens）。
        *
        * 为什么右栏也要一个：上下文长度原本只能在**设置页 → 模型详情**里调，
@@ -11742,6 +11789,57 @@ const probeOne = async (id) => {
         const unlistedCount = models.filter((m) => m.official === false).length;
         const freeCount = models.filter((m) => m.free === true).length;
         const currentName = current?.model ? routingName(current.model) : '';
+        /*
+         * 测速状态（见「刷新模型」旁边那个按钮的长注释）。
+         *
+         * model 记住这份结果属于哪个模型：用户切了模型之后旧结果不能继续显示 ——
+         * 那会让人以为新模型也有这个速度。下面的 tpsForCurrent 就是这道判断。
+         */
+        const runTps = async (modelId) => {
+          if (!modelId || tpsState.busy) return;
+          setTpsState({ model: modelId, busy: true, sample: null, error: '' });
+          try {
+            const res = await getJson('/workbuddy/tps?model=' + encodeURIComponent(modelId));
+            const d = res.data || {};
+            if (d.ok && d.sample) {
+              setTpsState({ model: modelId, busy: false, sample: d.sample, error: '' });
+            } else {
+              setTpsState({
+                model: modelId,
+                busy: false,
+                sample: d.sample || null,
+                error: d.error || (res.status ? 'HTTP ' + res.status : t('测速失败')),
+              });
+            }
+          } catch (e) {
+            setTpsState({ model: modelId, busy: false, sample: null, error: String(e?.message || e) });
+          }
+        };
+        /*
+         * 测速结果的人话摘要。
+         *
+         * 没有数字时**说明是哪一种没成**（三次都失败 / 上游没回报用量 / 输出太短），
+         * 而不是显示一个破折号 —— 用户要能判断"这个模型慢"和"这次没测成"的区别。
+         */
+        const tpsSummary = (sample) => {
+          if (!sample) return '';
+          if (typeof sample.tokensPerSecond === 'number') {
+            const parts = [sample.tokensPerSecond + ' tok/s'];
+            if (typeof sample.timeToFirstTokenMs === 'number') {
+              parts.push(t('首字节') + ' ' + sample.timeToFirstTokenMs + 'ms');
+            }
+            // 样本不完整时如实标注，避免把 2/3 次说成完整测量
+            if (sample.complete === false && sample.samples > 0) {
+              parts.push(t('样本') + ' ' + sample.samples + '/3');
+            }
+            return parts.join(' · ');
+          }
+          if (sample.reason === 'all-failed') return t('三次都失败了');
+          if (sample.reason === 'no-usage') return t('上游没回报用量');
+          if (sample.reason === 'few-chunks') return t('输出太短，量不准');
+          return t('没有数据');
+        };
+        const tpsForCurrent = tpsState.model && tpsState.model === current?.model ? tpsState : null;
         const currentEffort = current?.reasoningEffort || '';
         const effortSuffix = currentEffort ? ' · ' + currentEffort : '';
         const picked = draftModel || current?.model || '';
@@ -11782,6 +11880,42 @@ const probeOne = async (id) => {
                     disabled: modelsApi.loading,
                     onClick: () => { modelsApi.reload(); defaultApi.reload(); limitsApi.reload(); },
                   }, t('刷新模型'))),
+                /*
+                 * 输出速度测速（tokens/second）。
+                 *
+                 * ## 为什么值得占一个按钮
+                 *
+                 * 选模型时只能看倍率与上下文窗口，但**输出速度才是决定总耗时的那一项**：
+                 * dsh 把模型当子代理并发跑、每个还要多轮往返，于是"便宜的慢模型"可能比
+                 * "贵的快模型"更费总时间。实测同一倍率下中位速度能差 3.8 倍。
+                 *
+                 * ## 为什么必须手动点
+                 *
+                 * 它花真积分（三次测量约 0.01–0.15）。任何自动跑的设计都是让用户在
+                 * 不知情的情况下付费 —— 所以只能由用户点名。
+                 *
+                 * ## 为什么只测当前模型
+                 *
+                 * 用户最想知道的第一个问题就是"我现在用的这个有多快"。给列表里每一行
+                 * 都放按钮会让界面变重，也让误点成本变高。
+                 */
+                current?.model
+                  ? h('div', { className: 'wb-rail-tps' },
+                    h(Btn, {
+                      disabled: tpsForCurrent?.busy === true,
+                      title: t('测三次取中位数，花费约 0.01–0.15 积分'),
+                      onClick: () => { void runTps(current.model); },
+                    }, tpsForCurrent?.busy ? t('测速中…') : t('测速')),
+                    tpsForCurrent?.error
+                      ? h('span', { className: 'wb-rail-tps-err', role: 'alert' }, tpsForCurrent?.error)
+                      : (tpsForCurrent?.sample
+                        ? h('span', { className: 'wb-rail-tps-val' },
+                          tpsSummary(tpsForCurrent?.sample),
+                          tpsForCurrent?.sample.complete === false && tpsForCurrent?.sample.samples > 0
+                            ? h('span', { className: 'wb-rail-tps-note' }, t('（样本不完整）'))
+                            : null)
+                        : null))
+                  : null,
                 current && current.routable === false
                   ? h(Alert, { bad: true }, t('默认模型已失效（不在当前目录里），请重新选一个。'))
                   : null,
