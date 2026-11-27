@@ -2896,6 +2896,11 @@ body.dark .wb-root,
         + 'name or preview model), but you can still check it; whether it works depends on your '
         + 'account entitlements.',
       '已收起说明。': 'Explanation dismissed.',
+      '自动换号': 'Auto switch account',
+      '已开启自动换号。': 'Auto switch enabled.',
+      '已关闭自动换号。': 'Auto switch disabled.',
+      '同一模型 10 分钟内被限流达到这个次数后，自动切到下一个可用账号；账号用量上限与风控是一次即切，不受此阈值影响。':
+        'After this many rate-limit hits on the same model in 10 minutes, switch to the next available account. Account-level quota exhaustion and risk control switch immediately, regardless of this threshold.',
       '测速': 'Speed test',
       '测速中…': 'Testing…',
       '测速失败': 'Speed test failed',
