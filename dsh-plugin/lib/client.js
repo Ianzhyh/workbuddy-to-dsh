@@ -6650,6 +6650,13 @@ body.dark .wb-root,
         }
         return map;
       })();
+      /**
+       * 余额是否已经拿到过（用来区分"还在加载"与"这个账号读不到"）。
+       *
+       * 两者在界面上必须不同：加载中显示占位等宽符、读不到显示破折号。
+       * 混在一起会让用户在加载期间看到一片破折号，误以为全都没钱。
+       */
+      const panelQuotaLoaded = Boolean(panelQuotaApi.data);
       /** 当前阈值（0 = 关）。 */
       const panelAutoAfter = Number(panelAutoSwitchApi.data && panelAutoSwitchApi.data.after) || 0;
       const savePanelAutoSwitch = async (after) => {
@@ -7015,10 +7022,16 @@ body.dark .wb-root,
                         : null)
                     : null,
                   pluginFor ? h(Pill, { tone: '', text: '双凭据' }) : null,
-                  /* 余额：放在徽标之后，与右栏同一形状（胶囊 + 等宽数字） */
-                  a.userId && panelQuotaByUid.has(String(a.userId))
-                  ? h('span', { className: 'wb-balance-badge' }, fmtBalance(panelQuotaByUid.get(String(a.userId))))
-                  : null,
+                  /*
+                   * 余额胶囊：**始终渲染**，靠内容区分三态。
+                   *
+                   * 「没有数据就不渲染」会让它在别的元素之后凭空冒出来（用户指出过）。
+                   * 三态：未加载完 ·· / 读不到 — / 有值 数字 —— 宽度接近，替换时不推动布局。
+                   */
+                  a.userId
+                    ? h('span', { className: 'wb-balance-badge' },
+                      panelQuotaLoaded ? fmtBalance(panelQuotaByUid.get(String(a.userId))) : '··')
+                    : null,
                   a.hidden ? h(Pill, { tone: '', text: '已隐藏' }) : null),
                 h('div', { className: 'wb-account-primary' },
                   h(Btn, { disabled: saving, onClick: () => startEdit(a) }, '改名'),
@@ -11541,6 +11554,13 @@ const probeOne = async (id) => {
         }
         return map;
       })();
+      /**
+       * 余额是否已经拿到过（用来区分"还在加载"与"这个账号读不到"）。
+       *
+       * 两者在界面上必须不同：加载中显示占位等宽符、读不到显示破折号。
+       * 混在一起会让用户在加载期间看到一片破折号，误以为全都没钱。
+       */
+      const railQuotaLoaded = Boolean(railQuotaApi.data);
       /** 当前阈值（0 = 关）。 */
       const railAutoAfter = Number(railSwitchApi.data && railSwitchApi.data.after) || 0;
       const saveRailSwitch = async (after) => {
@@ -12777,9 +12797,15 @@ const probeOne = async (id) => {
                           : h('span', { className: 'wb-rail-item-sub' },
                             (a.domain || '') + (a.expired ? ' · ' + t('已过期') : ''))),
                       h('span', { className: 'wb-rail-item-side' },
-                        /* 余额胶囊：与设置页、控制台同形状 */
-                        a.userId && railQuotaByUid.has(String(a.userId)) && !narrow
-                          ? h('span', { className: 'wb-balance-badge' }, fmtBalance(railQuotaByUid.get(String(a.userId))))
+                        /*
+                         * 余额胶囊：**始终渲染**，靠内容区分三态。
+                         *
+                         * 「没有数据就不渲染」会让它在别的元素之后凭空冒出来（用户指出过）。
+                         * 三态：未加载完 ·· / 读不到 — / 有值 数字 —— 宽度接近，替换时不推动布局。
+                         */
+                        !narrow && a.userId
+                          ? h('span', { className: 'wb-balance-badge' },
+                            railQuotaLoaded ? fmtBalance(railQuotaByUid.get(String(a.userId))) : '··')
                           : null,
                         lim && !narrow ? h(Pill, { tone: lim.severe ? 'bad' : 'warn', text: t('受限 ' + lim.count) }) : null,
                         active
