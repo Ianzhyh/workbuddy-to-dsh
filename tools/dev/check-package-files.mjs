@@ -68,6 +68,10 @@ while (queue.length) {
   if (seen.has(relPath)) continue;
   seen.add(relPath);
 
+  /*
+   * vendor:check 负责；根包也不该携带整份 vendor（verify:github 会拦）。
+   */
+
   if (!coveredByFiles(relPath)) missingInFiles.add(relPath);
 
   const abs = join(ROOT, relPath);
