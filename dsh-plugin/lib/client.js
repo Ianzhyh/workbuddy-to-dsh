@@ -1574,6 +1574,27 @@ body.dark .wb-root,
   color:var(--dsw-alias-label-primary,light-dark(#0f1115,#f9fafb));
   box-shadow:inset 0 0 0 .5px var(--dsw-alias-border-l2,light-dark(#0000001a,#ffffff26));
 }
+/*
+ * 自动换号开关：标题行（名称 + 状态徽标）/ 阈值按钮组 / 一行说明。
+ *
+ * 追加在样式表末尾，确保在 @container 之外（窄档也要有完整样式）。
+ * 阈值用按钮组而不是下拉：只有四个选项，点一下就选完。
+ */
+.wb-auto-switch{
+  margin:10px 0 0;
+  padding:10px 0 0;
+  border-top:.5px solid var(--dsw-alias-border-l1,light-dark(#00000010,#ffffff1a));
+}
+.wb-auto-switch-head{
+  display:flex;align-items:center;justify-content:space-between;gap:8px;
+  margin:0 0 8px;font-size:12.5px;font-weight:600;
+}
+.wb-auto-switch .wb-rail-seg{display:flex;flex-wrap:wrap;gap:6px}
+.wb-auto-switch .wb-note{
+  margin:8px 0 0;font-size:11.5px;line-height:1.55;
+  color:var(--dsw-alias-label-tertiary,light-dark(#81858c,#adb2b8));
+}
+
 `;
 
 /* 高度档位的**内容**规则（JS 侧）：
@@ -12769,7 +12790,7 @@ const probeOne = async (id) => {
               h(Btn, {
                 disabled: accountApi.loading,
                 onClick: () => { accountApi.reload(); loginApi.reload(); limitsApi.reload(); },
-              }, t('刷新')))),
+              }, t('刷新'))),
               /*
                * 自动换号开关：放在账号列表**下方**（用户指定位置）。
                * 它管"所有账号之间怎么切"，不属于某一个账号。
@@ -12792,7 +12813,7 @@ const probeOne = async (id) => {
                 ),
                 h('p', { className: 'wb-note' },
                   t('同一模型 10 分钟内被限流达到这个次数后，自动切到下一个可用账号；账号用量上限与风控是一次即切，不受此阈值影响。')),
-              ),
+              )),
           h('div', { className: 'wb-card' },
             h('div', { className: 'wb-rail-cardhead' },
               h('h3', null, t('凭据')),
