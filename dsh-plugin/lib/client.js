@@ -151,6 +151,27 @@ const EFFORT_LABELS = { minimal: 'Minimal', low: '低', medium: '中', high: '�
     const CSS = `
 /* box-sizing 是防溢出的根：width:100% 的输入件把 padding 算进宽度内 */
 .wb-root, .wb-root *{box-sizing:border-box}
+/*
+ * 「当前默认」行：模型名 + 「刷新模型」「测速」。
+ *
+ * ⚠️ 必须在 @container 之外：这是所有宽度都要的布局。放进容器查询块里时，
+ * 窄档整组不生效 —— display 退回 block、gap 失效、margin 也没有。
+ * 本轮在这个坑上踩过三次（按钮黏一起 / 无边距），注释留在这里防第四次。
+ */
+.wb-rail-inline-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:2px 0 12px}
+.wb-rail-inline-head>.wb-row{flex:1 1 auto;min-width:0}
+.wb-rail-inline-head>.wb-note{flex:1 1 100%;margin:0 0 2px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.wb-rail-inline-head>.wb-btn{flex:0 0 auto}
+/* 窄档：模型名独占一行，两个按钮靠左并排在第二行 */
+@container wb-rail (max-width: 479px) {
+  .wb-rail-inline-head>.wb-row{flex:1 1 100%;margin-bottom:2px}
+  .wb-rail-inline-head>.wb-btn{margin-left:0}
+}
+/* 宽档：只让第一个按钮把整组推到右边 */
+@container wb-rail (min-width: 480px) {
+  .wb-rail-inline-head>.wb-btn:first-of-type{margin-left:auto}
+}
+
 .wb-root{
   color-scheme: light dark;
   --wb-ease: cubic-bezier(0.16, 1, 0.3, 1);
@@ -1272,17 +1293,24 @@ body.dark .wb-root,
  * 窄栏里特别臃肿。这里用轻边框 + 语义色条区分严重度。
  */
 .wb-limit-acct{
-  border:.5px solid var(--dsw-alias-border-l1,light-dark(#00000010,#ffffff14));
-  border-left:3px solid var(--dsw-alias-border-l2,light-dark(#00000024,#ffffff2e));
+  /*
+   * 整圈均匀描边 + 圆角，**不用粗左边框**：
+   * 左 3px、其余 0.5px 时圆角处会出现尖角台阶，像贴了条胶带。
+   * 严重度靠描边颜色 + 很淡的同色底表达，不靠粗细。
+   *
+   * 顺带修了两处缺分号：原先 border-left 与 background 两行没有分号，
+   * 导致后面的 background / border-radius 被浏览器丢弃 —— 卡片实际是没有圆角的。
+   */
+  border:1px solid var(--dsw-alias-border-l1,light-dark(#00000012,#ffffff18));
   background:var(--dsw-alias-interactive-bg-hover,light-dark(#26314808,#ffffff0a));
-  border-radius:10px;
-  padding:8px 10px 6px;
+  border-radius:12px;
+  padding:9px 11px 7px;
   margin:8px 0 0;
   min-width:0;
   box-sizing:border-box;
 }
-.wb-limit-acct.is-warn{border-left-color:#d29922}
-.wb-limit-acct.is-bad{border-left-color:#e5534b}
+  .wb-limit-acct.is-warn{border-color:#d29922;background:light-dark(#d2992208,#d2992210)}
+  .wb-limit-acct.is-bad{border-color:#e5534b;background:light-dark(#e5534b08,#e5534b10)}
 .wb-limit-acct+.wb-limit-acct{margin-top:8px}
 .wb-limit-acct-head{
   display:flex;align-items:center;gap:6px;min-width:0;
@@ -1415,10 +1443,6 @@ body.dark .wb-root,
    * 宽档时左侧是信息、右侧是动作，视线一次扫完；窄档自动换行（按钮落到下一行），
    * 不会把模型名挤成省略号。
    */
-  .wb-rail-inline-head{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
-  .wb-rail-inline-head>.wb-row{flex:1 1 auto;min-width:0}
-  .wb-rail-inline-head>.wb-note{flex:1 1 auto;margin:0;min-width:0}
-  .wb-rail-inline-head>.wb-btn{flex:none;margin-left:auto}
   /* 菜单跟触发框同宽（见上方注释：不能再固定 460px） */
   .wb-rail .wb-dropdown-menu{min-width:100%;width:100%;max-width:100%}
   /*
