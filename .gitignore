@@ -1,5 +1,7 @@
 # 依赖与运行时
 node_modules/
+web/node_modules/
+*.tsbuildinfo
 *.log
 # 轮转后的日志（bridge.log.1 / console.log.2 之类）。
 # `*.log` 只匹配**结尾**是 .log 的名字，`bridge.log.1` 不匹配 —— 实测漏了这条：

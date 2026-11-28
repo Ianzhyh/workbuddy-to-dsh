@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="wb-console-build" content="__WB_BUILD__">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>WorkBuddy 本地 API 桥 · 控制台</title>
+  <script>
+/* Prevent flash of wrong theme/accent before React mounts (follows OS when unset) */
+(function () {
+  try {
+    var t = localStorage.getItem('wb.theme');
+    if (t !== 'light' && t !== 'dark') {
+      t = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+    }
+    document.documentElement.setAttribute('data-theme', t);
+    var a = localStorage.getItem('wb.accent');
+    if (a && a !== 'blue') document.documentElement.setAttribute('data-accent', a);
+    var l = localStorage.getItem('wb-lang');
+    if (l === 'en') document.documentElement.lang = 'en';
+  } catch (e) {}
+})();
+
+/* Shared request & probe runtime constants */
+const API_TIMEOUT_MS = 20000;
+function formatApiTimeoutError() {
+  return `请求超时（${Math.round(API_TIMEOUT_MS / 1000)} 秒），请重试`;
+}
+
+/* Shared probe volume & cost table (verified against lib/diagnostics.mjs) */
+const PROBE_SIZE_LS_KEY = 'wb.probeInputTokens';
+const PROBE_SIZE_CHOICES = [5000, 10000, 20000, 30000, 50000];
+const ANCHORS = [[5000, 0.26], [10000, 0.45], [12000, 1.86], [20000, 3.30], [30000, 4.91], [50000, 8.16]];
+function lsSet(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
+let probeInputTokens = 10000;
+try {
+  const saved = Number(localStorage.getItem(PROBE_SIZE_LS_KEY));
+  if (PROBE_SIZE_CHOICES.includes(saved)) probeInputTokens = saved;
+} catch (e) {}
+function probeInputTokensValue() {
+  return Number(probeInputTokens) || 10000;
+}
+function setProbeInputTokens(v) {
+  const n = Number(v);
+  if (!PROBE_SIZE_CHOICES.includes(n)) return;
+  probeInputTokens = n;
+  lsSet(PROBE_SIZE_LS_KEY, String(v));
+}
+function syncProbeSelect(sel) {
+  if (!sel) return;
+  const opts = Array.from(sel.options || []).map((o) => o.value);
+  if (opts.includes(String(probeInputTokens))) sel.value = String(probeInputTokens);
+}
+window.__WB_PROBE = {
+  CHOICES: PROBE_SIZE_CHOICES,
+  ANCHORS: ANCHORS,
+  getValue: probeInputTokensValue,
+  setValue: setProbeInputTokens,
+  syncSelect: syncProbeSelect,
+};
+
+/* Formula-injection-safe CSV export shared with web/src/lib/api.ts */
+function csvCell(value) {
+  let s = value == null ? '' : String(value);
+  if (/^[=+\-@\t\r]/.test(s)) s = "'" + s;
+  if (/[",\n\r]/.test(s)) s = '"' + s.replace(/"/g, '""') + '"';
+  return s;
+}
+function downloadCsv(filename, rows) {
+  const csv = '\ufeff' + rows.map((r) => r.map(csvCell).join(',')).join('\r\n');
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+window.csvCell = csvCell;
+window.downloadCsv = downloadCsv;
+
+/* Shared upstream terminology table (1:1 aligned with dsh-plugin/lib/client.js) */
+const I18N_TERMS_EN = {
+  'CodeBuddy个人版拉新权益包': 'CodeBuddy Personal Referral Pack',
+  'CodeBuddy个人版国内运营裂变包': 'CodeBuddy Personal Domestic Viral Pack',
+  'CodeBuddy个人体验版': 'CodeBuddy Personal Trial',
+  '企业/教育月度额度': 'Enterprise/education monthly quota',
+  '个人体验版': ' Personal Trial',
+  '个人版': ' Personal',
+  '限时免费': 'Limited-time free',
+  '限时折扣': 'Limited-time discount',
+  '夜间免费': 'Free at night',
+  '夜间折扣': 'Night discount',
+  '错峰使用': 'Off-peak use',
+  '促销进行中': 'Promotion active',
+  '促销未生效': 'Promotion scheduled',
+  '促销说明': 'Promotion details',
+  '促销截止': 'Promotion ends',
+  '（进行中）': ' (active)',
+  '（未生效）': ' (not active)',
+};
+const I18N_EN = {
+  '全部面板': 'All panels',
+  '概览与用量': 'Overview & usage',
+  '可用模型': 'Available models',
+  '对话测试与诊断': 'Chat test & diagnostics',
+  '客户端接入': 'Client setup',
+};
+window.I18N_TERMS_EN = I18N_TERMS_EN;
+
+/* Auto check-in signal detector shared with ConsoleContext */
+let seenAutoCheckinAt = null;
+function syncCheckinFromOverview(bridge) {
+  const at = bridge && bridge.autoCheckin && bridge.autoCheckin.at;
+  if (!at) return;
+  if (seenAutoCheckinAt === null) {
+    seenAutoCheckinAt = at;
+    return;
+  }
+  if (at === seenAutoCheckinAt) return;
+  seenAutoCheckinAt = at;
+  if (typeof loadCheckin === 'function') loadCheckin();
+}
+window.syncCheckinFromOverview = syncCheckinFromOverview;
+
+/* Visibility-aware poll scheduler shared by ConsoleContext and visibility contract tests */
+function createPollScheduler({ pollers: items, isHidden, setTimer, clearTimer, subscribe }) {
+  let timers = [];
+  let running = false;
+  let lastHidden = null;
+  function start() {
+    if (running) return;
+    running = true;
+    timers = items.map((p) => setTimer(p.run, p.every));
+  }
+  function stop() {
+    running = false;
+    timers.forEach(clearTimer);
+    timers = [];
+  }
+  function sync() {
+    const hidden = isHidden();
+    if (hidden === lastHidden) return;
+    lastHidden = hidden;
+    if (hidden) { stop(); return; }
+    for (const p of items) p.run();
+    start();
+  }
+  lastHidden = isHidden();
+  if (!lastHidden) start();
+  const unsubscribe = typeof subscribe === 'function' ? subscribe(sync) : null;
+  return {
+    sync,
+    start,
+    stop,
+    isRunning: () => running,
+    dispose() { stop(); if (unsubscribe) unsubscribe(); },
+  };
+}
+window.createPollScheduler = createPollScheduler;
+  </script>
+</head>
+<body>
+  <!-- Early structural markers for ConsoleSupervisor probe & static option contract; replaced on React mount -->
+  <div id="root"><nav id="navTabs" hidden><button class="nav-tab active" data-tab="all" aria-pressed="true"></button></nav><select id="probeInputTokens" hidden><option value="5000">5k</option><option value="10000">10k</option><option value="20000">20k</option><option value="30000">30k</option><option value="50000">50k</option></select></div>
+  <script type="module" src="/src/main.tsx"></script>
+</body>
+</html>

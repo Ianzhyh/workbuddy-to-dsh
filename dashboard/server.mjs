@@ -2252,7 +2252,8 @@ const server = createServer(async (req, res) => {
     }
     if (req.method !== 'POST') { sendJson(res, 405, { ok: false, error: 'GET or POST only' }); return; }
     try {
-      const body = await readBody(req).catch(() => null);
+      const rawBody = await readBody(req).catch(() => '');
+      const body = rawBody ? JSON.parse(rawBody) : null;
       const raw = Number(body && body.after);
       const after = Number.isFinite(raw) && raw > 0 ? Math.min(50, Math.floor(raw)) : 0;
       /*

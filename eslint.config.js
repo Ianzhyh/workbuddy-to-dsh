@@ -15,6 +15,7 @@ export default [
     ignores: [
       'dsh-plugin/vendor/**',
       'node_modules/**',
+      'web/**',
       '.tmp-*/**',
       '.tmp-*',
       '.optimize/**',

@@ -72,6 +72,8 @@
   },
   "scripts": {
     "start": "node dashboard/server.mjs",
+    "web:dev": "npm --prefix web run dev",
+    "web:build": "npm --prefix web run build",
     "bridge": "node bridge/launch.mjs",
     "connect": "node tools/connect.mjs",
     "doctor": "node tools/doctor.mjs",
