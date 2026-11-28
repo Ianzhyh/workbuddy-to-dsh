@@ -1666,6 +1666,39 @@ td.busy {
      原先写的 500 是个空档位：与 400 同为常规字重，等于没写。 */
   font-weight: 600;
 }
+/*
+ * 「未列出」徽标：网关目录里有、但 WorkBuddy 官方模型选择器不铺的档位/灰度模型。
+ *
+ * 为什么必须可见：这些模型默认不进 dsh 选择器（与官方 GUI 一致），不标出来
+ * 用户会以为"列表里少了几个"。样式刻意**弱**于促销标签 —— 它是解释，不是卖点。
+ */
+.tag.unlisted {
+  border-style: dashed;
+  color: var(--muted);
+  font-weight: 500;
+}
+/*
+ * 测速列（tokens/second）与用量上限卡。
+ *
+ * 测速单元格里可能同时有结论与「重测」按钮，窄列下必须允许换行 ——
+ * `nowrap` 会让按钮溢出到相邻单元格（与体检列同一个坑）。
+ */
+td.tps {
+  white-space: normal;
+  min-width: 96px;
+}
+td.tps .tpsbtn {
+  margin-top: 2px;
+}
+/*
+ * 用量上限里"严重"的那一组（积分不足 / 账号被风控）：换号或充钱才能好，
+ * 等多久都不会恢复。用描边而不是左侧色条 —— 后者在这个圆角尺寸下会在
+ * 圆角处露出台阶（1.24.7 修过一次同类问题）。
+ */
+.acct.acct-limited {
+  border-color: color-mix(in oklab, var(--fail) 45%, var(--border));
+  background: color-mix(in oklab, var(--fail) 5%, var(--panel-subtle));
+}
 button.tag {
   font: inherit;
   font-size: var(--fs-label);
@@ -2843,6 +2876,39 @@ pre.log {
 }
 #promptInput {
   flex: 1 1 260px;
+}
+/*
+ * 对话测试的采样参数行（max_tokens / temperature / 思考强度）。
+ *
+ * 与上面那行控件**分开成两行**：第一行是"发什么"，这一行是"怎么发"。挤在一起
+ * 时 390px 视口下只剩输入框可见（其余全换行到视口外，实测溢出）。这里统一
+ * 用 <label class="check"> 包住"标签 + 控件"，保证读屏能念出每格是什么。
+ */
+.chat-params {
+  margin-top: -6px;
+  gap: 14px;
+}
+.chat-params .check {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+.chat-params input[type="number"] {
+  height: 32px;
+  padding: 4px 8px;
+}
+.chat-params select {
+  height: 32px;
+}
+.chat-params select:disabled {
+  /* 模型没有思考档位：禁用而不是隐藏（隐藏会让这一行在模型之间跳变） */
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.chat-params .hint {
+  margin: 0;
+  font-size: var(--fs-label);
 }
 #chatOut {
   margin: 0;

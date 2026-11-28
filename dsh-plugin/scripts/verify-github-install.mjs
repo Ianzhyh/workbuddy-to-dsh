@@ -109,6 +109,13 @@ try {
     'dsh-plugin/vendor/lib/failover.mjs',
   'dsh-plugin/vendor/lib/env-file.mjs',
     'dsh-plugin/vendor/lib/log-rotate.mjs',
+    /*
+     * 用量上限的共享规则。插件宿主入口**静态 import** 它（`../vendor/lib/limits.mjs`），
+     * 与 failover 同理：根包形态下也只能从同一路径取，所以这一份必须进根包。
+     * 根包里有对应的 `lib/limits.mjs`（仓库检出优先），vendor 这份是给
+     * "装在别处的插件包"准备的 —— 两者内容由 `vendor:check` 保证一致。
+     */
+    'dsh-plugin/vendor/lib/limits.mjs',
     'dsh-plugin/vendor/LICENSE',
     'dsh-plugin/vendor/NOTICE.md',
     'dsh-plugin/vendor/.env.example',

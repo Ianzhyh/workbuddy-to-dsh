@@ -164,6 +164,23 @@
     <div id="accountList"><div class="skeleton" role="status" aria-label="正在读取…"><i style="width:70%"></i><i style="width:92%"></i><i style="width:58%"></i></div></div>
   </section>
 
+  <!--
+    用量上限（跨账号）。这张卡回答的是「哪个账号的哪个模型满了」——
+    原先这份数据只被自动切号用过，界面上一个字都看不到，用户只能在请求
+    整片变红之后才反应过来。与 dsh 面板的「用量上限」卡同一份实现
+    （lib/limits.mjs）：分类、历史合并、恢复时间三层兜底、过期清理全共用，
+    所以两边的结论逐字一致。
+
+    逐条列出而不是压成一条：桥的 `quota` 只保留最新一条，多个模型同时触顶时
+    会互相顶掉（用户原话「怎么又只剩一个了」），所以读 `quotaModels`。
+  -->
+  <section class="panel" data-section="overview">
+    <h2>用量上限 <span class="hint" style="display:inline">哪个账号的哪个模型触顶了（不只看当前账号）</span>
+      <span class="spacer"></span><span class="stamp" id="limitsStamp"></span>
+      <button class="mini" id="limitsRefreshBtn">刷新上限</button></h2>
+    <div id="limitsBox"><div class="skeleton" role="status" aria-label="正在读取…"><i style="width:52%"></i><i style="width:74%"></i></div></div>
+  </section>
+
   <!-- 插件登录（第二条凭据来源）：不读桌面端凭据，也不需要安装 App -->
   <section class="panel" data-section="overview">
     <h2>插件登录（不依赖桌面端）</h2>
@@ -190,6 +207,17 @@
     <h2>每日签到 <span class="spacer"></span><span class="stamp" id="checkinStamp"></span></h2>
     <p class="hint">领取当天的签到积分。签到的判定与奖励由上游决定，重复签到会被识别为"今天已签"而不是失败。</p>
     <div id="checkinBox"><div class="skeleton" role="status" aria-label="正在读取…"><i style="width:64%"></i><i style="width:80%"></i><i style="width:52%"></i></div></div>
+  </section>
+
+  <!--
+    本机各账号的签到状态。为什么需要：原先这一页只有「当前账号」的状态，
+    而本机常登着 3–4 个号 —— 只签当前账号等于每次都要手动切号再点一次。
+    与 dsh 面板的「账号签到状态」卡同一套数据（桥的 /v1/checkin/accounts 与
+    /v1/checkin/all），无签到活动的账号折叠成一行可点开的摘要（不是藏起来）。
+  -->
+  <section class="panel" data-section="overview">
+    <h2>账号签到状态 <span class="hint" style="display:inline">本机各账号各领各的，不切换账号</span> <span class="spacer"></span><span class="stamp" id="acctCheckinStamp"></span></h2>
+    <div id="acctCheckinBox"><div class="skeleton" role="status" aria-label="正在读取…"><i style="width:58%"></i><i style="width:84%"></i><i style="width:66%"></i></div></div>
   </section>
 
   <section class="panel" data-section="overview">
@@ -251,6 +279,26 @@
       <button class="primary" id="sendBtn">发送</button>
       <button id="chatStopBtn" hidden>停止</button>
       <button id="chatClearBtn" title="清空对话历史与输出（不影响模型选择与搜索词）">清空对话</button>
+    </div>
+    <!--
+      采样参数。与 dsh 面板的「对话测试」同三项（max_tokens / temperature /
+      思考强度），**留空 = 不发该字段**（交给上游默认，绝不替用户猜一个值）。
+
+      原先控制台一样都没有：面板里能调输出上限与思考档位，控制台只能"发一句看
+      效果"。而这两项恰恰是控制台最能帮上忙的地方 —— 它本来就是用来对比
+      不同档位/参数下模型表现的地方。
+    -->
+    <div class="chat-controls chat-params">
+      <label class="check" title="单次回复的最大 token 数；留空 = 上游默认">
+        max_tokens<input type="number" id="chatMaxTokens" min="1" step="1" placeholder="默认" style="width:96px">
+      </label>
+      <label class="check" title="采样温度 0–2，越低越稳定（代码 / 提取 0–0.3），越高越发散（创作 1.0+）；留空 = 上游默认">
+        temperature<input type="number" id="chatTemperature" min="0" max="2" step="0.1" placeholder="默认" style="width:88px">
+      </label>
+      <label class="check" title="回答前的思考深度；留空 = 模型默认档位">
+        思考强度<select id="chatEffort"><option value="">默认</option></select>
+      </label>
+      <span class="hint" id="chatParamsHint"></span>
     </div>
     <div id="chatOut"><span class="meta">等待发送…</span></div>
     <details id="logDrawer">
@@ -1319,6 +1367,153 @@ const I18N_EN = {
   '桥在跑：每天首次模型请求时自动签；控制台开着：启动时与每小时检查一次。':
     'Bridge running: auto check-in on the day\'s first model request. Console open: once at startup and once per hour.',
   '桥侧需重启桥生效': 'restart the bridge for the bridge-side change to take effect',
+
+  /* ---- 自动换号（英文模式此前一直残留中文，与 dsh 面板的同一块对齐）---- */
+  '自动换号': 'Auto account switching',
+  '自动换号阈值': 'Auto account switching threshold',
+  '关闭': 'Off',
+  '3 次': '3 times',
+  '5 次': '5 times',
+  '10 次': '10 times',
+  '已开启自动换号': 'Automatic account switching enabled',
+  '已关闭自动换号': 'Automatic account switching disabled',
+  '保存失败': 'Save failed',
+  '同一模型 10 分钟内被限流达到这个次数后，自动切到下一个可用账号；账号用量上限与风控是一次即切，不受此阈值影响。':
+    'Once the same model is rate-limited this many times within 10 minutes, switch to the next usable account. '
+    + 'Account quota and risk-control rejections switch immediately and ignore this threshold.',
+
+  // ---- 账号签到状态（跨账号，与 dsh 面板同一张卡）----
+  '账号签到状态': 'Per-account check-in',
+  '本机各账号各领各的，不切换账号': 'Each local account claims its own; the active account is never switched',
+  '本机各账号各领各的，不切换账号。': 'Each local account claims its own; the active account is never switched.',
+  '无签到活动': 'No check-in program',
+  '已签到': 'Checked in',
+  '未签到': 'Not checked in',
+  '当前': 'Current',
+  '未使用': 'Not in use',
+  '全部领取': 'Claim for all',
+  '今天都领完了': 'All claimed today',
+  '本机所有账号今天都已处理过': 'Every local account has been handled today',
+  '领取中…': 'Claiming…',
+  '刷新账号': 'Refresh accounts',
+  '本机所有账号今天都已处理过（已签到或无签到活动）':
+    'Every local account has been handled today (checked in, or no program)',
+  '给每个账号各发一次领取（不切换当前账号）':
+    'Send one claim per account (the active account is not switched)',
+  '没有找到本机已登录的账号。': 'No signed-in local accounts found.',
+  '本机账号都没有签到活动': 'No local account has a check-in program',
+  '个账号无签到活动，已折叠': 'accounts have no program (collapsed)',
+  ' 个账号无签到活动，已折叠': ' accounts have no program (collapsed)',
+  '今日签到完成度': 'Today\'s check-in progress',
+  '今日已签': 'Checked in today',
+  '个有活动的账号': 'accounts with a program',
+  '共领': 'total claimed',
+  '全部领取失败：': 'Claim-for-all failed: ',
+  '全部领取：': 'Claimed for all: ',
+  '展开': 'Expand',
+  '收起': 'Collapse',
+  '失败': 'Failed',
+  '刷新': 'Refresh',
+
+  // ---- 用量上限（跨账号）----
+  '用量上限': 'Usage limits',
+  '哪个账号的哪个模型触顶了（不只看当前账号）':
+    'Which account hit its limit, and on which model (not just the active account)',
+  '刷新上限': 'Refresh limits',
+  '没有账号触顶（最近 10 分钟）。': 'No account is limited (last 10 minutes).',
+  '额度已恢复（刚到期移除）。': 'Limits cleared (just expired and removed).',
+  '额度已用尽': 'Quota exhausted',
+  '积分不足': 'Not enough credits',
+  '账号被风控': 'Account flagged',
+  '触发了限流': 'Rate limited',
+  '换模型或换号': 'Switch model or account',
+  '充积分或换号，等待无效': 'Top up or switch account; waiting will not help',
+  '重新登录无效，请换号': 'Re-login will not help; switch account',
+  '换号（重新登录无效）': 'Switch account — re-login will not help',
+  '稍等再试': 'Wait and retry',
+  '需充值，不会自动恢复': 'Top up — this will not recover by itself',
+  '10 分钟窗口内': 'within the 10-minute window',
+  '上游未给恢复时间': 'Upstream gave no reset time',
+  /*
+   * 下面几条是**拼接片段**（数量单独放 `<b>`）。
+   *
+   * DOM 文本节点会被折叠空白并 trim，所以键里**不能带首尾空格** ——
+   * 带空格的条目永远匹配不上，英文模式就整段留中文（实测踩到：
+   * `所有账号都已列出，不只当前这个（共 ` 这份键一次都没生效）。
+   */
+  '所有账号都已列出，不只当前这个（共': 'All accounts are listed, not just the active one (',
+  '个账号）。每条到恢复时间会自动消失。': ' accounts). Each entry disappears when its reset time arrives.',
+  '条': 'rows',
+  '还剩': 'Resets in ',
+  '所有账号都已列出，不只当前这个（共 ': 'All accounts are listed, not just the active one (',
+  ' 个账号）。每条到恢复时间会自动消失。': ' accounts). Each entry disappears when its reset time arrives.',
+  '所有账号都已列出，不只当前这个（共 N 个账号）。每条到恢复时间会自动消失。':
+    'All accounts are listed, not just the active one (N accounts). Each entry disappears when its reset time arrives.',
+  '到恢复时间会自动消失；换模型或换号可恢复。':
+    'Each entry disappears when its reset time arrives; switching model or account recovers immediately.',
+  '即将恢复': 'Recovering now',
+
+  // ---- 模型测速（tokens/second）----
+  '测速': 'Speed test',
+  '重测': 'Retest',
+  '测速中…': 'Testing…',
+  '测速失败': 'Speed test failed',
+  '速度': 'Speed',
+  '首字节': 'TTFT',
+  '样本': 'samples',
+  '三次都失败了': 'All three runs failed',
+  '上游没回报用量': 'Upstream reported no usage',
+  '输出太短，量不准': 'Output too short to measure',
+  '没有数据': 'No data',
+  '样本不完整（': 'Incomplete sample (',
+  '/3 次成功）—— 如实标注，不外推': '/3 runs succeeded) — reported as-is, never extrapolated',
+  '三次取中位数；结果在桥侧缓存 30 分钟':
+    'Median of three runs; the bridge caches the result for 30 minutes',
+  '输出速度（tokens/second）：点击测这个模型，三次取中位数。会消耗少量积分（约 0.01–0.15），所以只在你点名时才跑；结果缓存 30 分钟':
+    'Output speed (tokens/second): click to measure this model, median of three runs. It spends a little credit (about 0.01–0.15), '
+    + 'so it only runs when you ask; results are cached for 30 minutes',
+  '测速超时（桥仍在测量，稍后再试可读到缓存结果）':
+    'Speed test timed out (the bridge is still measuring; retry shortly to read the cached result)',
+
+  // ---- 模型「未列出」标记与筛选 ----
+  '未列出': 'Not listed',
+  '仅未列出': 'Not listed only',
+  '隐藏未列出': 'Hide not-listed',
+  '网关目录里有，但 WorkBuddy 官方模型选择器未列出；默认不进 dsh 选择器，可先体检再手动显示':
+    'Present in the gateway catalog but not listed by WorkBuddy\'s official model picker. Hidden from the dsh picker by default; '
+    + 'probe it first, then show it manually',
+  '隐藏 WorkBuddy 官方模型选择器未列出的档位/灰度模型':
+    'Hide tiers/gray-release models that WorkBuddy\'s official picker does not list',
+  '官方目录': 'Official catalog',
+  '未列出（网关有、官方模型选择器不铺；默认不进 dsh 选择器）':
+    'Not listed (in the gateway, not in the official picker; off by default in the dsh picker)',
+  '已列出': 'Listed',
+  '官方默认上下文': 'Official default context',
+  '上下文上限': 'Context ceiling',
+  '官方可选档位': 'Official context options',
+  '思考档位': 'Reasoning levels',
+  '官方默认 temperature': 'Official default temperature',
+  '已刷新用量上限（': 'Usage limits refreshed (',
+  '刷新中…': 'Refreshing…',
+
+  // ---- 对话测试的采样参数（与 dsh 面板同三项）----
+  '单次回复的最大 token 数；留空 = 上游默认': 'Max tokens per reply; empty = upstream default',
+  '采样温度 0–2，越低越稳定（代码 / 提取 0–0.3），越高越发散（创作 1.0+）；留空 = 上游默认':
+    'Sampling temperature 0–2. Lower is more stable (0–0.3 for coding / extraction); higher is more varied (1.0+ for creative work). Empty = upstream default',
+  '回答前的思考深度；留空 = 模型默认档位': 'Reasoning depth before answering; empty = the model default',
+  '思考强度': 'Reasoning effort',
+  '默认': 'Default',
+  '留空 = 模型默认档位': 'Empty = the model default level',
+  '这个模型没有思考档位（上游未提供）': 'This model has no reasoning levels (not provided upstream)',
+  'max_tokens 需要是正整数': 'max_tokens must be a positive integer',
+  'temperature 需要是 0–2 之间的数字': 'temperature must be a number between 0 and 2',
+  '参数不合法：': 'Invalid parameters: ',
+  '。请改正或清空后再发送。': '. Fix or clear them before sending.',
+  '最低': 'Minimal',
+  '低': 'Low',
+  '中': 'Medium',
+  '高': 'High',
+  '最高': 'Max',
   '（这里不自动重启）。': ' (this page does not restart it automatically).',
   '已开启': 'On',
   '已关闭': 'Off',
@@ -3217,7 +3412,8 @@ async function refreshAll() {  const btn = $('refreshBtn');
   try {
     await Promise.all([
       loadOverview(), loadModels(), loadDiag(), loadUsage(),
-      loadAccounts(), loadPluginLogin(), loadCheckin(), loadRequests(), loadClients(),
+      loadAccounts(), loadPluginLogin(), loadCheckin(), loadCheckinAccounts(),
+      loadLimits(), loadRequests(), loadClients(),
     ]);
     if (logPanel && logPanel.open) await loadLog();
     setMsg('已刷新全部面板（' + fmtTime(Date.now()) + '）', 'good');
@@ -3714,6 +3910,9 @@ function captureTableState() {
   return {
     filter: ($('modelFilter') && $('modelFilter').value) || '',
     kind: ($('modelKind') && $('modelKind').value) || '',
+    /* 「隐藏未列出」也要跨轮询重建保留：它极可能正被用来收窄长列表，
+       每 20 秒被重置回关会让用户以为开关坏了 */
+    hideUnlisted: !!($('modelHideUnlisted') && $('modelHideUnlisted').checked),
     checked,
     sorted: sortedByCredits,
     // 表格被整体替换后滚动位置会回到顶部，长列表里很恼人
@@ -3730,6 +3929,7 @@ function restoreTableState(s) {
   });
   if ($('modelFilter')) $('modelFilter').value = s.filter;
   if ($('modelKind')) $('modelKind').value = s.kind;
+  if ($('modelHideUnlisted')) $('modelHideUnlisted').checked = !!s.hideUnlisted;
   if ($('checkAll')) $('checkAll').checked = s.checkAll;
   if (s.sorted) sortModelsByCredits(true);
   updateRegCount();
@@ -3800,6 +4000,91 @@ function syncProbeRowState(tr) {
   const r = probePending.has(id) ? null : probeResults[id];
   tr.dataset.probeOk = r ? (r.ok ? '1' : '0') : '';
   tr.dataset.probeMs = r && Number.isFinite(Number(r.ms)) ? String(Number(r.ms)) : '';
+}
+
+/* ── 模型测速（tokens/second）────────────────────────────────────────────
+ *
+ * ## 为什么值得一列
+ *
+ * 选模型时只能看倍率与上下文窗口，但**输出速度才是决定总耗时的那一项**：
+ * dsh 把模型当子代理并发跑、每个还要多轮往返，于是"便宜的慢模型"可能比
+ * "贵的快模型"更费总时间。同类项目实测同一倍率下中位速度差 3.8 倍 ——
+ * 只看倍率会选错，而控制台正是对比几十个模型的地方。
+ *
+ * ## 与 dsh 面板的三处刻意一致
+ *
+ *   1. **必须手动点**：三次测量约 0.01–0.15 积分。任何自动跑的设计都是让用户
+ *      在不知情的情况下付费，所以不给"一键测全部"，也不在轮询里测。
+ *   2. **结果不落盘**（只在内存）：这是"眼下这个模型多快"的读数，不是账本。
+ *      落盘会造出第二份数据，与上游实际状态可能不一致；桥侧有 30 分钟缓存。
+ *   3. **拿不到就说清是哪一种**：`reason` 原样展示（三次都失败 / 上游没回报
+ *      用量 / 输出太短），不显示一个让人困惑的破折号。
+ */
+const tpsState = new Map(); // modelId → { busy, sample, error }
+let tpsSeq = 0;
+
+function tpsSummary(sample) {
+  if (!sample) return '';
+  if (typeof sample.tokensPerSecond === 'number') {
+    const parts = [sample.tokensPerSecond + ' tok/s'];
+    if (typeof sample.timeToFirstTokenMs === 'number') parts.push('首字节 ' + sample.timeToFirstTokenMs + 'ms');
+    if (sample.complete === false && sample.samples > 0) parts.push('样本 ' + sample.samples + '/3');
+    return parts.join(' · ');
+  }
+  if (sample.reason === 'all-failed') return '三次都失败了';
+  if (sample.reason === 'no-usage') return '上游没回报用量';
+  if (sample.reason === 'few-chunks') return '输出太短，量不准';
+  return '没有数据';
+}
+
+function renderTpsCell(id) {
+  const st = tpsState.get(id);
+  if (!st) return '<button class="mini tpsbtn" type="button">测速</button>';
+  if (st.busy) return '<span class="tag">测速中…</span>';
+  if (st.error) {
+    return '<span class="tag fail" title="' + escapeAttr(st.error) + '">测速失败</span>'
+      + ' <button class="mini tpsbtn" type="button">重测</button>';
+  }
+  const text = tpsSummary(st.sample);
+  const incomplete = st.sample && st.sample.complete === false && st.sample.samples > 0;
+  return '<span class="tag' + (typeof st.sample?.tokensPerSecond === 'number' ? ' ok' : '') + '"'
+    + ' title="' + escapeAttr(incomplete ? '样本不完整（' + st.sample.samples + '/3 次成功）—— 如实标注，不外推' : '三次取中位数；结果在桥侧缓存 30 分钟') + '">'
+    + escapeAttr(text) + '</span> <button class="mini tpsbtn" type="button">重测</button>';
+}
+
+async function runTps(id) {
+  if (!id) return;
+  const prev = tpsState.get(id);
+  if (prev && prev.busy) return;
+  tpsState.set(id, { busy: true, sample: null, error: '' });
+  refreshTpsCells(id);
+  const seq = (tpsSeq += 1);
+  try {
+    const d = await api('/api/tps?model=' + encodeURIComponent(id));
+    /* 同一模型可能被点了两次（第一次超时后才回来）：只认最后一次 */
+    if (seq !== tpsSeq) return;
+    if (d && d.ok && d.sample) {
+      tpsState.set(id, { busy: false, sample: d.sample, error: '' });
+    } else {
+      tpsState.set(id, {
+        busy: false,
+        sample: d && d.sample ? d.sample : null,
+        error: (d && (d.error || d.sample?.reason)) || '测速失败',
+      });
+    }
+  } catch (err) {
+    tpsState.set(id, { busy: false, sample: null, error: String((err && err.message) || err) });
+  } finally {
+    refreshTpsCells(id);
+  }
+}
+
+function refreshTpsCells(onlyId) {
+  document.querySelectorAll('#modelTable td[data-tps]').forEach((td) => {
+    const id = td.dataset.tps;
+    if (onlyId && id !== onlyId) return;
+    td.innerHTML = renderTpsCell(id);
+  });
 }
 
 /**
@@ -4265,7 +4550,330 @@ async function doCheckin() {
     setMsg('签到失败：' + ((d && d.error) || '未知错误'), 'err');
   }
   await loadCheckin();
+  await loadCheckinAccounts();
   await loadOverview();
+}
+
+/* ── 本机各账号的签到（跨账号）────────────────────────────────────────
+ *
+ * 与 dsh 面板的「账号签到状态」卡**同一套数据**（桥的 `/v1/checkin/accounts`
+ * 与 `/v1/checkin/all`）。原先控制台只有当前账号一个号，而本机常登着 3–4 个，
+ * 只签当前账号等于每次都要手动切号再点一次。
+ *
+ * 三条必须守住的口径（与面板逐字一致）：
+ *   1. **无签到活动的账号不出行、不计入分母**（国际版网关根本没有积分活动，
+ *      把它算进 `2/4` 会让进度条永远填不满，而列表里只看到 2 行）；
+ *   2. **它们是"折叠"而不是"藏起来"**：一行可点开的摘要，点开就是真实行 ——
+ *      只折叠不给入口等于把账号藏起来（用户实测以为号丢了）；
+ *   3. **失败要说清原因**：令牌过期 vs 网络错误 vs 上游拒绝，处置完全不同。
+ */
+const acctCheckinState = { open: false, busy: '', data: null, error: '' };
+let acctCheckinStampAt = 0;
+
+async function loadCheckinAccounts() {
+  const box = $('acctCheckinBox');
+  if (!box) return;
+  const d = await api('/api/checkin/accounts');
+  acctCheckinState.data = d && Array.isArray(d.accounts) ? d : null;
+  acctCheckinState.error = (d && d.error) ? String(d.error) : '';
+  acctCheckinStampAt = Date.now();
+  setStamp('acctCheckinStamp');
+  renderCheckinAccounts();
+}
+
+function renderCheckinAccounts() {
+  const box = $('acctCheckinBox');
+  if (!box) return;
+  const d = acctCheckinState.data;
+  const err = acctCheckinState.error;
+  if (!d) {
+    box.innerHTML = '<div class="empty">' + escapeAttr(err || '读取失败：桥未运行') + '</div>';
+    return;
+  }
+  const rows = d.accounts || [];
+  const activeRows = rows.filter((a) => !a.noActivity);
+  const noActivityRows = rows.filter((a) => a.noActivity);
+  const signed = activeRows.filter((a) => a.status && a.status.todayCheckedIn).length;
+  const credit = activeRows.reduce((sum, a) => sum
+    + (a.status && a.status.todayCheckedIn && Number(a.status.todayCredit) > 0
+      ? Number(a.status.todayCredit) : 0), 0);
+  const total = activeRows.length;
+  const pct = total ? Math.round((signed / total) * 100) : 0;
+  const claimable = rows.some((a) => !a.expired && !a.noActivity && !(a.status && a.status.todayCheckedIn));
+
+  const rowHtml = (a) => {
+    const tone = a.error ? 'fail' : a.noActivity ? '' : (a.status && a.status.todayCheckedIn ? 'ok' : '');
+    /*
+     * 状态文案与可选的「+18」**分成两个节点**。
+     *
+     * 合起来（`已签到 +18`）会是一个既不在词条表里、也匹配不到规则的动态串 ——
+     * 英文模式下整块留中文。拆开之后「已签到」是词条、`+18` 是数据（不翻），
+     * 与对话页「本轮扣分」那处的做法一致。
+     */
+    const statusText = a.error ? '失败'
+      : a.noActivity ? '无签到活动'
+        : (a.status && a.status.todayCheckedIn) ? '已签到' : '未签到';
+    const gained = (a.status && a.status.todayCheckedIn && Number(a.status.todayCredit) > 0)
+      ? ' +' + a.status.todayCredit : '';
+    const remainText = Number(a.expiresAt) > 0
+      ? (a.expiresAt > Date.now() ? '剩余 ' + fmtDuration(a.expiresAt - Date.now()) : '已过期')
+      : '';
+    /* 身份/域名/有效期同样拆成多个节点：中文片段各自有条目，`.` 分隔符留在文字节点外 */
+    const bits = [
+      a.region === 'intl' ? '国际版' : '国内版',
+      a.domain || '',
+      remainText,
+      a.error || '',
+    ].filter(Boolean);
+    return '<div class="acct">' +
+      '<div class="acct-head">' +
+        '<div class="acct-name"><span data-i18n-skip>' + escapeAttr(a.nickname || String(a.userId || '').slice(0, 8) + '…') + '</span>' +
+          (a.current ? ' <span class="tag ok">当前</span>' : '') +
+          (a.expired ? ' <span class="tag fail">已过期</span>' : '') +
+          ' <span class="tag' + (tone ? ' ' + tone : '') + '">' + escapeAttr(statusText) + '</span>' +
+          (gained ? '<span class="tag ok mono" data-i18n-skip>' + escapeAttr(gained.trim()) + '</span>' : '') +
+        '</div>' +
+        '<div class="acct-act">' + (a.current ? '' : '<span class="tag">未使用</span>') + '</div>' +
+      '</div>' +
+      '<div class="acct-sub mono">' + bits.map((b, i) => (i ? '<span> · </span>' : '') +
+        '<span' + (i === 1 ? ' data-i18n-skip' : '') + '>' + escapeAttr(b) + '</span>').join('') +
+      '</div>' +
+    '</div>';
+  };
+
+  const header =
+    '<div class="panel-tools" style="margin:0 0 8px">' +
+      '<span class="hint">今日已签 <b data-i18n-skip>' + signed + '/' + total + '</b> 个有活动的账号' +
+        (credit > 0 ? '<span> · </span><span>共领</span> <b data-i18n-skip>+' + credit + '</b><span> 积分</span>' : '') +
+      '</span>' +
+      '<span class="spacer"></span>' +
+      '<button class="mini primary" id="acctCheckinAllBtn"' + (claimable && acctCheckinState.busy !== 'all' ? '' : ' disabled')
+        + ' title="' + escapeAttr(claimable ? '给每个账号各发一次领取（不切换当前账号）' : '本机所有账号今天都已处理过') + '">'
+        + (acctCheckinState.busy === 'all' ? '领取中…' : (claimable ? '全部领取' : '今天都领完了')) + '</button>' +
+      '<button class="mini" id="acctCheckinRefreshBtn">刷新</button>' +
+    '</div>' +
+    (total
+      ? '<div class="probe-progress" role="progressbar" aria-valuenow="' + pct + '" aria-valuemin="0" aria-valuemax="100"'
+        + ' aria-label="今日签到完成度" style="margin:0 0 10px"><div class="ptrack"><div class="pfill" style="width:' + pct + '%"></div></div>'
+        + '<span>' + pct + '%</span></div>'
+      : '');
+
+  const list = activeRows.length
+    ? activeRows.map(rowHtml).join('')
+    : '<div class="empty">' + escapeAttr(rows.length ? '本机账号都没有签到活动' : '没有找到本机已登录的账号。') + '</div>';
+
+  const folded = noActivityRows.length
+    ? '<div class="acct" style="opacity:.72">' +
+        '<div class="acct-head"><div class="acct-name">' +
+          '<button class="mini" type="button" id="acctCheckinToggle" aria-expanded="' + (acctCheckinState.open ? 'true' : 'false') + '">' +
+            /*
+             * 箭头与文字**分开**：合起来（`▸ 展开`）既不在词条表里、也匹配不到
+             * 「展开 / 收起」的单字规则 —— 英文模式下按钮会留着中文。
+             * 数量也一样拆出去（数字是数据）。
+             */
+            (acctCheckinState.open ? '▾ ' : '▸ ') + '<span>' + (acctCheckinState.open ? '收起' : '展开') + '</span>' + '</button>' +
+          '<span>' + '<b data-i18n-skip>' + noActivityRows.length + '</b>' + ' 个账号无签到活动，已折叠</span>' +
+        '</div></div>' +
+        (acctCheckinState.open ? '<div style="margin-top:8px">' + noActivityRows.map(rowHtml).join('') + '</div>' : '') +
+      '</div>'
+    : '';
+
+  box.innerHTML = header + list + folded;
+
+  const allBtn = $('acctCheckinAllBtn');
+  if (allBtn) allBtn.onclick = claimAllCheckinAccounts;
+  const refreshBtn = $('acctCheckinRefreshBtn');
+  if (refreshBtn) refreshBtn.onclick = loadCheckinAccounts;
+  const toggle = $('acctCheckinToggle');
+  if (toggle) {
+    toggle.onclick = () => {
+      acctCheckinState.open = !acctCheckinState.open;
+      renderCheckinAccounts();
+    };
+  }
+}
+
+async function claimAllCheckinAccounts() {
+  if (acctCheckinState.busy) return;
+  acctCheckinState.busy = 'all';
+  renderCheckinAccounts();
+  try {
+    const d = await api('/api/checkin/all', { method: 'POST' });
+    if (d && d.ok) {
+      const t = d.totals || {};
+      const bits = [];
+      if (Number(t.claimed) > 0) bits.push('领取 ' + t.claimed + ' 个（+' + (t.credit || 0) + ' 积分）');
+      if (Number(t.already) > 0) bits.push('已签过 ' + t.already + ' 个');
+      if (Number(t.skipped) > 0) bits.push('无活动 ' + t.skipped + ' 个');
+      if (Number(t.failed) > 0) bits.push('失败 ' + t.failed + ' 个');
+      setMsg('全部领取：' + (bits.join(' · ') || '没有可领的账号'), Number(t.failed) > 0 ? 'err' : 'good');
+    } else {
+      setMsg('全部领取失败：' + ((d && d.error) || '未知错误'), 'err');
+    }
+    await loadCheckinAccounts();
+    await loadCheckin();
+    await loadOverview();
+  } finally {
+    acctCheckinState.busy = '';
+    renderCheckinAccounts();
+  }
+}
+
+/**
+ * 用量上限（跨账号）：哪个账号的哪个模型触顶了。
+ *
+ * 与 dsh 面板的「用量上限」卡**同一份实现**（后端 `/api/limits` 直接调
+ * `lib/limits.mjs`，插件侧也转调它），所以两边的分类、恢复时间、过期判定
+ * 逐字一致。
+ *
+ * 为什么值得单独一张卡：桥的 `rateLimit` 早就在，但只被自动切号用过。用户
+ * 看到的现象是"请求整片变红，但界面上什么都看不到"，只能靠猜。而三条结论的
+ * 处置方式完全不同 —— 额度用尽换模型、账号被风控换号（重登无效）、积分不足
+ * 必须充钱（等多久都不会好）。
+ *
+ * 倒计时**每秒重算**，到点自动摘除，不需要额外请求（本机时钟就是用户看到的
+ * 那个"现在"，两者一致才不会觉得数字在跳）。
+ */
+const limitsState = { data: null, error: '', at: 0 };
+let limitsTicker = null;
+
+async function loadLimits(opts = {}) {
+  const box = $('limitsBox');
+  if (!box) return;
+  const d = await api('/api/limits' + (opts.refresh ? '?refresh=1' : ''));
+  limitsState.data = d && d.ok === true && Array.isArray(d.limiting) ? d : null;
+  limitsState.error = (d && d.error) ? String(d.error) : '';
+  limitsState.at = Date.now();
+  setStamp('limitsStamp');
+  renderLimits();
+  ensureLimitsTicker();
+}
+
+/** 有带恢复时间的条目时才需要每分钟/每秒刷新 —— 没有就停掉定时器（省电）。 */
+function ensureLimitsTicker() {
+  const need = !!limitsState.data
+    && limitsState.data.limiting.some((it) => it.resetAt && Date.parse(it.resetAt) > Date.now());
+  if (need && !limitsTicker) {
+    limitsTicker = setInterval(() => {
+      if (document.hidden) return;
+      renderLimits();
+    }, 1000);
+  } else if (!need && limitsTicker) {
+    clearInterval(limitsTicker);
+    limitsTicker = null;
+  }
+}
+
+/** 倒计时文案：不到 2 分钟显示秒（否则用户盯着 5 秒看不出变化，会以为坏了）。 */
+function fmtCountdown(ms) {
+  if (!Number.isFinite(ms)) return '';
+  if (ms <= 0) return '即将恢复';
+  if (ms < 120_000) return Math.max(1, Math.ceil(ms / 1000)) + ' 秒';
+  const totalMin = Math.ceil(ms / 60000);
+  const d = Math.floor(totalMin / (60 * 24));
+  const h = Math.floor((totalMin % (60 * 24)) / 60);
+  const m = totalMin % 60;
+  const parts = [];
+  if (d) parts.push(d + ' 天');
+  if (h) parts.push(h + ' 小时');
+  if (m && !d) parts.push(m + ' 分');
+  return parts.join(' ') || '不到 1 分钟';
+}
+
+function renderLimits() {
+  const box = $('limitsBox');
+  if (!box) return;
+  const d = limitsState.data;
+  if (!d) {
+    box.innerHTML = '<div class="empty">' + escapeAttr(limitsState.error || '读取失败：桥未运行') + '</div>';
+    return;
+  }
+  const now = Date.now();
+  /* 到点就摘掉：不重新请求（桥侧也会清，但面板有缓存、可能还没轮到） */
+  const list = d.limiting.filter((it) => {
+    const resetMs = it.resetAt ? Date.parse(it.resetAt) : NaN;
+    return !(Number.isFinite(resetMs) && resetMs <= now);
+  });
+  if (!list.length) {
+    box.innerHTML = '<div class="empty">'
+      + (d.expiredCount > 0 ? '额度已恢复（刚到期移除）。' : '没有账号触顶（最近 10 分钟）。')
+      + '</div>';
+    return;
+  }
+  const groups = [];
+  const byUid = new Map();
+  for (const it of list) {
+    const gid = it.uid || '(unknown)';
+    let g = byUid.get(gid);
+    if (!g) {
+      g = { uid: gid, label: it.accountLabel || String(gid).slice(0, 8), items: [], isCurrent: false, severe: false };
+      byUid.set(gid, g);
+      groups.push(g);
+    }
+    g.items.push(it);
+    if (it.isCurrent) g.isCurrent = true;
+    if (it.kind === 'credits' || it.kind === 'account_restricted') g.severe = true;
+  }
+  const KIND_TEXT = {
+    quota: '额度已用尽',
+    credits: '积分不足',
+    account_restricted: '账号被风控',
+    rate_limit: '触发了限流',
+  };
+  const ADVICE = {
+    quota: '换模型或换号',
+    credits: '充积分或换号，等待无效',
+    account_restricted: '重新登录无效，请换号',
+    rate_limit: '稍等再试',
+  };
+  const html = groups.map((g) => '<div class="acct' + (g.severe ? ' acct-limited' : '') + '">' +
+    '<div class="acct-head">' +
+      '<div class="acct-name"><span data-i18n-skip>' + escapeAttr(g.label) + '</span>' +
+        (g.isCurrent ? ' <span class="tag ok">当前</span>' : '') +
+        ' <span class="tag"><b data-i18n-skip>' + g.items.length + '</b><span> 条</span></span></div>' +
+    '</div>' +
+    g.items.map((it) => {
+      const resetMs = it.resetAt ? Date.parse(it.resetAt) : NaN;
+      /*
+       * 「还剩多久」只对**等得好的**那几种有意义：
+       *   · credits / account_restricted 等多久都不会好（充钱、换号才行），
+       *     写"上游未给恢复时间"会让人以为再等等就行 —— 那是误导；
+       *   · quota 有上游给的 resetAt，按它算倒计时；
+       *   · rate_limit 是 10 分钟滑动窗口，没有明确时刻。
+       * 与 dsh 面板逐字同一套说法（那边写的是 advice）。
+       */
+      /*
+       * 「还剩 3 小时」这类倒计时**拆两段**：`还剩` 是文案、时长是数据。
+       * 整串是动态拼接（`fmtCountdown` 产出 `3 小时`），既不在词条表也匹配不到
+       * 规则 —— 英文模式下会整段留中文。拆开后时长由 `data-i18n-skip` 原样留下。
+       */
+      const lineHtml = it.kind === 'credits'
+        ? '<span>需充值，不会自动恢复</span>'
+        : it.kind === 'account_restricted'
+          ? '<span>换号（重新登录无效）</span>'
+          : (Number.isFinite(resetMs)
+            ? '<span>还剩 </span><span data-i18n-skip>' + escapeAttr(fmtCountdown(resetMs - now)) + '</span>'
+            : (it.kind === 'rate_limit'
+              ? '<span>10 分钟窗口内</span>'
+              : '<span>上游未给恢复时间</span>'));
+      return '<div class="acct-sub mono" style="display:flex;justify-content:space-between;gap:12px;align-items:baseline">' +
+        '<span data-i18n-skip>' + escapeAttr(it.model || '—') + '</span>' +
+        lineHtml +
+        '<span class="tag ' + (it.kind === 'quota' || it.kind === 'rate_limit' ? '' : 'fail') + '" title="'
+          + escapeAttr(ADVICE[it.kind] || '') + '">' + escapeAttr(KIND_TEXT[it.kind] || it.kind) + '</span>' +
+      '</div>';
+    }).join('') +
+  '</div>').join('');
+  /*
+   * 说明文字**拆成多段**：括号里的数量是数据、前后是文案。
+   * 整串（`…共 2 个账号）。每条…`）是动态拼接，既不在词条表里也匹配不到规则 ——
+   * 英文模式下整段留中文。拆开后每段都能翻，数量靠 data-i18n-skip 原样留下。
+   */
+  const noteHtml = d.accountCount > 1
+    ? '<span>所有账号都已列出，不只当前这个（共 </span><b data-i18n-skip>' + d.accountCount
+      + '</b><span> 个账号）。每条到恢复时间会自动消失。</span>'
+    : '<span>到恢复时间会自动消失；换模型或换号可恢复。</span>';
+  box.innerHTML = '<p class="hint" style="margin:0 0 8px">' + noteHtml + '</p>' + html;
 }
 
 let usageReloadTimer = null;
@@ -6292,6 +6900,14 @@ async function copyText(text, opts = {}) {
 function applyModelFilter() {
   const q = ($('modelFilter') && $('modelFilter').value || '').trim().toLowerCase();
   const kind = ($('modelKind') && $('modelKind').value) || '';
+  /*
+   * 「隐藏未列出」是**独立勾选**，与下拉里的「仅未列出」互补：
+   *   · 勾选 = 把未列出的档位/灰度模型从视图里去掉（它们默认也不进 dsh 选择器）；
+   *   · 下拉「仅未列出」= 反过来只留这些，便于先体检再决定要不要显示。
+   * 两者同时生效时结果为空 —— 这是合理的（互相矛盾的意图），但必须在
+   * 计数条上说清"已筛掉 N"，否则用户看到一张空表只会以为表格坏了。
+   */
+  const hideUnlisted = !!($('modelHideUnlisted') && $('modelHideUnlisted').checked);
   // 从 DOM 现算勾选状态：用户可能刚改过，缓存集合会过期
   const checked = new Set(
     [...document.querySelectorAll('#modelTable input[data-id]')]
@@ -6299,10 +6915,12 @@ function applyModelFilter() {
   );
 
   let shown = 0;
+  let hidden = 0;
   document.querySelectorAll('#modelTable tbody tr').forEach((tr) => {
     const id = tr.dataset.modelId || '';
     const name = tr.dataset.modelName || '';
     const free = tr.dataset.free === '1';
+    const unlisted = tr.dataset.official === '0';
     const isReg = checked.has(id);
     const probeOk = tr.dataset.probeOk || ''; // '' 未测 / '1' 可用 / '0' 不可用
 
@@ -6313,17 +6931,31 @@ function applyModelFilter() {
       || (kind === 'unregistered' && !isReg)
       || (kind === 'probe-ok' && probeOk === '1')
       || (kind === 'probe-fail' && probeOk === '0')
-      || (kind === 'probe-none' && probeOk === '');
+      || (kind === 'probe-none' && probeOk === '')
+      || (kind === 'unlisted' && unlisted);
 
-    const show = matchQ && matchKind;
+    /* 隐藏类开关放在搜索**之前**判断：否则搜一个未列出的模型名又把它翻出来，
+       "隐藏"就名不副实（插件面板那边同一套理由）。 */
+    const show = matchQ && matchKind && !(hideUnlisted && unlisted);
     tr.style.display = show ? '' : 'none';
     if (show) shown += 1;
+    else if (matchQ && matchKind && hideUnlisted && unlisted) hidden += 1;
   });
 
   // 用独立元素显示过滤结果：#regMsg 要留给「保存 / 探测」的进度与结论，
   // 两者共用会让「改一下搜索词就把探测进度冲掉」
   const info = $('filterInfo');
-  if (info) info.textContent = (q || kind) ? '显示 ' + shown + ' / ' + currentModels.length : '';
+  if (info) {
+    const total = currentModels.length;
+    info.textContent = (q || kind || hideUnlisted)
+      ? ('显示 ' + shown + ' / ' + total + (hidden ? '，已隐藏 ' + hidden : ''))
+      : '';
+  }
+  const count = $('modelUnlistedCount');
+  if (count) {
+    const n = currentModels.filter((m) => m.official === false).length;
+    count.textContent = n ? '(' + n + ')' : '';
+  }
 }
 
 /** 取出行的体检耗时（没有则视为无穷大，排在最后）。 */
@@ -7218,7 +7850,7 @@ function renderModelTable(models, registered) {
       return '<tr data-model-id="' + escapeAttr(m.id) + '" data-model-name="' + escapeAttr(m.name || '')
         + '" data-free="' + (m.free ? '1' : '') + '" data-credits="'
         + (typeof m.credits === 'number' ? m.credits : '') + '" data-probe-ok="' + probeOk
-        + '" data-probe-ms="' + probeMs + '">' +
+        + '" data-probe-ms="' + probeMs + '" data-official="' + (m.official === false ? '0' : '1') + '">' +
         /*
          * 行复选框**必须给可访问名称**：这个单元格里只有一枚裸 checkbox，
          * 而模型名在右边另一列 —— 读屏 Tab 到它只会念「复选框」，不说选的是哪个。
@@ -7231,13 +7863,18 @@ function renderModelTable(models, registered) {
           + '<button type="button" class="idcopy" title="点击复制">' + escapeAttr(m.id) + COPY_ICON + '</button>' +
           '<button type="button" class="infobtn" data-info="' + escapeAttr(m.id)
           + '" aria-expanded="false" title="查看模型详情">ⓘ</button></td>' +
-        '<td class="name" data-i18n-skip>' + escapeAttr(m.name || '—') + '</td>' +
+        '<td class="name" data-i18n-skip>' + escapeAttr(m.name || '—')
+          + (m.official === false
+            ? ' <span class="tag unlisted" title="网关目录里有，但 WorkBuddy 官方模型选择器未列出；默认不进 dsh 选择器，可先体检再手动显示">未列出</span>'
+            : '')
+          + '</td>' +
         '<td class="mono num" title="' + escapeAttr(fmtNum(m.context_window || 0)) + '">' + escapeAttr(fmtCompact(m.context_window)) + '</td>' +
         '<td class="mono num" title="' + escapeAttr(fmtNum(m.max_output_tokens || 0)) + '">' + escapeAttr(fmtCompact(m.max_output_tokens)) + '</td>' +
         '<td class="mono num">' + rateCell + '</td>' +'<td class="busy">' + renderBusy(m) + '</td>' +
         '<td class="mono num" data-cost="' + escapeAttr(m.id) + '" title="正在计算…">—</td>' +
         '<td>' + (on ? '<span class="tag ok">已注册</span>' : '<span class="tag">未注册</span>') + '</td>' +
         '<td data-probe="' + escapeAttr(m.id) + '">' + renderProbe(m.id) + '</td>' +
+        '<td class="tps" data-tps="' + escapeAttr(m.id) + '">' + renderTpsCell(m.id) + '</td>' +
       '</tr>';
     }).join('');
 
@@ -7252,7 +7889,10 @@ function renderModelTable(models, registered) {
           '<option value="probe-ok">仅可用</option>' +
           '<option value="probe-fail">仅不可用</option>' +
           '<option value="probe-none">未测</option>' +
+          '<option value="unlisted">仅未列出</option>' +
         '</select>' +
+        '<label class="check" title="隐藏 WorkBuddy 官方模型选择器未列出的档位/灰度模型">' +
+          '<input type="checkbox" id="modelHideUnlisted"> 隐藏未列出 <span class="filterinfo" id="modelUnlistedCount"></span></label>' +
         '<span class="filterinfo" id="filterInfo"></span>' +
         '<button id="sortByCredits">按倍率排序</button>' +
         '<span class="sep"></span>' +
@@ -7324,6 +7964,7 @@ function renderModelTable(models, registered) {
       '<div class="tablewrap" id="modelTableWrap"><table id="modelTable"><thead><tr>' +
       '<th style="width:38px"></th><th>模型 id</th><th>显示名</th><th class="num">上下文</th><th class="num">最大输出</th><th class="num">倍率</th><th class="busy" title="上游 /v2/chat/busy 实时探测（只读免费）：空闲=现在选它最划算，轻度/极度拥堵=可能要等，不可用=现在别选。无数据=上游未回报或该区域没有此接口">拥堵</th>'
       + '<th class="num" title="账本最近 N 天：扣分合计 ÷ token 合计 × 1000，只含成功且回报了扣分的调用">实测成本</th><th>dsh</th>' +
+      '<th class="tps" title="输出速度（tokens/second）：点击测这个模型，三次取中位数。会消耗少量积分（约 0.01–0.15），所以只在你点名时才跑；结果缓存 30 分钟">速度</th>' +
       '<th class="th-probe" id="probeSortTh" title="点击切换排序：可用优先 / 耗时升序 / 耗时降序">可用性'
         + '<span class="sortmark" id="probeSortMark"></span> <span class="stamp" id="probeStamp"></span></th>' +
       '</tr></thead><tbody>' + rows + '</tbody></table></div>';
@@ -7371,6 +8012,14 @@ function renderModelTable(models, registered) {
     document.querySelectorAll('#modelTable button.infobtn').forEach((b) => {
       b.onclick = (e) => { e.stopPropagation(); toggleModelDetail(b.dataset.info, b); };
     });
+    /* 测速按钮：表格每 8 秒可能重建一次，所以每次重建都要重新绑定 */
+    document.querySelectorAll('#modelTable button.tpsbtn').forEach((b) => {
+      b.onclick = (e) => {
+        e.stopPropagation();
+        const td = b.closest('td[data-tps]');
+        if (td) void runTps(td.dataset.tps);
+      };
+    });
     $('saveRegBtn').onclick = saveRegistration;
     $('syncUsableBtn').onclick = syncUsableModels;
     $('probeScope').onchange = (e) => {
@@ -7412,6 +8061,7 @@ function renderModelTable(models, registered) {
     wireModelDefault();
     $('modelFilter').oninput = applyModelFilter;
     $('modelKind').onchange = applyModelFilter;
+    $('modelHideUnlisted').onchange = applyModelFilter;
     $('probeSortTh').onclick = sortModelsByProbe;
     // 包一层：直接挂 sortModelsByCredits 会把 MouseEvent 当成 silent 参数，
     // 于是点「按倍率排序」永远不显示提示
@@ -7739,6 +8389,30 @@ function modelDetailHtml(m) {
   add('厂商', m.vendor);
   if (Array.isArray(m.tags) && m.tags.length) add('标签', m.tags.join('、'));
   if (m.supports_images) add('支持图片', '是');
+  /*
+   * 官方档位：`context_window_default` / `context_window_options` /
+   * `context_window_max` 是官方 GUI 的选择器口径（默认 300K，可选 300K·600K·1M）。
+   * 表格里的「上下文」只有一列，看不出"这个模型还能开到多大" —— 而选错档位
+   * 会直接影响能不能塞下一整个会话。dsh 面板的模型详情有这三行，控制台作为
+   * 「看数据的地方」更该有（它只读，改档位在 dsh 面板里做）。
+   */
+  if (m.official === false) {
+    add('官方目录', '未列出（网关有、官方模型选择器不铺；默认不进 dsh 选择器）');
+  } else if (m.official === true) {
+    add('官方目录', '已列出');
+  }
+  if (Number(m.context_window_default)) add('官方默认上下文', fmtNum(m.context_window_default), { mono: true });
+  if (Number(m.context_window_max) && Number(m.context_window_max) !== Number(m.context_window_default)) {
+    add('上下文上限', fmtNum(m.context_window_max), { mono: true });
+  }
+  if (Array.isArray(m.context_window_options) && m.context_window_options.length) {
+    add('官方可选档位', m.context_window_options.map((v) => fmtCompact(v)).join(' · '), { mono: true });
+  }
+  if (Array.isArray(m.reasoning_efforts) && m.reasoning_efforts.length) {
+    add('思考档位', m.reasoning_efforts.join(' · ')
+      + (m.default_reasoning_effort ? '（默认 ' + m.default_reasoning_effort + '）' : ''));
+  }
+  if (typeof m.default_temperature === 'number') add('官方默认 temperature', String(m.default_temperature), { mono: true });
   // 精确值：表格列显示的是 1M / 131K 这类紧凑形式，这里给原始数字
   if (Number(m.context_window)) add('上下文（精确）', fmtNum(m.context_window), { mono: true });
   if (Number(m.max_output_tokens)) add('最大输出（精确）', fmtNum(m.max_output_tokens), { mono: true });
@@ -7850,6 +8524,83 @@ function applyModelSearch() {
     ? list.map((m) => '<option value="' + escapeAttr(m.id) + '">' + escapeAttr(m.id) + '</option>').join('')
     : '<option value="">（无匹配模型）</option>';
   sel.value = (prev && list.some((m) => m.id === prev)) ? prev : ((list[0] && list[0].id) || '');
+  refreshChatEfforts();
+}
+
+/**
+ * 「思考强度」下拉的候选项跟随**当前选中的模型**。
+ *
+ * ## 为什么必须跟着模型变
+ *
+ * 档位是**模型自身的属性**（桥目录的 `reasoning_efforts`）：deepseek 给
+ * low/medium/high，glm 给 low/high/max，不支持推理的模型一个都不给。
+ * 固定写死三档会让用户给一个不支持推理的模型发 `reasoning_effort` ——
+ * 上游要么 400，要么静默忽略，用户看到的是"设了没用"。
+ *
+ * ## 不支持时禁用而不是隐藏
+ *
+ * 隐藏会让这一行在模型之间跳变（宽度、布局都跟着动）；禁用 + 说明
+ * 「这个模型没有思考档位」才能让人知道**为什么**选不了（与插件面板同一做法）。
+ */
+function refreshChatEfforts() {
+  const sel = $('chatEffort');
+  const hint = $('chatParamsHint');
+  if (!sel) return;
+  const model = ($('modelSel') && $('modelSel').value) || '';
+  const m = currentModels.find((x) => x.id === model) || null;
+  const levels = Array.isArray(m && m.reasoning_efforts) ? m.reasoning_efforts : [];
+  const prev = sel.value;
+  sel.innerHTML = '<option value="">默认</option>'
+    + levels.map((v) => '<option value="' + escapeAttr(v) + '">' + escapeAttr(EFFORT_LABELS[v] || v) + '</option>').join('');
+  /* 换了模型且旧档位不在新列表里 → 回到「默认」（不把 A 模型的档位发给 B） */
+  sel.value = levels.includes(prev) ? prev : '';
+  sel.disabled = levels.length === 0;
+  if (hint) {
+    hint.textContent = !m ? ''
+      : levels.length === 0
+        ? '这个模型没有思考档位（上游未提供）'
+        : '留空 = 模型默认档位' + (m.default_reasoning_effort
+          ? '（' + (EFFORT_LABELS[m.default_reasoning_effort] || m.default_reasoning_effort) + '）'
+          : '');
+  }
+}
+
+/** 思考档位的中文名（与插件面板同一套；桥给的是 id，界面要给人看的词）。 */
+const EFFORT_LABELS = {
+  minimal: '最低', low: '低', medium: '中', high: '高', max: '最高',
+};
+
+/**
+ * 只收集**用户显式填过**的采样参数。
+ *
+ * 三条纪律：
+ *   1. 空串 / 非法值一律**不发**该字段 —— 交给上游默认，绝不替用户猜；
+ *   2. temperature 必须在 0–2（超出范围上游会 400，提前在本地拦住并说明）；
+ *   3. max_tokens 必须是正整数。
+ *
+ * 非法值不静默丢弃：单独返回 `invalid[]` 让调用方提示，否则用户会以为
+ * "设了、生效了"，而那一轮其实用的是上游默认。
+ *
+ * @returns {{ values: Record<string, number|string>, invalid: string[] }}
+ */
+function chatOverrides() {
+  const values = {};
+  const invalid = [];
+  const maxRaw = (($('chatMaxTokens') && $('chatMaxTokens').value) || '').trim();
+  if (maxRaw) {
+    const n = Number(maxRaw);
+    if (Number.isFinite(n) && Number.isInteger(n) && n > 0) values.max_tokens = n;
+    else invalid.push('max_tokens 需要是正整数');
+  }
+  const tempRaw = (($('chatTemperature') && $('chatTemperature').value) || '').trim();
+  if (tempRaw) {
+    const n = Number(tempRaw);
+    if (Number.isFinite(n) && n >= 0 && n <= 2) values.temperature = n;
+    else invalid.push('temperature 需要是 0–2 之间的数字');
+  }
+  const effort = ($('chatEffort') && $('chatEffort').value) || '';
+  if (effort) values.reasoning_effort = effort;
+  return { values, invalid };
 }
 
 /*
@@ -8012,6 +8763,23 @@ function refreshLogIfOpen() {
 }
 
 $('refreshBtn').onclick = refreshAll;
+/*
+ * 「刷新上限」：手动强制重算，绕过服务端 15 秒缓存。
+ *
+ * 为什么值得一个独立按钮：用户发现请求开始报 429 时会立刻想知道是哪一条，
+ * 而面板的 15 秒轮询可能刚好落在缓存窗口里 —— 那一屏会显示"没有账号触顶"，
+ * 看起来就像按钮坏了/接口没实现。
+ */
+$('limitsRefreshBtn').onclick = async () => {
+  const btn = $('limitsRefreshBtn');
+  if (btn) { btn.disabled = true; btn.textContent = '刷新中…'; }
+  try {
+    await loadLimits({ refresh: true });
+    setMsg('已刷新用量上限（' + fmtTime(Date.now()) + '）', 'good');
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = '刷新上限'; }
+  }
+};
 // 「复制全部」：贴进聊天/笔记用；面板里每一块也都有各自的复制按钮
 $('clientsCopyAllBtn').onclick = () => runCopy(
   $('clientsCopyAllBtn'), '全部接入信息', translateMultiline(clientsCheatSheet(lastClients || {})),
@@ -8067,6 +8835,8 @@ $('logClearBtn').onclick = async () => {
 };
 
 $('modelSearch').oninput = applyModelSearch;
+/* 换模型要重算「思考强度」的候选项：档位是模型自身的属性 */
+$('modelSel').onchange = refreshChatEfforts;
 
 $('startBtn').onclick = async () => {
   setMsg('正在启动桥服务…');
@@ -8224,6 +8994,20 @@ async function sendChat() {
   }
   if (!prompt) return;
 
+  /*
+   * 采样参数：先校验再发。
+   *
+   * 非法值**不静默丢弃**：那会让用户以为"设了、生效了"，实际这一轮用的是上游
+   * 默认。这里直接在输出区说清哪一项不合法并中止本次发送（比发出去再吃 400 好，
+   * 也花掉一次额度）。
+   */
+  const { values: overrides, invalid: paramErrors } = chatOverrides();
+  if (paramErrors.length) {
+    $('chatOut').innerHTML = '<span class="meta">参数不合法：'
+      + escapeAttr(paramErrors.join('；')) + '。请改正或清空后再发送。</span>';
+    return;
+  }
+
   // 阈值提示（不裁剪）：把「这一轮发出去会很大」如实说清，让用户自己决定清不清
   const willSend = chatHistory.length + 1;
   const willChars = chatChars() + prompt.length;
@@ -8254,8 +9038,14 @@ async function sendChat() {
     const res = await fetch('/api/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'x-workbuddy-panel': '1' },
-      // 整段历史一起带上（含固定 system 首条）
-      body: JSON.stringify({ model, messages: chatHistory, stream: true }),
+      /*
+       * 整段历史一起带上（含固定 system 首条），外加**用户显式设过的采样参数**。
+       *
+       * `overrides` 只含填过的项：空 = 不发该字段（交给上游默认）。
+       * 绝不替用户猜一个值 —— 不同上游模型对未知参数的容忍度不同，
+       * 乱发反而可能 400（这条与 dsh 面板的对话测试同一套纪律）。
+       */
+      body: JSON.stringify({ model, messages: chatHistory, stream: true, ...overrides }),
       signal: ctrl.signal,
     });
 
@@ -10916,6 +11706,8 @@ initPanelFadeIn(); // 必须在下面首次取数之前挂上，否则第一帧�
   loadAccounts();
   loadPluginLogin();
   loadCheckin();
+  loadCheckinAccounts();
+  loadLimits();
   loadUsage();
   loadRequests();
   // 客户端接入面板：内容全是静态的（地址/令牌/模型映射），**不进轮询**，
@@ -10970,6 +11762,24 @@ const pollers = [
   { every: 30000, run: refreshProbeStamp },
   // 账号读取要启动客户端取密钥（约 0.3s），因此放慢到 60s 一次
   { every: 60000, run: loadAccounts },
+  /*
+   * 用量上限：15 秒。
+   *
+   * 上限是**突发事件**：刚还在正常对话，下一个请求就 429 了。这份数据是桥的
+   * 内存表（读它不打上游、几乎零成本），所以可以比别的面板密。放 20 秒那一档
+   * 会让人看到"已经提示上限了、卡片里还什么都没有"（dsh 面板那边正是这么被
+   * 反馈的，所以两边都定 15 秒）。
+   */
+  { every: 15000, run: loadLimits },
+  /*
+   * 本机各账号签到状态：5 分钟。
+   *
+   * 每次都要逐个账号打上游的签到状态端点（串行），所以不能密。而它回答的是
+   * 「今天还有哪个号没领」，一天里变化极少 —— 5 分钟与 dsh 面板同一个节奏。
+   * 打开面板时的首次加载、以及「全部领取 / 立即签到」之后都会立刻重取，
+   * 不靠轮询补。
+   */
+  { every: 300000, run: loadCheckinAccounts },
 ];
 // 注：签到面板**不在这里轮询**。自动签到是后台发生的，但它的"已发生"信号
 // 随 /api/overview（已每 20 秒轮询）一起来，页面据此按需刷新（见 syncCheckinFromOverview）。

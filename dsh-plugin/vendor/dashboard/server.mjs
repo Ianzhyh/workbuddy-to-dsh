@@ -68,6 +68,21 @@ import {
 import { effectiveAuthFile, readState, writeAccountAlias, writeAccountHidden, writeAccountOrder, writeState, writeStateStrict } from '../lib/state.mjs';
 import { failoverSignal, pickAccountFailoverTarget, pickFailoverTarget } from '../lib/failover.mjs';
 import { updateProjectEnv } from '../lib/env-file.mjs';
+/*
+ * 用量上限（跨账号）—— **与 dsh 插件共用一份规则**。
+ *
+ * 分类（quota / credits / account_restricted / rate_limit）、历史合并（空
+ * resetAt 不能覆盖已知值）、恢复时间三层兜底、7 天清理都在这里。两边各写
+ * 一遍的后果是同一份桥数据能得出两个不同结论。
+ */
+import {
+  collectLimitItems,
+  mergeLimitHistory,
+  listLimitHistory,
+  backfillResetTimes,
+  readLimitHistoryFile,
+  writeLimitHistoryFile,
+} from '../lib/limits.mjs';
 
 // ── 基础工具 ────────────────────────────────────────────────────────────
 
@@ -771,6 +786,121 @@ function authFileMatches(healthBody, expected) {
   return normalizePath(healthBody?.authFile) === want || normalizePath(healthBody?.authFilePinned) === want;
 }
 
+/* ── 用量上限（跨账号）─────────────────────────────────────────────────
+ *
+ * ## 为什么控制台也要有这张表
+ *
+ * 这份数据原先只有 dsh 面板有（插件侧 `readLimits`），控制台只把
+ * `health.rateLimit` 用于「自动切号」——界面上一个字都看不到。后果是：
+ * 请求开始整片变红时，用户不知道是**这个模型满了**、**这个号被风控**、还是
+ * **积分耗尽**，而这三件的处置方式完全不同（换模型 / 换号 / 充钱）。
+ *
+ * ## 为什么必须与插件共用一份实现
+ *
+ * 两个前端、一个后端。分类规则（`quotaModels` 逐条 vs `quota` 单条、
+ * `creditsEmpty` 的兼容判定）、历史合并（空 `resetAt` 不能覆盖已知值）、
+ * 恢复时间三层兜底、过期清理 —— 任何一处各写一遍迟早会漂移，用户就会看到
+ * 控制台说「额度已用尽」而面板说「没有账号触顶」。所以规则全在
+ * `lib/limits.mjs`，这里只负责把桥数据喂给它、把路径告诉它。
+ *
+ * ## 为什么必须落盘
+ *
+ * 桥的 `rateLimit` 是**进程内**表：切号之后上一个账号的记录立刻查不到。
+ * 而用户要的是"不管我现在是什么账号，都能看到别的号是不是用完了"。
+ * 落盘文件与插件**同一个**：`<数据目录>/limit-history.json`。
+ */
+const LIMIT_HISTORY_FILE = join(config.paths.data, 'limit-history.json');
+
+/**
+ * 进程内缓存：15 秒内复用上一次的结论。
+ *
+ * 面板与控制台都按 15 秒轮询这张表，而每次计算要读一次落盘文件 + 可能读一次
+ * 失败账本（`/v1/requests`）。桥的 `rateLimit` 本身是内存表、读它不打上游，
+ * 但落盘文件每次重读纯属浪费。TTL 与轮询间隔同级，不会让用户看到陈旧结论
+ * （`?refresh=1` 可强制绕过）。
+ */
+let limitsCache = { at: 0, body: null };
+const LIMITS_TTL_MS = 15_000;
+
+async function limitsSnapshot({ force = false } = {}) {
+  if (!force && limitsCache.body && Date.now() - limitsCache.at < LIMITS_TTL_MS) return limitsCache.body;
+  const at = new Date().toISOString();
+  const nowMs = Date.now();
+
+  const health = await bridgeHealth(4000);
+  if (!health.running) {
+    /* 桥没跑：如实说"读不到"，不要伪造"没有上限" */
+    const body = {
+      ok: false, limiting: [], accounts: [], at, error: '本地桥未运行，读不到用量上限',
+    };
+    limitsCache = { at: Date.now(), body };
+    return body;
+  }
+  const uid = String(health.body?.auth?.userId || health.body?.auth?.uid || '');
+  const rateLimit = health.body?.rateLimit && typeof health.body.rateLimit === 'object' ? health.body.rateLimit : {};
+
+  /* ① 收集：四条分类规则在共享模块里 */
+  const { items, expiredCount: expiredNow } = collectLimitItems(rateLimit, uid, nowMs);
+
+  /* 账号昵称：复用控制台自己的账号列表（已合并快照、已带别名） */
+  let accounts = [];
+  try {
+    const listed = await listAccounts();
+    accounts = (Array.isArray(listed?.accounts) ? listed.accounts : [])
+      .filter((a) => a && !a.hidden)
+      .map((a) => ({
+        uid: String(a.userId || ''),
+        account: String(a.account || ''),
+        label: String(a.alias || a.nickname || a.account || a.name || '').replace(/\.info$/i, ''),
+        current: Boolean(a.active),
+        usable: a.usable !== false,
+      }));
+  } catch { /* 账号清单读不到：只影响昵称显示 */ }
+  const labelOf = (id) => {
+    if (!id) return '';
+    const hit = accounts.find((a) => a.uid === id || (a.account && a.account === id));
+    return hit ? hit.label : String(id).slice(0, 8);
+  };
+
+  /* ② 读盘 + 合并（读-改-写：两个进程都会写这份文件） */
+  const history = readLimitHistoryFile(LIMIT_HISTORY_FILE, nowMs);
+  const merged = mergeLimitHistory(history, items, { at, nowMs, labelOf });
+  let dirty = merged.changed || expiredNow > 0;
+
+  const listedHistory = listLimitHistory(history, { uid, labelOf, nowMs });
+  const limiting = listedHistory.limiting;
+
+  /* ③ 恢复时间兜底：health 文案 → 失败账本原文，只补空着的 */
+  if (limiting.some((it) => !it.resetAt)) {
+    let ledger = [];
+    try {
+      const recent = await bridgeRequests(50);
+      ledger = Array.isArray(recent?.requests) ? recent.requests : [];
+    } catch { /* 账本读不到：保持"未给恢复时间"，不编造 */ }
+    const filled = backfillResetTimes({ map: history, limiting, rateLimit, requests: ledger, nowMs });
+    if (filled.changed) dirty = true;
+  }
+
+  if (dirty) writeLimitHistoryFile(LIMIT_HISTORY_FILE, history);
+
+  const body = {
+    ok: true,
+    /** 全部账号的上限（不只是当前账号） */
+    limiting,
+    accounts,
+    at,
+    /** 桥当前登录的是哪个账号 */
+    account: uid,
+    accountLabel: labelOf(uid),
+    /** 已经过了恢复时间、被丢掉几条 —— 让"怎么突然空了"有据可查 */
+    expiredCount: listedHistory.expiredCount || expiredNow,
+    /** 这份列表覆盖了几个账号 */
+    accountCount: listedHistory.accountCount,
+  };
+  limitsCache = { at: Date.now(), body };
+  return body;
+}
+
 /**
  * 启动桥，并等到「本次 spawn 的那个进程」真正在服务为止。
  *
@@ -1444,7 +1574,7 @@ const server = createServer(async (req, res) => {
      * 不能让一个跨站简单请求随随便便读到 —— 所以即使只是读也要求面板头。
      * `/api/account/archive` 同理：它是账号清单的第二份（含存档时间与路径）。
      */
-    const PANEL_ONLY_GET = new Set(['/api/connect', '/api/clients', '/api/diagnose', '/api/accounts', '/api/account/archive']);
+    const PANEL_ONLY_GET = new Set(['/api/connect', '/api/clients', '/api/diagnose', '/api/accounts', '/api/account/archive', '/api/limits']);
     const needsPanel = !isRead
       || PANEL_ONLY_GET.has(route)
       || (route === '/api/models' && url.searchParams.get('refresh') === '1');
@@ -2058,6 +2188,35 @@ const server = createServer(async (req, res) => {
       return;
     }
 
+    /*
+     * 用量上限（跨账号）：**哪个账号的哪个模型触顶了**。
+     *
+     * 这份数据原先只有 dsh 面板有（插件侧 `readLimits`）；控制台只把它用于
+     * 自动切号，界面上完全看不到 —— 用户只能在请求整片变红之后才反应过来。
+     * 现在两边共用 `lib/limits.mjs` 的规则（分类 / 历史合并 / 恢复时间三层兜底 /
+     * 过期清理），所以控制台与面板给出的结论**逐字一致**。
+     *
+     * 桥的 `rateLimit` 是**进程内**表：读一次不打上游、几乎零成本，但切号之后
+     * 上一个账号的记录就没了。跨账号要靠落盘的 `limit-history.json`（与插件
+     * 同一份文件），这也是「不管我现在是什么账号都要看得到」的唯一实现方式。
+     */
+    if (route === '/api/limits') {
+      if (req.method !== 'GET' && req.method !== 'HEAD') {
+        sendJson(res, 405, { ok: false, error: 'GET only' });
+        return;
+      }
+      try {
+        /* `?refresh=1` 绕过 15 秒进程内缓存：面板上的「刷新上限」按钮用它 */
+        sendJson(res, 200, await limitsSnapshot({ force: url.searchParams.get('refresh') === '1' }));
+      } catch (error) {
+        /* 结论读不到要如实说，不能回一个空的"没有上限" */
+        sendJson(res, 200, {
+          ok: false, error: String(error?.message || error), limiting: [], accounts: [], at: null,
+        });
+      }
+      return;
+    }
+
     if (route === '/api/probe-results') {
       if (req.method === 'GET') {
         sendJson(res, 200, readProbeResults());
@@ -2533,6 +2692,112 @@ const server = createServer(async (req, res) => {
         });
       } catch (err) {
         sendJson(res, 502, { ok: false, error: String(err.message || err), checkin: readCheckinState() });
+      }
+      return;
+    }
+
+    /*
+     * 本机各账号的签到（只读 / 全部领取）。
+     *
+     * ## 为什么控制台需要它
+     *
+     * 原先这一页只有「当前账号」的签到状态，而本机常常登着 3–4 个号。用户真正
+     * 想做的是「一次把今天能领的都领了」—— 只签当前账号等于每次都要手动切号
+     * 再点一次。dsh 面板早就有这张表（`/workbuddy/checkin/accounts`），控制台
+     * 一直没有，属于同一件事的两个前端只做了一个。
+     *
+     * 桥的两个端点都是**管理面**（会枚举本机所有账号身份、`/all` 会给每个账号
+     * 各发一次领取），所以桥侧只接受 local 令牌；控制台本身不带桥令牌以外的
+     * 凭据，透传时必须带上本地令牌 —— `bridgeFetch` 已经统一做了。
+     *
+     * 红线不变：**只读登录文件、只做签到，不参与模型请求路由**（仍然是单账号
+     * 供给）。逐账号串行：这些请求打向不同网关，并发没有收益反而容易触发限流。
+     */
+    if (route === '/api/checkin/accounts' || route === '/api/checkin/all') {
+      const claim = route === '/api/checkin/all';
+      if (claim && req.method !== 'POST') {
+        sendJson(res, 405, { ok: false, error: 'POST only' });
+        return;
+      }
+      if (!claim && req.method !== 'GET' && req.method !== 'HEAD') {
+        sendJson(res, 405, { ok: false, error: 'GET only' });
+        return;
+      }
+      try {
+        const upstream = await fetch(`${config.bridge.url}/v1${route.slice(4)}`, {
+          method: claim ? 'POST' : 'GET',
+          headers: { Authorization: `Bearer ${config.bridge.token}` },
+          signal: AbortSignal.timeout(claim ? 120_000 : 60_000),
+        });
+        const body = await upstream.json().catch(() => ({ ok: false, error: `HTTP ${upstream.status}` }));
+        if (claim && body && body.ok) {
+          /* 领到了钱：余额缓存必须失效，否则页面还显示旧的积分 */
+          invalidateQuotaCache();
+          const totals = body.totals || {};
+          writeCheckinState({
+            lastAt: Date.now(),
+            lastResult: Number(totals.claimed) > 0 ? 'ok' : (Number(totals.already) > 0 ? 'already' : 'ok'),
+            lastError: Number(totals.failed) > 0 ? '有账号领取失败' : null,
+            lastSource: 'manual',
+          });
+        }
+        sendJson(res, upstream.ok ? 200 : upstream.status, body);
+      } catch (err) {
+        sendJson(res, 502, { ok: false, error: String(err.message || err), accounts: [] });
+      }
+      return;
+    }
+
+    /*
+     * 模型输出速度测速（tokens/second）。
+     *
+     * ## 为什么控制台也做
+     *
+     * 用户选模型时只能看倍率与上下文窗口，而**输出速度才是决定总耗时的那一项**
+     * （dsh 把模型当子代理并发跑、每个还要多轮往返，便宜的慢模型可能比贵的
+     * 快模型更费总时间）。dsh 面板早就有这个按钮，控制台作为「看数据的地方」
+     * 反而没有 —— 而恰恰是在控制台对比几十个模型时最需要这一列。
+     *
+     * ## 三条纪律（与桥、插件一致）
+     *
+     *   1. **必须显式触发**：每次三趟测量花 0.01–0.15 积分，任何自动跑的设计
+     *      都是让用户在不知情的情况下付费；
+     *   2. **结果不落盘**：这是"眼下这个模型多快"的读数，不是账本；落盘会造出
+     *      第二份数据，与上游实际状态可能不一致（桥侧有 30 分钟内存缓存）；
+     *   3. **失败不撒谎**：桥回的 `sample.reason` 原样透传，界面据此说清是
+     *      「三次都失败」还是「上游没回报用量」，而不是显示一个破折号。
+     */
+    if (route === '/api/tps') {
+      if (req.method !== 'GET' && req.method !== 'HEAD') {
+        sendJson(res, 405, { ok: false, error: 'GET only' });
+        return;
+      }
+      const model = String(url.searchParams.get('model') || '').trim();
+      if (!model) {
+        sendJson(res, 400, { ok: false, error: '缺少 model' });
+        return;
+      }
+      const refresh = url.searchParams.get('refresh') === '1' ? '&refresh=1' : '';
+      try {
+        const upstream = await fetch(
+          `${config.bridge.url}/v1/tps?model=${encodeURIComponent(model)}${refresh}`,
+          {
+            headers: { Authorization: `Bearer ${config.bridge.token}` },
+            /*
+             * 三趟测量 + 每趟最长 256 token 输出；桥侧自己还有 150 秒上限，
+             * 这里给的预算必须**大于**它（否则控制台先超时、桥还在付钱测）。
+             */
+            signal: AbortSignal.timeout(180_000),
+          },
+        );
+        const body = await upstream.json().catch(() => ({ ok: false, error: `HTTP ${upstream.status}` }));
+        sendJson(res, upstream.ok ? 200 : upstream.status, body);
+      } catch (err) {
+        const timeout = err?.name === 'TimeoutError' || err?.name === 'AbortError';
+        sendJson(res, 502, {
+          ok: false,
+          error: timeout ? '测速超时（桥仍在测量，稍后再试可读到缓存结果）' : String(err.message || err),
+        });
       }
       return;
     }

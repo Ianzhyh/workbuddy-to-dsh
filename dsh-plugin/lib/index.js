@@ -38,6 +38,23 @@ import { BridgeClient, BridgeSupervisor, BRIDGE_SCRIPT_REL } from './bridge.mjs'
 import { ConsoleSupervisor } from './console.mjs';
 import { failoverSignal, pickAccountFailoverTarget, pickFailoverTarget } from '../vendor/lib/failover.mjs';
 import { updateProjectEnv } from '../vendor/lib/env-file.mjs';
+/*
+ * 用量上限（跨账号）的收集 / 合并 / 恢复时间兜底 —— **与控制台共用一份实现**。
+ *
+ * 这两个前端是"一个后端、两个前端"，同一件事各写一遍必然漂移：控制台说
+ * 「额度已用尽」而面板说「没有账号触顶」，用户只能两边都信不了。规则（谁算
+ * credits、空 resetAt 不能覆盖、三层兜底、7 天清理）全部在 lib/limits.mjs 里，
+ * 这里只负责把桥的数据喂给它、把路径告诉它。
+ */
+import {
+  parseResetFromText as sharedParseResetFromText,
+  readLimitHistoryFile,
+  writeLimitHistoryFile,
+  collectLimitItems,
+  mergeLimitHistory,
+  listLimitHistory,
+  backfillResetTimes,
+} from '../vendor/lib/limits.mjs';
 import { WorkBuddyAdapter } from './adapter.mjs';
 import { toDirectory, pickDefaultModel } from './models.mjs';
 import { createTools } from './tools.mjs';
@@ -279,58 +296,28 @@ export function limitHistoryPath() {
 /**
  * 从磁盘读回上限历史。
  *
- * 容忍一切异常：文件不存在、被手改成坏 JSON、权限不对 —— 都当成"还没有历史"，
- * 绝不能因为一个缓存文件让插件启动失败。
+ * 实际实现已抽到共享模块 `../vendor/lib/limits.mjs`（控制台读同一份文件、
+ * 用同一套过期过滤），这里只负责给出路径。容忍一切异常：文件不存在、被手改成
+ * 坏 JSON、权限不对 —— 都当成"还没有历史"，绝不能因为一个缓存文件让插件启动失败。
  */
 export function readLimitHistory() {
-  const map = new Map();
-  try {
-    const file = limitHistoryPath();
-    if (!existsSync(file)) return map;
-    const parsed = JSON.parse(readFileSync(file, 'utf8'));
-    const list = Array.isArray(parsed?.entries) ? parsed.entries : [];
-    const now = Date.now();
-    for (const raw of list) {
-      if (!raw || typeof raw !== 'object') continue;
-      const uid = String(raw.uid || '');
-      const model = String(raw.model || '');
-      const kind = String(raw.kind || '');
-      if (!kind) continue;
-      /* 读回时也做一次过期过滤：关机这几天里到期的条目不该再出现 */
-      const resetMs = raw.resetAt ? Date.parse(raw.resetAt) : NaN;
-      if (Number.isFinite(resetMs) && resetMs <= now) continue;
-      map.set(`${uid}\0${model}\0${kind}`, {
-        uid, model, kind,
-        count: Number(raw.count) || 1,
-        lastAt: typeof raw.lastAt === 'string' ? raw.lastAt : '',
-        resetAt: typeof raw.resetAt === 'string' ? raw.resetAt : '',
-        resetAtSource: typeof raw.resetAtSource === 'string' ? raw.resetAtSource : '',
-        accountLabel: typeof raw.accountLabel === 'string' ? raw.accountLabel : '',
-        firstSeenAt: typeof raw.firstSeenAt === 'string' ? raw.firstSeenAt : '',
-        seenAt: typeof raw.seenAt === 'string' ? raw.seenAt : '',
-      });
-    }
-  } catch { /* 读不到就当没有：不影响插件启动 */ }
-  return map;
+  return readLimitHistoryFile(limitHistoryPath());
 }
 
 /**
  * 把上限历史写回磁盘（尽力而为）。
  *
  * 不抛出：这是缓存，写不进去（磁盘满 / 只读目录）只会让下次重启后看不到历史，
- * 不该影响正在进行的任何操作。用 `writeFileSync` 直接覆盖而不做原子替换 ——
- * 内容很小、且最坏情况只是丢掉这份缓存。
+ * 不该影响正在进行的任何操作。共享模块用「同目录唯一临时文件 + rename」，
+ * 因为**控制台进程也会写这份文件**（两个前端一个后端，两边都要看到同一个结论）。
  */
 export function writeLimitHistory(map) {
-  try {
-    const dir = runtimeDataDir();
-    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-    const entries = [...map.values()];
-    writeFileSync(limitHistoryPath(), JSON.stringify({ at: new Date().toISOString(), entries }, null, 1));
-  } catch { /* 缓存写失败：静默 */ }
+  writeLimitHistoryFile(limitHistoryPath(), map);
 }
 
 /**
+ * 恢复时间解析 —— 实现已抽到共享模块 `../vendor/lib/limits.mjs`（控制台与插件
+ * 用同一份，否则两边对同一句报错会给出不同结论）。
  *
  * 为什么需要它：桥只在当前账号的 `/health.rateLimit` 里带 `resetAt`，跨账号
  * 那条查不到；但报错原文里其实写着恢复时刻，两种写法都出现过：
@@ -345,34 +332,7 @@ export function writeLimitHistory(map) {
  *
  * 返回 epoch ms；解析不出或明显超范围（已过去 / 30 天后）返回 0 —— 不编造。
  */
-export function parseResetFromText(text, now = Date.now()) {
-  const raw = String(text || '');
-  if (!raw) return 0;
-  /* 优先带时区标记的完整 ISO（无歧义） */
-  const iso = raw.match(
-    /(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?(?:Z|[+-]\d{2}:?\d{2}))/,
-  );
-  if (iso) {
-    const ts = Date.parse(iso[1]);
-    if (Number.isFinite(ts)) return withinResetRange(ts, now) ? ts : 0;
-  }
-  /* 再试 `2026-11-14 11:07:27`（无时区：按本机时区理解） */
-  const wall = raw.match(/(\d{4})[-/](\d{2})[-/](\d{2})[ T](\d{2}):(\d{2}):(\d{2})/);
-  if (wall) {
-    const [, y, mo, d, h, mi, s] = wall;
-    const ts = new Date(Number(y), Number(mo) - 1, Number(d), Number(h), Number(mi), Number(s)).getTime();
-    if (Number.isFinite(ts)) return withinResetRange(ts, now) ? ts : 0;
-  }
-  return 0;
-}
-
-/** 恢复时间只在「还没过去」且「不超过 30 天」时才采信（同桥的判据）。 */
-function withinResetRange(ts, now) {
-  /* 留 1 分钟余量：时钟抖动不该让一条刚记下的结论立刻作废 */
-  if (ts <= now - 60_000) return false;
-  if (ts > now + 30 * 86_400_000) return false;
-  return true;
-}
+export const parseResetFromText = sharedParseResetFromText;
 
 /**
  * 读取桥的账号钉住状态；旧版在安装目录 `.state.json`，首次读取时迁移到
@@ -2765,68 +2725,9 @@ export function apply(ctx, rawConfig = {}) {
     }
     const uid = String(health?.auth?.userId || health?.auth?.uid || '');
     const rateLimit = health?.rateLimit && typeof health.rateLimit === 'object' ? health.rateLimit : {};
-    /** 条目是否已经过了上游承诺的恢复时刻。解析不出来就不判（不凭空判过期）。 */
-    const isExpired = (raw) => {
-      const resetAt = typeof raw?.resetAt === 'string' ? raw.resetAt : '';
-      if (!resetAt) return false;
-      const ts = Date.parse(resetAt);
-      if (!Number.isFinite(ts)) return false;
-      return ts <= nowMs;
-    };
-    const items = [];
-    let expiredCount = 0;
-    const push = (raw, kind) => {
-      if (!raw || typeof raw !== 'object') return;
-      const count = Number(raw.count);
-      if (!Number.isFinite(count) || count < 1) return;
-      if (isExpired(raw)) { expiredCount += 1; return; }
-      items.push({
-        kind,
-        model: typeof raw.model === 'string' ? raw.model : '',
-        count,
-        lastAt: typeof raw.lastAt === 'string' ? raw.lastAt : '',
-        /*
-         * 积分不足（`credits`）**永远不带恢复时间**。
-         *
-         * 它没有"到点自己好"这回事（充钱或换号才有用），而文案里常混着套餐
-         * 到期日之类的时刻 —— 一旦被当成 resetAt，界面就会出现"积分不足但
-         * 还剩 X 小时"（用户直接指出来的）。这里显式清空，不靠上游文案。
-         */
-        resetAt: kind === 'credits' ? '' : (typeof raw.resetAt === 'string' ? raw.resetAt : ''),
-        uid,
-      });
-    };
-    /*
-     * 额度上限：**逐条**读，不能只读 `quota`。
-     *
-     * 桥的 `rateLimitSummary()` 把多条触顶记录压成了一个 `quota`（只保留最新那条，
-     * 其余仅累加 count），于是"用别的渠道 / 别的模型"触顶时，面板上那条会被
-     * 最新的一条**顶掉**，看起来像"只剩一个"（用户原话）。
-     *
-     * 新桥会额外给出 `quotaModels`（每条一条，且带 `kind`：quota / credits）。
-     * 这里优先用它；老桥没有这个字段时回落到单个 `quota` —— 保证老版本也能显示。
-     */
-    const quotaList = Array.isArray(rateLimit.quotaModels) && rateLimit.quotaModels.length
-      ? rateLimit.quotaModels
-      : [rateLimit.quota];
-    for (const q of quotaList) {
-      if (!q || typeof q !== 'object') continue;
-      /*
-       * 是不是"积分不足"（等不来恢复）：
-       *   1. 新桥直接给 `kind: 'credits'`；
-       *   2. 老桥没有 kind，但桥侧 `creditsEmpty > 0` 且这条**没有 resetAt**
-       *      —— 那也按积分不足处理，免得把套餐到期日误当恢复时间。
-       */
-      const creditsHint = q.kind === 'credits'
-        || (q.kind === undefined && Number(rateLimit.creditsEmpty) > 0 && !q.resetAt);
-      push(q, creditsHint ? 'credits' : 'quota');
-    }
-    push(rateLimit.accountRestricted, 'account_restricted');
-    /*
-     * 总量限流只有在**没有更具体的结论**时才展示：`quota` 已经把"哪个模型满了"
-     * 说清楚了，再叠一条"429 N 次"只是同一件事的噪音。
-     */
-    if (!items.length) push(rateLimit, 'rate_limit');
+
+    /* ① 收集：规则在共享模块里（控制台用同一份，见 lib/limits.mjs 的说明） */
+    const { items, expiredCount: expiredNow } = collectLimitItems(rateLimit, uid, nowMs);
 
     /* 账号昵称：控制台在跑就翻成"名字"，否则只给 uid 前缀 */
     let accounts = [];
@@ -2857,133 +2758,43 @@ export function apply(ctx, rawConfig = {}) {
     };
 
     /*
-     * ── 把这次读到的结果**记进跨账号历史**，再把历史整体吐出来 ──
+     * ② 记进跨账号历史，再把历史整体吐出来。
      *
      * 桥的 rateLimit 只反映当前凭据，切号之后那个号的数据就查不到了。而用户
      * 要的是"不管我现在是什么账号，都能看到别的号是不是用完了"（原话：
      * "我做这个就是为了看哪个用完了，所以不管我是什么账号都得看得到"）。
      *
-     * 所以这里做两件事：
-     *   1. 把本次 items 按 `${uid}\0${model}\0${kind}` 写进 state.limitHistory；
-     *   2. 读的时候把**全部历史**过一遍过期过滤，一起返回。
-     *
-     * 条目不因为"当前不是这个账号"而隐藏 —— `isCurrent` 只用来打标记。
+     * 合并规则（空 resetAt 不能覆盖已知值）与过期清理都在 sharedMergeLimitHistory
+     * 里 —— 与控制台逐字同一份。
      */
-    /** 本次读取里历史表是否被改动过；只在那时落盘，避免每轮轮询都写盘。 */
-    let dirtyHistory = false;
-    for (const it of items) {
-      const key = `${it.uid}\0${it.model}\0${it.kind}`;
-      const prev = state.limitHistory.get(key);
-      dirtyHistory = true;
-      /*
-       * ⚠️ 不能简单写 `...prev, ...it`：本次若没带 resetAt（空串），会把
-       * prev 里已经知道的恢复时间**抹掉**，界面立刻退回"上游未给恢复时间"。
-       * 只在新值非空时才覆盖。
-       */
-      state.limitHistory.set(key, {
-        ...prev,
-        ...it,
-        resetAt: it.resetAt || prev?.resetAt || '',
-        /* resetAt 从哪来：upstream（桥直给）/ ledger（从报错原文补的） */
-        resetAtSource: it.resetAt ? 'upstream' : (prev?.resetAtSource || ''),
-        accountLabel: labelOf(it.uid),
-        firstSeenAt: prev?.firstSeenAt || at,
-        seenAt: at,
-      });
-    }
-    /* 清掉已经过期的历史，避免无限增长（用写侧的 nowMs，与读侧同基准） */
-    for (const [key, it] of state.limitHistory) {
-      if (isExpired(it)) { state.limitHistory.delete(key); dirtyHistory = true; }
-      else if (nowMs - Date.parse(it.seenAt || it.lastAt || 0) > 7 * 24 * 3_600_000) {
-        /* 上游从没给 resetAt 的条目：最多留 7 天，不能永远挂着 */
-        state.limitHistory.delete(key);
-        dirtyHistory = true;
-      }
-    }
+    const sharedMergeLimitHistory = mergeLimitHistory;
+    const { changed: historyChanged } = sharedMergeLimitHistory(state.limitHistory, items, {
+      at, nowMs, labelOf,
+    });
+    let dirtyHistory = historyChanged || expiredNow > 0;
 
-    const merged = [];
-    const seen = new Set();
-    for (const it of state.limitHistory.values()) {
-      if (isExpired(it)) continue;
-      const key = `${it.uid}\0${it.model}\0${it.kind}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      merged.push({
-        ...it,
-        accountLabel: it.accountLabel || labelOf(it.uid),
-        isCurrent: Boolean(uid && it.uid === uid),
-      });
-    }
+    const listed = listLimitHistory(state.limitHistory, { uid, labelOf, nowMs });
+    const merged = listed.limiting;
 
     /*
-     * ── 恢复时间兜底：三处一起找 ──
-     *
-     * 桥只在**当前账号**的 rateLimit 里带 resetAt，跨账号那条拿不到；用户看到
-     * 的却是"上游未给恢复时间"，而报错原文里明明写着时间。依次尝试：
-     *
-     *   1. 桥 health 里的 quota / accountRestricted 自带的 resetAt（本次已进 items）；
-     *   2. 桥 health 里这两块的 `message` 文本（有时只有文字、没有结构化字段）；
-     *   3. 失败账本里每条 error 原文（客户端收到的那句里就有时间）。
-     *
-     * 只补空着的，不覆盖已有的 —— 上游直给的那份更新。都拿不到就保持空，
-     * 界面如实显示"上游未给恢复时间"，绝不编造。
+     * ③ 恢复时间兜底：health 文案 → 失败账本原文，只补空着的。
+     *    都拿不到就保持空，界面如实显示"上游未给恢复时间"，绝不编造。
      */
     if (merged.some((it) => !it.resetAt)) {
-      /* 2. health 里的文案 */
-      for (const raw of [rateLimit.quota, rateLimit.accountRestricted]) {
-        if (!raw || typeof raw !== 'object') continue;
-        const ts = parseResetFromText(String(raw.message || raw.msg || ''));
-        if (!ts) continue;
-        for (const it of merged) {
-          if (it.resetAt) continue;
-          if (it.model && raw.model && it.model !== raw.model) continue;
-          it.resetAt = new Date(ts).toISOString();
-          it.resetAtSource = 'health-message';
-        }
-      }
-      /* 3. 失败账本 */
+      let ledgerRequests = [];
       try {
         const recent = await client.requests({ limit: 50, signal: AbortSignal.timeout(4000) });
-        for (const row of (recent?.requests || [])) {
-          if (!row || row.ok) continue;
-          const raw = String(row.error || '');
-          if (!raw) continue;
-          const ts = parseResetFromText(raw);
-          if (!ts) continue;
-          for (const it of merged) {
-            if (it.resetAt) continue;
-            if (it.model && row.model && it.model !== row.model) continue;
-            it.resetAt = new Date(ts).toISOString();
-            it.resetAtSource = 'ledger';
-          }
-        }
+        ledgerRequests = Array.isArray(recent?.requests) ? recent.requests : [];
       } catch { /* 账本读不到：保持"未给恢复时间"，不编造 */ }
-    }
-    /*
-     * 补到的结果也写回历史：否则每次请求都重新捞一遍，而且桥重启清空内存表后
-     * 又退回"未给"。写回后这条历史自带恢复时间，能自己活到 resetAt。
-     */
-    for (const it of merged) {
-      if (!it.resetAt) continue;
-      const key = `${it.uid}\0${it.model}\0${it.kind}`;
-      const prev = state.limitHistory.get(key);
-      if (prev && !prev.resetAt) {
-        state.limitHistory.set(key, { ...prev, resetAt: it.resetAt, resetAtSource: it.resetAtSource || 'ledger' });
-        dirtyHistory = true;
-      }
+      const backfilled = backfillResetTimes({
+        map: state.limitHistory, limiting: merged, rateLimit, requests: ledgerRequests, nowMs,
+      });
+      if (backfilled.changed) dirtyHistory = true;
     }
 
-    /* 当前账号的排前面，其余按最近命中排序 —— 用户最先关心"我正在用的这个" */
-    merged.sort((a, b) => Number(b.isCurrent) - Number(a.isCurrent)
-      || String(b.lastAt || '').localeCompare(String(a.lastAt || '')));
-
     /*
-     * 落盘。放在这里而不是每个 set/delete 之后：
-     * 本次读取里对历史表的所有改动（新增 / 清过期 / 回填 resetAt）都已经完成，
-     * 一次写就够；分散写会变成一轮请求写四次文件。
-     *
-     * 只在**表内容真的可能变了**时写（有新增条目、清了过期、或回填了时间），
-     * 避免每 60 秒轮询都碰一次磁盘。
+     * ④ 落盘：本次所有改动（新增 / 清过期 / 回填 resetAt）都已完成后一次写，
+     *    避免一轮请求写四次文件；没变就不碰磁盘。
      */
     if (dirtyHistory) writeLimitHistory(state.limitHistory);
 
@@ -2997,9 +2808,9 @@ export function apply(ctx, rawConfig = {}) {
       account: uid,
       accountLabel: labelOf(uid),
       /** 已经过了恢复时间、被丢掉几条 —— 让"怎么突然空了"有据可查 */
-      expiredCount,
+      expiredCount: listed.expiredCount || expiredNow,
       /** 这份列表覆盖了几个账号 —— 界面据此说明"历史攒了几天" */
-      accountCount: new Set(merged.map((it) => it.uid)).size,
+      accountCount: listed.accountCount,
     };
   }
 

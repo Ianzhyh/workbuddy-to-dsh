@@ -416,6 +416,172 @@ export function checkinFailFixture(error = '桥未运行') {
   return { ok: false, error };
 }
 
+/**
+ * 本机各账号的签到状态（`/api/checkin/accounts`，桥 `/v1/checkin/accounts` 的形状）。
+ *
+ * ## 为什么夹具里必须有「无签到活动的账号」
+ *
+ * 这张卡的分母是**有活动的账号数**而不是本机账号总数 —— 国际版网关没有积分
+ * 活动，把它算进 `2/4` 会让进度条永远填不满，而列表里只看到 2 行。那个分支
+ * 只有在夹具里真的放一个 `noActivity: true` 的账号时才走得到；只给"全都正常"
+ * 的桩，测试会全绿而产品可能早就退回 `2/4`。
+ *
+ * 同理留一个 `expired` 账号：过期的行必须显示「已过期」并且**不**计为可领取，
+ * 否则「全部领取」会对着一个签不了的号反复打上游。
+ */
+export function checkinAccountsFixture({
+  signed = true, withNoActivity = true, withExpired = false,
+} = {}) {
+  const rows = [
+    {
+      userId: '330101979236', nickname: '国内版1', uin: '330101979236',
+      region: 'cn', domain: 'copilot.tencent.com',
+      authFile: 'C:\\stub\\auth\\workbuddy-desktop.info',
+      current: true, expired: false, expiresAt: NOW + 20 * 86400000,
+      status: { active: true, todayCheckedIn: signed, streakDays: 4, todayCredit: signed ? 18 : 0 },
+    },
+    {
+      userId: '450702422472', nickname: '国际版1', uin: '450702422472',
+      region: 'intl', domain: 'www.workbuddy.ai',
+      authFile: 'C:\\stub\\auth\\workbuddy-desktop-ai.info',
+      current: false, expired: false, expiresAt: NOW + 12 * 86400000,
+      status: { active: true, todayCheckedIn: false, streakDays: 0, todayCredit: 0 },
+    },
+  ];
+  if (withNoActivity) {
+    rows.push({
+      userId: '450701675133', nickname: '国际版2', uin: '450701675133',
+      region: 'intl', domain: 'www.workbuddy.ai',
+      authFile: 'C:\\stub\\auth\\workbuddy-desktop-ai2.info',
+      current: false, expired: false, expiresAt: NOW + 30 * 86400000,
+      status: { active: false, todayCheckedIn: false, streakDays: 0, todayCredit: 0 },
+      noActivity: true,
+    });
+  }
+  if (withExpired) {
+    rows.push({
+      userId: '330126184144', nickname: '国内版2', uin: '330126184144',
+      region: 'cn', domain: 'copilot.tencent.com',
+      authFile: 'C:\\stub\\auth\\workbuddy-desktop-cn2.info',
+      current: false, expired: true, expiresAt: NOW - 3600000,
+      /*
+       * 刻意**不带** `error`：真实接口只在"领取失败"时才给这个键（形状表里
+       * 它是条件字段，桩里多写会被判成"真实接口没有这个键"）。过期的账号
+       * 靠 `expired: true` 表达，页面据此显示「已过期」并排除在可领取之外 ——
+       * 那正是这条桩要测的分支。
+       */
+    });
+  }
+  return {
+    ok: true,
+    claim: false,
+    totals: { accounts: rows.length, claimed: 0, already: 0, failed: 0, skipped: 0, credit: 0 },
+    accounts: rows,
+  };
+}
+
+/** 「全部领取」的成功响应（`POST /api/checkin/all`）。 */
+export function checkinClaimAllFixture({
+  claimed = 1, already = 1, skipped = 1, failed = 0, credit = 18,
+} = {}) {
+  return {
+    ok: true,
+    claim: true,
+    totals: { accounts: claimed + already + skipped + failed, claimed, already, failed, skipped, credit },
+    accounts: [],
+  };
+}
+
+/**
+ * 用量上限（跨账号）—— `/api/limits`（桥 `/health.rateLimit` 的投影）。
+ *
+ * 三条必须都在夹具里，因为它们各自的界面结论**完全不同**：
+ *   · `quota`（额度已用尽，带恢复倒计时）→ 换模型或换号
+ *   · `credits`（积分不足，**没有**倒计时）→ 必须充钱，等待无效
+ *   · `account_restricted`（账号被风控）→ 重登无效，只能换号
+ * 只给 quota 的桩会让「积分不足不许显示倒计时」这条回归测不到 —— 而那正是
+ * 用户指出来的缺陷（"积分不足但还剩 X 小时"）。
+ *
+ * 另有一条属于**另一个账号**（`isCurrent: false`）：卡片必须写明"所有账号都
+ * 已列出"，否则用户以为只看得到当前号。
+ */
+export function limitsFixture({
+  quotaModel = 'deepseek-v4.1-flash', creditModel = 'glm-5.3',
+  restrictedModel = 'kimi-k3.1-pro', resetInMs = 3 * 3600000, now = Date.now(),
+} = {}) {
+  return {
+    ok: true,
+    at: new Date(now).toISOString(),
+    account: '330101979236',
+    accountLabel: '国内版1',
+    expiredCount: 0,
+    accountCount: 2,
+    accounts: [],
+    limiting: [
+      {
+        kind: 'quota', model: quotaModel, count: 1,
+        lastAt: new Date(now - 600000).toISOString(),
+        /*
+         * `resetAt` **必须相对真实此刻**（不能用冻结的 NOW）。
+         *
+         * 页面会按 `resetAt - Date.now()` 算倒计时并**把已到期的条目摘掉** ——
+         * 用固定时间戳的话，那份夹具一旦"过期"，整个 quota 条目就会在渲染时
+         * 被丢掉，测试看到的是"没有额度上限"而不是"有上限且带倒计时"。
+         * 这正是本项目反复踩的那类假绿：夹具自己让分支走不到。
+         */
+        resetAt: new Date(now + resetInMs).toISOString(),
+        resetAtSource: 'upstream',
+        uid: '330101979236', accountLabel: '国内版1', isCurrent: true,
+        firstSeenAt: new Date(now - 600000).toISOString(), seenAt: new Date(now - 600000).toISOString(),
+      },
+      {
+        kind: 'credits', model: creditModel, count: 1,
+        lastAt: new Date(now - 900000).toISOString(),
+        resetAt: '',
+        resetAtSource: '',
+        uid: '330101979236', accountLabel: '国内版1', isCurrent: true,
+        firstSeenAt: new Date(now - 900000).toISOString(), seenAt: new Date(now - 900000).toISOString(),
+      },
+      {
+        kind: 'account_restricted', model: restrictedModel, count: 2,
+        lastAt: new Date(now - 1800000).toISOString(),
+        resetAt: '',
+        resetAtSource: '',
+        uid: '450702422472', accountLabel: '国际版1', isCurrent: false,
+        firstSeenAt: new Date(now - 1800000).toISOString(), seenAt: new Date(now - 1800000).toISOString(),
+      },
+    ],
+  };
+}
+
+/** 「没有账号触顶」的响应（页面必须说清是"没有"，而不是留空）。 */
+export function limitsEmptyFixture({ expiredCount = 0, now = Date.now() } = {}) {
+  return {
+    ok: true,
+    at: new Date(now).toISOString(),
+    account: '330101979236',
+    accountLabel: '国内版1',
+    expiredCount,
+    accountCount: 0,
+    accounts: [],
+    limiting: [],
+  };
+}
+
+/** 测速（`/api/tps`）：成功 / 样本不完整 / 失败三种。 */
+export function tpsFixture({
+  model = 'm1', tokensPerSecond = 416, timeToFirstTokenMs = 815, samples = 3, complete = true, reason = '',
+} = {}) {
+  return {
+    ok: true,
+    cached: false,
+    sample: {
+      model, tokensPerSecond, timeToFirstTokenMs, samples, complete,
+      ...(reason ? { reason } : {}),
+    },
+  };
+}
+
 export function clientsFixture({ running = true } = {}) {
   return {
     running, host: '127.0.0.1', port: 8790,
@@ -711,6 +877,9 @@ export function baseRoutes({ catalog = CATALOG, usage, probeResults, modelsDefau
       },
     },
     '/api/checkin': { body: checkinFixture(rest) },
+    /* 跨账号签到 / 用量上限：默认给非空夹具 —— 空桩会让整张卡不渲染，断言变成假绿 */
+    '/api/checkin/accounts': { body: checkinAccountsFixture() },
+    '/api/limits': { body: limitsFixture() },
     '/api/probe-results': { body: probeResultsFixture({ catalog, ...(probeResults || {}) }) },
     '/api/bridge/log': { body: { lines: [] } },
   };

@@ -29,24 +29,50 @@
       "shared": { "file": "lib/env-file.mjs", "markers": ["export function updateProjectEnv"] }
     },
     {
-      "name": "用量上限按账号分组",
+      "name": "用量上限（按账号分组）",
       "plugin": { "file": "dsh-plugin/lib/client.js", "markers": ["wb-limit-acct"] },
-      "console": { "file": "dashboard/public/index.html", "markers": ["用量上限"] }
+      "console": { "file": "dashboard/public/index.html", "markers": ["limitsBox", "acct-limited"] },
+      "shared": { "file": "lib/limits.mjs", "markers": ["export function collectLimitItems", "export function backfillResetTimes"] }
+    },
+    {
+      "name": "用量上限后端",
+      "plugin": { "file": "dsh-plugin/lib/routes.mjs", "markers": ["/workbuddy/limits"] },
+      "console": { "file": "dashboard/server.mjs", "markers": ["/api/limits", "limitsSnapshot"] }
     },
     {
       "name": "签到（单账号 + 全部领取）",
-      "plugin": { "file": "dsh-plugin/lib/client.js", "markers": ["checkin/all"] },
-      "console": { "file": "dashboard/server.mjs", "markers": ["checkin"] }
+      "plugin": { "file": "dsh-plugin/lib/client.js", "markers": ["checkin/all", "账号签到状态"] },
+      "console": { "file": "dashboard/public/index.html", "markers": ["acctCheckinBox", "全部领取"] }
+    },
+    {
+      "name": "跨账号签到后端",
+      "plugin": { "file": "dsh-plugin/lib/routes.mjs", "markers": ["/workbuddy/checkin/all"] },
+      "console": { "file": "dashboard/server.mjs", "markers": ["/api/checkin/all"] }
     },
     {
       "name": "模型测速",
       "plugin": { "file": "dsh-plugin/lib/client.js", "markers": ["wb-rail-tps"] },
-      "intentional": "控制台是看数据的地方；测速是发一次真请求（花积分），属于对话侧操作，放控制台会让人以为它只影响控制台。"
+      "console": { "file": "dashboard/public/index.html", "markers": ["renderTpsCell"] }
+    },
+    {
+      "name": "测速后端",
+      "plugin": { "file": "dsh-plugin/lib/routes.mjs", "markers": ["/workbuddy/tps"] },
+      "console": { "file": "dashboard/server.mjs", "markers": ["/api/tps"] }
     },
     {
       "name": "隐藏未列出 / 只列免费",
       "plugin": { "file": "dsh-plugin/lib/client.js", "markers": ["wb-rail-filters"] },
-      "intentional": "这两个筛选作用于插件自己的模型选择器列表；控制台没有那个列表。"
+      "console": { "file": "dashboard/public/index.html", "markers": ["modelHideUnlisted", "仅未列出", "仅免费"] }
+    },
+    {
+      "name": "模型详情（官方档位 / 思考档位）",
+      "plugin": { "file": "dsh-plugin/lib/client.js", "markers": ["官方可选上下文"] },
+      "console": { "file": "dashboard/public/index.html", "markers": ["官方可选档位", "思考档位"] }
+    },
+    {
+      "name": "对话测试的采样参数（max_tokens / temperature / 思考强度）",
+      "plugin": { "file": "dsh-plugin/lib/client.js", "markers": ["采样温度 0~2；留空 = 上游默认"] },
+      "console": { "file": "dashboard/public/index.html", "markers": ["chatMaxTokens", "chatTemperature", "chatEffort", "chatOverrides"] }
     }
   ]
 }

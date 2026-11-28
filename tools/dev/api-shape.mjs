@@ -48,6 +48,17 @@ export const CAPTURED_ROUTES = [
   '/api/requests',
   '/api/accounts',
   '/api/checkin',
+  /*
+   * 本机各账号的签到状态。**必须纳入形状表**：这张卡的分母是「有活动的账号数」，
+   * 而桩里少一个 `noActivity` 或 `status.todayCredit` 就会让进度条永远停在 0%，
+   * 页面看起来「功能没实现」而测试全绿 —— 正是形状表要防的那类静默失效。
+   */
+  '/api/checkin/accounts',
+  /*
+   * 用量上限（跨账号）。同样是「字段少一个就静默不渲染」的重灾区：`limiting`
+   * 里每条都靠 `kind` / `resetAt` / `isCurrent` 分支出完全不同的处置文案。
+   */
+  '/api/limits',
   '/api/probe-results',
 ];
 

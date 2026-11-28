@@ -2211,6 +2211,188 @@
         "type": "number",
         "optional": true
       }
+    },
+    "/api/limits": {
+      "$": {
+        "type": "object"
+      },
+      "$.ok": {
+        "type": "boolean"
+      },
+      "$.limiting": {
+        "type": "array"
+      },
+      "$.limiting[]": {
+        "type": "object"
+      },
+      "$.limiting[].uid": {
+        "type": "string"
+      },
+      "$.limiting[].model": {
+        "type": "string"
+      },
+      "$.limiting[].kind": {
+        "type": "string"
+      },
+      "$.limiting[].count": {
+        "type": "number"
+      },
+      "$.limiting[].lastAt": {
+        "type": "string"
+      },
+      "$.limiting[].resetAt": {
+        "type": "string"
+      },
+      "$.limiting[].resetAtSource": {
+        "type": "string"
+      },
+      "$.limiting[].accountLabel": {
+        "type": "string"
+      },
+      "$.limiting[].firstSeenAt": {
+        "type": "string"
+      },
+      "$.limiting[].seenAt": {
+        "type": "string"
+      },
+      "$.limiting[].isCurrent": {
+        "type": "boolean"
+      },
+      "$.accounts": {
+        "type": "array"
+      },
+      "$.accounts[]": {
+        "type": "object"
+      },
+      "$.accounts[].uid": {
+        "type": "string"
+      },
+      "$.accounts[].account": {
+        "type": "string"
+      },
+      "$.accounts[].label": {
+        "type": "string"
+      },
+      "$.accounts[].current": {
+        "type": "boolean"
+      },
+      "$.accounts[].usable": {
+        "type": "boolean"
+      },
+      "$.at": {
+        "type": "string"
+      },
+      "$.account": {
+        "type": "string"
+      },
+      "$.accountLabel": {
+        "type": "string"
+      },
+      "$.expiredCount": {
+        "type": "number"
+      },
+      "$.accountCount": {
+        "type": "number"
+      }
+    },
+    "/api/checkin/accounts": {
+      "$": {
+        "type": "object"
+      },
+      "$.ok": {
+        "type": "boolean"
+      },
+      "$.claim": {
+        "type": "boolean"
+      },
+      "$.totals": {
+        "type": "object"
+      },
+      "$.totals.accounts": {
+        "type": "number"
+      },
+      "$.totals.claimed": {
+        "type": "number"
+      },
+      "$.totals.already": {
+        "type": "number"
+      },
+      "$.totals.failed": {
+        "type": "number"
+      },
+      "$.totals.skipped": {
+        "type": "number"
+      },
+      "$.totals.credit": {
+        "type": "number"
+      },
+      "$.accounts": {
+        "type": "array"
+      },
+      "$.accounts[]": {
+        "type": "object"
+      },
+      "$.accounts[].userId": {
+        "type": "string"
+      },
+      "$.accounts[].nickname": {
+        "type": "string"
+      },
+      "$.accounts[].uin": {
+        "type": "string"
+      },
+      "$.accounts[].region": {
+        "type": "string"
+      },
+      "$.accounts[].domain": {
+        "type": "string"
+      },
+      "$.accounts[].authFile": {
+        "type": "string"
+      },
+      "$.accounts[].current": {
+        "type": "boolean"
+      },
+      "$.accounts[].expired": {
+        "type": "boolean"
+      },
+      "$.accounts[].expiresAt": {
+        "type": "number"
+      },
+      "$.accounts[].status": {
+        "type": "object"
+      },
+      "$.accounts[].status.active": {
+        "type": "boolean"
+      },
+      "$.accounts[].status.todayCheckedIn": {
+        "type": "boolean"
+      },
+      "$.accounts[].status.streakDays": {
+        "type": "number"
+      },
+      "$.accounts[].status.dailyCredit": {
+        "type": "number"
+      },
+      "$.accounts[].status.todayCredit": {
+        "type": "number"
+      },
+      "$.accounts[].status.isStreakDay": {
+        "type": "boolean"
+      },
+      "$.accounts[].status.nextStreakDay": {
+        "type": "number"
+      },
+      "$.accounts[].status.streakBonusDays": {
+        "type": "number"
+      },
+      "$.accounts[].status.streakBonusCredit": {
+        "type": "number"
+      },
+      "$.accounts[].noActivity": {
+        "type": "boolean",
+        "optional": true
+      }
     }
   }
 }
