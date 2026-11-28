@@ -27,9 +27,11 @@ Two credential sources: the **WorkBuddy desktop app** you are already logged in 
 **"Plugin sign-in" inside the dsh plugin** — **the desktop app is optional**; a one-time
 browser authorization is enough (credentials are kept encrypted by the plugin).
 
-Also included: a web console (status / start-stop / diagnostics / model registration /
-usage / health check / chat test) — **bilingual (Chinese / English, switchable in the
-top-right corner, remembered locally)** — and an optional **DeepSeek Harness (dsh)
+Also included: a redesigned web console (status / start-stop / account & plugin sign-in /
+usage analytics / model health probe & speed test / diagnostics / chat playground /
+one-click client setup, with a built-in `⌘K` command palette) — **bilingual (Chinese /
+English, switchable in the top-right corner, remembered locally)** with system light/dark
+theme following and 5 accent presets — plus an optional **DeepSeek Harness (dsh)
 native plugin**.
 
 > **In one line**: WorkBuddy quota → local API → any AI client you like.
@@ -37,7 +39,7 @@ native plugin**.
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/console-hero-en-dark.png">
   <img src="docs/console-hero-en-light.png" width="100%"
-       alt="The WorkBuddy Local API Bridge console (English UI): a bridge-status badge and start/stop controls at the top, eight status cards showing account, token TTL, credential encryption, upstream endpoint, bridge process, available models, credit balance and dsh readiness, with the account list below">
+       alt="The WorkBuddy Local API Bridge web console (English UI): left sidebar navigation and live bridge status card, top control bar, 3 primary telemetry cards and 5 summary cards (bridge process, credit balance, token TTL, available models, current account, dsh readiness, credential encryption, upstream endpoint), with equal-height Account and Plugin sign-in panels below">
 </picture>
 
 > 🌏 **English summary only.** The full documentation is in Chinese
@@ -129,12 +131,18 @@ request ledger when the host exposes them, otherwise a clearly-labelled estimate
 1. `git clone https://github.com/Ianzhyh/workbuddy-to-dsh && cd workbuddy-to-dsh`
 2. Double-click `启动.cmd` — it locates Node.js, starts the bridge + console and
    opens `http://127.0.0.1:8792` in your browser.
-3. Open the **Client Access** tab for Base URL & token:
+3. Open the **Client setup** tab for one-click client configuration or Base URL & token:
    - OpenAI-compatible: `http://127.0.0.1:8790/v1`
    - Anthropic: `http://127.0.0.1:8790` (no `/v1`)
-   - API key: the random local token shown in the console's **Client Access** tab
+   - API key: the random local token shown in the console's **Client setup** tab
      (also stored in `<WORKBUDDY_DATA_DIR>/bridge-token`, default
      `%USERPROFILE%\.workbuddy-bridge\bridge-token`; or set `WORKBUDDY_LOCAL_TOKEN`)
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/clients-panel-en-dark.png">
+  <img src="docs/clients-panel-en-light.png" width="100%"
+       alt="The web console Client setup view (English UI): one-click auto-backup config writer for Codex, Claude Code and opencode on top, followed by the expandable Manual setup drawer with three copyable endpoints, segmented client switcher and ready-to-copy snippets">
+</picture>
 
 No WorkBuddy desktop app? Install the dsh plugin, open its **Account** tab and use
 **Plugin sign-in** — no desktop download is required.
@@ -206,10 +214,15 @@ instead of the DeepSeek wallet.
 - **Ops features**: local rate limiting (opt-in), per-request overhead header,
   in-flight request visibility, `count_tokens`, client credential layering
   (per-key accounting / revocation / rate-limit buckets), local usage ledger.
-- **Honest console** — 9 tabs of diagnostics that distinguish "model thinking"
-  from "actually stuck", and never fake capabilities (embeddings return 501).
-- **Bilingual console** — complete Chinese / English UI, switchable in-page
-  (no reload, no build step); your choice is remembered.
+- **Refined, honest web console** — rebuilt with React 19 + TypeScript + Vite into
+  zero-dependency offline static files (`dashboard/public/`), featuring sidebar
+  navigation, `⌘K` command palette, interactive usage analytics (dual-series trend chart,
+  token composition donut, health & efficiency bar, per-model credit ranking),
+  general-client `/v1/models` scope & speed probes, diagnostics that distinguish "model
+  thinking" from "actually stuck", and honest 501 responses for unsupported capabilities.
+- **Bilingual console & adaptive themes** — complete Chinese / English UI, switchable
+  in-page without reload, automatic system light/dark mode following, and 5 accent
+  presets; all choices are remembered locally.
 
 ## Configuration
 
